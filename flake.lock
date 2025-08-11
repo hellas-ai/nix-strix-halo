@@ -50,11 +50,28 @@
         "type": "github"
       }
     },
+    "rocwmma": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1754059004,
+        "narHash": "sha256-HT+Oa6UKKCucQf+lfXlEhbp1Jf2WfJgRdHhfQgx64wo=",
+        "owner": "ROCm",
+        "repo": "rocWMMA",
+        "rev": "bea42cef56261a247df4dc5896dfded0b33cd963",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "rocWMMA",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
         "llama-cpp": "llama-cpp",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "rocwmma": "rocwmma"
       }
     },
     "systems": {
