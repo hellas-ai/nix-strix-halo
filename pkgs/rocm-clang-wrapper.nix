@@ -1,10 +1,7 @@
 # ROCm clang wrapper derivation - creates wrapper scripts for ROCm's clang
-{ pkgs, rocmSources }:
-
-{ target }:
+{ pkgs, rocm }:
 
 let
-  rocm = import ./rocm7-bin.nix { inherit pkgs rocmSources; } { inherit target; };
   
   # Create a wrapper lib directory with libgcc linker script
   gccLibWrapper = pkgs.runCommand "gcc-lib-wrapper" {} ''
@@ -17,7 +14,7 @@ let
   '';
 in
 pkgs.stdenv.mkDerivation {
-  pname = "rocm-clang-wrapper-${target}";
+  pname = "rocm-clang-wrapper";
   version = rocm.version;
   
   dontUnpack = true;

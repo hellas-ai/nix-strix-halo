@@ -1,7 +1,5 @@
 # ROCm pre-built binary package
-{ pkgs, rocmSources }:
-
-{ target }:
+{ pkgs, rocmSources, target }:
 
 let
   source = rocmSources.linux.${target};

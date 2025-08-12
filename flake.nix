@@ -2,8 +2,8 @@
   description = "Llama.cpp with pre-built ROCm binaries from TheRock";
 
   inputs = {
-    # nixpkgs.url = "github:LunNova/nixpkgs/lunnova/rocm-6.4.x";
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:LunNova/nixpkgs/lunnova/rocm-6.4.x";
+    # nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     llama-cpp = {
       url = "github:ggerganov/llama.cpp";
@@ -28,71 +28,108 @@
     ec-su-axb35,
   }: let
     rocmSources = builtins.fromJSON (builtins.readFile ./rocm-sources.json);
-
-    # Import package builders
-    mkRocmDerivation = pkgs: import ./pkgs/rocm7-bin.nix {inherit pkgs rocmSources;};
-    mkRocmClangWrapper = pkgs: import ./pkgs/rocm-clang-wrapper.nix {inherit pkgs rocmSources;};
-    mkRocwmmaDerivation = pkgs: import ./pkgs/rocwmma.nix {inherit pkgs rocwmma;};
-    mkLlamaCppDerivation = pkgs:
-      import ./pkgs/llama-cpp.nix {
-        inherit pkgs llama-cpp;
-        mkRocwmmaDerivation = mkRocwmmaDerivation pkgs;
-        mkRocmClangWrapper = mkRocmClangWrapper pkgs;
-      };
-    mkEcSuAxb35 = pkgs: import ./pkgs/ec-su-axb35.nix {inherit pkgs ec-su-axb35;};
-
-    # Import benchmark runner
-    mkBenchmark = pkgs: import ./bench/default.nix;
+    
+    # Define ROCm targets we support
+    targets = ["gfx1151"];
   in
     # Overlay output
     {
       overlays.default = final: prev: let
-        # EC-SU_AXB35 packages
-        ecPackages = mkEcSuAxb35 prev;
-      in {
-        # EC-SU_AXB35 packages
-        ec-su-axb35 = ecPackages.ec-su-axb35;
-        ec-su-axb35-monitor = ecPackages.ec-su-axb35-monitor;
-
-        # Monitoring tools
-        strixtop = prev.callPackage ./pkgs/strixtop.nix {};
-
-        # Updated shaderc for Vulkan support
-        shaderc = prev.callPackage ./pkgs/shaderc.nix {};
-
-        # Llama.cpp ROCm packages
-        llamacpp-rocm = let
-          mkRocm = mkRocmDerivation prev;
-          mkLlamaCpp = mkLlamaCppDerivation prev;
-          targets = ["gfx110X" "gfx1151" "gfx120X"];
-
-          # Build overlay packages for each target
-          buildOverlay = target: {
-            # ROCm toolchain
-            "rocm-${target}" = mkRocm {inherit target;};
-
-            # Standard build (short name for convenience)
-            "${target}" = mkLlamaCpp {
-              inherit target;
-              rocm = mkRocm {inherit target;};
-            };
-
-            # ROCWMMA-optimized build
-            "${target}-rocwmma" = mkLlamaCpp {
-              inherit target;
-              rocm = mkRocm {inherit target;};
-              enableRocwmma = true;
-              enableHipBlasLt = true;
-            };
+        # Helper to build ROCm for a target
+        mkRocm = target: prev.callPackage ./pkgs/rocm7-bin.nix {
+          inherit rocmSources target;
+        };
+        
+        # Helper to build clang wrapper for a rocm package
+        mkClangWrapper = rocm: prev.callPackage ./pkgs/rocm-clang-wrapper.nix {
+          inherit rocm;
+        };
+        
+        # Helper to build rocwmma for a target
+        mkRocwmma = target: rocm: rocmClangWrapper: 
+          final.callPackage ./pkgs/rocwmma.nix {
+            inherit rocwmma rocm rocmClangWrapper;
+            targets = [ target ];
           };
-        in
-          # Merge all overlays
-          prev.lib.foldl' (
-            acc: target:
-              acc // buildOverlay target
-          ) {}
-          targets;
-      };
+        
+        # Helper to build llama-cpp variants
+        mkLlamaCpp = args: prev.callPackage ./pkgs/llama-cpp.nix ({
+          inherit llama-cpp;
+        } // args);
+        
+        # Build packages for each target
+        targetPackages = builtins.listToAttrs (
+          builtins.concatMap (target: let
+            rocm = mkRocm target;
+            clangWrapper = mkClangWrapper rocm;
+            rocwmmaPkg = mkRocwmma target rocm clangWrapper;
+          in [
+            { name = "rocm7-bin-${target}"; value = rocm; }
+            { name = "rocm-clang-wrapper-${target}"; value = clangWrapper; }
+            { name = "rocwmma-${target}"; value = rocwmmaPkg; }
+          ])
+          targets
+        );
+        
+        # Build llama-cpp packages
+        llamacppPackages = builtins.listToAttrs (
+          builtins.concatMap (target: let
+            rocm = targetPackages."rocm7-bin-${target}";
+            clangWrapper = targetPackages."rocm-clang-wrapper-${target}";
+            rocwmmaPkg = targetPackages."rocwmma-${target}";
+          in [
+            {
+              name = target;
+              value = mkLlamaCpp {
+                inherit target rocm;
+                rocmClangWrapper = clangWrapper;
+              };
+            }
+            {
+              name = "${target}-rocwmma";
+              value = mkLlamaCpp {
+                inherit target rocm;
+                rocmClangWrapper = clangWrapper;
+                rocwmma = rocwmmaPkg;
+                enableRocwmma = true;
+                enableHipBlasLt = true;
+              };
+            }
+          ])
+          targets
+        );
+        
+        # EC-SU_AXB35 packages
+        ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
+          ec-su-axb35-src = ec-su-axb35;
+        };
+      in
+        targetPackages
+        // {
+          # EC-SU_AXB35 packages
+          ec-su-axb35 = ecPackages.kernelModule;
+          ec-su-axb35-monitor = ecPackages.monitor;
+          
+          # Monitoring tools
+          strixtop = prev.callPackage ./pkgs/strixtop.nix {
+            ec-su-axb35-monitor = ecPackages.monitor;
+          };
+          
+          # Updated shaderc for Vulkan support
+          shaderc = prev.callPackage ./pkgs/shaderc.nix {};
+          
+          # Build our gpu targets for nixos rocm
+          rocmPackages = prev.rocmPackages.overrideScope (
+            rocmFinal: rocmPrev: {
+              clr = rocmPrev.clr.override {
+                localGpuTargets = targets;
+              };
+            }
+          );
+          
+          # Llama.cpp ROCm packages under llamacpp-rocm namespace
+          llamacpp-rocm = llamacppPackages;
+        };
 
       # NixOS modules
       nixosModules = {
@@ -108,78 +145,82 @@
     # Per-system outputs (ROCm only works on Linux)
     flake-utils.lib.eachSystem ["x86_64-linux"] (
       system: let
-        # Apply our overlay to get custom packages like shaderc
+        # Apply our overlay to get custom packages
         pkgs = import nixpkgs {
           inherit system;
           overlays = [self.overlays.default];
         };
-        mkRocm = mkRocmDerivation pkgs;
-        mkClangWrapper = mkRocmClangWrapper pkgs;
-        mkLlamaCpp = mkLlamaCppDerivation pkgs;
+        
+        # Helper functions using overlay packages
+        mkVulkanWrapper = {driver, driverName}: 
+          let
+            vulkanBase = (pkgs.llama-cpp.override {
+              vulkanSupport = true;
+              rpcSupport = true;
+            }).overrideAttrs (old: {
+              pname = "llama-cpp-vulkan";
+            });
+          in pkgs.runCommand "llama-cpp-vulkan-${driverName}" {
+            buildInputs = [ pkgs.makeWrapper ];
+            passthru.pname = "llama-cpp-vulkan-${driverName}";
+          } ''
+            mkdir -p $out/bin
+            makeWrapper ${vulkanBase}/bin/llama-bench $out/bin/llama-bench \
+              --set VK_ICD_FILENAMES "${driver}"
+            makeWrapper ${vulkanBase}/bin/llama-cli $out/bin/llama-cli \
+              --set VK_ICD_FILENAMES "${driver}"
+            makeWrapper ${vulkanBase}/bin/llama-server $out/bin/llama-server \
+              --set VK_ICD_FILENAMES "${driver}"
+          '';
       in {
         packages = let
-          # GPU targets we support
-          targets = ["gfx110X" "gfx1151" "gfx120X"];
-
-          # Build matrix for each target
+          # Build matrix for each target - reuse overlay packages
           buildForTarget = target: {
-            # ROCm toolchain
-            "rocm-${target}" = mkRocm {inherit target;};
-
-            # ROCm clang wrapper
-            "rocm-clang-wrapper-${target}" = mkClangWrapper {inherit target;};
-
-            # Standard build
-            "llama-cpp-${target}" = mkLlamaCpp {
-              inherit target;
-              rocm = mkRocm {inherit target;};
-            };
-
-            # ROCWMMA-optimized build
-            "llama-cpp-${target}-rocwmma" = mkLlamaCpp {
-              inherit target;
-              rocm = mkRocm {inherit target;};
-              enableRocwmma = true;
-              enableHipBlasLt = true;
-            };
-
-            # Standalone rocwmma package
-            "rocwmma-${target}" = mkRocwmmaDerivation pkgs {
-              rocm = mkRocm {inherit target;};
-              rocmClangWrapper = mkClangWrapper {inherit target;};
-              inherit target;
-            };
+            # ROCm toolchain (from overlay)
+            "rocm-${target}" = pkgs."rocm7-bin-${target}";
+            
+            # ROCm clang wrapper (from overlay)
+            "rocm-clang-wrapper-${target}" = pkgs."rocm-clang-wrapper-${target}";
+            
+            # Standard build (from overlay)
+            "llama-cpp-${target}" = pkgs.llamacpp-rocm.${target};
+            
+            # ROCWMMA-optimized build (from overlay)
+            "llama-cpp-${target}-rocwmma" = pkgs.llamacpp-rocm."${target}-rocwmma";
           };
-
-          # Merge all target builds into one attrset
-          allPackages =
-            pkgs.lib.foldl' (
-              acc: target:
-                acc // buildForTarget target
-            ) {}
-            targets;
           
-          # Vulkan build (not GPU-target specific)
-          vulkanPackage = {
+          # Merge all target builds into one attrset
+          allPackages = pkgs.lib.foldl' (
+            acc: target:
+              acc // buildForTarget target
+          ) {} targets;
+          
+          # Vulkan builds
+          vulkanPackages = {
             "llama-cpp-vulkan" = (pkgs.llama-cpp.override {
               vulkanSupport = true;
               rpcSupport = true;
             }).overrideAttrs (old: {
               pname = "llama-cpp-vulkan";
             });
+            "llama-cpp-vulkan-radv" = mkVulkanWrapper {
+              driver = "${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json";
+              driverName = "radv";
+            };
+            "llama-cpp-vulkan-amdvlk" = mkVulkanWrapper {
+              driver = "${pkgs.amdvlk}/share/vulkan/icd.d/amd_icd64.json";
+              driverName = "amdvlk";
+            };
           };
-
-          # EC-SU_AXB35 packages
-          ecPackages = mkEcSuAxb35 pkgs;
         in
           allPackages
-          // vulkanPackage
+          // vulkanPackages
           // {
             # Default package
             default = allPackages.llama-cpp-gfx1151;
-
-            # EC-SU_AXB35 monitor tool
-            ec-su-axb35-monitor = ecPackages.ec-su-axb35-monitor;
+            
+            # EC-SU_AXB35 monitor tool (from overlay)
+            ec-su-axb35-monitor = pkgs.ec-su-axb35-monitor;
           };
 
         # Benchmarks as separate output
