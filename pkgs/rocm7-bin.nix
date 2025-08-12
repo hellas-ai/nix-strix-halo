@@ -10,7 +10,7 @@ in
   then throw "ROCm sources not populated for ${target}. Run: python3 update-rocm.py"
   else
     pkgs.stdenv.mkDerivation {
-      pname = "rocm-prebuilt-${target}";
+      pname = "rocm7-bin-${target}";
       version = source.version;
 
       src = pkgs.fetchurl {

@@ -1,10 +1,20 @@
 # Simple benchmark runner
-{ pkgs, llamaCppPackage, modelPath ? null, mmap ? null, fa ? null, ngl ? null, threads ? null, batch ? null, ubatch ? null, rpc ? null, extraArgs ? "" }:
-
+{
+  pkgs,
+  llamaCppPackage,
+  modelPath ? null,
+  mmap ? null,
+  fa ? null,
+  ngl ? null,
+  threads ? null,
+  batch ? null,
+  ubatch ? null,
+  rpc ? null,
+  extraArgs ? "",
+}:
 pkgs.runCommand "benchmark-${llamaCppPackage.pname}" {
-  buildInputs = [ llamaCppPackage ];
-  requiredSystemFeatures = [ "rocm" ];
-  # Require sandbox paths for GPU access
+  buildInputs = [llamaCppPackage];
+  requiredSystemFeatures = ["rocm"];
   __noChroot = true;
 } ''
   export HSA_OVERRIDE_GFX_VERSION=11.5.1

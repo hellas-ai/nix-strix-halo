@@ -1,5 +1,5 @@
 # Llama.cpp derivation with ROCm support
-{ pkgs, llama-cpp, mkRocwmmaDerivation }:
+{ pkgs, llama-cpp, mkRocwmmaDerivation, mkRocmClangWrapper }:
 
 {
   target,
@@ -18,17 +18,9 @@ let
     then "gfx1200;gfx1201"
     else target;
 
-  # Create a wrapper lib directory with libgcc linker script
-  gccLibWrapper = pkgs.runCommand "gcc-lib-wrapper" {} ''
-    mkdir -p $out/lib
-    # Create a linker script that redirects to libgcc_s
-    cat > $out/lib/libgcc.so << EOF
-    /* GNU ld script */
-    GROUP ( ${pkgs.stdenv.cc.cc.libgcc}/lib/libgcc_s.so.1 )
-    EOF
-    # Copy actual libs
-    cp -L ${pkgs.stdenv.cc.cc.libgcc}/lib/* $out/lib/ 2>/dev/null || true
-  '';
+  # Get the clang wrapper and gccLibWrapper from it
+  rocmClangWrapper = mkRocmClangWrapper { inherit target; };
+  gccLibWrapper = rocmClangWrapper.gccLibWrapper;
   
   # Simple hipcc wrapper for compilation
   # For ROCWMMA builds, we need to use ROCm's clang++ for AMD GPU builtins
@@ -53,7 +45,7 @@ let
           -isystem ${pkgs.glibc.dev}/include \
           -I${rocm}/include \
           -I${rocm}/include/hip \
-          -I${mkRocwmmaDerivation { inherit rocm target; }}/include \
+          -I${mkRocwmmaDerivation { inherit rocm target rocmClangWrapper; }}/include \
           -B${pkgs.glibc}/lib \
           -L${rocm}/lib \
           -L${pkgs.stdenv.cc.cc.lib}/lib \
@@ -123,7 +115,7 @@ in
       rocm
       stdenv.cc.cc.lib
     ] ++ pkgs.lib.optionals enableRocwmma [
-      (mkRocwmmaDerivation { inherit rocm target; })
+      (mkRocwmmaDerivation { inherit rocm target rocmClangWrapper; })
     ];
 
     postPatch = ''

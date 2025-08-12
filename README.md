@@ -4,12 +4,9 @@ A Nix flake for building llama.cpp with pre-built ROCm binaries from TheRock pro
 
 ## Features
 
-- 🚀 Pre-built ROCm 7 binaries from TheRock's nightly builds
-- 🎯 Support for multiple GPU targets (gfx110X, gfx1151, gfx120X)
-- ⚡ ROCWMMA support for 15x faster flash attention (optional)
-- 📦 All ROCm runtime libraries included
-- 🔄 Automated updates via Python script
-- ❄️ Fully reproducible builds with Nix
+- Pre-built ROCm 7 binaries from TheRock's nightly builds
+- Support for multiple GPU targets (gfx110X, gfx1151, gfx120X)
+- ROCWMMA support for faster flash attention
 
 ## Supported GPU Targets
 
@@ -68,25 +65,6 @@ nix flake update llama-cpp
 nix flake update
 ```
 
-## How It Works
-
-1. **Update Script** (`update-rocm.py`):
-   - Queries TheRock's S3 bucket for latest ROCm tarballs
-   - Downloads and computes SHA256 hashes
-   - Updates `rocm-sources.json` with metadata
-
-2. **ROCm Derivations**:
-   - Fixed-output derivations using hashes from JSON
-   - Unpacks pre-built binaries (no compilation needed)
-   - Sets proper permissions for executables and libraries
-
-3. **Llama.cpp Derivations**:
-   - Fetches llama.cpp source from GitHub
-   - Patches HIP version check for compatibility
-   - Builds with ROCm's clang/clang++
-   - Bundles all required ROCm runtime libraries
-   - Creates wrapper scripts with proper LD_LIBRARY_PATH
-
 ## Using as an Overlay
 
 This flake provides an overlay that can be used in other Nix projects to easily access the llama.cpp ROCm packages.
@@ -118,36 +96,20 @@ This flake provides an overlay that can be used in other Nix projects to easily 
 }
 ```
 
-### In a Development Shell
+## Benchmarks
 
-```nix
-{
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    llamacpp-rocm.url = "github:hellas-ai/nix-strix-halo";
-  };
-
-  outputs = { self, nixpkgs, llamacpp-rocm, ... }: 
-    let
-      system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        overlays = [ llamacpp-rocm.overlays.default ];
-      };
-    in {
-      devShells.${system}.default = pkgs.mkShell {
-        buildInputs = [
-          pkgs.llamacpp-rocm.gfx1151
-        ];
-        
-        shellHook = ''
-          echo "Llama.cpp with ROCm is available!"
-          echo "Run: llama-server -m model.gguf -ngl 99"
-        '';
-      };
-    };
-}
-```
+❯ cat $(nix build .\#benchmarks.llama2-7b.llama-cpp-rocm-gfx1151-rocwmma-b512-fa1 --print-out-paths)
+warning: Git tree '/Users/grw/src/nix-llamacpp-rocm' is dirty
+───────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+       │ File: /nix/store/rxsqd36vcnmkaq73d7n1qkw584jgzia7-benchmark-llama-cpp-rocm-gfx1151-rocwmma
+───────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   1   │ | model                          |       size |     params | backend    | ngl | n_batch | fa |            test |                  t/s |
+   2   │ | ------------------------------ | ---------: | ---------: | ---------- | --: | ------: | -: | --------------: | -------------------: |
+   3   │ | llama 7B Q4_K - Medium         |   3.80 GiB |     6.74 B | ROCm,RPC   |  99 |     512 |  1 |           pp512 |        821.55 ± 1.72 |
+   4   │ | llama 7B Q4_K - Medium         |   3.80 GiB |     6.74 B | ROCm,RPC   |  99 |     512 |  1 |           tg128 |         33.81 ± 0.10 |
+   5   │ 
+   6   │ build: unknown (0)
+───────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ## NixOS Modules
 

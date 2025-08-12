@@ -2,6 +2,7 @@
   description = "Llama.cpp with pre-built ROCm binaries from TheRock";
 
   inputs = {
+    # nixpkgs.url = "github:LunNova/nixpkgs/lunnova/rocm-6.4.x";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     llama-cpp = {
@@ -13,7 +14,7 @@
       flake = false;
     };
     ec-su-axb35 = {
-      url = "github:cmetz/ec-su_axb35-linux/main";
+      url = "github:cmetz/ec-su_axb35-linux";
       flake = false;
     };
   };
@@ -29,12 +30,14 @@
     rocmSources = builtins.fromJSON (builtins.readFile ./rocm-sources.json);
 
     # Import package builders
-    mkRocmDerivation = pkgs: import ./pkgs/rocm.nix {inherit pkgs rocmSources;};
+    mkRocmDerivation = pkgs: import ./pkgs/rocm7-bin.nix {inherit pkgs rocmSources;};
+    mkRocmClangWrapper = pkgs: import ./pkgs/rocm-clang-wrapper.nix {inherit pkgs rocmSources;};
     mkRocwmmaDerivation = pkgs: import ./pkgs/rocwmma.nix {inherit pkgs rocwmma;};
     mkLlamaCppDerivation = pkgs:
       import ./pkgs/llama-cpp.nix {
         inherit pkgs llama-cpp;
         mkRocwmmaDerivation = mkRocwmmaDerivation pkgs;
+        mkRocmClangWrapper = mkRocmClangWrapper pkgs;
       };
     mkEcSuAxb35 = pkgs: import ./pkgs/ec-su-axb35.nix {inherit pkgs ec-su-axb35;};
 
@@ -43,7 +46,18 @@
   in
     # Overlay output
     {
-      overlays.default = final: prev: {
+      overlays.default = final: prev: let
+        # EC-SU_AXB35 packages
+        ecPackages = mkEcSuAxb35 prev;
+      in {
+        # EC-SU_AXB35 packages
+        ec-su-axb35 = ecPackages.ec-su-axb35;
+        ec-su-axb35-monitor = ecPackages.ec-su-axb35-monitor;
+
+        # Monitoring tools
+        strixtop = prev.callPackage ./pkgs/strixtop.nix {};
+
+        # Llama.cpp ROCm packages
         llamacpp-rocm = let
           mkRocm = mkRocmDerivation prev;
           mkLlamaCpp = mkLlamaCppDerivation prev;
@@ -79,13 +93,12 @@
 
       # NixOS modules
       nixosModules = {
+        default = {
+          nixpkgs.overlays = [self.overlays.default];
+        };
         rpc-server = import ./modules/rpc-server.nix;
         benchmark-runner = import ./modules/benchmark-runner.nix;
-        ec-su-axb35 = { config, lib, pkgs, ... }: {
-          config.lib.inputs.ec-su-axb35 = ec-su-axb35;
-          imports = [ ./modules/ec-su-axb35.nix ];
-        };
-        default = import ./modules/rpc-server.nix;
+        ec-su-axb35 = import ./modules/ec-su-axb35.nix;
       };
     }
     //
@@ -94,6 +107,7 @@
       system: let
         pkgs = nixpkgs.legacyPackages.${system};
         mkRocm = mkRocmDerivation pkgs;
+        mkClangWrapper = mkRocmClangWrapper pkgs;
         mkLlamaCpp = mkLlamaCppDerivation pkgs;
       in {
         packages = let
@@ -104,6 +118,9 @@
           buildForTarget = target: {
             # ROCm toolchain
             "rocm-${target}" = mkRocm {inherit target;};
+
+            # ROCm clang wrapper
+            "rocm-clang-wrapper-${target}" = mkClangWrapper {inherit target;};
 
             # Standard build
             "llama-cpp-${target}" = mkLlamaCpp {
@@ -118,6 +135,13 @@
               enableRocwmma = true;
               enableHipBlasLt = true;
             };
+
+            # Standalone rocwmma package
+            "rocwmma-${target}" = mkRocwmmaDerivation pkgs {
+              rocm = mkRocm {inherit target;};
+              rocmClangWrapper = mkClangWrapper {inherit target;};
+              inherit target;
+            };
           };
 
           # Merge all target builds into one attrset
@@ -127,7 +151,7 @@
                 acc // buildForTarget target
             ) {}
             targets;
-          
+
           # EC-SU_AXB35 packages
           ecPackages = mkEcSuAxb35 pkgs;
         in
@@ -135,11 +159,11 @@
           // {
             # Default package
             default = allPackages.llama-cpp-gfx1151;
-            
+
             # EC-SU_AXB35 monitor tool
             ec-su-axb35-monitor = ecPackages.ec-su-axb35-monitor;
           };
-        
+
         # Benchmarks as separate output
         benchmarks = import ./bench/default.nix {
           inherit pkgs;
@@ -148,10 +172,21 @@
 
         # Apps for easy running
         apps = {
-          update-rocm = {
+          # Interactive llama.cpp CLI with best ROCm build
+          llama-cli = {
             type = "app";
-            program = toString (pkgs.writeShellScript "update-rocm" ''
-              ${pkgs.python3}/bin/python3 ${./update-rocm.py} "$@"
+            program = toString (pkgs.writeShellScript "llama-cli" ''
+              export HSA_OVERRIDE_GFX_VERSION=11.5.1
+              ${self.packages.${system}.llama-cpp-gfx1151-rocwmma}/bin/llama-cli "$@"
+            '');
+          };
+
+          # Start llama.cpp server with best ROCm build
+          llama-server = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "llama-server" ''
+              export HSA_OVERRIDE_GFX_VERSION=11.5.1
+              ${self.packages.${system}.llama-cpp-gfx1151-rocwmma}/bin/llama-server "$@"
             '');
           };
         };
@@ -163,11 +198,12 @@
       in {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            (python3.withPackages (ps: with ps; [
-              pandas
-              plotly
-              numpy
-            ]))
+            (python3.withPackages (ps:
+              with ps; [
+                pandas
+                plotly
+                numpy
+              ]))
             nix-fast-build
           ];
         };

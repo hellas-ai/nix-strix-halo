@@ -1,8 +1,7 @@
 # ROCWMMA derivation builder - builds from source against ROCm 7
 { pkgs, rocwmma }:
 
-{ rocm, target }:
-
+{ rocm, rocmClangWrapper, target }:
 pkgs.stdenv.mkDerivation rec {
   pname = "rocwmma";
   version = "main";
@@ -15,6 +14,7 @@ pkgs.stdenv.mkDerivation rec {
     lld
     llvmPackages.bintools
     autoPatchelfHook
+    rocmClangWrapper
   ];
   
   buildInputs = with pkgs; [
@@ -28,12 +28,11 @@ pkgs.stdenv.mkDerivation rec {
                 'message(STATUS "The detected ROCm does not support data type'
   '';
   
-  # Build ROCWMMA from source using nixpkgs clang (like llama.cpp)
-  # This avoids linking issues with ROCm's clang in Nix environment
+  # Build ROCWMMA from source using wrapped ROCm clang with proper paths
   cmakeFlags = [
     "-G Ninja"
-    "-DCMAKE_C_COMPILER=${pkgs.clang}/bin/clang"
-    "-DCMAKE_CXX_COMPILER=${pkgs.clang}/bin/clang++"
+    "-DCMAKE_C_COMPILER=${rocmClangWrapper}/bin/clang"
+    "-DCMAKE_CXX_COMPILER=${rocmClangWrapper}/bin/clang++"
     "-DCMAKE_BUILD_TYPE=Release"
     "-DCMAKE_INSTALL_PREFIX=${placeholder "out"}"
     "-DCMAKE_CROSSCOMPILING=ON"
@@ -62,6 +61,8 @@ pkgs.stdenv.mkDerivation rec {
     export ROCM_PATH="${rocm}"
     export HIP_PLATFORM="amd"
     export PATH="${rocm}/bin:$PATH"
-    export HIP_CLANG_PATH="${pkgs.clang}/bin"
+    export HIP_CLANG_PATH="${rocm}/llvm/bin"
+    # Ensure our wrappers are used
+    export PATH="${rocmClangWrapper}/bin:$PATH"
   '';
 }

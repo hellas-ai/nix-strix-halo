@@ -73,6 +73,20 @@ in {
       cfg.modelsPath
     ];
 
+    boot.kernelParams = [
+      "amd_iommu=off"
+      "amdgpu.gttsize=131072"
+      "ttm.pages_limit=33554432"
+    ];
+
+    environment.systemPackages = with pkgs; [
+      amdgpu_top
+      nvtopPackages.amd
+      btop
+      tmux
+      strixtop
+    ];
+
     # Optionally relax sandbox for benchmark builds
     nix.settings.sandbox = mkIf cfg.enableSandboxRelaxation "relaxed";
 
@@ -98,64 +112,71 @@ in {
     # Systemd services to ensure models are downloaded
     systemd.services = let
       # Create individual download services for each file
-      fileServices = flatten (map (model:
-        map (file: {
-          name = "ensure-model-${model.name}-${builtins.replaceStrings ["." "/"] ["-" "-"] file}";
+      fileServices = flatten (map (
+          model:
+            map (file: {
+              name = "ensure-model-${model.name}-${builtins.replaceStrings ["." "/"] ["-" "-"] file}";
+              value = {
+                description = "Download ${file} for model ${model.name}";
+                after = ["network.target"];
+                path = with pkgs; [
+                  (python3.withPackages (ps: with ps; [huggingface-hub hf-transfer]))
+                  coreutils
+                ];
+                environment = {
+                  HF_HUB_ENABLE_HF_TRANSFER = "1";
+                  HF_HOME = "${cfg.modelsPath}/.cache/huggingface";
+                };
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                };
+                script = ''
+                  MODEL_DIR="${cfg.modelsPath}/${model.name}"
+                  FILE_PATH="$MODEL_DIR/${file}"
+
+                  if [ -f "$FILE_PATH" ]; then
+                    echo "File ${file} already exists"
+                    exit 0
+                  fi
+
+                  echo "Downloading ${file} from ${model.repo}"
+                  mkdir -p "$MODEL_DIR"
+
+                  huggingface-cli download "${model.repo}" "${file}" \
+                    --local-dir "$MODEL_DIR" \
+                    --local-dir-use-symlinks False
+
+                  chmod -R a+r "$MODEL_DIR"
+                  echo "File ${file} downloaded successfully"
+                '';
+              };
+            })
+            model.files
+        )
+        cfg.ensureModels);
+
+      # Create orchestrator services to coordinate downloads
+      orchestratorServices =
+        map (model: {
+          name = "ensure-model-${model.name}";
           value = {
-            description = "Download ${file} for model ${model.name}";
+            description = "Orchestrate downloads for model ${model.name}";
+            wantedBy = ["multi-user.target"];
             after = ["network.target"];
-            path = with pkgs; [
-              (python3.withPackages (ps: with ps; [huggingface-hub hf-transfer]))
-              coreutils
-            ];
-            environment = {
-              HF_HUB_ENABLE_HF_TRANSFER = "1";
-              HF_HOME = "${cfg.modelsPath}/.cache/huggingface";
-            };
+            wants =
+              map (
+                file: "ensure-model-${model.name}-${builtins.replaceStrings ["." "/"] ["-" "-"] file}.service"
+              )
+              model.files;
             serviceConfig = {
               Type = "oneshot";
               RemainAfterExit = true;
+              ExecStart = "${pkgs.coreutils}/bin/true";
             };
-            script = ''
-              MODEL_DIR="${cfg.modelsPath}/${model.name}"
-              FILE_PATH="$MODEL_DIR/${file}"
-
-              if [ -f "$FILE_PATH" ]; then
-                echo "File ${file} already exists"
-                exit 0
-              fi
-
-              echo "Downloading ${file} from ${model.repo}"
-              mkdir -p "$MODEL_DIR"
-
-              huggingface-cli download "${model.repo}" "${file}" \
-                --local-dir "$MODEL_DIR" \
-                --local-dir-use-symlinks False
-
-              chmod -R a+r "$MODEL_DIR"
-              echo "File ${file} downloaded successfully"
-            '';
           };
-        }) model.files
-      ) cfg.ensureModels);
-
-      # Create orchestrator services to coordinate downloads
-      orchestratorServices = map (model: {
-        name = "ensure-model-${model.name}";
-        value = {
-          description = "Orchestrate downloads for model ${model.name}";
-          wantedBy = ["multi-user.target"];
-          after = ["network.target"];
-          wants = map (
-            file: "ensure-model-${model.name}-${builtins.replaceStrings ["." "/"] ["-" "-"] file}.service"
-          ) model.files;
-          serviceConfig = {
-            Type = "oneshot";
-            RemainAfterExit = true;
-            ExecStart = "${pkgs.coreutils}/bin/true";
-          };
-        };
-      }) cfg.ensureModels;
+        })
+        cfg.ensureModels;
     in
       builtins.listToAttrs (fileServices ++ orchestratorServices);
   };

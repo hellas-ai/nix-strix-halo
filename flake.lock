@@ -12,7 +12,6 @@
       },
       "original": {
         "owner": "cmetz",
-        "ref": "main",
         "repo": "ec-su_axb35-linux",
         "type": "github"
       }
@@ -38,11 +37,11 @@
     "llama-cpp": {
       "flake": false,
       "locked": {
-        "lastModified": 1754923831,
-        "narHash": "sha256-JOSPQVcA51xAM3is92V85PAzF0VHfd8lfU47fN/+AGc=",
+        "lastModified": 1754986333,
+        "narHash": "sha256-RM891xXQDubyTxwGcim7iev89xs11eoBZl3Aaygh8Us=",
         "owner": "ggerganov",
         "repo": "llama.cpp",
-        "rev": "be48528b068111304e4a0bb82c028558b5705f05",
+        "rev": "bbd57b7eafb3b32e3f7f3a2175bce0b35abc7de8",
         "type": "github"
       },
       "original": {
