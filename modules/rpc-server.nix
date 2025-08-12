@@ -1,8 +1,10 @@
-{ config, lib, pkgs, ... }:
-
-with lib;
-
-let
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+with lib; let
   cfg = config.services.llamacpp-rpc-server;
 in {
   options.services.llamacpp-rpc-server = {
@@ -49,7 +51,7 @@ in {
 
     enableCache = mkOption {
       type = types.bool;
-      default = false;
+      default = true;
       description = "Enable local file cache";
     };
 
@@ -62,7 +64,7 @@ in {
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [];
-      example = [ "--verbose" ];
+      example = ["--verbose"];
       description = "Extra arguments to pass to rpc-server";
     };
 
@@ -105,37 +107,42 @@ in {
     # Systemd service
     systemd.services.llamacpp-rpc-server = {
       description = "llama.cpp RPC server";
-      after = [ "network.target" ];
-      wantedBy = [ "multi-user.target" ];
+      after = ["network.target"];
+      wantedBy = ["multi-user.target"];
 
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
         ExecStart = let
-          args = [
-            "${cfg.package}/bin/rpc-server"
-            "--threads" (toString cfg.threads)
-            "--host" cfg.host
-            "--port" (toString cfg.port)
-          ]
-          ++ optionals (cfg.device != null) [ "--device" cfg.device ]
-          ++ optionals (cfg.memory != null) [ "--mem" (toString cfg.memory) ]
-          ++ optionals cfg.enableCache [ "--cache" ]
-          ++ cfg.extraArgs;
-        in escapeShellArgs args;
-        
+          args =
+            [
+              "${cfg.package}/bin/rpc-server"
+              "--threads"
+              (toString cfg.threads)
+              "--host"
+              cfg.host
+              "--port"
+              (toString cfg.port)
+            ]
+            ++ optionals (cfg.device != null) ["--device" cfg.device]
+            ++ optionals (cfg.memory != null) ["--mem" (toString cfg.memory)]
+            ++ optionals cfg.enableCache ["--cache"]
+            ++ cfg.extraArgs;
+        in
+          escapeShellArgs args;
+
         Restart = "on-failure";
         RestartSec = 5;
-        
+
         # Security hardening
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = true;
         NoNewPrivileges = true;
         PrivateDevices = false; # Need access to GPU devices
-        ReadWritePaths = mkIf cfg.enableCache [ cfg.cacheDirectory ];
-        
+        ReadWritePaths = mkIf cfg.enableCache [cfg.cacheDirectory];
+
         # Environment for ROCm
         Environment = [
           "HSA_OVERRIDE_GFX_VERSION=11.5.1"
@@ -145,9 +152,9 @@ in {
     };
 
     # Open firewall if requested
-    networking.firewall.allowedTCPPorts = mkIf cfg.openFirewall [ cfg.port ];
+    networking.firewall.allowedTCPPorts = mkIf cfg.openFirewall [cfg.port];
 
     # Add package to system packages for debugging
-    environment.systemPackages = [ cfg.package ];
+    environment.systemPackages = [cfg.package];
   };
 }

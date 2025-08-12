@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "ec-su-axb35": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1752926484,
+        "narHash": "sha256-CKMoltjRCvfKF7tJvP+wvwiuy2EpTP3vGbs875ey/7M=",
+        "owner": "cmetz",
+        "repo": "ec-su_axb35-linux",
+        "rev": "1761092d215322a62dee19afab7b4765788611eb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cmetz",
+        "ref": "main",
+        "repo": "ec-su_axb35-linux",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -21,11 +38,11 @@
     "llama-cpp": {
       "flake": false,
       "locked": {
-        "lastModified": 1754764183,
-        "narHash": "sha256-LKESRUckFe9adcMeAdkVJDljnsdPM99nIzkeRMFYdQU=",
+        "lastModified": 1754923831,
+        "narHash": "sha256-JOSPQVcA51xAM3is92V85PAzF0VHfd8lfU47fN/+AGc=",
         "owner": "ggerganov",
         "repo": "llama.cpp",
-        "rev": "79c1160b073b8148a404f3dd2584be1606dccc66",
+        "rev": "be48528b068111304e4a0bb82c028558b5705f05",
         "type": "github"
       },
       "original": {
@@ -68,6 +85,7 @@
     },
     "root": {
       "inputs": {
+        "ec-su-axb35": "ec-su-axb35",
         "flake-utils": "flake-utils",
         "llama-cpp": "llama-cpp",
         "nixpkgs": "nixpkgs",

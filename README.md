@@ -22,37 +22,6 @@ A Nix flake for building llama.cpp with pre-built ROCm binaries from TheRock pro
 - Nix with flakes enabled
 - Python 3 (for updating ROCm sources)
 
-## Quick Start
-
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd nix-llamacpp-rocm
-   ```
-
-2. **Update ROCm sources (first time setup):**
-   ```bash
-   python3 update-rocm.py
-   ```
-   This downloads and hashes the latest ROCm tarballs from TheRock's S3 bucket.
-
-3. **Build llama.cpp for your GPU:**
-   ```bash
-   # For RDNA3 GPUs (RX 7900 series, etc.)
-   nix build .#llama-cpp-gfx110X
-
-   # For STX Halo GPUs
-   nix build .#llama-cpp-gfx1151
-
-   # For RDNA4 GPUs (RX 9070 series)
-   nix build .#llama-cpp-gfx120X
-   ```
-
-4. **Run llama-server:**
-   ```bash
-   ./result/bin/llama-server -m path/to/model.gguf -ngl 99
-   ```
-
 ## Available Nix Packages
 
 ### Standard Llama.cpp Packages
@@ -65,7 +34,7 @@ A Nix flake for building llama.cpp with pre-built ROCm binaries from TheRock pro
 - `llama-cpp-gfx1151-rocwmma` - STX Halo with ROCWMMA and hipBLASLt
 - `llama-cpp-gfx120X-rocwmma` - RDNA4 with ROCWMMA and hipBLASLt
 
-### ROCm Packages (used internally)
+### ROCm Packages
 - `rocm-gfx110X` - Pre-built ROCm for RDNA3
 - `rocm-gfx1151` - Pre-built ROCm for STX Halo
 - `rocm-gfx120X` - Pre-built ROCm for RDNA4
@@ -87,12 +56,6 @@ python3 update-rocm.py --targets gfx110X,gfx1151
 python3 update-rocm.py --output rocm-sources.json
 ```
 
-This updates the `rocm-sources.json` file with:
-- Latest tarball URLs
-- SHA256 hashes (for Nix fixed-output derivations)
-- Version information
-- Update timestamps
-
 ### Updating llama.cpp
 
 To update llama.cpp to the latest version:
@@ -104,21 +67,6 @@ nix flake update llama-cpp
 # Or update all dependencies
 nix flake update
 ```
-
-## Development Shell
-
-Enter a development environment with all required tools:
-
-```bash
-nix develop
-```
-
-This provides:
-- Python 3
-- CMake
-- Ninja
-- curl
-- jq
 
 ## How It Works
 
@@ -139,29 +87,6 @@ This provides:
    - Bundles all required ROCm runtime libraries
    - Creates wrapper scripts with proper LD_LIBRARY_PATH
 
-## File Structure
-
-```
-nix-llamacpp-rocm/
-├── flake.nix           # Main Nix flake with derivations
-├── update-rocm.py      # Script to update ROCm sources
-├── rocm-sources.json   # ROCm tarball metadata
-├── modules/            # NixOS modules
-│   └── rpc-server.nix  # RPC server service module
-└── README.md          # This file
-```
-
-## Troubleshooting
-
-### ROCm sources not populated error
-Run `python3 update-rocm.py` to fetch and hash the ROCm tarballs.
-
-### Build fails with HIP version error
-The flake automatically patches the HIP version check. If issues persist, check that the patch in `flake.nix` is being applied correctly.
-
-### Missing libraries at runtime
-The flake copies essential ROCm libraries to the output. If you encounter missing library errors, check the `postInstall` phase in `flake.nix`.
-
 ## Using as an Overlay
 
 This flake provides an overlay that can be used in other Nix projects to easily access the llama.cpp ROCm packages.
@@ -172,7 +97,7 @@ This flake provides an overlay that can be used in other Nix projects to easily 
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    llamacpp-rocm.url = "github:user/nix-llamacpp-rocm";
+    llamacpp-rocm.url = "github:hellas-ai/nix-strix-halo";
   };
 
   outputs = { self, nixpkgs, llamacpp-rocm, ... }: {
@@ -184,9 +109,7 @@ This flake provides an overlay that can be used in other Nix projects to easily 
           
           # Now you can use the packages
           environment.systemPackages = with pkgs; [
-            llamacpp-rocm.gfx1151  # For STX Halo GPUs
-            # Or: llamacpp-rocm.gfx110X for RDNA3
-            # Or: llamacpp-rocm.gfx120X for RDNA4
+            llamacpp-rocm.gfx1151
           ];
         })
       ];
@@ -201,7 +124,7 @@ This flake provides an overlay that can be used in other Nix projects to easily 
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    llamacpp-rocm.url = "github:user/nix-llamacpp-rocm";
+    llamacpp-rocm.url = "github:hellas-ai/nix-strix-halo";
   };
 
   outputs = { self, nixpkgs, llamacpp-rocm, ... }: 
@@ -226,25 +149,6 @@ This flake provides an overlay that can be used in other Nix projects to easily 
 }
 ```
 
-### Available Overlay Packages
-
-When using the overlay, packages are available under `pkgs.llamacpp-rocm.*`:
-
-#### Standard Builds
-- `pkgs.llamacpp-rocm.gfx110X` - Llama.cpp for RDNA3 GPUs
-- `pkgs.llamacpp-rocm.gfx1151` - Llama.cpp for STX Halo GPUs
-- `pkgs.llamacpp-rocm.gfx120X` - Llama.cpp for RDNA4 GPUs
-
-#### ROCWMMA-Optimized Builds
-- `pkgs.llamacpp-rocm.gfx110X-rocwmma` - RDNA3 with ROCWMMA
-- `pkgs.llamacpp-rocm.gfx1151-rocwmma` - STX Halo with ROCWMMA
-- `pkgs.llamacpp-rocm.gfx120X-rocwmma` - RDNA4 with ROCWMMA
-
-#### ROCm Toolchains (internal use)
-- `pkgs.llamacpp-rocm.rocm-gfx110X` - ROCm toolchain for RDNA3
-- `pkgs.llamacpp-rocm.rocm-gfx1151` - ROCm toolchain for STX Halo
-- `pkgs.llamacpp-rocm.rocm-gfx120X` - ROCm toolchain for RDNA4
-
 ## NixOS Modules
 
 This flake provides NixOS modules for running llama.cpp services.
@@ -259,7 +163,7 @@ The RPC server module allows you to run a llama.cpp RPC server as a systemd serv
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    llamacpp-rocm.url = "github:user/nix-llamacpp-rocm";
+    llamacpp-rocm.url = "github:hellas-ai/nix-strix-halo";
   };
 
   outputs = { self, nixpkgs, llamacpp-rocm, ... }: {
@@ -312,58 +216,15 @@ The RPC server module allows you to run a llama.cpp RPC server as a systemd serv
 | `group` | string | "llamacpp-rpc" | Group to run the service as |
 | `openFirewall` | bool | false | Open firewall for the RPC port |
 
-#### Service Management
+## Benchmarking
 
-Once configured, the RPC server runs as a systemd service:
-
-```bash
-# Check service status
-systemctl status llamacpp-rpc-server
-
-# View logs
-journalctl -u llamacpp-rpc-server -f
-
-# Restart service
-systemctl restart llamacpp-rpc-server
-```
-
-#### Security Notes
-
-The module includes security hardening:
-- Runs as a dedicated system user
-- Uses systemd sandboxing features
-- Restricts file system access (except cache directory if enabled)
-- Keeps GPU device access for ROCm functionality
-
-## Advanced Usage
-
-### Using specific ROCm versions
-
-Edit `update-rocm.py` to fetch specific versions instead of latest, or manually edit `rocm-sources.json` with known good URLs and hashes.
-
-### Custom llama.cpp versions
-
-You can use a specific llama.cpp version by overriding the input:
-
-```bash
-# Use a specific commit or tag
-nix build .#llama-cpp-gfx110X --override-input llama-cpp github:ggerganov/llama.cpp/specific-commit-or-tag
-
-# Use a local llama.cpp checkout
-nix build .#llama-cpp-gfx110X --override-input llama-cpp path:/path/to/local/llama.cpp
-```
-
-### Adding new GPU targets
-
-1. Add the target to `update-rocm.py`
-2. Update `rocm-sources.json`
-3. Add corresponding packages in `flake.nix`
+The flake includes a comprehensive benchmarking framework to compare different builds, models, and settings.
 
 ## Credits
 
-- [TheRock](https://github.com/ROCm/TheRock) - Pre-built ROCm binaries
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - Efficient LLM inference
-- [llamacpp-rocm](https://github.com/lemonade-sdk/llamacpp-rocm) - Inspiration for this project
+- [amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes) 
+- [strix-halo-testing](https://github.com/lhl/strix-halo-testing/)
+- [llamacpp-rocm](https://github.com/lemonade-sdk/llamacpp-rocm)
 
 ## License
 
