@@ -27,6 +27,7 @@
       license = licenses.gpl2Only;
       platforms = platforms.linux;
       maintainers = with maintainers; [ georgewhewell ];
+      mainProgram = "su_axb35_monitor";
     };
   };
 
