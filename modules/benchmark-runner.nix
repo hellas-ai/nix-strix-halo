@@ -84,7 +84,12 @@ in {
       nvtopPackages.amd
       btop
       tmux
+      vulkan-tools
       strixtop
+    ];
+
+    hardware.graphics.extraPackages = with pkgs; [
+      amdvlk
     ];
 
     # Optionally relax sandbox for benchmark builds

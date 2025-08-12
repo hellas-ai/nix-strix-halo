@@ -10,6 +10,7 @@
   batch ? null,
   ubatch ? null,
   rpc ? null,
+  vkIcdFilenames ? null,
   extraArgs ? "",
 }:
 pkgs.runCommand "benchmark-${llamaCppPackage.pname}" {
@@ -18,6 +19,7 @@ pkgs.runCommand "benchmark-${llamaCppPackage.pname}" {
   __noChroot = true;
 } ''
   export HSA_OVERRIDE_GFX_VERSION=11.5.1
+  ${pkgs.lib.optionalString (vkIcdFilenames != null) "export VK_ICD_FILENAMES=${vkIcdFilenames}"}
   ${llamaCppPackage}/bin/llama-bench \
     ${pkgs.lib.optionalString (modelPath != null) "-m ${modelPath}"} \
     ${pkgs.lib.optionalString (mmap != null) "--mmap ${toString mmap}"} \

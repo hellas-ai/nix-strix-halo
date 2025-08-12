@@ -57,6 +57,9 @@
         # Monitoring tools
         strixtop = prev.callPackage ./pkgs/strixtop.nix {};
 
+        # Updated shaderc for Vulkan support
+        shaderc = prev.callPackage ./pkgs/shaderc.nix {};
+
         # Llama.cpp ROCm packages
         llamacpp-rocm = let
           mkRocm = mkRocmDerivation prev;
@@ -105,7 +108,11 @@
     # Per-system outputs (ROCm only works on Linux)
     flake-utils.lib.eachSystem ["x86_64-linux"] (
       system: let
-        pkgs = nixpkgs.legacyPackages.${system};
+        # Apply our overlay to get custom packages like shaderc
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [self.overlays.default];
+        };
         mkRocm = mkRocmDerivation pkgs;
         mkClangWrapper = mkRocmClangWrapper pkgs;
         mkLlamaCpp = mkLlamaCppDerivation pkgs;
@@ -151,11 +158,22 @@
                 acc // buildForTarget target
             ) {}
             targets;
+          
+          # Vulkan build (not GPU-target specific)
+          vulkanPackage = {
+            "llama-cpp-vulkan" = (pkgs.llama-cpp.override {
+              vulkanSupport = true;
+              rpcSupport = true;
+            }).overrideAttrs (old: {
+              pname = "llama-cpp-vulkan";
+            });
+          };
 
           # EC-SU_AXB35 packages
           ecPackages = mkEcSuAxb35 pkgs;
         in
           allPackages
+          // vulkanPackage
           // {
             # Default package
             default = allPackages.llama-cpp-gfx1151;
@@ -172,7 +190,6 @@
 
         # Apps for easy running
         apps = {
-          # Interactive llama.cpp CLI with best ROCm build
           llama-cli = {
             type = "app";
             program = toString (pkgs.writeShellScript "llama-cli" ''
@@ -181,7 +198,6 @@
             '');
           };
 
-          # Start llama.cpp server with best ROCm build
           llama-server = {
             type = "app";
             program = toString (pkgs.writeShellScript "llama-server" ''
@@ -194,7 +210,10 @@
     )
     // flake-utils.lib.eachDefaultSystem (
       system: let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [self.overlays.default];
+        };
       in {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -208,15 +227,5 @@
           ];
         };
       }
-    )
-    // {
-      # Top-level shortcut to x86_64-linux benchmarks
-      benchmarks = let
-        pkgs = nixpkgs.legacyPackages.x86_64-linux;
-        packages = self.packages.x86_64-linux;
-      in
-        import ./bench/default.nix {
-          inherit pkgs packages;
-        };
-    };
+    );
 }
