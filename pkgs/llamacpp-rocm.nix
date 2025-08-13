@@ -73,7 +73,7 @@ let
   '';
 in
 pkgs.stdenv.mkDerivation {
-  pname = "llama-cpp-rocm-${target}${pkgs.lib.optionalString enableRocwmma "-rocwmma"}";
+  pname = "llamacpp-rocm-${target}${pkgs.lib.optionalString enableRocwmma "-rocwmma"}";
   version = "git";
   hardeningDisable = [ "all" ];
   src = llama-cpp;

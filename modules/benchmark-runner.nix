@@ -57,10 +57,9 @@ in {
     nix.settings.system-features = [
       "benchmark"
       "big-parallel"
-      "ca-derivations"
-      "rocm"
-      cfg.gpuTarget
       "kvm"
+      "gccarch-znver5"
+      cfg.gpuTarget
     ];
 
     # Allow GPU access in sandbox
@@ -73,12 +72,6 @@ in {
       cfg.modelsPath
     ];
 
-    boot.kernelParams = [
-      "amd_iommu=off"
-      "amdgpu.gttsize=131072"
-      "ttm.pages_limit=33554432"
-    ];
-
     environment.systemPackages = with pkgs; [
       amdgpu_top
       nvtopPackages.amd
@@ -86,10 +79,6 @@ in {
       tmux
       vulkan-tools
       strixtop
-    ];
-
-    hardware.graphics.extraPackages = with pkgs; [
-      amdvlk
     ];
 
     # Optionally relax sandbox for benchmark builds
@@ -149,8 +138,7 @@ in {
                   mkdir -p "$MODEL_DIR"
 
                   huggingface-cli download "${model.repo}" "${file}" \
-                    --local-dir "$MODEL_DIR" \
-                    --local-dir-use-symlinks False
+                    --local-dir "$MODEL_DIR"
 
                   chmod -R a+r "$MODEL_DIR"
                   echo "File ${file} downloaded successfully"

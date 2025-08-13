@@ -1,17 +1,18 @@
 # Benchmark matrix generator
-{ pkgs, packages }:
-
-let
+{
+  pkgs,
+  packages,
+}: let
   runner = import ./runner.nix;
 
   # Standard package set for all benchmarks
   standardPackages = [
-    (pkgs.llama-cpp.override {
-      rocmSupport = true;
-      rpcSupport = true;
-    })
-    packages.llama-cpp-gfx1151
-    packages.llama-cpp-gfx1151-rocwmma
+    # (pkgs.llama-cpp.override {
+    #   rocmSupport = true;
+    #   rpcSupport = true;
+    # })
+    packages.llamacpp-rocm-gfx1151
+    packages.llamacpp-rocm-gfx1151-rocwmma
     packages.llama-cpp-vulkan-amdvlk
     packages.llama-cpp-vulkan-radv
   ];
@@ -23,15 +24,25 @@ let
       benchmarks = {
         # Batch size effects
         batchSizes = {
-          params = map (b: { batch = b; fa = 1; }) 
+          params =
+            map (b: {
+              batch = b;
+              fa = 1;
+            })
             [1 2 4 8 32 64 128 256 512];
         };
-        
+
         # Flash attention comparison
         flashAttention = {
           params = [
-            { fa = 0; ngl = 999; }
-            { fa = 1; ngl = 999; }
+            {
+              fa = 0;
+              ngl = 999;
+            }
+            {
+              fa = 1;
+              ngl = 999;
+            }
           ];
         };
       };
@@ -43,8 +54,14 @@ let
         # Memory offloading tests
         memoryTests = {
           params = [
-            { fa = 1; ngl = 50; }
-            { fa = 1; ngl = 99; }
+            {
+              fa = 1;
+              ngl = 50;
+            }
+            {
+              fa = 1;
+              ngl = 99;
+            }
           ];
         };
       };
@@ -55,15 +72,29 @@ let
       benchmarks = {
         flashAttention = {
           params = [
-            { fa = 0; ngl = 999; }
-            { fa = 1; ngl = 999; }
+            {
+              fa = 0;
+              ngl = 999;
+            }
+            {
+              fa = 1;
+              ngl = 999;
+            }
           ];
         };
-        
+
         promptProcessing = {
           params = [
-            { batch = 128; fa = 1; ngl = 999; }
-            { batch = 512; fa = 1; ngl = 999; }
+            {
+              batch = 128;
+              fa = 1;
+              ngl = 999;
+            }
+            {
+              batch = 512;
+              fa = 1;
+              ngl = 999;
+            }
           ];
         };
       };
@@ -80,7 +111,15 @@ let
     );
 
   # Generate benchmark runner invocation
-  mkBenchmark = { model, package, batch ? null, fa ? null, ngl ? null, rpc ? null, ... } @ args:
+  mkBenchmark = {
+    model,
+    package,
+    batch ? null,
+    fa ? null,
+    ngl ? null,
+    rpc ? null,
+    ...
+  } @ args:
     runner {
       inherit pkgs batch fa ngl rpc;
       llamaCppPackage = package;
@@ -92,20 +131,25 @@ let
   generateModelBenchmarks = modelName: modelConfig: let
     # Expand benchmark definitions into concrete configs
     allConfigs = pkgs.lib.flatten (
-      pkgs.lib.mapAttrsToList (benchName: benchDef:
-        pkgs.lib.flatten (
-          map (pkg:
-            map (params: { package = pkg; } // params) benchDef.params
-          ) standardPackages
-        )
-      ) modelConfig.benchmarks
+      pkgs.lib.mapAttrsToList (
+        benchName: benchDef:
+          pkgs.lib.flatten (
+            map (
+              pkg:
+                map (params: {package = pkg;} // params) benchDef.params
+            )
+            standardPackages
+          )
+      )
+      modelConfig.benchmarks
     );
   in
     builtins.listToAttrs (
       map (config: {
         name = mkName config;
-        value = mkBenchmark (config // { model = modelConfig.path; });
-      }) allConfigs
+        value = mkBenchmark (config // {model = modelConfig.path;});
+      })
+      allConfigs
     );
 in {
   # Generate benchmarks for each model

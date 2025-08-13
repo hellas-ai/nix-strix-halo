@@ -17,6 +17,9 @@ pkgs.runCommand "benchmark-${llamaCppPackage.pname}" {
   requiredSystemFeatures = ["rocm"];
   __noChroot = true;
 } ''
+  echo "Running benchmark with the following parameters:"
+  echo "Model Path: ${modelPath}"
+
   export HSA_OVERRIDE_GFX_VERSION=11.5.1
   ${llamaCppPackage}/bin/llama-bench \
     ${pkgs.lib.optionalString (modelPath != null) "-m ${modelPath}"} \
