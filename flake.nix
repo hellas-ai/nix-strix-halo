@@ -2,10 +2,7 @@
   description = "Llama.cpp with pre-built ROCm binaries from TheRock";
 
   inputs = {
-    # nixpkgs.url = "github:LunNova/nixpkgs/lunnova/rocm-6.4.x";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    chaotic.url = "github:chaotic-cx/nyx/nyxpkgs-unstable";
-
     flake-utils.url = "github:numtide/flake-utils";
     disko = {
       url = "github:nix-community/disko";
@@ -164,18 +161,17 @@
           ...
         }: {
           imports = [
-            inputs.chaotic.nixosModules.default
-            inputs.disko.nixosModules.disko
+            # inputs.disko.nixosModules.disko
           ];
           nixpkgs.overlays = [
             self.overlays.default
-            inputs.chaotic.overlays.default
           ];
         };
         rpc-server = import ./modules/rpc-server.nix;
         benchmark-runner = import ./modules/benchmark-runner.nix;
         ec-su-axb35 = import ./modules/ec-su-axb35.nix;
         disko-raid0 = import ./modules/disko-raid0.nix;
+        disko-efi-img = import ./modules/disko-efi-img.nix;
         tuning = import ./modules/tuning.nix;
       };
 
@@ -192,6 +188,67 @@
           ];
         };
       };
+
+      # Bootable images (ISO and disk images)
+      images = let
+        mkImage = {
+          name,
+          modules,
+          format ? "diskImage",
+        }:
+          (nixpkgs.lib.nixosSystem {
+            system = "x86_64-linux";
+            specialArgs = {
+              inherit inputs;
+              inherit self;
+            };
+            modules = modules;
+          }).config.system.build.${
+            format
+          };
+      in {
+        live-iso = mkImage {
+          name = "live-iso";
+          format = "isoImage";
+          modules = [
+            ./examples/live-cd/configuration.nix
+            "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
+            {
+              # ISO-specific configuration
+              isoImage = {
+                volumeID = "STRIX-LIVE-ISO";
+                # fileName = "strix-live-iso.iso";
+                makeEfiBootable = true;
+                makeUsbBootable = true;
+                appendToMenuLabel = "NixOS LlamaCPP ROCm";
+              };
+            }
+          ];
+        };
+
+        # Bootable disk image with disko
+        bootable-disk = mkImage {
+          name = "bootable-disk";
+          format = "diskoImages";
+          modules = [
+            ./examples/live-cd/configuration.nix
+            self.nixosModules.disko-efi-img
+            {
+              # Set a default root password for initial login
+              users.users.root.initialPassword = "nixos";
+
+              # Enable SSH by default
+              services.openssh = {
+                enable = true;
+                settings = {
+                  PermitRootLogin = "yes";
+                  PasswordAuthentication = true;
+                };
+              };
+            }
+          ];
+        };
+      };
     }
     //
     # Per-system outputs (ROCm only works on Linux)
@@ -202,7 +259,6 @@
           inherit system;
           overlays = [
             self.overlays.default
-            inputs.chaotic.overlays.default
           ];
         };
 
@@ -320,7 +376,6 @@
           inherit system;
           overlays = [
             self.overlays.default
-            inputs.chaotic.overlays.default
           ];
         };
       in {

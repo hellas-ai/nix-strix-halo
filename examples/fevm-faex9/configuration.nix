@@ -13,7 +13,6 @@
     inputs.self.nixosModules.rpc-server
     inputs.self.nixosModules.benchmark-runner
     inputs.self.nixosModules.ec-su-axb35
-    inputs.self.nixosModules.disko-raid0
   ];
 
   # This value determines the NixOS release from which the default
@@ -30,23 +29,20 @@
     };
   };
 
-  # High-performance profile
-  powerManagement.cpuFreqGovernor = lib.mkDefault "performance";
+  # Time zone and locale
+  time.timeZone = "UTC";
+  i18n.defaultLocale = "en_US.UTF-8";
 
   # Networking
   networking = {
     hostName = "fevm-faex9";
-    useDHCP = true;
-    useNetworkd = true;
+    useDHCP = lib.mkDefault true;
+    useNetworkd = lib.mkDefault true;
     firewall = {
       enable = true;
       allowedTCPPorts = [22 8080 50052];
     };
   };
-
-  # Time zone and locale
-  time.timeZone = "UTC";
-  i18n.defaultLocale = "en_US.UTF-8";
 
   # Enable SSH
   # services.openssh = {
@@ -64,11 +60,4 @@
   #   host = "0.0.0.0";
   #   port = 50052;
   # };
-
-  # # Benchmark runner service (from our module)
-  services.benchmark-runner = {
-    enable = true;
-    gpuTarget = "gfx1151";
-    modelsPath = "/models";
-  };
 }

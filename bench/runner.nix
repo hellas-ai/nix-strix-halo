@@ -14,7 +14,7 @@
 }:
 pkgs.runCommand "benchmark-${llamaCppPackage.pname}" {
   buildInputs = [llamaCppPackage];
-  requiredSystemFeatures = ["rocm"];
+  requiredSystemFeatures = ["gfx1151"];
   __noChroot = true;
 } ''
   echo "Running benchmark with the following parameters:"

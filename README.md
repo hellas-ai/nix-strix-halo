@@ -21,15 +21,18 @@ A Nix flake for building llama.cpp with pre-built ROCm binaries from TheRock pro
 
 ## Available Nix Packages
 
-### Standard Llama.cpp Packages
-- `llama-cpp-gfx110X` - Llama.cpp built for RDNA3 GPUs
-- `llama-cpp-gfx1151` - Llama.cpp built for STX Halo GPUs  
-- `llama-cpp-gfx120X` - Llama.cpp built for RDNA4 GPUs
+### Standard Llama.cpp Packages (Built from Source)
+- `llamacpp-rocm-gfx110X` - Llama.cpp built for RDNA3 GPUs
+- `llamacpp-rocm-gfx1151` - Llama.cpp built for STX Halo GPUs  
+- `llamacpp-rocm-gfx120X` - Llama.cpp built for RDNA4 GPUs
 
 ### ROCWMMA-Optimized Packages (15x faster flash attention)
-- `llama-cpp-gfx110X-rocwmma` - RDNA3 with ROCWMMA and hipBLASLt
-- `llama-cpp-gfx1151-rocwmma` - STX Halo with ROCWMMA and hipBLASLt
-- `llama-cpp-gfx120X-rocwmma` - RDNA4 with ROCWMMA and hipBLASLt
+- `llamacpp-rocm-gfx110X-rocwmma` - RDNA3 with ROCWMMA and hipBLASLt
+- `llamacpp-rocm-gfx1151-rocwmma` - STX Halo with ROCWMMA and hipBLASLt
+- `llamacpp-rocm-gfx120X-rocwmma` - RDNA4 with ROCWMMA and hipBLASLt
+
+### Pre-built Binary Packages
+- `llamacpp-rocm-bin-gfx1151` - Pre-built binary for STX Halo GPUs
 
 ### ROCm Packages
 - `rocm-gfx110X` - Pre-built ROCm for RDNA3
