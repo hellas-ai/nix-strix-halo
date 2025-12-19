@@ -3,7 +3,8 @@
 , fetchzip
 , autoPatchelfHook
 , zlib
-, glibc
+, glibc,
+...
 }:
 
 stdenv.mkDerivation rec {
