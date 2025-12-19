@@ -30,6 +30,7 @@ in
         gfortran.cc.lib
         zlib
         ncurses
+        ocl-icd
       ];
 
       autoPatchelfIgnoreMissingDeps = [

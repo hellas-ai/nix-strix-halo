@@ -36,7 +36,11 @@ def get_s3_listing(prefix):
     files = []
     for contents in root.findall('s3:Contents', namespace):
         key = contents.find('s3:Key', namespace).text
-        files.append(key)
+        last_modified = contents.find('s3:LastModified', namespace)
+        files.append({
+            "key": key,
+            "last_modified": last_modified.text if last_modified is not None else None,
+        })
     
     return files
 
@@ -56,10 +60,16 @@ def find_latest_rocm_file(target, platform="linux"):
     if not files:
         print(f"No files found for prefix: {prefix}")
         return None, None
+
+    non_adhoc_files = [entry for entry in files if "ADHOCBUILD" not in entry["key"]]
+    if non_adhoc_files:
+        files = non_adhoc_files
+    else:
+        print(f"  NOTE: Only ADHOCBUILD artifacts found for prefix: {prefix}")
     
     # Sort to get the latest
-    sorted_files = sorted(files)
-    latest_file = sorted_files[-1] if sorted_files else None
+    latest_entry = max(files, key=lambda entry: entry["last_modified"] or entry["key"])
+    latest_file = latest_entry["key"] if latest_entry else None
     
     if latest_file:
         # Extract version from filename
