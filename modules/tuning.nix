@@ -1,19 +1,11 @@
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}: {
+{pkgs, ...}: {
   boot = {
     kernelParams = [
-      "amd_iommu=off"
-      "amdgpu.gttsize=131072"
-      "ttm.pages_limit=33554432"
+      "amd_iommu=pt"
+      # GTT: 80GB (leaves ~30GB system RAM for OS/apps)
+      "ttm.pages_limit=20971520"
     ];
     tmp.useTmpfs = true;
-    kernelPackages = pkgs.linuxPackages_cachyos-rc.cachyOverride {
-      mArch = "ZEN4";
-    };
   };
 
   services.tuned = {

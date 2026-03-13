@@ -2,19 +2,14 @@
 {
   pkgs,
   packages,
+  gpuTarget ? "gfx1151",
 }: let
   runner = import ./runner.nix;
 
   # Standard package set for all benchmarks
   standardPackages = [
-    # (pkgs.llama-cpp.override {
-    #   rocmSupport = true;
-    #   rpcSupport = true;
-    # })
-    packages.llamacpp-rocm-gfx1151
-    packages.llamacpp-rocm-gfx1151-rocwmma
-    packages.llama-cpp-vulkan-amdvlk
-    packages.llama-cpp-vulkan-radv
+    packages.llamacpp-rocm
+    packages.llama-cpp-vulkan
   ];
 
   # Model configurations with their benchmark parameters
@@ -121,7 +116,7 @@
     ...
   } @ args:
     runner {
-      inherit pkgs batch fa ngl rpc;
+      inherit pkgs batch fa ngl rpc gpuTarget;
       llamaCppPackage = package;
       modelPath = model;
       extraArgs = args.extraArgs or "";

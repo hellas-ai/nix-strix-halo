@@ -57,12 +57,22 @@
   #   };
   # };
 
-  # Llama.cpp RPC server service (from our module)
-  # services.llamacpp-rpc-server = {
-  #   enable = true;
-  #   package = pkgs.llamacpp-rocm.gfx1151-rocwmma;
-  #   host = "0.0.0.0";
-  #   port = 50052;
+  # Llama.cpp RPC server instances (from our module)
+  # services.llamacpp-rpc-servers = {
+  #   gpu = {
+  #     enable = true;
+  #     device = "0";
+  #     host = "0.0.0.0";
+  #     port = 50052;
+  #     memory = 32768;
+  #   };
+  #   cpu = {
+  #     enable = true;
+  #     host = "0.0.0.0";
+  #     port = 50053;
+  #     threads = 64;
+  #     memory = 65536;
+  #   };
   # };
 
   # # Benchmark runner service (from our module)

@@ -5,156 +5,180 @@
   ...
 }:
 with lib; let
-  cfg = config.services.llamacpp-rpc-server;
-in {
-  options.services.llamacpp-rpc-server = {
-    enable = mkEnableOption "llama.cpp RPC server";
+  cfg = config.services.llamacpp-rpc-servers;
 
-    package = mkOption {
-      type = types.package;
-      default = pkgs.llamacpp-rocm.gfx1151;
-      defaultText = literalExpression "pkgs.llamacpp-rocm.gfx1151";
-      description = "The llama.cpp package to use (must include rpc-server binary)";
-    };
+  instanceModule = {
+    name,
+    config,
+    ...
+  }: {
+    options = {
+      enable = mkEnableOption "this llama.cpp RPC server instance";
 
-    threads = mkOption {
-      type = types.int;
-      default = 64;
-      description = "Number of threads for the CPU backend";
-    };
+      package = mkOption {
+        type = types.package;
+        default = pkgs.llamacpp-rocm;
+        defaultText = literalExpression "pkgs.llamacpp-rocm";
+        description = "The llama.cpp package to use (must include rpc-server binary)";
+      };
 
-    device = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "0";
-      description = "Device to use (e.g., GPU device ID)";
-    };
+      threads = mkOption {
+        type = types.int;
+        default = 64;
+        description = "Number of threads for the CPU backend";
+      };
 
-    host = mkOption {
-      type = types.str;
-      default = "127.0.0.1";
-      description = "Host to bind to";
-    };
+      device = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "0";
+        description = "Device to use (e.g., GPU device ID)";
+      };
 
-    port = mkOption {
-      type = types.port;
-      default = 50052;
-      description = "Port to bind to";
-    };
+      host = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = "Host to bind to";
+      };
 
-    memory = mkOption {
-      type = types.nullOr types.int;
-      default = null;
-      example = 8192;
-      description = "Backend memory size in MB";
-    };
+      port = mkOption {
+        type = types.port;
+        default = 50052;
+        description = "Port to bind to";
+      };
 
-    enableCache = mkOption {
-      type = types.bool;
-      default = true;
-      description = "Enable local file cache";
-    };
+      enableCache = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Enable local file cache";
+      };
 
-    cacheDirectory = mkOption {
-      type = types.path;
-      default = "/var/cache/llamacpp-rpc";
-      description = "Directory for the file cache (when enableCache is true)";
-    };
+      cacheDirectory = mkOption {
+        type = types.path;
+        default = "/var/cache/llamacpp-rpc/${name}";
+        description = "Directory for the file cache (when enableCache is true)";
+      };
 
-    extraArgs = mkOption {
-      type = types.listOf types.str;
-      default = [];
-      example = ["--verbose"];
-      description = "Extra arguments to pass to rpc-server";
-    };
+      extraArgs = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = ["--verbose"];
+        description = "Extra arguments to pass to rpc-server";
+      };
 
-    user = mkOption {
-      type = types.str;
-      default = "llamacpp-rpc";
-      description = "User under which the rpc-server runs";
-    };
+      user = mkOption {
+        type = types.str;
+        default = "llamacpp-rpc";
+        description = "User under which the rpc-server runs";
+      };
 
-    group = mkOption {
-      type = types.str;
-      default = "llamacpp-rpc";
-      description = "Group under which the rpc-server runs";
-    };
+      group = mkOption {
+        type = types.str;
+        default = "llamacpp-rpc";
+        description = "Group under which the rpc-server runs";
+      };
 
-    openFirewall = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Whether to open the firewall for the RPC port";
+      openFirewall = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Whether to open the firewall for the RPC port";
+      };
     };
   };
 
-  config = mkIf cfg.enable {
-    # Create user and group
-    users.users.${cfg.user} = {
-      isSystemUser = true;
-      group = cfg.group;
-      description = "llama.cpp RPC server user";
-      home = cfg.cacheDirectory;
-      createHome = cfg.enableCache;
-    };
+  enabledInstances = filterAttrs (_: inst: inst.enable) cfg;
+in {
+  options.services.llamacpp-rpc-servers = mkOption {
+    type = types.attrsOf (types.submodule instanceModule);
+    default = {};
+    description = "Named llama.cpp RPC server instances";
+    example = literalExpression ''
+      {
+        gpu = {
+          enable = true;
+          device = "0";
+          port = 50052;
+        };
+        cpu = {
+          enable = true;
+          port = 50053;
+          threads = 64;
+        };
+      }
+    '';
+  };
 
-    users.groups.${cfg.group} = {};
+  config = mkIf (enabledInstances != {}) {
+    # Collect all unique user/group pairs
+    users.users = mapAttrs' (_: inst:
+      nameValuePair inst.user {
+        isSystemUser = true;
+        group = inst.group;
+        extraGroups = ["render" "video"];
+        description = "llama.cpp RPC server user";
+      })
+    enabledInstances;
 
-    # Create cache directory if needed
-    systemd.tmpfiles.rules = mkIf cfg.enableCache [
-      "d ${cfg.cacheDirectory} 0755 ${cfg.user} ${cfg.group} - -"
-    ];
+    users.groups = mapAttrs' (_: inst:
+      nameValuePair inst.group {})
+    enabledInstances;
 
-    # Systemd service
-    systemd.services.llamacpp-rpc-server = {
-      description = "llama.cpp RPC server";
-      after = ["network.target"];
-      wantedBy = ["multi-user.target"];
+    # Create cache directories
+    systemd.tmpfiles.rules = concatLists (mapAttrsToList (_: inst:
+      optional inst.enableCache
+      "d ${inst.cacheDirectory} 0755 ${inst.user} ${inst.group} - -")
+    enabledInstances);
 
-      serviceConfig = {
-        Type = "simple";
-        User = cfg.user;
-        Group = cfg.group;
-        ExecStart = let
-          args =
-            [
-              "${cfg.package}/bin/rpc-server"
-              "--threads"
-              (toString cfg.threads)
-              "--host"
-              cfg.host
-              "--port"
-              (toString cfg.port)
-            ]
-            ++ optionals (cfg.device != null) ["--device" cfg.device]
-            ++ optionals (cfg.memory != null) ["--mem" (toString cfg.memory)]
-            ++ optionals cfg.enableCache ["--cache"]
-            ++ cfg.extraArgs;
-        in
-          escapeShellArgs args;
+    # Systemd services — one per instance
+    systemd.services = mapAttrs' (name: inst:
+      nameValuePair "llamacpp-rpc-server-${name}" {
+        description = "llama.cpp RPC server (${name})";
+        after = ["network.target"];
+        wantedBy = ["multi-user.target"];
 
-        Restart = "on-failure";
-        RestartSec = 5;
+        serviceConfig = {
+          Type = "simple";
+          User = inst.user;
+          Group = inst.group;
+          ExecStart = let
+            args =
+              [
+                "${inst.package}/bin/llama-rpc-server"
+                "--threads"
+                (toString inst.threads)
+                "--host"
+                inst.host
+                "--port"
+                (toString inst.port)
+              ]
+              ++ optionals (inst.device != null) ["--device" inst.device]
+              ++ optionals inst.enableCache ["--cache"]
+              ++ inst.extraArgs;
+          in
+            escapeShellArgs args;
 
-        # Security hardening
-        PrivateTmp = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        NoNewPrivileges = true;
-        PrivateDevices = false; # Need access to GPU devices
-        ReadWritePaths = mkIf cfg.enableCache [cfg.cacheDirectory];
+          WorkingDirectory = mkIf inst.enableCache inst.cacheDirectory;
+          Environment = mkIf inst.enableCache "HOME=${inst.cacheDirectory}";
 
-        # Environment for ROCm
-        Environment = [
-          "HSA_OVERRIDE_GFX_VERSION=11.5.1"
-          "ROCM_PATH=${cfg.package}/rocm"
-        ];
-      };
-    };
+          Restart = "on-failure";
+          RestartSec = 5;
 
-    # Open firewall if requested
-    networking.firewall.allowedTCPPorts = mkIf cfg.openFirewall [cfg.port];
+          # Security hardening
+          PrivateTmp = true;
+          ProtectHome = true;
+          NoNewPrivileges = true;
+          PrivateDevices = false; # Need access to GPU devices
+        };
+      })
+    enabledInstances;
 
-    # Add package to system packages for debugging
-    environment.systemPackages = [cfg.package];
+    # Open firewall for instances that request it
+    networking.firewall.allowedTCPPorts =
+      mapAttrsToList (_: inst: inst.port)
+      (filterAttrs (_: inst: inst.openFirewall) enabledInstances);
+
+    # Add packages to system packages for debugging
+    environment.systemPackages =
+      unique (mapAttrsToList (_: inst: inst.package) enabledInstances);
   };
 }

@@ -11,11 +11,11 @@
   ubatch ? null,
   rpc ? null,
   extraArgs ? "",
+  gpuTarget ? "gfx1151",
 }:
 pkgs.runCommand "benchmark-${llamaCppPackage.pname}" {
   buildInputs = [llamaCppPackage];
-  requiredSystemFeatures = ["rocm"];
-  __noChroot = true;
+  requiredSystemFeatures = [gpuTarget];
 } ''
   echo "Running benchmark with the following parameters:"
   echo "Model Path: ${modelPath}"

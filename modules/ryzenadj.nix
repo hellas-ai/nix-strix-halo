@@ -16,7 +16,9 @@
   ryzenadj = "${pkgs.ryzenadj}/bin/ryzenadj";
 
   # Curve optimizer encoding: positive values direct, negative as 1048576 + value
-  coallValue = if cfg.curveOptimizer.offset >= 0 then cfg.curveOptimizer.offset
+  coallValue =
+    if cfg.curveOptimizer.offset >= 0
+    then cfg.curveOptimizer.offset
     else 1048576 + cfg.curveOptimizer.offset;
 
   # Base args (without curve optimizer - applied separately with grace period)
@@ -32,7 +34,9 @@
     (mkBoolArg "power-saving" cfg.powerSaving)
   ];
 
-  hasBaseConfig = cfg.stapmLimit != null
+  hasBaseConfig =
+    cfg.stapmLimit
+    != null
     || cfg.fastLimit != null
     || cfg.slowLimit != null
     || cfg.apuSlowLimit != null
@@ -44,25 +48,55 @@
 
   # Verification checks - map config option to output name and expected value
   checks = lib.filter (x: x.value != null) [
-    { name = "STAPM LIMIT"; value = cfg.stapmLimit; divisor = 1000; }
-    { name = "PPT LIMIT FAST"; value = cfg.fastLimit; divisor = 1000; }
-    { name = "PPT LIMIT SLOW"; value = cfg.slowLimit; divisor = 1000; }
-    { name = "PPT LIMIT APU"; value = cfg.apuSlowLimit; divisor = 1000; }
-    { name = "THM LIMIT CORE"; value = cfg.tctlTemp; divisor = 1; }
-    { name = "STT LIMIT APU"; value = cfg.apuSkinTemp; divisor = 1; }
-    { name = "STT LIMIT dGPU"; value = cfg.dgpuSkinTemp; divisor = 1; }
+    {
+      name = "STAPM LIMIT";
+      value = cfg.stapmLimit;
+      divisor = 1000;
+    }
+    {
+      name = "PPT LIMIT FAST";
+      value = cfg.fastLimit;
+      divisor = 1000;
+    }
+    {
+      name = "PPT LIMIT SLOW";
+      value = cfg.slowLimit;
+      divisor = 1000;
+    }
+    {
+      name = "PPT LIMIT APU";
+      value = cfg.apuSlowLimit;
+      divisor = 1000;
+    }
+    {
+      name = "THM LIMIT CORE";
+      value = cfg.tctlTemp;
+      divisor = 1;
+    }
+    {
+      name = "STT LIMIT APU";
+      value = cfg.apuSkinTemp;
+      divisor = 1;
+    }
+    {
+      name = "STT LIMIT dGPU";
+      value = cfg.dgpuSkinTemp;
+      divisor = 1;
+    }
   ];
 
-  verifyScript = lib.concatMapStringsSep "\n" (check: ''
-    expected="${toString (check.value / check.divisor)}"
-    actual=$(echo "$output" | grep -F "| ${check.name}" | awk -F'|' '{print $3}' | tr -d ' ' | cut -d. -f1)
-    if [ "$actual" != "$expected" ]; then
-      echo "Verification failed for ${check.name}: expected $expected, got $actual" >&2
-      failed=1
-    else
-      echo "Verified ${check.name}: $actual"
-    fi
-  '') checks;
+  verifyScript =
+    lib.concatMapStringsSep "\n" (check: ''
+      expected="${toString (check.value / check.divisor)}"
+      actual=$(echo "$output" | grep -F "| ${check.name}" | awk -F'|' '{print $3}' | tr -d ' ' | cut -d. -f1)
+      if [ "$actual" != "$expected" ]; then
+        echo "Verification failed for ${check.name}: expected $expected, got $actual" >&2
+        failed=1
+      else
+        echo "Verified ${check.name}: $actual"
+      fi
+    '')
+    checks;
 
   configScript = pkgs.writeShellScript "ryzenadj-config" ''
     set -euo pipefail
@@ -170,7 +204,7 @@ in {
         type = lib.types.int;
         default = 0;
         example = -30;
-        description = "All-core Curve Optimizer offset. Negative = undervolt (more efficient), positive = overvolt. Use ryzenadj-co-test to find optimal value.";
+        description = "All-core Curve Optimizer offset. Negative = undervolt (more efficient), positive = overvolt.";
       };
 
       graceSeconds = lib.mkOption {
@@ -192,13 +226,13 @@ in {
 
     hardware.cpu.amd.ryzen-smu.enable = true;
 
-    environment.systemPackages = [ pkgs.ryzenadj pkgs.ryzenadj-co-test ];
+    environment.systemPackages = [pkgs.ryzenadj];
 
     systemd.services.ryzenadj = lib.mkIf hasAnyConfig {
       description = "Configure AMD Ryzen power limits with ryzenadj";
       after = ["systemd-modules-load.service"];
       wantedBy = ["multi-user.target"];
-      path = [ pkgs.gawk pkgs.gnugrep pkgs.coreutils ];
+      path = [pkgs.gawk pkgs.gnugrep pkgs.coreutils];
 
       serviceConfig = {
         Type = "oneshot";

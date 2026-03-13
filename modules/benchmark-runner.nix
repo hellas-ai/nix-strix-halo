@@ -7,14 +7,21 @@
 }:
 with lib; let
   cfg = config.services.benchmark-runner;
+  isNvidia = hasPrefix "rtx" cfg.gpuTarget;
+  isAmd = hasPrefix "gfx" cfg.gpuTarget;
 in {
   options.services.benchmark-runner = {
     enable = mkEnableOption "benchmark runner configuration";
 
     gpuTarget = mkOption {
-      type = types.enum ["gfx110X" "gfx1151" "gfx120X"];
+      type = types.enum ["gfx1010" "gfx1151" "rtx4090"];
       default = "gfx1151";
       description = "GPU architecture target";
+    };
+
+    cpuTarget = mkOption {
+      type = types.str;
+      description = "CPU identifier for benchmark dispatch (e.g., '9950x3d', 'aimax395')";
     };
 
     modelsPath = mkOption {
@@ -25,7 +32,7 @@ in {
 
     enableSandboxRelaxation = mkOption {
       type = types.bool;
-      default = true;
+      default = false;
       description = "Whether to relax sandbox restrictions for GPU access";
     };
 
@@ -53,39 +60,42 @@ in {
   };
 
   config = mkIf cfg.enable {
-    # Add ROCm and GPU features to system
-    nix.settings.system-features = [
-      "benchmark"
-      "big-parallel"
-      "kvm"
-      "gccarch-znver5"
-      cfg.gpuTarget
-    ];
+    # Add GPU and CPU features to system
+    nix.settings.system-features = [cfg.gpuTarget cfg.cpuTarget];
 
     # Allow GPU access in sandbox
-    nix.settings.extra-sandbox-paths = [
-      "/dev/kfd"
-      "/dev/dri"
-      "/sys/devices/virtual/kfd"
-      "/sys/class/kfd"
-      "/sys/class/drm"
-      cfg.modelsPath
-    ];
-
-    environment.systemPackages = with pkgs; [
-      amdgpu_top
-      nvtopPackages.amd
-      btop
-      tmux
-      vulkan-tools
-      strixtop
-    ];
+    nix.settings.extra-sandbox-paths =
+      [
+        "/dev/dri"
+        "/dev/shm"
+        "/sys/dev"
+        "/sys/devices"
+        "/proc"
+        cfg.modelsPath
+      ]
+      ++ optionals isAmd [
+        "/dev/kfd"
+        "/sys/class/kfd"
+        "/sys/class/drm"
+      ]
+      ++ optionals isNvidia [
+        "/dev/nvidia0"
+        "/dev/nvidiactl"
+        "/dev/nvidia-uvm"
+        "/dev/nvidia-uvm-tools"
+        "/dev/nvidia-caps"
+        # Bind-mount the NVIDIA driver package to /run/opengl-driver so
+        # autoAddDriverRunpath RUNPATH entries resolve inside the sandbox.
+        # A plain "/run/opengl-driver" only mounts the symlink; the target
+        # store path is not a build input so it won't be available.
+        "/run/opengl-driver=${config.hardware.nvidia.package}"
+      ];
 
     # Optionally relax sandbox for benchmark builds
     nix.settings.sandbox = mkIf cfg.enableSandboxRelaxation "relaxed";
 
     # Limit concurrent builds for benchmarks
-    nix.settings.max-jobs = mkDefault 1;
+    # nix.settings.max-jobs = mkDefault 1;
 
     # Create models directory with proper permissions
     systemd.tmpfiles.rules = [
@@ -96,12 +106,21 @@ in {
     ];
 
     # allow nixbld group to access GPU devices
-    services.udev.extraRules = ''
-      # Allow nixbld group access to GPU devices
-      KERNEL=="kfd", GROUP="nixbld", MODE="0660"
-      SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"
-      SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"
-    '';
+    services.udev.extraRules = concatStringsSep "\n" (
+      optionals isAmd [
+        ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
+      ]
+      ++ [
+        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
+        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
+      ]
+      ++ optionals isNvidia [
+        ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidiactl", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidia-uvm", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidia-uvm-tools", GROUP="nixbld", MODE="0660"''
+      ]
+    );
 
     # Systemd services to ensure models are downloaded
     systemd.services = let
