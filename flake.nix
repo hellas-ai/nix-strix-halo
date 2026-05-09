@@ -158,8 +158,10 @@
       devShells = perSystem (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
+            deadnix
             nix-fast-build
             nixfmt-tree
+            statix
             (python3.withPackages (
               ps: with ps; [
                 numpy
@@ -172,5 +174,39 @@
       });
 
       formatter = perSystem (pkgs: pkgs.nixfmt-tree);
+
+      checks = perSystem (
+        pkgs:
+        let
+          mkSourceCheck =
+            name: nativeBuildInputs: command:
+            pkgs.runCommandLocal "ci-${name}"
+              {
+                inherit nativeBuildInputs;
+                src = lib.cleanSource ./.;
+              }
+              ''
+                export HOME="$TMPDIR"
+                export XDG_CACHE_HOME="$TMPDIR/cache"
+                cp -r --no-preserve=mode "$src" source
+                cd source
+                ${command}
+                touch "$out"
+              '';
+        in
+        {
+          format = mkSourceCheck "format" [ pkgs.nixfmt-tree ] ''
+            treefmt --fail-on-change
+          '';
+
+          deadnix = mkSourceCheck "deadnix" [ pkgs.deadnix ] ''
+            deadnix --fail .
+          '';
+
+          statix = mkSourceCheck "statix" [ pkgs.statix ] ''
+            statix check .
+          '';
+        }
+      );
     };
 }

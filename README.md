@@ -102,3 +102,9 @@ nix develop
 nix fmt -- --fail-on-change
 nix flake check --no-build
 ```
+
+## CI
+
+Pull requests run a matrix derived from the flake's `checks` output on the shared self-hosted runner. Protect `master` by requiring the `required checks` job.
+
+Pushes to `master` run a full build of non-benchmark package outputs. Benchmark derivations are evaluated by `nix flake check --no-build`, but are not built in CI because they require local models and hardware-specific system features.
