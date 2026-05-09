@@ -1,9 +1,14 @@
 # Disko configuration for dual NVMe RAID0 setup
-{lib, ...}: {
+{ lib, ... }:
+{
   boot.loader = {
     systemd-boot.enable = true;
     efi.canTouchEfiVariables = lib.mkForce true;
   };
+
+  boot.swraid.mdadmConf = lib.mkDefault ''
+    MAILADDR root
+  '';
 
   disko.devices = {
     disk = {
@@ -20,7 +25,7 @@
                 type = "filesystem";
                 format = "vfat";
                 mountpoint = "/boot";
-                mountOptions = ["umask=0077"];
+                mountOptions = [ "umask=0077" ];
               };
             };
             mdadm = {
@@ -46,7 +51,7 @@
                 type = "filesystem";
                 format = "vfat";
                 mountpoint = "/boot-fallback";
-                mountOptions = ["umask=0077"];
+                mountOptions = [ "umask=0077" ];
               };
             };
             mdadm = {

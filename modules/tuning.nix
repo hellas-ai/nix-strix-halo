@@ -1,4 +1,5 @@
-{pkgs, ...}: {
+{ pkgs, ... }:
+{
   boot = {
     kernelParams = [
       "amd_iommu=pt"
@@ -21,8 +22,8 @@
 
   systemd.services.tuned-set-profile = {
     description = "Set TuneD profile";
-    after = ["tuned.service"];
-    wantedBy = ["multi-user.target"];
+    after = [ "tuned.service" ];
+    wantedBy = [ "multi-user.target" ];
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${pkgs.tuned}/bin/tuned-adm profile accelerator-performance";

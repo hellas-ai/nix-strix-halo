@@ -3,23 +3,23 @@
   lib,
   pkgs,
   ...
-}: let
+}:
+let
   cfg = config.services.ryzenadj;
 
   # Build command line arguments from config
-  mkArg = flag: value:
-    lib.optionalString (value != null) " --${flag}=${toString value}";
+  mkArg = flag: value: lib.optionalString (value != null) " --${flag}=${toString value}";
 
-  mkBoolArg = flag: value:
-    lib.optionalString value " --${flag}";
+  mkBoolArg = flag: value: lib.optionalString value " --${flag}";
 
   ryzenadj = "${pkgs.ryzenadj}/bin/ryzenadj";
 
   # Curve optimizer encoding: positive values direct, negative as 1048576 + value
   coallValue =
-    if cfg.curveOptimizer.offset >= 0
-    then cfg.curveOptimizer.offset
-    else 1048576 + cfg.curveOptimizer.offset;
+    if cfg.curveOptimizer.offset >= 0 then
+      cfg.curveOptimizer.offset
+    else
+      1048576 + cfg.curveOptimizer.offset;
 
   # Base args (without curve optimizer - applied separately with grace period)
   baseArgs = lib.concatStrings [
@@ -35,8 +35,7 @@
   ];
 
   hasBaseConfig =
-    cfg.stapmLimit
-    != null
+    cfg.stapmLimit != null
     || cfg.fastLimit != null
     || cfg.slowLimit != null
     || cfg.apuSlowLimit != null
@@ -85,18 +84,16 @@
     }
   ];
 
-  verifyScript =
-    lib.concatMapStringsSep "\n" (check: ''
-      expected="${toString (check.value / check.divisor)}"
-      actual=$(echo "$output" | grep -F "| ${check.name}" | awk -F'|' '{print $3}' | tr -d ' ' | cut -d. -f1)
-      if [ "$actual" != "$expected" ]; then
-        echo "Verification failed for ${check.name}: expected $expected, got $actual" >&2
-        failed=1
-      else
-        echo "Verified ${check.name}: $actual"
-      fi
-    '')
-    checks;
+  verifyScript = lib.concatMapStringsSep "\n" (check: ''
+    expected="${toString (check.value / check.divisor)}"
+    actual=$(echo "$output" | grep -F "| ${check.name}" | awk -F'|' '{print $3}' | tr -d ' ' | cut -d. -f1)
+    if [ "$actual" != "$expected" ]; then
+      echo "Verification failed for ${check.name}: expected $expected, got $actual" >&2
+      failed=1
+    else
+      echo "Verified ${check.name}: $actual"
+    fi
+  '') checks;
 
   configScript = pkgs.writeShellScript "ryzenadj-config" ''
     set -euo pipefail
@@ -132,7 +129,8 @@
   '';
 
   hasAnyConfig = hasBaseConfig || cfg.curveOptimizer.enable;
-in {
+in
+{
   options.services.ryzenadj = {
     enable = lib.mkEnableOption "ryzenadj power management";
 
@@ -226,13 +224,17 @@ in {
 
     hardware.cpu.amd.ryzen-smu.enable = true;
 
-    environment.systemPackages = [pkgs.ryzenadj];
+    environment.systemPackages = [ pkgs.ryzenadj ];
 
     systemd.services.ryzenadj = lib.mkIf hasAnyConfig {
       description = "Configure AMD Ryzen power limits with ryzenadj";
-      after = ["systemd-modules-load.service"];
-      wantedBy = ["multi-user.target"];
-      path = [pkgs.gawk pkgs.gnugrep pkgs.coreutils];
+      after = [ "systemd-modules-load.service" ];
+      wantedBy = [ "multi-user.target" ];
+      path = [
+        pkgs.gawk
+        pkgs.gnugrep
+        pkgs.coreutils
+      ];
 
       serviceConfig = {
         Type = "oneshot";

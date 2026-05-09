@@ -3,13 +3,20 @@
   lib,
   pkgs,
   ...
-}: let
+}:
+let
   cfg = config.services.ec-su-axb35;
 
   fanOptions = {
     options = {
       mode = lib.mkOption {
-        type = lib.types.nullOr (lib.types.enum ["auto" "fixed" "curve"]);
+        type = lib.types.nullOr (
+          lib.types.enum [
+            "auto"
+            "fixed"
+            "curve"
+          ]
+        );
         default = null;
         description = "Fan operating mode";
       };
@@ -42,13 +49,21 @@
     echo "${value}" > ${path}
   '';
 
-  fanConfig = name: fanCfg: lib.optionalString (fanCfg.mode != null) ''
-    # Configure ${name}
-    ${writeSysfs "${sysfsBase}/${name}/mode" fanCfg.mode}
-    ${lib.optionalString (fanCfg.level != null) (writeSysfs "${sysfsBase}/${name}/level" (toString fanCfg.level))}
-    ${lib.optionalString (fanCfg.rampupCurve != null) (writeSysfs "${sysfsBase}/${name}/rampup_curve" fanCfg.rampupCurve)}
-    ${lib.optionalString (fanCfg.rampdownCurve != null) (writeSysfs "${sysfsBase}/${name}/rampdown_curve" fanCfg.rampdownCurve)}
-  '';
+  fanConfig =
+    name: fanCfg:
+    lib.optionalString (fanCfg.mode != null) ''
+      # Configure ${name}
+      ${writeSysfs "${sysfsBase}/${name}/mode" fanCfg.mode}
+      ${lib.optionalString (fanCfg.level != null) (
+        writeSysfs "${sysfsBase}/${name}/level" (toString fanCfg.level)
+      )}
+      ${lib.optionalString (fanCfg.rampupCurve != null) (
+        writeSysfs "${sysfsBase}/${name}/rampup_curve" fanCfg.rampupCurve
+      )}
+      ${lib.optionalString (fanCfg.rampdownCurve != null) (
+        writeSysfs "${sysfsBase}/${name}/rampdown_curve" fanCfg.rampdownCurve
+      )}
+    '';
 
   configScript = pkgs.writeShellScript "ec-su-axb35-config" ''
     set -euo pipefail
@@ -76,18 +91,26 @@
     echo "ec_su_axb35 configuration applied"
   '';
 
-  hasAnyConfig = cfg.powerMode != null
+  hasAnyConfig =
+    cfg.powerMode != null
     || cfg.fans.fan1.mode != null
     || cfg.fans.fan2.mode != null
     || cfg.fans.fan3.mode != null;
-in {
+in
+{
   options.services.ec-su-axb35 = {
     enable = lib.mkEnableOption "EC-SU_AXB35 embedded controller kernel module";
 
     monitor.enable = lib.mkEnableOption "EC-SU_AXB35 monitor script";
 
     powerMode = lib.mkOption {
-      type = lib.types.nullOr (lib.types.enum ["quiet" "balanced" "performance"]);
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "quiet"
+          "balanced"
+          "performance"
+        ]
+      );
       default = null;
       description = "APU power mode";
     };
@@ -95,19 +118,19 @@ in {
     fans = {
       fan1 = lib.mkOption {
         type = lib.types.submodule fanOptions;
-        default = {};
+        default = { };
         description = "CPU fan 1 configuration";
       };
 
       fan2 = lib.mkOption {
         type = lib.types.submodule fanOptions;
-        default = {};
+        default = { };
         description = "CPU fan 2 configuration";
       };
 
       fan3 = lib.mkOption {
         type = lib.types.submodule fanOptions;
-        default = {};
+        default = { };
         description = "System fan configuration";
       };
     };
@@ -116,11 +139,11 @@ in {
   config = lib.mkIf cfg.enable {
     boot.extraModulePackages = [
       (pkgs.ec-su-axb35 {
-        kernel = config.boot.kernelPackages.kernel;
+        inherit (config.boot.kernelPackages) kernel;
       })
     ];
 
-    boot.kernelModules = ["ec_su_axb35"];
+    boot.kernelModules = [ "ec_su_axb35" ];
 
     environment.systemPackages = lib.mkIf cfg.monitor.enable [
       pkgs.ec-su-axb35-monitor
@@ -128,8 +151,8 @@ in {
 
     systemd.services.ec-su-axb35-config = lib.mkIf hasAnyConfig {
       description = "Configure EC-SU_AXB35 embedded controller settings";
-      after = ["systemd-modules-load.service"];
-      wantedBy = ["multi-user.target"];
+      after = [ "systemd-modules-load.service" ];
+      wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
         Type = "oneshot";

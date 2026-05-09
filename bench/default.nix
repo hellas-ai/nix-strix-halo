@@ -3,13 +3,20 @@
   pkgs,
   packages,
   gpuTarget ? "gfx1151",
-}: let
+}:
+let
   runner = import ./runner.nix;
 
   # Standard package set for all benchmarks
   standardPackages = [
-    packages.llamacpp-rocm
-    packages.llama-cpp-vulkan
+    {
+      name = "rocm";
+      package = packages.llama-cpp-rocm;
+    }
+    {
+      name = "vulkan";
+      package = packages.llama-cpp-vulkan;
+    }
   ];
 
   # Model configurations with their benchmark parameters
@@ -20,11 +27,22 @@
         # Batch size effects
         batchSizes = {
           params =
-            map (b: {
-              batch = b;
-              fa = 1;
-            })
-            [1 2 4 8 32 64 128 256 512];
+            map
+              (b: {
+                batch = b;
+                fa = 1;
+              })
+              [
+                1
+                2
+                4
+                8
+                32
+                64
+                128
+                256
+                512
+              ];
         };
 
         # Flash attention comparison
@@ -97,58 +115,75 @@
   };
 
   # Generate benchmark name from config
-  mkName = config:
+  mkName =
+    config:
     builtins.concatStringsSep "-" (
-      [config.package.pname]
+      [ config.package.pname ]
+      ++ (pkgs.lib.optional (config ? packageName) config.packageName)
       ++ (pkgs.lib.optional (config ? batch) "b${toString config.batch}")
       ++ (pkgs.lib.optional (config ? fa) "fa${toString config.fa}")
       ++ (pkgs.lib.optional (config ? ngl) "ngl${toString config.ngl}")
     );
 
   # Generate benchmark runner invocation
-  mkBenchmark = {
-    model,
-    package,
-    batch ? null,
-    fa ? null,
-    ngl ? null,
-    rpc ? null,
-    ...
-  } @ args:
+  mkBenchmark =
+    {
+      model,
+      package,
+      batch ? null,
+      fa ? null,
+      ngl ? null,
+      rpc ? null,
+      ...
+    }@args:
     runner {
-      inherit pkgs batch fa ngl rpc gpuTarget;
-      llamaCppPackage = package;
+      inherit
+        pkgs
+        batch
+        fa
+        ngl
+        rpc
+        gpuTarget
+        ;
+      llamaPackage = package;
       modelPath = model;
       extraArgs = args.extraArgs or "";
     };
 
   # Generate all benchmarks for a model
-  generateModelBenchmarks = modelName: modelConfig: let
-    # Expand benchmark definitions into concrete configs
-    allConfigs = pkgs.lib.flatten (
-      pkgs.lib.mapAttrsToList (
-        benchName: benchDef:
+  generateModelBenchmarks =
+    modelConfig:
+    let
+      # Expand benchmark definitions into concrete configs
+      allConfigs = pkgs.lib.flatten (
+        pkgs.lib.mapAttrsToList (
+          _: benchDef:
           pkgs.lib.flatten (
             map (
-              pkg:
-                map (params: {package = pkg;} // params) benchDef.params
-            )
-            standardPackages
+              packageConfig:
+              map (
+                params:
+                {
+                  inherit (packageConfig) package;
+                  packageName = packageConfig.name;
+                }
+                // params
+              ) benchDef.params
+            ) standardPackages
           )
-      )
-      modelConfig.benchmarks
-    );
-  in
+        ) modelConfig.benchmarks
+      );
+    in
     builtins.listToAttrs (
       map (config: {
         name = mkName config;
-        value = mkBenchmark (config // {model = modelConfig.path;});
-      })
-      allConfigs
+        value = mkBenchmark (config // { model = modelConfig.path; });
+      }) allConfigs
     );
-in {
+in
+{
   # Generate benchmarks for each model
-  llama2-7b = generateModelBenchmarks "llama2-7b" modelConfigs.llama2-7b;
-  qwen25-32b = generateModelBenchmarks "qwen25-32b" modelConfigs.qwen25-32b;
-  qwen3-coder-30b = generateModelBenchmarks "qwen3-coder-30b" modelConfigs.qwen3-coder-30b;
+  llama2-7b = generateModelBenchmarks modelConfigs.llama2-7b;
+  qwen25-32b = generateModelBenchmarks modelConfigs.qwen25-32b;
+  qwen3-coder-30b = generateModelBenchmarks modelConfigs.qwen3-coder-30b;
 }

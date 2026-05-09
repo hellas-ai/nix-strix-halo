@@ -5,16 +5,22 @@
   pkgs,
   ...
 }:
-with lib; let
+with lib;
+let
   cfg = config.services.benchmark-runner;
   isNvidia = hasPrefix "rtx" cfg.gpuTarget;
   isAmd = hasPrefix "gfx" cfg.gpuTarget;
-in {
+in
+{
   options.services.benchmark-runner = {
     enable = mkEnableOption "benchmark runner configuration";
 
     gpuTarget = mkOption {
-      type = types.enum ["gfx1010" "gfx1151" "rtx4090"];
+      type = types.enum [
+        "gfx1010"
+        "gfx1151"
+        "rtx4090"
+      ];
       default = "gfx1151";
       description = "GPU architecture target";
     };
@@ -37,35 +43,48 @@ in {
     };
 
     ensureModels = mkOption {
-      type = types.listOf (types.submodule {
-        options = {
-          repo = mkOption {
-            type = types.str;
-            description = "HuggingFace repository ID (e.g., 'meta-llama/Llama-2-7b')";
+      type = types.listOf (
+        types.submodule {
+          options = {
+            repo = mkOption {
+              type = types.str;
+              description = "HuggingFace repository ID (e.g., 'meta-llama/Llama-2-7b')";
+            };
+            files = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              example = [ "model.gguf" ];
+              description = "Specific files to download from the repository";
+            };
+            name = mkOption {
+              type = types.str;
+              description = "Local directory name for the model";
+            };
           };
-          files = mkOption {
-            type = types.listOf types.str;
-            default = [];
-            description = "Specific files to download (empty means all files)";
-          };
-          name = mkOption {
-            type = types.str;
-            description = "Local directory name for the model";
-          };
-        };
-      });
-      default = [];
+        }
+      );
+      default = [ ];
       description = "Models to ensure are downloaded from HuggingFace";
     };
   };
 
   config = mkIf cfg.enable {
-    # Add GPU and CPU features to system
-    nix.settings.system-features = [cfg.gpuTarget cfg.cpuTarget];
+    assertions = [
+      {
+        assertion = all (model: model.files != [ ]) cfg.ensureModels;
+        message = "services.benchmark-runner.ensureModels entries must include at least one file";
+      }
+    ];
 
-    # Allow GPU access in sandbox
-    nix.settings.extra-sandbox-paths =
-      [
+    nix.settings = {
+      # Add GPU and CPU features to system
+      system-features = [
+        cfg.gpuTarget
+        cfg.cpuTarget
+      ];
+
+      # Allow GPU access in sandbox
+      extra-sandbox-paths = [
         "/dev/dri"
         "/dev/shm"
         "/sys/dev"
@@ -91,8 +110,9 @@ in {
         "/run/opengl-driver=${config.hardware.nvidia.package}"
       ];
 
-    # Optionally relax sandbox for benchmark builds
-    nix.settings.sandbox = mkIf cfg.enableSandboxRelaxation "relaxed";
+      # Optionally relax sandbox for benchmark builds
+      sandbox = mkIf cfg.enableSandboxRelaxation "relaxed";
+    };
 
     # Limit concurrent builds for benchmarks
     # nix.settings.max-jobs = mkDefault 1;
@@ -123,17 +143,24 @@ in {
     );
 
     # Systemd services to ensure models are downloaded
-    systemd.services = let
-      # Create individual download services for each file
-      fileServices = flatten (map (
-          model:
+    systemd.services =
+      let
+        # Create individual download services for each file
+        fileServices = flatten (
+          map (
+            model:
             map (file: {
-              name = "ensure-model-${model.name}-${builtins.replaceStrings ["." "/"] ["-" "-"] file}";
+              name = "ensure-model-${model.name}-${builtins.replaceStrings [ "." "/" ] [ "-" "-" ] file}";
               value = {
                 description = "Download ${file} for model ${model.name}";
-                after = ["network.target"];
+                after = [ "network.target" ];
                 path = with pkgs; [
-                  (python3.withPackages (ps: with ps; [huggingface-hub hf-transfer]))
+                  (python3.withPackages (
+                    ps: with ps; [
+                      huggingface-hub
+                      hf-transfer
+                    ]
+                  ))
                   coreutils
                 ];
                 environment = {
@@ -163,33 +190,28 @@ in {
                   echo "File ${file} downloaded successfully"
                 '';
               };
-            })
-            model.files
-        )
-        cfg.ensureModels);
+            }) model.files
+          ) cfg.ensureModels
+        );
 
-      # Create orchestrator services to coordinate downloads
-      orchestratorServices =
-        map (model: {
+        # Create orchestrator services to coordinate downloads
+        orchestratorServices = map (model: {
           name = "ensure-model-${model.name}";
           value = {
             description = "Orchestrate downloads for model ${model.name}";
-            wantedBy = ["multi-user.target"];
-            after = ["network.target"];
-            wants =
-              map (
-                file: "ensure-model-${model.name}-${builtins.replaceStrings ["." "/"] ["-" "-"] file}.service"
-              )
-              model.files;
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network.target" ];
+            wants = map (
+              file: "ensure-model-${model.name}-${builtins.replaceStrings [ "." "/" ] [ "-" "-" ] file}.service"
+            ) model.files;
             serviceConfig = {
               Type = "oneshot";
               RemainAfterExit = true;
               ExecStart = "${pkgs.coreutils}/bin/true";
             };
           };
-        })
-        cfg.ensureModels;
-    in
+        }) cfg.ensureModels;
+      in
       builtins.listToAttrs (fileServices ++ orchestratorServices);
   };
 }
