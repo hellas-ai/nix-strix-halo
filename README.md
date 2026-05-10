@@ -5,6 +5,8 @@ Small Nix flake for Strix Halo / Sixunited AXB35 systems.
 It provides:
 
 - a nixpkgs overlay for `llama-cpp` with ROCm enabled for `gfx1151`
+- latest vLLM packages for CPU, Strix Halo ROCm (`gfx1151`), and RTX 4090 CUDA (`sm_89`)
+- Zen 5 tuned vLLM variants and reusable helpers for other CPU/GPU targets
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
 - benchmark derivations for local `/models` GGUF files
 - a minimal `fevm-faex9` NixOS example
@@ -21,6 +23,13 @@ Main package outputs:
 - `packages.x86_64-linux.llama-cpp-rocm`
 - `packages.x86_64-linux.llama-cpp-vulkan`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
+- `packages.x86_64-linux.vllm-cpu`
+- `packages.x86_64-linux.vllm-cpu-zen5`
+- `packages.x86_64-linux.vllm-rocm-gfx1151`
+- `packages.x86_64-linux.vllm-rocm-gfx1151-zen5`
+- `packages.x86_64-linux.vllm-cuda-rtx4090`
+- `packages.x86_64-linux.vllm-cuda-rtx4090-zen5`
+- `packages.x86_64-linux.vllm-env-*`
 - `packages.x86_64-linux.bench-*`
 
 Main app outputs:
@@ -50,6 +59,45 @@ Main app outputs:
   };
 }
 ```
+
+## vLLM
+
+The vLLM package is a thin override of `nixpkgs-vllm`'s upstream derivation. Its source tracks upstream `releases/v0.20.2` through the `vllm-src` flake input. Hardware defaults are intentionally narrow:
+
+- `vllm-cpu`: CPU backend
+- `vllm-rocm-gfx1151`: ROCm for Strix Halo / Radeon 8060S
+- `vllm-cuda-rtx4090`: CUDA for RTX 4090 / `sm_89`
+- `*-zen5`: same hardware target, imported with `localSystem.gcc.arch = "znver5"`
+- `vllm-env-*`: Python environment with `vllm` and `ray`
+
+For custom targets, use the helper functions instead of adding more aliases:
+
+```nix
+let
+  hardware = inputs.nix-strix-halo.lib.mkRocmHardware {
+    name = "gfx1100";
+    gpuTargets = [ "gfx1100" ];
+  };
+
+  vllmPkgs = inputs.nix-strix-halo.lib.mkPackageSet {
+    system = "x86_64-linux";
+    inherit hardware;
+    cpu = "znver5";
+  };
+in
+inputs.nix-strix-halo.lib.mkVllmPackage {
+  pkgs = vllmPkgs;
+  inherit hardware;
+  tunePackage = true;
+}
+```
+
+Available overlays:
+
+- `overlays.vllm-cpu`
+- `overlays.vllm-rocm-gfx1151`
+- `overlays.vllm-cuda-rtx4090`
+- `overlays.cpu-tuned-zen5`
 
 ## llama.cpp RPC Servers
 

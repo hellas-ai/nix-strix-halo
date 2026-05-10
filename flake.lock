@@ -52,11 +52,118 @@
         "type": "github"
       }
     },
+    "nixpkgs-vllm": {
+      "locked": {
+        "lastModified": 1776994955,
+        "narHash": "sha256-hVui3rNd44gJBoew8P2oST4bT9gXRJu4Cy6c3FhMLJU=",
+        "owner": "CertainLach",
+        "repo": "nixpkgs",
+        "rev": "ba2de00e653c726a0b662bcc6372159c492352a0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "CertainLach",
+        "ref": "push-lklxouywkrnv",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "disko": "disko",
         "ec-su-axb35": "ec-su-axb35",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "nixpkgs-vllm": "nixpkgs-vllm",
+        "vllm-cutlass-src": "vllm-cutlass-src",
+        "vllm-flash-attn-src": "vllm-flash-attn-src",
+        "vllm-flashmla-cutlass-src": "vllm-flashmla-cutlass-src",
+        "vllm-flashmla-src": "vllm-flashmla-src",
+        "vllm-src": "vllm-src"
+      }
+    },
+    "vllm-cutlass-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773723521,
+        "narHash": "sha256-0q9Ad0Z6E/rO2PdM4uQc8H0E0qs9uKc3reHepiHhjEc=",
+        "owner": "NVIDIA",
+        "repo": "cutlass",
+        "rev": "da5e086dab31d63815acafdac9a9c5893b1c69e2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NVIDIA",
+        "ref": "v4.4.2",
+        "repo": "cutlass",
+        "type": "github"
+      }
+    },
+    "vllm-flash-attn-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1775254593,
+        "narHash": "sha256-Bdvg5ROX4EFccrRElYnbGtHS9FD9qLY9ZwYfqTUYOnA=",
+        "owner": "vllm-project",
+        "repo": "flash-attention",
+        "rev": "f5bc33cfc02c744d24a2e9d50e6db656de40611c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vllm-project",
+        "repo": "flash-attention",
+        "rev": "f5bc33cfc02c744d24a2e9d50e6db656de40611c",
+        "type": "github"
+      }
+    },
+    "vllm-flashmla-cutlass-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1768266331,
+        "narHash": "sha256-dHQto08IwTDOIuFUp9jwm1MWkFi8v2YJ/UESrLuG71g=",
+        "owner": "NVIDIA",
+        "repo": "cutlass",
+        "rev": "147f5673d0c1c3dcf66f78d677fd647e4a020219",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NVIDIA",
+        "repo": "cutlass",
+        "rev": "147f5673d0c1c3dcf66f78d677fd647e4a020219",
+        "type": "github"
+      }
+    },
+    "vllm-flashmla-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1776696663,
+        "narHash": "sha256-Oj37H0swZdxaprpaHq0XfOCagc0ypYKpS8e6JzqcDQg=",
+        "owner": "vllm-project",
+        "repo": "FlashMLA",
+        "rev": "a6ec2ba7bd0a7dff98b3f4d3e6b52b159c48d78b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vllm-project",
+        "repo": "FlashMLA",
+        "rev": "a6ec2ba7bd0a7dff98b3f4d3e6b52b159c48d78b",
+        "type": "github"
+      }
+    },
+    "vllm-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778203536,
+        "narHash": "sha256-NqcziIw7zVu8RmZx2HaZ9BEdLpRlNKVFxccDZZdTQfE=",
+        "owner": "vllm-project",
+        "repo": "vllm",
+        "rev": "bc150f50299199599673614f80d12a196f377655",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vllm-project",
+        "ref": "releases/v0.20.2",
+        "repo": "vllm",
+        "type": "github"
       }
     }
   },
