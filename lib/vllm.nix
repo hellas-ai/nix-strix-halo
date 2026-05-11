@@ -213,15 +213,19 @@ rec {
 
   mkCpuTuningOverlay =
     {
-      preferVectorWidth512 ? true,
+      cpu ? null,
+      preferVectorWidth512 ? cpu == "znver5",
     }:
     _: prev:
     let
+      cpuFlags = lib.optionalString (cpu != null) " -march=${cpu} -mtune=${cpu}";
       vectorFlags = lib.optionalString preferVectorWidth512 " -mprefer-vector-width=512";
-      tune = pkg: if vectorFlags == "" then pkg else appendCompileFlags vectorFlags pkg;
-      tunePy = pkg: if vectorFlags == "" then pkg else appendPythonCompileFlags vectorFlags pkg;
+      compileFlags = cpuFlags + vectorFlags;
+      tune = pkg: if compileFlags == "" then pkg else appendCompileFlags compileFlags pkg;
+      tunePy = pkg: if compileFlags == "" then pkg else appendPythonCompileFlags compileFlags pkg;
     in
     {
+      llama-cpp = tune prev.llama-cpp;
       openblas = tune prev.openblas;
 
       libtpms = prev.libtpms.overrideAttrs (old: {
@@ -277,6 +281,12 @@ rec {
           });
         })
       ];
+    }
+    // lib.optionalAttrs (prev ? llama-cpp-rocm) {
+      llama-cpp-rocm = tune prev.llama-cpp-rocm;
+    }
+    // lib.optionalAttrs (prev ? llama-cpp-vulkan) {
+      llama-cpp-vulkan = tune prev.llama-cpp-vulkan;
     };
 
   mkPackageSet =
@@ -314,7 +324,7 @@ rec {
             (mkVllmOverlay { inherit hardware; })
           ]
           ++ lib.optionals tuneCpuPackages [
-            (mkCpuTuningOverlay { })
+            (mkCpuTuningOverlay { inherit cpu; })
           ]
           ++ extraOverlays;
       }

@@ -37,6 +37,16 @@ Main app outputs:
 - `apps.x86_64-linux.llama-cli`
 - `apps.x86_64-linux.llama-server`
 
+Package-set outputs:
+
+- `legacyPackages.x86_64-linux.defaultPackages`
+- `legacyPackages.x86_64-linux.zen5Packages`
+
+Use package sets when CPU tuning should stay independent of accelerator choice:
+
+- `legacyPackages.x86_64-linux.zen5Packages.llama-cpp`
+- `legacyPackages.x86_64-linux.zen5Packages.llama-cpp-rocm`
+
 ## Use The Overlay
 
 ```nix
@@ -94,10 +104,16 @@ inputs.nix-strix-halo.lib.mkVllmPackage {
 
 Available overlays:
 
-- `overlays.vllm-cpu`
-- `overlays.vllm-rocm-gfx1151`
-- `overlays.vllm-cuda-rtx4090`
-- `overlays.cpu-tuned-zen5`
+- `overlays.default`
+- `overlays.tuned`: Zen 5 tuning overlay
+- `overlays.mkTunedOverlay "znver4"`: tuning overlay for another CPU target
+
+```nix
+overlays = [
+  inputs.nix-strix-halo.overlays.default
+  (inputs.nix-strix-halo.overlays.mkTunedOverlay "znver4")
+];
+```
 
 ## llama.cpp RPC Servers
 
