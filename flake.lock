@@ -52,33 +52,34 @@
         "type": "github"
       }
     },
-    "nixpkgs-vllm": {
-      "locked": {
-        "lastModified": 1776994955,
-        "narHash": "sha256-hVui3rNd44gJBoew8P2oST4bT9gXRJu4Cy6c3FhMLJU=",
-        "owner": "CertainLach",
-        "repo": "nixpkgs",
-        "rev": "ba2de00e653c726a0b662bcc6372159c492352a0",
-        "type": "github"
-      },
-      "original": {
-        "owner": "CertainLach",
-        "ref": "push-lklxouywkrnv",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "disko": "disko",
         "ec-su-axb35": "ec-su-axb35",
         "nixpkgs": "nixpkgs",
-        "nixpkgs-vllm": "nixpkgs-vllm",
+        "vllm": "vllm",
         "vllm-cutlass-src": "vllm-cutlass-src",
         "vllm-flash-attn-src": "vllm-flash-attn-src",
         "vllm-flashmla-cutlass-src": "vllm-flashmla-cutlass-src",
         "vllm-flashmla-src": "vllm-flashmla-src",
-        "vllm-src": "vllm-src"
+        "vllm-triton-kernels-src": "vllm-triton-kernels-src"
+      }
+    },
+    "vllm": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778203536,
+        "narHash": "sha256-NqcziIw7zVu8RmZx2HaZ9BEdLpRlNKVFxccDZZdTQfE=",
+        "owner": "vllm-project",
+        "repo": "vllm",
+        "rev": "bc150f50299199599673614f80d12a196f377655",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vllm-project",
+        "ref": "releases/v0.20.2",
+        "repo": "vllm",
+        "type": "github"
       }
     },
     "vllm-cutlass-src": {
@@ -149,20 +150,20 @@
         "type": "github"
       }
     },
-    "vllm-src": {
+    "vllm-triton-kernels-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1778203536,
-        "narHash": "sha256-NqcziIw7zVu8RmZx2HaZ9BEdLpRlNKVFxccDZZdTQfE=",
-        "owner": "vllm-project",
-        "repo": "vllm",
-        "rev": "bc150f50299199599673614f80d12a196f377655",
+        "lastModified": 1768918676,
+        "narHash": "sha256-JFSpQn+WsNnh7CAPlcpOcUp0nyKXNbJEANdXqmkt4Tc=",
+        "owner": "triton-lang",
+        "repo": "triton",
+        "rev": "7c56a5e40f7fd928dfd5c72902d5def0097db73a",
         "type": "github"
       },
       "original": {
-        "owner": "vllm-project",
-        "ref": "releases/v0.20.2",
-        "repo": "vllm",
+        "owner": "triton-lang",
+        "ref": "v3.6.0",
+        "repo": "triton",
         "type": "github"
       }
     }

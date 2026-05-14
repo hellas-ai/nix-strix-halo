@@ -4,12 +4,9 @@
   ...
 }:
 
-# Slim override of `nixpkgs-vllm.python3Packages.amd-aiter` (which is
-# the upstream ROCm/aiter v0.1.11.post1 packaging from nixpkgs PR
-# #498040). Goal is to layer on top — *not* fork the whole derivation —
-# so we keep upstream improvements (composable_kernel symlink, hermetic
-# git-id stub, NIX_AITER_ROCM_INCL plumbing, postPatch wheel-rerun
-# guard) and only carry our own deltas.
+# Slim override of `nixpkgs.python3Packages.amd-aiter`. Goal is to layer on
+# top, not fork the whole derivation, so we keep upstream improvements and only
+# carry our own deltas.
 #
 # What we override:
 #

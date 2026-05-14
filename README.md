@@ -21,6 +21,7 @@ Main package outputs:
 
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.llama-cpp-rocm`
+- `packages.x86_64-linux.llama-cpp-rocm-zen5`
 - `packages.x86_64-linux.llama-cpp-vulkan`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.vllm-cpu`
@@ -72,13 +73,19 @@ Use package sets when CPU tuning should stay independent of accelerator choice:
 
 ## vLLM
 
-The vLLM package is a thin override of `nixpkgs-vllm`'s upstream derivation. Its source tracks upstream `releases/v0.20.2` through the `vllm-src` flake input. Hardware defaults are intentionally narrow:
+The vLLM package is a thin override of the upstream nixpkgs derivation. Its source tracks upstream `releases/v0.20.2` through the `vllm` flake input. Hardware defaults are intentionally narrow:
 
 - `vllm-cpu`: CPU backend
 - `vllm-rocm-gfx1151`: ROCm for Strix Halo / Radeon 8060S
 - `vllm-cuda-rtx4090`: CUDA for RTX 4090 / `sm_89`
 - `*-zen5`: same hardware target, imported with `localSystem.gcc.arch = "znver5"`
 - `vllm-env-*`: Python environment with `vllm` and `ray`
+
+The tuned package set exposes the same vLLM names without the `-zen5` suffix:
+
+```bash
+nix build .#zen5Packages.vllm-rocm-gfx1151
+```
 
 For custom targets, use the helper functions instead of adding more aliases:
 

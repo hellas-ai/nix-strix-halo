@@ -78,6 +78,12 @@
                 type = "filesystem";
                 format = "ext4";
                 mountpoint = "/";
+                # Enable the large_dir feature so /nix/store/.links (which
+                # accumulates millions of hardlinks under auto-optimise)
+                # doesn't hit ext4's default htree depth limit. Otherwise
+                # dmesg fills with `Directory ... index full, reach max
+                # htree level :2 / Large directory feature is not enabled`.
+                extraArgs = [ "-O" "large_dir" ];
               };
             };
           };
