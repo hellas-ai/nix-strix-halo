@@ -63,17 +63,43 @@
           };
         };
 
+      # Python-side extras for RDMA-enabled vllm: rixl (ROCm NIXL port),
+      # lmcache (KV-cache layer on top of rixl), cupy-rocm-7-0 (CuPy ROCm
+      # build). These layer on top of libibverbs.overlays.vllm (bare
+      # wrapper) — kept here because they're ROCm/strix-specific, while
+      # libibverbs owns only the kernel + rdma-core layer.
+      vllmRdmaExtrasOverlay = _final: prev: {
+        pythonPackagesExtensions = (prev.pythonPackagesExtensions or [ ]) ++ [
+          (pyfinal: _pyprev: {
+            rixl = pyfinal.callPackage ./pkgs/rixl { };
+            cupy-rocm-7-0 = pyfinal.callPackage ./pkgs/cupy-rocm { };
+            lmcache = pyfinal.callPackage ./pkgs/lmcache {
+              rixl = pyfinal.rixl;
+            };
+          })
+        ];
+      };
+
       overlays = {
-        # Composed default: pulls libibverbs's RDMA-enabled vllm overlay
-        # (wraps stock python3Packages.vllm + injects rixl + lmcache) and
-        # layers our own strix additions (ec-su, llama-cpp-rocm) on top.
-        # Consumers (nixos-config strix machines) get a vllm-rdma-ready
-        # pkgs set with one overlay import. Doesn't include rocm-narrow —
-        # that's still opt-in via overlays.rocm-narrow below since it
-        # invalidates downstream caches.
+        # Composed default for strix-halo NixOS machines. Order matters:
+        # libibverbs's bare vllm overlay first (defines vllm via the
+        # wrapper); rdma extras (rixl/lmcache/cupy-rocm) on top so vllm
+        # picks them up at runtime via try/except imports; then strix
+        # additions (ec-su, llama-cpp-rocm). Doesn't include rocm-narrow —
+        # that's opt-in via overlays.rocm-narrow because it invalidates
+        # downstream caches.
         default = nixpkgs.lib.composeManyExtensions [
-          inputs.usb4-rdma.overlays.vllm-rdma
+          inputs.usb4-rdma.overlays.vllm
+          vllmRdmaExtrasOverlay
           strixAdditionsOverlay
+        ];
+
+        # Just the RDMA-enabled vllm composition without strix additions.
+        # Useful for non-strix consumers that want vllm+rixl+lmcache but
+        # not ec-su/llama-cpp-rocm.
+        vllm-rdma = nixpkgs.lib.composeManyExtensions [
+          inputs.usb4-rdma.overlays.vllm
+          vllmRdmaExtrasOverlay
         ];
 
         # Narrows rocmPackages.clr to `rocmTargets` (currently gfx1151) for
