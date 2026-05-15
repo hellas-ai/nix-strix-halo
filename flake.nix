@@ -43,6 +43,16 @@
       url = "github:cmetz/ec-su_axb35-linux";
       flake = false;
     };
+
+    # libibverbs-usb4 is the lower-layer RDMA stack (kernel patches,
+    # rdma-core-usb4, rixl, lmcache) plus the canonical vllm wrapper
+    # exposed as `overlays.vllm` / `overlays.vllm-rdma`. We compose its
+    # vllm-rdma overlay into our own overlays.default below so strix
+    # machines pick up an RDMA-enabled vllm by default.
+    usb4-rdma = {
+      url = "git+ssh://trex/home/grw/src/linux-libibverbs-usb4";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -79,27 +89,36 @@
       mkTunedOverlay =
         final: if builtins.isString final then vllmLib.mkCpuTuningOverlay { cpu = final; } else _: { };
 
-      overlays = {
-        # Safe on any host: package additions only, no global rocmPackages
-        # override. llama-cpp-rocm uses stock rocmPackages.clr, so it carries
-        # broad GPU-target support without poisoning downstream caches.
-        default =
-          final: prev:
-          let
-            ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
-              ec-su-axb35-src = inputs.ec-su-axb35;
-            };
-          in
-          {
-            ec-su-axb35 = ecPackages.kernelModule;
-            ec-su-axb35-monitor = ecPackages.monitor;
-
-            llama-cpp-rocm = prev.llama-cpp.override {
-              rocmSupport = true;
-              rpcSupport = true;
-              rocmGpuTargets = rocmTargets;
-            };
+      strixAdditionsOverlay =
+        final: prev:
+        let
+          ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
+            ec-su-axb35-src = inputs.ec-su-axb35;
           };
+        in
+        {
+          ec-su-axb35 = ecPackages.kernelModule;
+          ec-su-axb35-monitor = ecPackages.monitor;
+
+          llama-cpp-rocm = prev.llama-cpp.override {
+            rocmSupport = true;
+            rpcSupport = true;
+            rocmGpuTargets = rocmTargets;
+          };
+        };
+
+      overlays = {
+        # Composed default: pulls libibverbs's RDMA-enabled vllm overlay
+        # (wraps stock python3Packages.vllm + injects rixl + lmcache) and
+        # layers our own strix additions (ec-su, llama-cpp-rocm) on top.
+        # Consumers (nixos-config strix machines) get a vllm-rdma-ready
+        # pkgs set with one overlay import. Doesn't include rocm-narrow —
+        # that's still opt-in via overlays.rocm-narrow below since it
+        # invalidates downstream caches.
+        default = nixpkgs.lib.composeManyExtensions [
+          inputs.usb4-rdma.overlays.vllm-rdma
+          strixAdditionsOverlay
+        ];
 
         # Narrows rocmPackages.clr to `rocmTargets` (currently gfx1151) for
         # faster builds on strix-halo. Applying this overlay invalidates
