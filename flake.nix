@@ -4,35 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    vllm = {
-      url = "github:vllm-project/vllm/releases/v0.20.2";
-      flake = false;
-    };
-
-    vllm-cutlass-src = {
-      url = "github:NVIDIA/cutlass/v4.4.2";
-      flake = false;
-    };
-
-    vllm-flash-attn-src = {
-      url = "github:vllm-project/flash-attention/f5bc33cfc02c744d24a2e9d50e6db656de40611c";
-      flake = false;
-    };
-
-    vllm-flashmla-src = {
-      url = "github:vllm-project/FlashMLA/a6ec2ba7bd0a7dff98b3f4d3e6b52b159c48d78b";
-      flake = false;
-    };
-
-    vllm-flashmla-cutlass-src = {
-      url = "github:NVIDIA/cutlass/147f5673d0c1c3dcf66f78d677fd647e4a020219";
-      flake = false;
-    };
-
-    vllm-triton-kernels-src = {
-      url = "github:triton-lang/triton/v3.6.0";
-      flake = false;
-    };
+    # vllm + flash-attn + cutlass + triton sources used to live here as
+    # direct inputs. Now provided transitively via inputs.usb4-rdma,
+    # which owns the canonical vllm wrapper (see overlays.vllm-rdma).
 
     disko = {
       url = "github:nix-community/disko";
@@ -67,27 +41,9 @@
       systems = [ "x86_64-linux" ];
       forAllSystems = lib.genAttrs systems;
 
-      versionFromReleaseRef = ref: lib.removePrefix "v" (lib.last (lib.splitString "/" ref));
-
-      vllmLib = import ./lib/vllm.nix {
-        inherit lib nixpkgs;
-        vllmVersion = versionFromReleaseRef (inputs.vllm.sourceInfo.ref or "releases/v0.20.2");
-        vllmSources = {
-          vllm = inputs.vllm;
-          cutlass = inputs.vllm-cutlass-src;
-          flash-attn = inputs.vllm-flash-attn-src;
-          flashmla = inputs.vllm-flashmla-src;
-          flashmla-cutlass = inputs.vllm-flashmla-cutlass-src;
-          triton-kernels = inputs.vllm-triton-kernels-src;
-        };
-      };
-
       rocmTargets = [
         "gfx1151"
       ];
-
-      mkTunedOverlay =
-        final: if builtins.isString final then vllmLib.mkCpuTuningOverlay { cpu = final; } else _: { };
 
       strixAdditionsOverlay =
         final: prev:
@@ -133,12 +89,6 @@
             }
           );
         };
-
-        inherit mkTunedOverlay;
-
-        tuned = vllmLib.mkCpuTuningOverlay {
-          cpu = "znver5";
-        };
       };
 
       defaultPackagesFor =
@@ -148,87 +98,20 @@
           overlays = [ overlays.default ];
         };
 
-      zen5PackagesFor =
-        system:
-        import nixpkgs {
-          inherit system;
-          overlays = [
-            overlays.default
-            overlays.tuned
-          ];
-        };
-
       perSystem =
         f:
         forAllSystems (
           system:
           let
             pkgs = defaultPackagesFor system;
-            zen5Packages = zen5PackagesFor system;
           in
           f {
             inherit
               pkgs
               system
-              zen5Packages
               ;
           }
         );
-
-      vllmTargets = [
-        {
-          name = "cpu";
-          hardware = vllmLib.hardwareProfiles.none;
-        }
-        {
-          name = "rocm-gfx1151";
-          hardware = vllmLib.hardwareProfiles.gfx1151;
-        }
-        {
-          name = "cuda-rtx4090";
-          hardware = vllmLib.hardwareProfiles.rtx4090;
-        }
-      ];
-
-      mkVllmAliases =
-        {
-          system,
-          cpu ? null,
-          suffix ? "",
-        }:
-        let
-          tunePackage = cpu != null;
-          mkTargetAliases =
-            {
-              name,
-              hardware,
-            }:
-            let
-              packageSet = vllmLib.mkPackageSet (
-                {
-                  inherit system hardware;
-                }
-                // lib.optionalAttrs (cpu != null) {
-                  inherit cpu;
-                }
-              );
-              packageName = "vllm-${name}${suffix}";
-              envName = "vllm-env-${name}${suffix}";
-            in
-            {
-              "${packageName}" = vllmLib.mkVllmPackage {
-                pkgs = packageSet;
-                inherit hardware tunePackage;
-              };
-
-              "${envName}" = vllmLib.mkVllmEnv {
-                pkgs = packageSet;
-                inherit hardware tunePackage;
-                name = envName;
-              };
-            };
-        in
-        lib.foldl' (aliases: target: aliases // mkTargetAliases target) { } vllmTargets;
 
       mkBenchmarkPackages =
         pkgs:
@@ -267,8 +150,6 @@
     {
       inherit overlays;
 
-      lib = vllmLib;
-
       nixosModules = {
         default = _: {
           nixpkgs.overlays = [
@@ -302,28 +183,14 @@
       };
 
       legacyPackages = perSystem (
+        { pkgs, ... }:
         {
-          system,
-          pkgs,
-          zen5Packages,
-        }:
-        {
-          defaultPackages = pkgs // mkVllmAliases { inherit system; };
-          zen5Packages =
-            zen5Packages
-            // mkVllmAliases {
-              inherit system;
-              cpu = "znver5";
-            };
+          defaultPackages = pkgs;
         }
       );
 
       packages = perSystem (
-        {
-          system,
-          pkgs,
-          zen5Packages,
-        }:
+        { pkgs, ... }:
         {
           default = pkgs.llama-cpp-rocm;
           inherit (pkgs)
@@ -331,14 +198,6 @@
             llama-cpp-rocm
             llama-cpp-vulkan
             ;
-
-          llama-cpp-rocm-zen5 = zen5Packages.llama-cpp-rocm;
-        }
-        // mkVllmAliases { inherit system; }
-        // mkVllmAliases {
-          inherit system;
-          cpu = "znver5";
-          suffix = "-zen5";
         }
         // mkBenchmarkPackages pkgs
       );
