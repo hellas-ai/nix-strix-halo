@@ -106,12 +106,70 @@
         # faster builds on strix-halo. Applying this overlay invalidates
         # downstream caches and removes support for other GPUs from the system
         # OpenCL ICD — only enable on hosts that exclusively run gfx1151.
+        #
+        # This is the *shallow* narrowing: only the ICD targets change. The
+        # individual rocm leaves (rccl, hipblaslt, miopen, …) still build for
+        # every nixpkgs-default arch. Pair with `rocm-narrow-deep` below to
+        # also narrow those leaves.
         rocm-narrow = _: prev: {
           rocmPackages = prev.rocmPackages.overrideScope (
             _: rocmPrev: {
               clr = rocmPrev.clr.override {
                 localGpuTargets = rocmTargets;
               };
+            }
+          );
+        };
+
+        # Deep ROCm narrowing for strix-halo: in addition to clr, also pins
+        # the gpuTargets of every leaf rocmPackage (rccl, hipblaslt, hipfft,
+        # hiprand, hipsparse, miopen, rocblas, rocfft, rocrand, rocsolver,
+        # rocsparse, aotriton) to gfx1151. composable_kernel_base's broken
+        # check requires at least one gfx9 mfma target, so it's pinned to
+        # gfx90a+gfx11-generic — CK still only emits gfx1151 kernels, but
+        # the meta.broken guard passes.
+        #
+        # Use this when you want every ROCm build in the closure to target
+        # only gfx1151 (i.e. on strix-halo hosts where you don't need
+        # multi-GPU portability). Invalidates downstream caches but cuts
+        # build time dramatically: composable_kernel alone has ~20 per-arch
+        # parts that otherwise would all rebuild.
+        #
+        # Same logic is also inline in linux-libibverbs-usb4/flake.nix as
+        # `gfx1151Overlay`; consolidating that copy into this one is a
+        # separate cleanup. For now both should produce equivalent results.
+        rocm-narrow-deep = final: prev: {
+          rocmPackages = prev.rocmPackages.overrideScope (
+            _: rocmPrev:
+            let
+              narrow = drv: drv.override { gpuTargets = rocmTargets; };
+            in
+            {
+              clr = rocmPrev.clr.override { localGpuTargets = rocmTargets; };
+
+              rccl       = narrow rocmPrev.rccl;
+              hipblaslt  = narrow rocmPrev.hipblaslt;
+              hipfft     = narrow rocmPrev.hipfft;
+              hiprand    = narrow rocmPrev.hiprand;
+              hipsparse  = narrow rocmPrev.hipsparse;
+              miopen     = narrow rocmPrev.miopen;
+              rocblas    = narrow rocmPrev.rocblas;
+              rocfft     = narrow rocmPrev.rocfft;
+              rocrand    = narrow rocmPrev.rocrand;
+              rocsolver  = narrow rocmPrev.rocsolver;
+              rocsparse  = narrow rocmPrev.rocsparse;
+
+              composable_kernel_base = rocmPrev.composable_kernel_base.override {
+                gpuTargets = [ "gfx90a" "gfx11-generic" ];
+              };
+
+              aotriton = rocmPrev.aotriton.overrideAttrs (old: {
+                cmakeFlags = (final.lib.filter
+                  (f: !final.lib.hasPrefix "-DAOTRITON_TARGET_ARCH" f)
+                  (old.cmakeFlags or [ ])) ++ [
+                  "-DAOTRITON_TARGET_ARCH:STRING=gfx1151"
+                ];
+              });
             }
           );
         };
@@ -185,6 +243,11 @@
         rocm-narrow = _: {
           nixpkgs.overlays = [
             self.overlays.rocm-narrow
+          ];
+        };
+        rocm-narrow-deep = _: {
+          nixpkgs.overlays = [
+            self.overlays.rocm-narrow-deep
           ];
         };
         rpc-server = import ./modules/rpc-server.nix;
