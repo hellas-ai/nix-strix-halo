@@ -1,0 +1,57 @@
+diff --git a/rocm-systems/projects/rocshmem/src/gda/topology.cpp b/rocm-systems/projects/rocshmem/src/gda/topology.cpp
+index 1d0f9f1..8b9ed65 100644
+--- a/rocm-systems/projects/rocshmem/src/gda/topology.cpp
++++ b/rocm-systems/projects/rocshmem/src/gda/topology.cpp
+@@ -25,0 +26,2 @@
++#include <system_error>
++
+@@ -397,5 +399,11 @@
+-              std::string pciPath = std::filesystem::canonical(device_path + "/device").string();
+-              std::size_t pos = pciPath.find_last_of('/');
+-              if (pos != std::string::npos) {
+-                ibvDevice.busId = pciPath.substr(pos + 1);
+-              }
++              std::error_code ec;
++              auto pciDevicePath = std::filesystem::path(device_path) / "device";
++              if (std::filesystem::exists(pciDevicePath, ec)) {
++                auto pciPath = std::filesystem::canonical(pciDevicePath, ec).string();
++                if (!ec) {
++                  std::size_t pos = pciPath.find_last_of('/');
++                  if (pos != std::string::npos) {
++                    ibvDevice.busId = pciPath.substr(pos + 1);
++                  }
++                }
++              }
+@@ -407,14 +415,18 @@
+-          std::filesystem::path devicePath = "/sys/bus/pci/devices/" + ibvDevice.busId + "/numa_node";
+-          std::string canonicalPath = std::filesystem::canonical(devicePath).string();
+-
+-          if (std::filesystem::exists(canonicalPath)) {
+-            std::ifstream file(canonicalPath);
+-            if (file.is_open()) {
+-              std::string numaNodeStr;
+-              std::getline(file, numaNodeStr);
+-              int numaNodeVal;
+-              if (sscanf(numaNodeStr.c_str(), "%d", &numaNodeVal) == 1)
+-                ibvDevice.numaNode = numaNodeVal;
+-              file.close();
+-            }
+-          }
++          if (!ibvDevice.busId.empty()) {
++            std::error_code ec;
++            std::filesystem::path devicePath = "/sys/bus/pci/devices/" + ibvDevice.busId + "/numa_node";
++            if (std::filesystem::exists(devicePath, ec)) {
++              auto canonicalPath = std::filesystem::canonical(devicePath, ec);
++              if (!ec) {
++                std::ifstream file(canonicalPath);
++                if (file.is_open()) {
++                  std::string numaNodeStr;
++                  std::getline(file, numaNodeStr);
++                  int numaNodeVal;
++                  if (sscanf(numaNodeStr.c_str(), "%d", &numaNodeVal) == 1)
++                    ibvDevice.numaNode = numaNodeVal;
++                  file.close();
++                }
++              }
++            }
++          }

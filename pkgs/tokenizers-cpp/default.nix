@@ -1,7 +1,7 @@
 {
   lib,
   stdenv,
-  fetchgit,
+  fetchFromGitHub,
   rustPlatform,
   cmake,
   pkg-config,
@@ -16,8 +16,9 @@ let
   rev = "acbdc5a27ae01ba74cda756f94da698d40f11dfe";
   version = "0-unstable-2025-03-18";
 
-  src = fetchgit {
-    url = "https://github.com/mlc-ai/tokenizers-cpp";
+  src = fetchFromGitHub {
+    owner = "mlc-ai";
+    repo = "tokenizers-cpp";
     inherit rev;
     hash = "sha256-/Y9FphwL0zs9hXyfvEbDbaDKAzy/hJ9qlSpUzViuDo8=";
   };

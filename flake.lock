@@ -135,6 +135,22 @@
         "type": "github"
       }
     },
+    "rocm-xio": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778795617,
+        "narHash": "sha256-3OcuRqVj52pahOJ1V3AZ4E2XobyqQ9suG38lsrqx18g=",
+        "ref": "refs/heads/main",
+        "rev": "5cdd6f4caeca999d968c291f2b530ffd1d4b2d39",
+        "revCount": 430,
+        "type": "git",
+        "url": "file:///mnt/Home/src/rocm-xio"
+      },
+      "original": {
+        "type": "git",
+        "url": "file:///mnt/Home/src/rocm-xio"
+      }
+    },
     "root": {
       "inputs": {
         "disko": "disko",
@@ -142,6 +158,7 @@
         "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",
         "nixpkgs": "nixpkgs",
+        "rocm-xio": "rocm-xio",
         "usb4-rdma": "usb4-rdma",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"

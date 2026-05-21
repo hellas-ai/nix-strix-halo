@@ -12,6 +12,7 @@
   rpc ? null,
   extraArgs ? "",
   gpuTarget ? "gfx1151",
+  hsaOverride ? null,
 }:
 pkgs.runCommand "benchmark-${llamaPackage.pname}"
   {
@@ -22,7 +23,9 @@ pkgs.runCommand "benchmark-${llamaPackage.pname}"
     echo "Running benchmark with the following parameters:"
     echo "Model Path: ${modelPath}"
 
-    export HSA_OVERRIDE_GFX_VERSION=11.5.1
+    ${pkgs.lib.optionalString (
+      hsaOverride != null
+    ) ''export HSA_OVERRIDE_GFX_VERSION="${hsaOverride}"''}
     ${llamaPackage}/bin/llama-bench \
       ${pkgs.lib.optionalString (modelPath != null) "-m ${modelPath}"} \
       ${pkgs.lib.optionalString (mmap != null) "--mmap ${toString mmap}"} \

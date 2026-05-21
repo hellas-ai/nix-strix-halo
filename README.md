@@ -1,13 +1,14 @@
 # nix-strix-halo
 
-Small Nix flake for Strix Halo / Sixunited AXB35 systems.
+Small Nix flake for Strix Halo / Sixunited AXB35 systems and nearby AMD accelerator test hosts.
 
 It provides:
 
-- a nixpkgs overlay for `llama-cpp` with ROCm enabled for `gfx1151`
+- a nixpkgs overlay for `llama-cpp` with ROCm variants for `gfx1010`, `gfx1036`, `gfx1103`, and `gfx1151`
+- shared hardware metadata under `lib.hardware` for GPU/NPU target wiring
 - an opt-in TheRock ROCm preview SDK package for Strix Halo (`gfx1151`)
-- latest vLLM packages for CPU, Strix Halo ROCm (`gfx1151`), and RTX 4090 CUDA (`sm_89`)
-- Zen 5 tuned vLLM variants and reusable helpers for other CPU/GPU targets
+- vLLM packages for Strix Halo ROCm (`gfx1151`)
+- opt-in ROCm/vLLM experiments that stay separate from the default nixpkgs ROCm path
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
 - benchmark derivations for local `/models` GGUF files
 - a minimal `fevm-faex9` NixOS example
@@ -22,18 +23,15 @@ Main package outputs:
 
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.llama-cpp-rocm`
-- `packages.x86_64-linux.llama-cpp-rocm-zen5`
+- `packages.x86_64-linux.llama-cpp-rocm-<gpu suffix>`
 - `packages.x86_64-linux.llama-cpp-vulkan`
+- `packages.x86_64-linux.llama-cpp-master-rocm`
+- `packages.x86_64-linux.llama-cpp-master-rocm-<gpu suffix>`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.therock-rocm-gfx1151`
 - `packages.x86_64-linux.therock-rocm-gfx1151-env`
 - `packages.x86_64-linux.vllm-env-therock-runtime-gfx1151`
-- `packages.x86_64-linux.vllm-cpu`
-- `packages.x86_64-linux.vllm-cpu-zen5`
 - `packages.x86_64-linux.vllm-rocm-gfx1151`
-- `packages.x86_64-linux.vllm-rocm-gfx1151-zen5`
-- `packages.x86_64-linux.vllm-cuda-rtx4090`
-- `packages.x86_64-linux.vllm-cuda-rtx4090-zen5`
 - `packages.x86_64-linux.vllm-env-*`
 - `packages.x86_64-linux.bench-*`
 
@@ -41,18 +39,19 @@ Main app outputs:
 
 - `apps.x86_64-linux.llama-cli`
 - `apps.x86_64-linux.llama-server`
+- `apps.x86_64-linux.llama-{cli,server}-<gpu suffix>`
+- `apps.x86_64-linux.llama-{cli,server}-master-<gpu suffix>`
 - `apps.x86_64-linux.therock-rocm-gfx1151-env`
 - `apps.x86_64-linux.vllm-therock-runtime-gfx1151`
 
 Package-set outputs:
 
 - `legacyPackages.x86_64-linux.defaultPackages`
-- `legacyPackages.x86_64-linux.zen5Packages`
 
-Use package sets when CPU tuning should stay independent of accelerator choice:
+Use package sets when importing the overlay into another flake:
 
-- `legacyPackages.x86_64-linux.zen5Packages.llama-cpp`
-- `legacyPackages.x86_64-linux.zen5Packages.llama-cpp-rocm`
+- `legacyPackages.x86_64-linux.defaultPackages.llama-cpp-rocm`
+- `legacyPackages.x86_64-linux.defaultPackages.llama-cpp-rocm-<gpu suffix>`
 
 ## Use The Overlay
 
@@ -77,54 +76,47 @@ Use package sets when CPU tuning should stay independent of accelerator choice:
 }
 ```
 
+## Hardware Targets
+
+ROCm target metadata lives in `lib.hardware` and is used by the generated llama.cpp packages, apps, benchmark derivations, and benchmark host module.
+
+| suffix | host | ROCm agent | build target | notes |
+| --- | --- | --- | --- | --- |
+| `gfx1010` | `trex` | `gfx1010` | `gfx1010` | PCI/ROCm report Navi 10 / RX 5700-class, not the expected RX 6700 XT. |
+| `gfx1036` | `fuckup` | `gfx1036` | `gfx1030` | Granite Ridge iGPU; wrappers set `HSA_OVERRIDE_GFX_VERSION=10.3.0`. |
+| `gfx1103` | `router` | `gfx1103` | `gfx1102` | Hawk Point / Radeon 780M iGPU; wrappers set `HSA_OVERRIDE_GFX_VERSION=11.0.2`. |
+| `gfx1151` | Strix Halo hosts | `gfx1151` | `gfx1151` | Default target; wrappers set `HSA_OVERRIDE_GFX_VERSION=11.5.1`. |
+
+NPU metadata is tracked separately:
+
+| suffix | host | XRT agent | support |
+| --- | --- | --- | --- |
+| `xdna2` | Strix Halo hosts | `aie2p` | FastFlowLM target currently supported by this flake. |
+| `aie2` | `router` | `aie2` | Detected as `RyzenAI-npu1`; FastFlowLM is not wired because upstream ships XDNA2 kernels. |
+
 ## vLLM
 
 The vLLM package is a thin override of the upstream nixpkgs derivation. Its source tracks upstream `releases/v0.20.2` through the `vllm` flake input. Hardware defaults are intentionally narrow:
 
-- `vllm-cpu`: CPU backend
 - `vllm-rocm-gfx1151`: ROCm for Strix Halo / Radeon 8060S
-- `vllm-cuda-rtx4090`: CUDA for RTX 4090 / `sm_89`
-- `*-zen5`: same hardware target, imported with `localSystem.gcc.arch = "znver5"`
 - `vllm-env-*`: Python environment with `vllm` and `ray`
 
-The tuned package set exposes the same vLLM names without the `-zen5` suffix:
+The TheRock/vLLM stack remains `gfx1151`-only until the grouped TheRock target pins are added for the other GPUs.
 
 ```bash
-nix build .#zen5Packages.vllm-rocm-gfx1151
-```
-
-For custom targets, use the helper functions instead of adding more aliases:
-
-```nix
-let
-  hardware = inputs.nix-strix-halo.lib.mkRocmHardware {
-    name = "gfx1100";
-    gpuTargets = [ "gfx1100" ];
-  };
-
-  vllmPkgs = inputs.nix-strix-halo.lib.mkPackageSet {
-    system = "x86_64-linux";
-    inherit hardware;
-    cpu = "znver5";
-  };
-in
-inputs.nix-strix-halo.lib.mkVllmPackage {
-  pkgs = vllmPkgs;
-  inherit hardware;
-  tunePackage = true;
-}
+nix build .#vllm-rocm-therock-gfx1151
 ```
 
 Available overlays:
 
 - `overlays.default`
-- `overlays.tuned`: Zen 5 tuning overlay
-- `overlays.mkTunedOverlay "znver4"`: tuning overlay for another CPU target
+- `overlays.rocm-narrow`
+- `overlays.rocm-narrow-<gpu suffix>`
 
 ```nix
 overlays = [
   inputs.nix-strix-halo.overlays.default
-  (inputs.nix-strix-halo.overlays.mkTunedOverlay "znver4")
+  inputs.nix-strix-halo.overlays.rocm-narrow-gfx1103
 ];
 ```
 

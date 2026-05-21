@@ -8,21 +8,32 @@
 with lib;
 let
   cfg = config.services.benchmark-runner;
+  hardwareTargets = import ../lib/hardware.nix { inherit lib; };
   isNvidia = hasPrefix "rtx" cfg.gpuTarget;
   isAmd = hasPrefix "gfx" cfg.gpuTarget;
+  effectiveNpuTarget =
+    if cfg.npuTarget != null then
+      cfg.npuTarget
+    else if cfg.enableNpu then
+      hardwareTargets.defaultNpuTarget.systemFeature
+    else
+      null;
+  isAmdNpu = effectiveNpuTarget != null;
 in
 {
   options.services.benchmark-runner = {
     enable = mkEnableOption "benchmark runner configuration";
 
     gpuTarget = mkOption {
-      type = types.enum [
-        "gfx1010"
-        "gfx1151"
-        "rtx4090"
-      ];
+      type = types.enum (hardwareTargets.gpuSystemFeatures ++ [ "rtx4090" ]);
       default = "gfx1151";
       description = "GPU architecture target";
+    };
+
+    npuTarget = mkOption {
+      type = types.nullOr (types.enum hardwareTargets.npuSystemFeatures);
+      default = null;
+      description = "Optional AMD NPU architecture target for benchmark dispatch";
     };
 
     cpuTarget = mkOption {
@@ -46,13 +57,9 @@ in
       type = types.bool;
       default = false;
       description = ''
-        Expose the AMD Ryzen AI NPU (/dev/accel/accel0 via amdxdna) to
-        sandboxed builds and advertise the `npu-strix` system feature.
-        Required by the FastFlowLM bench derivations.
-
-        Bench models are pulled separately: run
-        `FLM_MODEL_PATH=${"\${cfg.modelsPath}"}/flm flm pull <tag>` once per
-        model before invoking the bench.
+        Compatibility switch for exposing the default AMD Ryzen AI NPU
+        (${hardwareTargets.defaultNpuTarget.systemFeature}) to sandboxed
+        builds. Prefer setting npuTarget explicitly for non-default NPUs.
       '';
     };
 
@@ -96,7 +103,7 @@ in
         cfg.gpuTarget
         cfg.cpuTarget
       ]
-      ++ optional cfg.enableNpu "npu-strix";
+      ++ optionals isAmdNpu [ effectiveNpuTarget ];
 
       # Allow GPU access in sandbox
       extra-sandbox-paths = [
@@ -112,9 +119,7 @@ in
         "/sys/class/kfd"
         "/sys/class/drm"
       ]
-      ++ optionals cfg.enableNpu [
-        # FastFlowLM talks to the NPU via XRT, which opens
-        # /dev/accel/accel0 (the amdxdna DRM accel device).
+      ++ optionals isAmdNpu [
         "/dev/accel"
         "/sys/class/accel"
       ]
@@ -144,11 +149,6 @@ in
       # Allow nixbld group to read models
       "A ${cfg.modelsPath} - - - - group:nixbld:r-x"
       "A ${cfg.modelsPath} - - - - default:group:nixbld:r-x"
-    ]
-    ++ optionals cfg.enableNpu [
-      "d ${cfg.modelsPath}/flm 0755 root root -"
-      "A ${cfg.modelsPath}/flm - - - - group:nixbld:r-x"
-      "A ${cfg.modelsPath}/flm - - - - default:group:nixbld:r-x"
     ];
 
     # allow nixbld group to access GPU devices
@@ -156,12 +156,12 @@ in
       optionals isAmd [
         ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
       ]
+      ++ optionals isAmdNpu [
+        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="nixbld", MODE="0660"''
+      ]
       ++ [
         ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
         ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
-      ]
-      ++ optionals cfg.enableNpu [
-        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="nixbld", MODE="0660"''
       ]
       ++ optionals isNvidia [
         ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''

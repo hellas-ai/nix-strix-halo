@@ -24,7 +24,7 @@ BASE_URL = "https://rocm.nightlies.amd.com/v2"
 DEFAULT_TARGET = "gfx1151"
 DEFAULT_PYTHON_TAG = "cp312"
 DEFAULT_SERIES = "7.12"
-DEFAULT_PACKAGES = [
+BASE_PACKAGES = [
     "rocm",
     "torch",
     "torchvision",
@@ -32,8 +32,20 @@ DEFAULT_PACKAGES = [
     "triton",
     "rocm-sdk-core",
     "rocm-sdk-devel",
-    "rocm-sdk-libraries-gfx1151",
 ]
+TARGET_SLUGS = {
+    "gfx1010": "gfx101X-dgpu",
+    "gfx1036": "gfx103X-all",
+    "gfx1103": "gfx110X-all",
+}
+
+
+def target_slug(target: str) -> str:
+    return TARGET_SLUGS.get(target, target)
+
+
+def default_packages(target: str) -> list[str]:
+    return BASE_PACKAGES + [f"rocm-sdk-libraries-{target_slug(target).lower()}"]
 
 
 @dataclass(frozen=True)
@@ -112,7 +124,7 @@ def parse_distribution(project: str, href: str, index_url: str) -> Distribution 
 
 
 def list_distributions(target: str, project: str) -> list[Distribution]:
-    target_url = f"{BASE_URL}/{target}"
+    target_url = f"{BASE_URL}/{target_slug(target)}"
     index_url = f"{target_url}/{project}/"
     text = fetch_index(index_url)
     hrefs = re.findall(r'href="([^"]+)"', text)
@@ -223,7 +235,7 @@ def main() -> None:
     parser.add_argument("--output", default="therock-python-wheel-sources.json")
     args = parser.parse_args()
 
-    projects = args.package or DEFAULT_PACKAGES
+    projects = args.package or default_packages(args.target)
     distributions_by_project = {project: list_distributions(args.target, project) for project in projects}
     rocm_version = args.rocm_version or choose_rocm_version(
         distributions_by_project,
@@ -236,7 +248,7 @@ def main() -> None:
         "series": args.series,
         "rocmVersion": rocm_version,
         "pythonTag": args.python_tag,
-        "index": f"{BASE_URL}/{args.target}/",
+        "index": f"{BASE_URL}/{target_slug(args.target)}/",
         "packages": {},
         "updated": datetime.now(timezone.utc).isoformat(),
     }

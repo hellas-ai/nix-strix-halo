@@ -5,7 +5,7 @@
 # tok/s, decode tok/s, total tokens) along with the raw transcript.
 #
 # Bench hosts must:
-#   1. Provide the `npu-strix` system feature (see
+#   1. Provide the `xdna2` system feature (see
 #      modules/benchmark-runner.nix).
 #   2. Pre-pull each model with `FLM_MODEL_PATH=/models/flm flm pull <tag>`
 #      so the sandbox can read it without network access.
@@ -13,7 +13,7 @@
   pkgs,
   fastflowlm,
   modelsPath ? "/models/flm",
-  npuTarget ? "npu-strix",
+  npuTarget ? "xdna2",
 }:
 
 let
@@ -65,62 +65,88 @@ let
         + lib.optionalString (prefillChunkLen != null) "-chunk${toString prefillChunkLen}"
         + lib.optionalString (pmode != null) "-${pmode}";
     in
-    pkgs.runCommand name {
-      buildInputs = [ fastflowlm ];
-      requiredSystemFeatures = [ npuTarget ];
-      promptText = prompts.${promptKey};
-      meta = {
-        description = "FastFlowLM NPU bench: ${model} (${promptKey} prompt)";
-        platforms = [ "x86_64-linux" ];
-      };
-    } ''
-      set -euo pipefail
-
-      # flm reads/writes the model cache under $HOME/.config/flm by
-      # default; redirect to the pre-staged /models/flm tree via
-      # FLM_MODEL_PATH so the build doesn't need network or write access.
-      export HOME="$TMPDIR/home"
-      export FLM_MODEL_PATH="${modelsPath}"
-      export FLM_DISABLE_UPDATE_CHECK=1
-      mkdir -p "$HOME" "$out"
-
-      printf '%s\n' "Model:            ${model}"           > "$out/config.txt"
-      printf '%s\n' "Prompt:           ${promptKey}"      >> "$out/config.txt"
-      printf '%s\n' "ctx-len:          ${toString ctxLen}"           >> "$out/config.txt"
-      printf '%s\n' "prefill-chunk:    ${toString prefillChunkLen}" >> "$out/config.txt"
-      printf '%s\n' "pmode:            ${toString pmode}"           >> "$out/config.txt"
-      printf '%s\n' "FLM_MODEL_PATH:   $FLM_MODEL_PATH"             >> "$out/config.txt"
-
-      # Two-line stdin: enable verbose metrics, then the prompt. flm
-      # exits once the input stream ends.
+    pkgs.runCommand name
       {
-        echo "/verbose"
-        printf '%s\n' "$promptText"
-      } | ${fastflowlm}/bin/flm run ${flmArgs} ${model} \
-        > "$out/transcript.txt" 2>&1
+        buildInputs = [ fastflowlm ];
+        requiredSystemFeatures = [ npuTarget ];
+        promptText = prompts.${promptKey};
+        meta = {
+          description = "FastFlowLM NPU bench: ${model} (${promptKey} prompt)";
+          platforms = [ "x86_64-linux" ];
+        };
+      }
+      ''
+        set -euo pipefail
 
-      # Pull the four numeric perf lines out of /verbose's footer into
-      # a stable CSV.
-      {
-        echo "metric,value"
-        grep -E '^\s*(Total tokens|TTFT|Prefill speed|Decoding speed):' \
-          "$out/transcript.txt" \
-          | sed -E 's/^[[:space:]]*//; s/:[[:space:]]+/,/'
-      } > "$out/summary.csv"
+        # flm reads/writes the model cache under $HOME/.config/flm by
+        # default; redirect to the pre-staged /models/flm tree via
+        # FLM_MODEL_PATH so the build doesn't need network or write access.
+        export HOME="$TMPDIR/home"
+        export FLM_MODEL_PATH="${modelsPath}"
+        export FLM_DISABLE_UPDATE_CHECK=1
+        mkdir -p "$HOME" "$out"
 
-      # Surface the summary on stdout for `nix log`.
-      cat "$out/summary.csv"
-    '';
+        printf '%s\n' "Model:            ${model}"           > "$out/config.txt"
+        printf '%s\n' "Prompt:           ${promptKey}"      >> "$out/config.txt"
+        printf '%s\n' "ctx-len:          ${toString ctxLen}"           >> "$out/config.txt"
+        printf '%s\n' "prefill-chunk:    ${toString prefillChunkLen}" >> "$out/config.txt"
+        printf '%s\n' "pmode:            ${toString pmode}"           >> "$out/config.txt"
+        printf '%s\n' "FLM_MODEL_PATH:   $FLM_MODEL_PATH"             >> "$out/config.txt"
+
+        # Two-line stdin: enable verbose metrics, then the prompt. flm
+        # exits once the input stream ends.
+        {
+          echo "/verbose"
+          printf '%s\n' "$promptText"
+        } | ${fastflowlm}/bin/flm run ${flmArgs} ${model} \
+          > "$out/transcript.txt" 2>&1
+
+        # Pull the four numeric perf lines out of /verbose's footer into
+        # a stable CSV.
+        {
+          echo "metric,value"
+          grep -E '^\s*(Total tokens|TTFT|Prefill speed|Decoding speed):' \
+            "$out/transcript.txt" \
+            | sed -E 's/^[[:space:]]*//; s/:[[:space:]]+/,/'
+        } > "$out/summary.csv"
+
+        # Surface the summary on stdout for `nix log`.
+        cat "$out/summary.csv"
+      '';
 
   # Default sweep: each model gets a baseline run plus a deeper-context
   # variant. Add entries here to grow the matrix.
   cases = [
-    { model = "llama3.2:1b"; promptKey = "medium"; }
-    { model = "llama3.2:1b"; promptKey = "long"; ctxLen = 8192; prefillChunkLen = 512; }
-    { model = "gemma4-it:e4b"; promptKey = "medium"; }
-    { model = "gemma4-it:e4b"; promptKey = "long"; ctxLen = 8192; prefillChunkLen = 512; }
-    { model = "gpt-oss:20b"; promptKey = "long"; }
-    { model = "gpt-oss:20b"; promptKey = "long"; ctxLen = 8192; prefillChunkLen = 512; }
+    {
+      model = "llama3.2:1b";
+      promptKey = "medium";
+    }
+    {
+      model = "llama3.2:1b";
+      promptKey = "long";
+      ctxLen = 8192;
+      prefillChunkLen = 512;
+    }
+    {
+      model = "gemma4-it:e4b";
+      promptKey = "medium";
+    }
+    {
+      model = "gemma4-it:e4b";
+      promptKey = "long";
+      ctxLen = 8192;
+      prefillChunkLen = 512;
+    }
+    {
+      model = "gpt-oss:20b";
+      promptKey = "long";
+    }
+    {
+      model = "gpt-oss:20b";
+      promptKey = "long";
+      ctxLen = 8192;
+      prefillChunkLen = 512;
+    }
   ];
 
   benchmarks = lib.listToAttrs (

@@ -49,6 +49,7 @@
   target ? "gfx1151",
   version ? "7.13",
   profile ? "vllm",
+  enableRocshmem ? false,
 }:
 
 let
@@ -307,7 +308,7 @@ let
         "-DTHEROCK_ENABLE_OCL_RUNTIME=OFF"
         "-DTHEROCK_ENABLE_CORE_HIPTESTS=OFF"
         "-DTHEROCK_ENABLE_CORE_RUNTIME_TESTS=OFF"
-        "-DTHEROCK_ENABLE_ROCSHMEM=OFF"
+        (lib.cmakeBool "THEROCK_ENABLE_ROCSHMEM" enableRocshmem)
         "-DTHEROCK_ENABLE_FFT=OFF"
         "-DTHEROCK_ENABLE_SPARSE=OFF"
         "-DTHEROCK_ENABLE_SOLVER=OFF"
@@ -355,6 +356,7 @@ stdenv.mkDerivation {
 
   patches = [
     ./patches/hipify-use-amd-llvm-toolchain.patch
+    ./patches/rocshmem-tolerate-virtual-verbs-devices.patch
   ];
 
   nativeBuildInputs = [
@@ -416,104 +418,104 @@ stdenv.mkDerivation {
   '';
 
   postPatch = ''
-        find third-party -name CMakeLists.txt -type f -print0 \
-          | xargs -0 perl -0pi -e 's|https://rocm-third-party-deps\.s3\.us-east-2\.amazonaws\.com/|file://${thirdPartyMirror}/|g'
+            find third-party -name CMakeLists.txt -type f -print0 \
+              | xargs -0 perl -0pi -e 's|https://rocm-third-party-deps\.s3\.us-east-2\.amazonaws\.com/|file://${thirdPartyMirror}/|g'
 
-        substituteInPlace core/pre_hook_ROCR-Runtime.cmake \
-          --replace-fail \
-            'find_package(LibElf CONFIG REQUIRED)' \
-            'set(LibElf_DIR "${libelfCmakePackage}/lib/cmake/LibElf")
-    find_package(LibElf CONFIG REQUIRED)
-    set(NUMA_DIR "${numaCmakePackage}/lib/cmake/NUMA")
-    find_package(NUMA CONFIG REQUIRED)'
+            substituteInPlace core/pre_hook_ROCR-Runtime.cmake \
+              --replace-fail \
+                'find_package(LibElf CONFIG REQUIRED)' \
+                'set(LibElf_DIR "${libelfCmakePackage}/lib/cmake/LibElf")
+        find_package(LibElf CONFIG REQUIRED)
+        set(NUMA_DIR "${numaCmakePackage}/lib/cmake/NUMA")
+        find_package(NUMA CONFIG REQUIRED)'
 
-        substituteInPlace rocm-systems/projects/rocr-runtime/libhsakmt/CMakeLists.txt \
-          --replace-fail \
-            '    message(STATUS "NUMA: " ''${NUMA})' \
-            '    include_directories(''${NUMA_INCLUDE_DIRS})
-        message(STATUS "NUMA: " ''${NUMA})'
+            substituteInPlace rocm-systems/projects/rocr-runtime/libhsakmt/CMakeLists.txt \
+              --replace-fail \
+                '    message(STATUS "NUMA: " ''${NUMA})' \
+                '    include_directories(''${NUMA_INCLUDE_DIRS})
+            message(STATUS "NUMA: " ''${NUMA})'
 
-        substituteInPlace cmake/therock_subproject.cmake \
-          --replace-fail \
-            '    string(APPEND _toolchain_contents "set(CMAKE_LINKER \"@AMD_LLVM_LINKER@\")\n")' \
-            '    string(APPEND _toolchain_contents "set(CMAKE_LINKER \"@AMD_LLVM_LINKER@\")\n")
-    string(APPEND _toolchain_contents "set(CMAKE_SYSROOT \"${nixSysroot}\")\n")
-    string(APPEND _toolchain_contents "string(APPEND CMAKE_C_FLAGS_INIT \" --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib\")\n")
-    string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib\")\n")
-    string(APPEND _toolchain_contents "string(APPEND CMAKE_ASM_FLAGS_INIT \" --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib\")\n")
-    string(APPEND _toolchain_contents "string(APPEND CMAKE_EXE_LINKER_FLAGS_INIT \" -L${nixSysroot}/lib\")\n")
-    string(APPEND _toolchain_contents "string(APPEND CMAKE_SHARED_LINKER_FLAGS_INIT \" -L${nixSysroot}/lib\")\n")
-    string(APPEND _toolchain_contents "string(APPEND CMAKE_MODULE_LINKER_FLAGS_INIT \" -L${nixSysroot}/lib\")\n")'
+            substituteInPlace cmake/therock_subproject.cmake \
+              --replace-fail \
+                '    string(APPEND _toolchain_contents "set(CMAKE_LINKER \"@AMD_LLVM_LINKER@\")\n")' \
+                '    string(APPEND _toolchain_contents "set(CMAKE_LINKER \"@AMD_LLVM_LINKER@\")\n")
+        string(APPEND _toolchain_contents "set(CMAKE_SYSROOT \"${nixSysroot}\")\n")
+        string(APPEND _toolchain_contents "string(APPEND CMAKE_C_FLAGS_INIT \" --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib\")\n")
+        string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib\")\n")
+        string(APPEND _toolchain_contents "string(APPEND CMAKE_ASM_FLAGS_INIT \" --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib\")\n")
+        string(APPEND _toolchain_contents "string(APPEND CMAKE_EXE_LINKER_FLAGS_INIT \" -L${nixSysroot}/lib\")\n")
+        string(APPEND _toolchain_contents "string(APPEND CMAKE_SHARED_LINKER_FLAGS_INIT \" -L${nixSysroot}/lib\")\n")
+        string(APPEND _toolchain_contents "string(APPEND CMAKE_MODULE_LINKER_FLAGS_INIT \" -L${nixSysroot}/lib\")\n")'
 
-        substituteInPlace cmake/therock_subproject.cmake \
-          --replace-fail \
-            '    string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" --hip-device-lib-path=@_amd_llvm_device_lib_path@\")\n")' \
-            '    string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" --hip-device-lib-path=@_amd_llvm_device_lib_path@\")\n")
-    string(APPEND _toolchain_contents "set(CMAKE_HIP_COMPILER \"@AMD_LLVM_CXX_COMPILER@\")\n")
-    string(APPEND _toolchain_contents "set(CMAKE_HIP_COMPILER_ROCM_ROOT \"@_hip_dist_dir@\")\n")
-    string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\")\n")
-${hipLanguageFlagsToolchainLine}'
+            substituteInPlace cmake/therock_subproject.cmake \
+              --replace-fail \
+                '    string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" --hip-device-lib-path=@_amd_llvm_device_lib_path@\")\n")' \
+                '    string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" --hip-device-lib-path=@_amd_llvm_device_lib_path@\")\n")
+        string(APPEND _toolchain_contents "set(CMAKE_HIP_COMPILER \"@AMD_LLVM_CXX_COMPILER@\")\n")
+        string(APPEND _toolchain_contents "set(CMAKE_HIP_COMPILER_ROCM_ROOT \"@_hip_dist_dir@\")\n")
+        string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\")\n")
+    ${hipLanguageFlagsToolchainLine}'
 
-        ${hipRuntimeSourcePatch}
+            ${hipRuntimeSourcePatch}
 
-        substituteInPlace compiler/pre_hook_amd-llvm.cmake \
-          --replace-fail \
-            'set(LLVM_ENABLE_PROJECTS "clang;lld;clang-tools-extra" CACHE STRING "Enable LLVM projects" FORCE)' \
-            'set(LLVM_ENABLE_PROJECTS "clang;lld" CACHE STRING "Enable LLVM projects" FORCE)' \
-          --replace-fail \
-            'set(LLVM_ENABLE_PROJECTS "clang;lld;clang-tools-extra;flang" CACHE STRING "Enable LLVM projects" FORCE)' \
-            'set(LLVM_ENABLE_PROJECTS "clang;lld" CACHE STRING "Enable LLVM projects" FORCE)' \
-          --replace-fail \
-            'set(LLVM_ENABLE_RUNTIMES "compiler-rt;libunwind;libcxx;libcxxabi;openmp;offload" CACHE STRING "Enabled runtimes" FORCE)' \
-            'set(LLVM_ENABLE_RUNTIMES "compiler-rt;libunwind;libcxx;libcxxabi" CACHE STRING "Enabled runtimes" FORCE)' \
-          --replace-fail \
-            'set(RUNTIMES_CMAKE_ARGS "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON")' \
-            'set(RUNTIMES_CMAKE_ARGS
-          "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON"
-          "-DCMAKE_SYSROOT=${nixSysroot}"
-          "-DCMAKE_C_FLAGS_INIT=--gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib"
-          "-DCMAKE_CXX_FLAGS_INIT=--gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib"
-          "-DCMAKE_ASM_FLAGS_INIT=--gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib"
-          "-DCMAKE_EXE_LINKER_FLAGS_INIT=-L${nixSysroot}/lib"
-          "-DCMAKE_SHARED_LINKER_FLAGS_INIT=-L${nixSysroot}/lib"
-          "-DCOMPILER_RT_BUILD_BUILTINS=ON"
-          "-DCOMPILER_RT_BUILD_SANITIZERS=OFF"
-          "-DCOMPILER_RT_BUILD_XRAY=OFF"
-          "-DCOMPILER_RT_BUILD_LIBFUZZER=OFF"
-          "-DCOMPILER_RT_BUILD_PROFILE=OFF"
-          "-DCOMPILER_RT_BUILD_CTX_PROFILE=OFF"
-          "-DCOMPILER_RT_BUILD_MEMPROF=OFF"
-          "-DCOMPILER_RT_BUILD_ORC=OFF"
-          "-DCOMPILER_RT_BUILD_GWP_ASAN=OFF"
-        )'
+            substituteInPlace compiler/pre_hook_amd-llvm.cmake \
+              --replace-fail \
+                'set(LLVM_ENABLE_PROJECTS "clang;lld;clang-tools-extra" CACHE STRING "Enable LLVM projects" FORCE)' \
+                'set(LLVM_ENABLE_PROJECTS "clang;lld" CACHE STRING "Enable LLVM projects" FORCE)' \
+              --replace-fail \
+                'set(LLVM_ENABLE_PROJECTS "clang;lld;clang-tools-extra;flang" CACHE STRING "Enable LLVM projects" FORCE)' \
+                'set(LLVM_ENABLE_PROJECTS "clang;lld" CACHE STRING "Enable LLVM projects" FORCE)' \
+              --replace-fail \
+                'set(LLVM_ENABLE_RUNTIMES "compiler-rt;libunwind;libcxx;libcxxabi;openmp;offload" CACHE STRING "Enabled runtimes" FORCE)' \
+                'set(LLVM_ENABLE_RUNTIMES "compiler-rt;libunwind;libcxx;libcxxabi" CACHE STRING "Enabled runtimes" FORCE)' \
+              --replace-fail \
+                'set(RUNTIMES_CMAKE_ARGS "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON")' \
+                'set(RUNTIMES_CMAKE_ARGS
+              "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON"
+              "-DCMAKE_SYSROOT=${nixSysroot}"
+              "-DCMAKE_C_FLAGS_INIT=--gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib"
+              "-DCMAKE_CXX_FLAGS_INIT=--gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib"
+              "-DCMAKE_ASM_FLAGS_INIT=--gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib"
+              "-DCMAKE_EXE_LINKER_FLAGS_INIT=-L${nixSysroot}/lib"
+              "-DCMAKE_SHARED_LINKER_FLAGS_INIT=-L${nixSysroot}/lib"
+              "-DCOMPILER_RT_BUILD_BUILTINS=ON"
+              "-DCOMPILER_RT_BUILD_SANITIZERS=OFF"
+              "-DCOMPILER_RT_BUILD_XRAY=OFF"
+              "-DCOMPILER_RT_BUILD_LIBFUZZER=OFF"
+              "-DCOMPILER_RT_BUILD_PROFILE=OFF"
+              "-DCOMPILER_RT_BUILD_CTX_PROFILE=OFF"
+              "-DCOMPILER_RT_BUILD_MEMPROF=OFF"
+              "-DCOMPILER_RT_BUILD_ORC=OFF"
+              "-DCOMPILER_RT_BUILD_GWP_ASAN=OFF"
+            )'
 
-        NIX_SYSROOT=${lib.escapeShellArg nixSysroot} perl -0pi -e '
-          my $args = q{  set(RUNTIMES_CMAKE_ARGS
-          "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON"
-          "-DCMAKE_SYSROOT=__NIX_SYSROOT__"
-          "-DCMAKE_C_FLAGS_INIT=--gcc-toolchain=__NIX_SYSROOT__/usr -B__NIX_SYSROOT__/lib"
-          "-DCMAKE_CXX_FLAGS_INIT=--gcc-toolchain=__NIX_SYSROOT__/usr -B__NIX_SYSROOT__/lib"
-          "-DCMAKE_ASM_FLAGS_INIT=--gcc-toolchain=__NIX_SYSROOT__/usr -B__NIX_SYSROOT__/lib"
-          "-DCMAKE_EXE_LINKER_FLAGS_INIT=-L__NIX_SYSROOT__/lib"
-          "-DCMAKE_SHARED_LINKER_FLAGS_INIT=-L__NIX_SYSROOT__/lib"
-          "-DCOMPILER_RT_BUILD_BUILTINS=ON"
-          "-DCOMPILER_RT_BUILD_SANITIZERS=OFF"
-          "-DCOMPILER_RT_BUILD_XRAY=OFF"
-          "-DCOMPILER_RT_BUILD_LIBFUZZER=OFF"
-          "-DCOMPILER_RT_BUILD_PROFILE=OFF"
-          "-DCOMPILER_RT_BUILD_CTX_PROFILE=OFF"
-          "-DCOMPILER_RT_BUILD_MEMPROF=OFF"
-          "-DCOMPILER_RT_BUILD_ORC=OFF"
-          "-DCOMPILER_RT_BUILD_GWP_ASAN=OFF"
-        )
-    };
-          $args =~ s/__NIX_SYSROOT__/$ENV{NIX_SYSROOT}/g;
-          s/(set\(LLVM_ENABLE_RUNTIMES "compiler-rt;libunwind;libcxx;libcxxabi" CACHE STRING "Enabled runtimes" FORCE\)\n)/$1$args/
-            or die "failed to add unconditional runtimes CMake args\n";
-        ' compiler/pre_hook_amd-llvm.cmake
+            NIX_SYSROOT=${lib.escapeShellArg nixSysroot} perl -0pi -e '
+              my $args = q{  set(RUNTIMES_CMAKE_ARGS
+              "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON"
+              "-DCMAKE_SYSROOT=__NIX_SYSROOT__"
+              "-DCMAKE_C_FLAGS_INIT=--gcc-toolchain=__NIX_SYSROOT__/usr -B__NIX_SYSROOT__/lib"
+              "-DCMAKE_CXX_FLAGS_INIT=--gcc-toolchain=__NIX_SYSROOT__/usr -B__NIX_SYSROOT__/lib"
+              "-DCMAKE_ASM_FLAGS_INIT=--gcc-toolchain=__NIX_SYSROOT__/usr -B__NIX_SYSROOT__/lib"
+              "-DCMAKE_EXE_LINKER_FLAGS_INIT=-L__NIX_SYSROOT__/lib"
+              "-DCMAKE_SHARED_LINKER_FLAGS_INIT=-L__NIX_SYSROOT__/lib"
+              "-DCOMPILER_RT_BUILD_BUILTINS=ON"
+              "-DCOMPILER_RT_BUILD_SANITIZERS=OFF"
+              "-DCOMPILER_RT_BUILD_XRAY=OFF"
+              "-DCOMPILER_RT_BUILD_LIBFUZZER=OFF"
+              "-DCOMPILER_RT_BUILD_PROFILE=OFF"
+              "-DCOMPILER_RT_BUILD_CTX_PROFILE=OFF"
+              "-DCOMPILER_RT_BUILD_MEMPROF=OFF"
+              "-DCOMPILER_RT_BUILD_ORC=OFF"
+              "-DCOMPILER_RT_BUILD_GWP_ASAN=OFF"
+            )
+        };
+              $args =~ s/__NIX_SYSROOT__/$ENV{NIX_SYSROOT}/g;
+              s/(set\(LLVM_ENABLE_RUNTIMES "compiler-rt;libunwind;libcxx;libcxxabi" CACHE STRING "Enabled runtimes" FORCE\)\n)/$1$args/
+                or die "failed to add unconditional runtimes CMake args\n";
+            ' compiler/pre_hook_amd-llvm.cmake
 
-        ${explicitParallelSourcePatch}
-        ${compilerBuiltinsSourcePatch}
+            ${explicitParallelSourcePatch}
+            ${compilerBuiltinsSourcePatch}
   ''
   + lib.optionalString (spirvHeadersSource != null) ''
     substituteInPlace compiler/CMakeLists.txt \

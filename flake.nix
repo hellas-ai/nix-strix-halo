@@ -42,6 +42,11 @@
       flake = false;
     };
 
+    rocm-xio = {
+      url = "git+file:///mnt/Home/src/rocm-xio";
+      flake = false;
+    };
+
     # XRT and the xdna-driver plugin ship in lockstep through AMD's
     # lemonade PPA; treat their tags as a matched pair. Bump both at
     # once when moving versions. The `git+https://` URL with
@@ -71,9 +76,9 @@
       systems = [ "x86_64-linux" ];
       forAllSystems = lib.genAttrs systems;
 
-      rocmTargets = [
-        "gfx1151"
-      ];
+      hardwareTargets = import ./lib/hardware.nix { inherit lib; };
+      defaultRocmTarget = hardwareTargets.defaultRocmTarget;
+      rocmTargets = defaultRocmTarget.buildTargets;
       therockRocmSources = builtins.fromJSON (builtins.readFile ./therock-rocm-sources.json);
       therockPythonWheelSources = builtins.fromJSON (
         builtins.readFile ./therock-python-wheel-sources.json
@@ -144,12 +149,47 @@
               ];
             });
 
+          rocmHardwareTargets = hardwareTargets.rocmTargets;
+
           # Backend "bases": before applyRdmaSupport / applyMasterSrc.
-          llamaCppRocmBase = prev.llama-cpp.override {
-            rocmSupport = true;
-            rpcSupport = true;
-            rocmGpuTargets = rocmTargets;
-          };
+          mkLlamaCppRocmBaseFor =
+            target:
+            prev.llama-cpp.override {
+              rocmSupport = true;
+              rpcSupport = true;
+              rocmGpuTargets = target.buildTargets;
+            };
+
+          mkTargetedPackage =
+            pname: pkg:
+            pkg.overrideAttrs (_old: {
+              inherit pname;
+            });
+
+          mkTargetPackageAttrs =
+            prefix: mkPackage:
+            builtins.listToAttrs (
+              map (target: {
+                name = "${prefix}-${target.packageSuffix}";
+                value = mkPackage target;
+              }) rocmHardwareTargets
+            );
+
+          llamaCppRocmTargetPackages = mkTargetPackageAttrs "llama-cpp-rocm" (
+            target:
+            applyRdmaSupport (
+              mkTargetedPackage "llama-cpp-rocm-${target.packageSuffix}" (mkLlamaCppRocmBaseFor target)
+            )
+          );
+
+          llamaCppMasterRocmTargetPackages = mkTargetPackageAttrs "llama-cpp-master-rocm" (
+            target:
+            applyRdmaSupport (
+              applyMasterSrc "llama-cpp-master-rocm-${target.packageSuffix}" (mkLlamaCppRocmBaseFor target)
+            )
+          );
+
+          llamaCppRocmBase = mkLlamaCppRocmBaseFor defaultRocmTarget;
 
           llamaCppRocmTherockBase =
             let
@@ -833,6 +873,8 @@
                 "${prev.zlib}/lib"
                 "${prev.ncurses}/lib"
                 "${prev.ocl-icd}/lib"
+                "${prev.numactl}/lib"
+                "${final.rdma-core-usb4}/lib"
               )
 
               ld_path=
@@ -867,7 +909,81 @@
             '';
           };
 
-        };
+          therock-rocm-gfx1151-rocshmem-env = prev.writeShellApplication {
+            name = "therock-rocm-gfx1151-rocshmem-env";
+            runtimeInputs = [ prev.coreutils ];
+            text = ''
+              setup_rocshmem_sysfs_filter() {
+                local root fallback_device verbs name file
+
+                root="$(mktemp -d "''${TMPDIR:-/tmp}/rocshmem-sysfs.XXXXXX")"
+                mkdir -p "$root/class/infiniband" "$root/class/infiniband_verbs"
+
+                shopt -s nullglob
+
+                for verbs in /sys/class/infiniband_verbs/*; do
+                  if [ -e "$verbs/device" ]; then
+                    fallback_device="$verbs/device"
+                    break
+                  fi
+                done
+
+                for verbs in /sys/class/infiniband/*; do
+                  ln -s "$verbs" "$root/class/infiniband/$(basename "$verbs")"
+                done
+
+                for verbs in /sys/class/infiniband_verbs/*; do
+                  name="$(basename "$verbs")"
+                  if [ -e "$verbs/device" ] || [ -z "''${fallback_device:-}" ]; then
+                    ln -s "$verbs" "$root/class/infiniband_verbs/$name"
+                    continue
+                  fi
+
+                  mkdir -p "$root/class/infiniband_verbs/$name"
+                  for file in abi_version dev ibdev; do
+                    if [ -e "$verbs/$file" ]; then
+                      ln -s "$verbs/$file" "$root/class/infiniband_verbs/$name/$file"
+                    fi
+                  done
+                  ln -s "$fallback_device" "$root/class/infiniband_verbs/$name/device"
+                done
+
+                printf '%s\n' "$root"
+              }
+
+              rocshmem_sysfs_filter=
+              if [ -z "''${SYSFS_PATH:-}" ] && [ -d /sys/class/infiniband_verbs ]; then
+                rocshmem_sysfs_filter="$(setup_rocshmem_sysfs_filter)"
+                export SYSFS_PATH="$rocshmem_sysfs_filter"
+              fi
+
+              cleanup_rocshmem_sysfs_filter() {
+                if [ -n "$rocshmem_sysfs_filter" ]; then
+                  rm -rf "$rocshmem_sysfs_filter"
+                fi
+              }
+              trap cleanup_rocshmem_sysfs_filter EXIT
+
+              export PATH="${prev.openmpi}/bin:${prev.python3}/bin:${final.therock-rocm-gfx1151}/share/rocshmem:$PATH"
+              export LD_LIBRARY_PATH="${prev.openmpi}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              export OMPI_MCA_pml="''${OMPI_MCA_pml:-^ucx}"
+              export OMPI_MCA_osc="''${OMPI_MCA_osc:-^ucx}"
+
+              ${final.therock-rocm-gfx1151-env}/bin/therock-rocm-gfx1151-env "$@"
+            '';
+          };
+
+          rocm-xio-gfx1151 = prev.callPackage ./pkgs/rocm-xio {
+            src = inputs.rocm-xio;
+            rocmSdk = final.therock-rocm-gfx1151;
+            rdma-core = final.rdma-core-usb4;
+            offloadArch = "gfx1151";
+            version = "0.1.0-${inputs.rocm-xio.shortRev or "local"}";
+          };
+
+        }
+        // llamaCppRocmTargetPackages
+        // llamaCppMasterRocmTargetPackages;
 
       # Python-side extras for RDMA-enabled vLLM: rixl (ROCm NIXL port),
       # lmcache (KV-cache layer on top of rixl), and cupy-rocm-7-0. These
@@ -1334,6 +1450,21 @@
           };
         };
 
+      mkRocmNarrowOverlay = target: _: prev: {
+        rocmPackages = prev.rocmPackages.overrideScope (
+          _: rocmPrev: {
+            clr = rocmPrev.clr.override {
+              localGpuTargets = target.buildTargets;
+            };
+          }
+        );
+      };
+
+      rocmNarrowOverlays = lib.mapAttrs' (_: target: {
+        name = "rocm-narrow-${target.packageSuffix}";
+        value = mkRocmNarrowOverlay target;
+      }) hardwareTargets.rocm;
+
       overlays = {
         # Composed default for strix-halo NixOS machines. Order matters:
         # rdma-core-usb4 first, RDMA Python extras next, then Python/ROCm
@@ -1375,15 +1506,7 @@
         # individual rocm leaves (rccl, hipblaslt, miopen, …) still build for
         # every nixpkgs-default arch. Pair with `rocm-narrow-deep` below to
         # also narrow those leaves.
-        rocm-narrow = _: prev: {
-          rocmPackages = prev.rocmPackages.overrideScope (
-            _: rocmPrev: {
-              clr = rocmPrev.clr.override {
-                localGpuTargets = rocmTargets;
-              };
-            }
-          );
-        };
+        rocm-narrow = mkRocmNarrowOverlay defaultRocmTarget;
 
         # Deep ROCm narrowing for strix-halo: in addition to clr, also pins
         # the gpuTargets of every leaf rocmPackage (rccl, hipblaslt, hipfft,
@@ -1430,17 +1553,14 @@
                 ];
               };
 
-              aotriton = rocmPrev.aotriton.overrideAttrs (old: {
-                cmakeFlags =
-                  (final.lib.filter (f: !final.lib.hasPrefix "-DAOTRITON_TARGET_ARCH" f) (old.cmakeFlags or [ ]))
-                  ++ [
-                    "-DAOTRITON_TARGET_ARCH:STRING=gfx1151"
-                  ];
-              });
+              aotriton = rocmPrev.aotriton.override {
+                gpuTargets = rocmTargets;
+              };
             }
           );
         };
-      };
+      }
+      // rocmNarrowOverlays;
 
       defaultPackagesFor =
         system:
@@ -1467,27 +1587,49 @@
       mkBenchmarkPackages =
         pkgs:
         let
-          benchmarks = import ./bench/default.nix {
-            inherit pkgs;
-            packages = {
-              inherit (pkgs)
-                llama-cpp-rocm
-                llama-cpp-rocm-therock
-                llama-cpp-vulkan
-                llama-cpp-master-rocm
-                llama-cpp-master-rocm-therock
-                llama-cpp-master-vulkan
-                ;
+          mkPackageSetForTarget =
+            target:
+            let
+              isDefault = target.packageSuffix == defaultRocmTarget.packageSuffix;
+            in
+            {
+              llama-cpp-rocm =
+                if isDefault then pkgs.llama-cpp-rocm else pkgs."llama-cpp-rocm-${target.packageSuffix}";
+              llama-cpp-vulkan = pkgs.llama-cpp-vulkan;
+              llama-cpp-master-rocm =
+                if isDefault then
+                  pkgs.llama-cpp-master-rocm
+                else
+                  pkgs."llama-cpp-master-rocm-${target.packageSuffix}";
+              llama-cpp-master-vulkan = pkgs.llama-cpp-master-vulkan;
+            }
+            // lib.optionalAttrs isDefault {
+              llama-cpp-rocm-therock = pkgs.llama-cpp-rocm-therock;
+              llama-cpp-master-rocm-therock = pkgs.llama-cpp-master-rocm-therock;
             };
-          };
+
+          mkForTarget =
+            target:
+            let
+              benchmarks = import ./bench/default.nix {
+                inherit pkgs;
+                packages = mkPackageSetForTarget target;
+                gpuTarget = target.systemFeature;
+                hsaOverride = target.hsaOverride;
+              };
+              targetPrefix = lib.optionalString (
+                target.packageSuffix != defaultRocmTarget.packageSuffix
+              ) "${target.packageSuffix}-";
+            in
+            pkgs.lib.concatMapAttrs (
+              model: benchs:
+              pkgs.lib.mapAttrs' (name: drv: {
+                name = "bench-${targetPrefix}${model}-${name}";
+                value = drv;
+              }) benchs
+            ) benchmarks;
         in
-        pkgs.lib.concatMapAttrs (
-          model: benchs:
-          pkgs.lib.mapAttrs' (name: drv: {
-            name = "bench-${model}-${name}";
-            value = drv;
-          }) benchs
-        ) benchmarks;
+        lib.foldl' (acc: target: acc // mkForTarget target) { } hardwareTargets.rocmTargets;
 
       mkFastflowlmBenchmarks =
         pkgs:
@@ -1511,9 +1653,23 @@
             ${command}
             touch "$out"
           '';
+
+      rocmNarrowNixosModules = lib.mapAttrs' (_: target: {
+        name = "rocm-narrow-${target.packageSuffix}";
+        value = _: {
+          nixpkgs.overlays = [
+            self.overlays."rocm-narrow-${target.packageSuffix}"
+          ];
+        };
+      }) hardwareTargets.rocm;
     in
     {
       inherit overlays;
+
+      lib = {
+        hardware = hardwareTargets;
+        inherit mkRocmNarrowOverlay;
+      };
 
       nixosModules = {
         default = _: {
@@ -1538,7 +1694,8 @@
         ryzenadj = import ./modules/ryzenadj.nix;
         disko-raid0 = import ./modules/disko-raid0.nix;
         tuning = import ./modules/tuning.nix;
-      };
+      }
+      // rocmNarrowNixosModules;
 
       nixosConfigurations = {
         fevm-faex9 = nixpkgs.lib.nixosSystem {
@@ -1562,6 +1719,12 @@
 
       packages = perSystem (
         { pkgs, ... }:
+        let
+          rocmLlamaPackageNames = lib.concatMap (target: [
+            "llama-cpp-rocm-${target.packageSuffix}"
+            "llama-cpp-master-rocm-${target.packageSuffix}"
+          ]) hardwareTargets.rocmTargets;
+        in
         {
           default = pkgs.llama-cpp-rocm;
           inherit (pkgs)
@@ -1577,12 +1740,14 @@
             llama-cpp-master-rocm-therock
             llama-cpp-master-vulkan
             rdma-core-usb4
+            rocm-xio-gfx1151
             therock-python-gfx1151
             therock-python-wheels-gfx1151
             therock-python-overlay-smoke-gfx1151
             therock-amd-llvm-gfx1151
             therock-rocm-gfx1151
             therock-rocm-gfx1151-env
+            therock-rocm-gfx1151-rocshmem-env
             therock-rocm-source-gfx1151
             therock-rocm-from-source-gfx1151
             vllm-rocm-lemonade-gfx1151
@@ -1597,105 +1762,131 @@
             vllm-aiter-therock-gfx1151
             ;
         }
+        // lib.genAttrs rocmLlamaPackageNames (name: pkgs.${name})
         // mkBenchmarkPackages pkgs
         // mkFastflowlmBenchmarks pkgs
       );
 
       apps = perSystem (
         { pkgs, ... }:
+        let
+          mkHsaOverrideExport =
+            target:
+            lib.optionalString (
+              target.hsaOverride != null
+            ) ''export HSA_OVERRIDE_GFX_VERSION="${target.hsaOverride}"'';
+
+          mkLlamaApp =
+            {
+              name,
+              package,
+              binary,
+              target,
+              description,
+            }:
+            {
+              type = "app";
+              program = toString (
+                pkgs.writeShellScript name ''
+                  ${mkHsaOverrideExport target}
+                  ${package}/bin/${binary} "$@"
+                ''
+              );
+              meta.description = description;
+            };
+
+          llamaAppAxes = {
+            cli = {
+              appPrefix = "llama-cli";
+              packagePrefix = "llama-cpp-rocm";
+              binary = "llama-cli";
+              descriptionPrefix = "Run llama-cli with ROCm for";
+            };
+            server = {
+              appPrefix = "llama-server";
+              packagePrefix = "llama-cpp-rocm";
+              binary = "llama-server";
+              descriptionPrefix = "Run llama-server with ROCm for";
+            };
+            cliMaster = {
+              appPrefix = "llama-cli-master";
+              packagePrefix = "llama-cpp-master-rocm";
+              binary = "llama-cli";
+              descriptionPrefix = "Run llama-cli from ggml-org master with ROCm for";
+            };
+            serverMaster = {
+              appPrefix = "llama-server-master";
+              packagePrefix = "llama-cpp-master-rocm";
+              binary = "llama-server";
+              descriptionPrefix = "Run llama-server from ggml-org master with ROCm for";
+            };
+          };
+
+          mkLlamaAppSet =
+            {
+              target,
+              appSuffix ? "",
+              packageSuffix ? "",
+              packageNameFor ? null,
+              descriptionFor ? null,
+            }:
+            let
+              packageName =
+                spec:
+                if packageNameFor == null then "${spec.packagePrefix}${packageSuffix}" else packageNameFor spec;
+              description =
+                spec:
+                if descriptionFor == null then
+                  "${spec.descriptionPrefix} ${target.marketingName}"
+                else
+                  descriptionFor spec;
+            in
+            lib.mapAttrs' (
+              _: spec:
+              let
+                name = "${spec.appPrefix}${appSuffix}";
+              in
+              {
+                inherit name;
+                value = mkLlamaApp {
+                  inherit name target;
+                  package = pkgs.${packageName spec};
+                  inherit (spec) binary;
+                  description = description spec;
+                };
+              }
+            ) llamaAppAxes;
+
+          targetLlamaApps = lib.foldl' (
+            acc: target:
+            acc
+            // mkLlamaAppSet {
+              inherit target;
+              appSuffix = "-${target.packageSuffix}";
+              packageSuffix = "-${target.packageSuffix}";
+            }
+          ) { } hardwareTargets.rocmTargets;
+
+          defaultLlamaApps = mkLlamaAppSet { target = defaultRocmTarget; };
+          defaultTherockLlamaApps = mkLlamaAppSet {
+            target = defaultRocmTarget;
+            appSuffix = "-therock";
+            packageNameFor = spec: "${spec.packagePrefix}-therock";
+            descriptionFor =
+              spec: "${spec.descriptionPrefix} ${defaultRocmTarget.marketingName} with TheRock ROCm";
+          };
+        in
         {
-          llama-cli = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-cli" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-rocm}/bin/llama-cli "$@"
-              ''
-            );
-            meta.description = "Run llama-cli with the Strix Halo ROCm environment";
-          };
-
-          llama-server = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-server" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-rocm}/bin/llama-server "$@"
-              ''
-            );
-            meta.description = "Run llama-server with the Strix Halo ROCm environment";
-          };
-
-          llama-cli-therock = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-cli-therock" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-rocm-therock}/bin/llama-cli "$@"
-              ''
-            );
-            meta.description = "Run llama-cli with TheRock 7.13 ROCm on Strix Halo";
-          };
-
-          llama-server-therock = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-server-therock" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-rocm-therock}/bin/llama-server "$@"
-              ''
-            );
-            meta.description = "Run llama-server with TheRock 7.13 ROCm on Strix Halo";
-          };
-
-          llama-cli-master = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-cli-master" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-master-rocm}/bin/llama-cli "$@"
-              ''
-            );
-            meta.description = "Run llama-cli (ggml-org master) on Strix Halo ROCm";
-          };
-
-          llama-server-master = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-server-master" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-master-rocm}/bin/llama-server "$@"
-              ''
-            );
-            meta.description = "Run llama-server (ggml-org master) on Strix Halo ROCm";
-          };
-
-          llama-cli-master-therock = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-cli-master-therock" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-master-rocm-therock}/bin/llama-cli "$@"
-              ''
-            );
-            meta.description = "Run llama-cli (ggml-org master) with TheRock 7.13 ROCm on Strix Halo";
-          };
-
-          llama-server-master-therock = {
-            type = "app";
-            program = toString (
-              pkgs.writeShellScript "llama-server-master-therock" ''
-                export HSA_OVERRIDE_GFX_VERSION=11.5.1
-                ${pkgs.llama-cpp-master-rocm-therock}/bin/llama-server "$@"
-              ''
-            );
-            meta.description = "Run llama-server (ggml-org master) with TheRock 7.13 ROCm on Strix Halo";
-          };
-
           therock-rocm-gfx1151-env = {
             type = "app";
             program = "${pkgs.therock-rocm-gfx1151-env}/bin/therock-rocm-gfx1151-env";
             meta.description = "Run a command in the opt-in TheRock ROCm 7.13 gfx1151 environment";
+          };
+
+          therock-rocm-gfx1151-rocshmem-env = {
+            type = "app";
+            program = "${pkgs.therock-rocm-gfx1151-rocshmem-env}/bin/therock-rocm-gfx1151-rocshmem-env";
+            meta.description = "Run a command in the TheRock ROCm 7.13 gfx1151 rocSHMEM test environment";
           };
 
           therock-python-gfx1151 = {
@@ -1752,6 +1943,9 @@
             meta.description = "FastFlowLM CLI on the AMD Ryzen AI NPU (Strix Halo XDNA2)";
           };
         }
+        // defaultLlamaApps
+        // defaultTherockLlamaApps
+        // targetLlamaApps
       );
 
       devShells = perSystem (

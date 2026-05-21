@@ -18,14 +18,17 @@ from pathlib import Path
 
 
 BASE_URL = "https://rocm.nightlies.amd.com/tarball-multi-arch/"
+TARGET_SLUGS = {
+    "gfx1010": "gfx101X-dgpu",
+    "gfx1036": "gfx103X-all",
+    "gfx1103": "gfx110X-all",
+    "gfx110X": "gfx110X-dgpu",
+    "gfx120X": "gfx120X-all",
+}
 
 
 def target_slug(target: str) -> str:
-    if target == "gfx110X":
-        return "gfx110X-dgpu"
-    if target == "gfx120X":
-        return "gfx120X-all"
-    return target
+    return TARGET_SLUGS.get(target, target)
 
 
 def fetch_index() -> str:
