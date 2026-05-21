@@ -246,18 +246,33 @@
             vulkanSupport = true;
             rpcSupport = true;
           };
+
+          # CUDA variant for NVIDIA hosts (e.g. fuckup, RTX 4090 / sm89).
+          # Skips applyRdmaSupport: NVIDIA hosts don't ship the
+          # usb4_rdma kernel module / rdma-core-usb4 userspace, so
+          # linking libibverbs is just dead weight there. cudaSupport
+          # / cudaCapabilities come from the consuming pkgs instance
+          # (e.g. nixos-config's pkgsForCuda or our cudaPackagesFor
+          # below).
+          llamaCppCudaBase = prev.llama-cpp.override {
+            cudaSupport = true;
+            rpcSupport = true;
+          };
         in
         {
           ec-su-axb35 = ecPackages.kernelModule;
           ec-su-axb35-monitor = ecPackages.monitor;
 
-          # Backend × source-pin matrix. RDMA support is universal (every
-          # variant links libibverbs via rdma-core-usb4 and enables
-          # GGML_RPC_RDMA). The `master` axis swaps in upstream ggml-org/master
-          # via the llama-cpp-master flake input.
+          # Backend × source-pin matrix. RDMA support is universal for
+          # strix-halo variants (every ROCm/Vulkan variant links
+          # libibverbs via rdma-core-usb4 and enables GGML_RPC_RDMA).
+          # CUDA variants stay RDMA-free — see llamaCppCudaBase above.
+          # The `master` axis swaps in upstream ggml-org/master via
+          # the llama-cpp-master flake input.
           llama-cpp-rocm = applyRdmaSupport llamaCppRocmBase;
           llama-cpp-rocm-therock = applyRdmaSupport llamaCppRocmTherockBase;
           llama-cpp-vulkan = applyRdmaSupport llamaCppVulkanBase;
+          llama-cpp-cuda = llamaCppCudaBase;
           llama-cpp-master-rocm = applyRdmaSupport (applyMasterSrc "llama-cpp-master-rocm" llamaCppRocmBase);
           llama-cpp-master-rocm-therock = applyRdmaSupport (
             applyMasterSrc "llama-cpp-master-rocm-therock" llamaCppRocmTherockBase
@@ -265,6 +280,7 @@
           llama-cpp-master-vulkan = applyRdmaSupport (
             applyMasterSrc "llama-cpp-master-vulkan" llamaCppVulkanBase
           );
+          llama-cpp-master-cuda = applyMasterSrc "llama-cpp-master-cuda" llamaCppCudaBase;
 
           therock-rocm-gfx1151 = prev.callPackage ./pkgs/therock-rocm-sdk {
             target = "gfx1151";
@@ -1569,6 +1585,22 @@
           overlays = [ overlays.default ];
         };
 
+      # CUDA-enabled pkgs for NVIDIA consumers of llama-cpp-*-cuda.
+      # Capabilities pinned to 8.9 (RTX 4090 / Ada) which is what
+      # fuckup uses; bump or expose as a param if other NVIDIA hosts
+      # need different SMs.
+      cudaPackagesFor =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ strixAdditionsOverlay ];
+          config = {
+            allowUnfree = true;
+            cudaSupport = true;
+            cudaCapabilities = [ "8.9" ];
+          };
+        };
+
       perSystem =
         f:
         forAllSystems (
@@ -1718,15 +1750,21 @@
       );
 
       packages = perSystem (
-        { pkgs, ... }:
+        { pkgs, system, ... }:
         let
           rocmLlamaPackageNames = lib.concatMap (target: [
             "llama-cpp-rocm-${target.packageSuffix}"
             "llama-cpp-master-rocm-${target.packageSuffix}"
           ]) hardwareTargets.rocmTargets;
+          # Separate pkgs instance with cudaSupport=true so the CUDA
+          # variants below build against the cuda toolchain instead of
+          # the default ROCm-flavoured pkgs.
+          cudaPkgs = cudaPackagesFor system;
         in
         {
           default = pkgs.llama-cpp-rocm;
+          llama-cpp-cuda = cudaPkgs.llama-cpp-cuda;
+          llama-cpp-master-cuda = cudaPkgs.llama-cpp-master-cuda;
           inherit (pkgs)
             ec-su-axb35-monitor
             fastflowlm
