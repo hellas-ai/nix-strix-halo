@@ -14,8 +14,24 @@ let
       package = packages.llama-cpp-rocm;
     }
     {
+      name = "rocm-therock";
+      package = packages.llama-cpp-rocm-therock;
+    }
+    {
       name = "vulkan";
       package = packages.llama-cpp-vulkan;
+    }
+    {
+      name = "master-rocm";
+      package = packages.llama-cpp-master-rocm;
+    }
+    {
+      name = "master-rocm-therock";
+      package = packages.llama-cpp-master-rocm-therock;
+    }
+    {
+      name = "master-vulkan";
+      package = packages.llama-cpp-master-vulkan;
     }
   ];
 

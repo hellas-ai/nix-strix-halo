@@ -1,6 +1,5 @@
 {
   lib,
-  stdenv,
   buildPythonPackage,
   fetchPypi,
   python,
@@ -136,23 +135,26 @@ buildPythonPackage rec {
     # CPATH is the canonical "extra include dirs" env var honoured by
     # both g++ and hipcc/clang, so this is the cheapest single-knob fix.
     CPATH = lib.concatStringsSep ":" (
-      (map (p: "${lib.getInclude p}/include") (with rocmPackages; [
-        rocthrust
-        rocprim
-        hipcub
-        hipsparse
-        hipblas
-        hipblas-common
-        hipblaslt
-        hipfft
-        hiprand
-        hipsolver
-        miopen-hip
-        rocblas
-        rocrand
-        rocsolver
-        rocsparse
-      ]))
+      (map (p: "${lib.getInclude p}/include") (
+        with rocmPackages;
+        [
+          rocthrust
+          rocprim
+          hipcub
+          hipsparse
+          hipblas
+          hipblas-common
+          hipblaslt
+          hipfft
+          hiprand
+          hipsolver
+          miopen-hip
+          rocblas
+          rocrand
+          rocsolver
+          rocsparse
+        ]
+      ))
       # pybind11 headers — lmcache's csrc/cachegen_kernels_hip.cuh
       # includes <pybind11/pybind11.h>. The python pybind11 wheel
       # places them under .../site-packages/pybind11/include.

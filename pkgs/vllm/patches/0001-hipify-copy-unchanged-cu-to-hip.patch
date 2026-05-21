@@ -1,0 +1,47 @@
+--- a/cmake/hipify.py
++++ b/cmake/hipify.py
+@@ -40,6 +40,8 @@
+ 
+     args = parser.parse_args()
+ 
++    output_dir = os.path.abspath(args.output_dir)
++    project_dir = os.path.abspath(args.project_dir)
+     # Limit include scope to project_dir only
+     includes = [os.path.join(args.project_dir, "*")]
+ 
+@@ -72,6 +74,35 @@
+             )
+             else s_abs
+         )
++        if hipified_s_abs == s_abs and s_abs.endswith(".cu"):
++            # Newer torch hipify can report "skipped, no changes" for a CUDA
++            # source while vLLM's CMake rule still declares the corresponding
++            # .hip file as a byproduct and compiles that path. Preserve the
++            # CMake contract by materializing an unchanged .cu as a .hip file
++            # in the generated output tree.
++            try:
++                common = os.path.commonpath([output_dir, s_abs])
++            except ValueError:
++                common = None
++
++            if common == output_dir:
++                hipified_s_abs = os.path.splitext(s_abs)[0] + ".hip"
++            else:
++                try:
++                    common = os.path.commonpath([project_dir, s_abs])
++                except ValueError:
++                    common = None
++
++                if common == project_dir:
++                    rel = os.path.relpath(s_abs, project_dir)
++                    hipified_s_abs = os.path.join(
++                        output_dir, os.path.splitext(rel)[0] + ".hip"
++                    )
++
++            if hipified_s_abs != s_abs:
++                os.makedirs(os.path.dirname(hipified_s_abs), exist_ok=True)
++                shutil.copyfile(s_abs, hipified_s_abs)
++
+         hipified_sources.append(hipified_s_abs)
+ 
+     assert len(hipified_sources) == len(args.sources)

@@ -1,0 +1,17 @@
+{
+  "therock-7.13-gfx1151-vllm": {
+    "url": "https://github.com/ROCm/TheRock.git",
+    "ref": "refs/tags/therock-7.13",
+    "rev": "6d2136cd12be28c6251eb38c700e980c8c2f8cf6",
+    "hash": "sha256-L8beH9YcNnqJhWo9CjDx52yoDIFL/Pop/L2QSuJd2yc=",
+    "target": "gfx1151",
+    "version": "7.13",
+    "fetchArgs": [
+      "--no-include-debug-tools",
+      "--no-include-media-libs",
+      "--no-include-iree-libs",
+      "--no-include-ml-frameworks"
+    ],
+    "updated": "2026-05-19T12:43:04.032259+00:00"
+  }
+}

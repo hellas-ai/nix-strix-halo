@@ -1,0 +1,167 @@
+{
+  "archives": {
+    "Catch2-3.8.1.tar.gz": {
+      "hash": "sha256-GLP3CsgPzMNA2Mb/DzObKuZJRHgvjS/KK9cFz0fK23k=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/Catch2-3.8.1.tar.gz"
+    },
+    "FunctionalPlus-0.2.25.tar.gz": {
+      "hash": "sha256-m14ku8kvQ7l33IPvvBc7zwfb4H+HGPwmcAk2VbVvzuM=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/FunctionalPlus-0.2.25.tar.gz"
+    },
+    "OpenBLAS-18638c7.tar.gz": {
+      "hash": "sha256-XYGIL99FqSoZC9or4pItM3L+8Zr49EQvcgwOvE0Q66g=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/OpenBLAS-18638c7.tar.gz"
+    },
+    "SuiteSparse-7.8.3.tar.gz": {
+      "hash": "sha256-zjmyjUA4oJwU8h4CxmRAG+c8DLlqkZhBjWqYp9tzolk=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/SuiteSparse-7.8.3.tar.gz"
+    },
+    "boost_1_87_0-1.tar.bz2": {
+      "hash": "sha256-C6QIWgvrO5xX+mF9CREMeel3qZRHUM2T+xfYKAeoxkw=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/boost_1_87_0-1.tar.bz2"
+    },
+    "bzip2-1.0.8.tar.gz": {
+      "hash": "sha512-CD9eZ11z8yM8eTDr4gQlpTP+7eqqnYzIaDExKmWBzvvm7Q0I0vqJvoEILypavavKizwIC/lyGKG9WdwRijC58w==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/bzip2-1.0.8.tar.gz"
+    },
+    "eigen-3.4.0.tar.bz2": {
+      "hash": "sha256-tMGYRg66byjTSJTjpXEJmIGFFRBNbnTlzDMc4x5G5iY=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/eigen-3.4.0.tar.bz2"
+    },
+    "elfio-3.12.tar.gz": {
+      "hash": "sha512-E+xr4fjuPX3JbU/xQdPBmdrNgYRwwNkCQDIVVxzj2Ziv6ecajGTg5pz7hqR5R1LZPi5AYCX0gS5JnlG2cgHiPA==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/elfio-3.12.tar.gz"
+    },
+    "elfutils-0.192.tar.bz2": {
+      "hash": "sha512-VDGI9fLP5bx5Vah4QWxfJS7f+ZJnVOXeDGxXsTLyHZKFybKeQSgek7qtEdSufvu/k1gMEUV5wYIQNWX+mb05CQ==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/elfutils-0.192.tar.bz2"
+    },
+    "expat-2.7.5.tar.xz": {
+      "hash": "sha256-EDLf70/xf3BGSCfaooNpsg9lhNEIvDbxerFnbh7dL5E=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/expat-2.7.5.tar.xz"
+    },
+    "fftw-3.3.10.tar.gz": {
+      "hash": "sha256-VskyVJhSzdz6/as4ILAgDHdCZ1vpIXnlnmIVs0DiZGc=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/fftw-3.3.10.tar.gz"
+    },
+    "flatbuffers-25.9.23.tar.gz": {
+      "hash": "sha256-kQIlMhTepq4QwqyWbqHtIVXSIgI5C1MtHepkk1xRito=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/flatbuffers-25.9.23.tar.gz"
+    },
+    "fmt-11.1.3.zip": {
+      "hash": "sha256-ffL9NCaxjVUoQMBxyXfciR7+J0BR0ufEfiyDw5GLpt8=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/fmt-11.1.3.zip"
+    },
+    "frugally-deep-0.15.31.tar.gz": {
+      "hash": "sha256-Sb9eMK0tM+RkQzr7yLb+hTb8lZR0AEoc4qwD18VLyLo=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/frugally-deep-0.15.31.tar.gz"
+    },
+    "gmp-6.3.0.tar.xz": {
+      "hash": "sha512-6FoNq1GViJlIo0YhifDgWY0zHTRXYS4tM1B5nbouJEMW0lb4Fh31IZU46wA+S1ND+YmqoA+WMhVZBj7YyPKf0g==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/gmp-6.3.0.tar.xz"
+    },
+    "googletest-1.17.0.tar.gz": {
+      "hash": "sha256-Zfq3AdmCnTjLd8FKzcQx0hCL/b+JeeQOuK5Wft8Qsnw=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/googletest-1.17.0.tar.gz"
+    },
+    "grpc-v1.78.1.tar.gz": {
+      "hash": "sha256-luHUyCc1poZ7kEXXgtP090dyJElv7FOGyjra4fIFl5Y=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/grpc-v1.78.1.tar.gz"
+    },
+    "hwloc-1.11.13.tar.bz2": {
+      "hash": "sha256-pElLd2X1F8CZDRx/CdmMuHdVu2uEHk4sv+vKGxS6ycg=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/hwloc-1.11.13.tar.bz2"
+    },
+    "json-3.12.0.tar.gz": {
+      "hash": "sha256-QvbpXK1uxTL9NyORNzNjtioUr213EFbb/IYWDm3/96o=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/json-3.12.0.tar.gz"
+    },
+    "libbacktrace-b9e40069c0b47a722286b94eb5231f7f05c08713.zip": {
+      "hash": "sha512-iswzJNNnQT9Bp6Zdhrlq1TaQfvjFSQUEFnD1ua2sIppF1FSpVDhfIwxCNtDWnUhlURlLEphpSvnfIimgXpmJlw==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libbacktrace-b9e40069c0b47a722286b94eb5231f7f05c08713.zip"
+    },
+    "libcap-2.69.tar.gz": {
+      "hash": "sha256-nML6PudE2IFinNrBobVMMC52hP2j42IgViGMdoFkL/s=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libcap-2.69.tar.gz"
+    },
+    "libdivide-5.2.0.tar.gz": {
+      "hash": "sha256-c66RDEzb2oI7ffLB4OHnQnRk68Q/x3Cxowu1mMtwP0k=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libdivide-5.2.0.tar.gz"
+    },
+    "libdrm-libdrm-2.4.127.tar.bz2": {
+      "hash": "sha256-OhFlSQXFlfyigl1uJZqAhtBKRI3OIVtMsDpJMg2SWew=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libdrm-libdrm-2.4.127.tar.bz2"
+    },
+    "libmnl-1.0.5.tar.bz2": {
+      "hash": "sha256-J0ubkZ7zFSv7PaOhPJUN1g1uK81UIw/+yimNA7QNBSU=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libmnl-1.0.5.tar.bz2"
+    },
+    "libnl-3.12.0.tar.gz": {
+      "hash": "sha256-/FHKcZbxo/X99v/ThktQ9PnAIzO+KL5O7KBX4QPA3Rg=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libnl-3.12.0.tar.gz"
+    },
+    "libpciaccess-0.18.1.tar.xz": {
+      "hash": "sha256-SvQ0RLOK21VF0O0cLORtlgjMR7McI4f8UYFlZ2Wm+nY=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libpciaccess-0.18.1.tar.xz"
+    },
+    "mpfr-4.2.2.tar.xz": {
+      "hash": "sha512-655/UbU4X7NJzE+6OkX/3w3VO+bfx0ky3AElgVihBRRmeWDFMMR92d/Fqhi+K9lIWdgEmYRMVxNxBYHmrGJZqQ==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/mpfr-4.2.2.tar.xz"
+    },
+    "msgpack-cxx-7.0.0.tar.gz": {
+      "hash": "sha256-dQS3r357kALOUp1PlB4bf7H7Q1doeAzn2kq6rHm7FW8=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/msgpack-cxx-7.0.0.tar.gz"
+    },
+    "ncurses-6.6.tar.gz": {
+      "hash": "sha512-AmR7quU6vIRPut7lsKIYetBzElxOiVDfbRxP63gct0umT7g4zt/uLCRsOZMhh/Z3Wx3xJPGLmaQjPw2YxyGR3g==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/ncurses-6.6.tar.gz"
+    },
+    "numactl-2.0.19.tar.gz": {
+      "hash": "sha256-8mcqA4HLWRlunCRr+LzEPVVovEV3AKaX8aHfdiua+IQ=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/numactl-2.0.19.tar.gz"
+    },
+    "openmpi-5.0.9.tar.bz2": {
+      "hash": "sha256-37cnYlMRcIR68+Sg8h1317I8829nznzpAzZZJzZ32As=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/openmpi-5.0.9.tar.bz2"
+    },
+    "simde-0.8.2.tar.gz": {
+      "hash": "sha256-7SoyaGWPLyqbU2diioXM1M+VFkYO2GBO7TaWU9SbJfs=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/simde-0.8.2.tar.gz"
+    },
+    "spdlog-1.15.3.tar.gz": {
+      "hash": "sha256-FaBOacIi62wBCUtcf/iiSbNrsieI1yUZZG+4X+smfmc=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/spdlog-1.15.3.tar.gz"
+    },
+    "sqlite-amalgamation-3510300.zip": {
+      "hash": "sha256-rLHm9dgySEv20ytoHoWMOK3Ysqzf1CrF3yS4r7RlUrQ=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/sqlite-amalgamation-3510300.zip"
+    },
+    "xz-5.8.1.tar.bz2": {
+      "hash": "sha256-WWXGksTIgAzUszzm0PasmsnWqyJ7F8UStlYbzk8I1H4=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/xz-5.8.1.tar.bz2"
+    },
+    "yaml-cpp-0.8.0.tar.gz": {
+      "hash": "sha256-++dLvc7iHWVnFWiHBto8i+z9lG2SzURwXMYJi7I7OhY=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/yaml-cpp-0.8.0.tar.gz"
+    },
+    "zlib-1.3.2.tar.gz": {
+      "hash": "sha256-uzKaCizQJ00FUZ1hxmfAYuBpkNcuEl7i36jeZPARnRY=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/zlib-1.3.2.tar.gz"
+    },
+    "zstd-1.5.7.tar.gz": {
+      "hash": "sha256-6zPlH0mhXgI5UM14Jcp0pKK0Pbg1SCWsJPwbfuCeb6M=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/zstd-1.5.7.tar.gz"
+    }
+  },
+  "esmiIbLibrary": {
+    "hash": "sha256-I09JTi6I6Ny2Oso7Uitu6EgrtkTEfHmH45jYWdr1cpk=",
+    "ref": "refs/tags/esmi_pkg_ver-5.1.1",
+    "rev": "6cf2435dd15519ab4148c36751de7a9efc27d8dc",
+    "url": "https://github.com/amd/esmi_ib_library.git"
+  },
+  "spirvHeaders": {
+    "hash": "sha256-NECkIWUCrMdsmMfzmAT6i11h3rLSZeDcItKaSuqPXhw=",
+    "rev": "9268f3057354a2cb65991ba5f38b16d81e803692",
+    "url": "https://github.com/KhronosGroup/SPIRV-Headers/archive/9268f3057354a2cb65991ba5f38b16d81e803692.tar.gz"
+  }
+}

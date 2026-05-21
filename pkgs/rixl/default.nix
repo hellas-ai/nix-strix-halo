@@ -54,10 +54,14 @@ buildPythonPackage rec {
   # in nixpkgs anyway). Drop it from pyproject.toml so meson-python
   # doesn't fail at "getting build dependencies for wheel". Same for
   # `types-PyYAML` — used only by the dev/lint pipeline, not the build.
+  # The ROCm branch pins build-time torch to 2.11.*, but this flake supplies
+  # the matched ROCm torch through Nix. Keep the dependency while dropping the
+  # version guard so rixl follows the pinned runtime stack.
   postPatch = ''
     substituteInPlace pyproject.toml \
       --replace-fail '"patchelf",' "" \
-      --replace-fail '"types-PyYAML",' ""
+      --replace-fail '"types-PyYAML",' "" \
+      --replace-fail '"torch==2.11.*"' '"torch"'
 
     # `src/utils/common/meson.build` shells out to `git rev-parse` to
     # bake a commit-id into the binary. fetchFromGitHub strips the .git
@@ -90,6 +94,7 @@ buildPythonPackage rec {
     pyyaml
     pytest
     setuptools
+    torch
   ];
 
   buildInputs = [
@@ -126,7 +131,7 @@ buildPythonPackage rec {
     "-Denable_plugins=UCX,POSIX,OBJ"
     "-Dbuild_tests=false"
     "-Dbuild_examples=false"
-    "-Dbuild_nixl_ep=false"  # requires sm_90 (Hopper); pure CDNA/RDNA build
+    "-Dbuild_nixl_ep=false" # requires sm_90 (Hopper); pure CDNA/RDNA build
     "-Dinstall_headers=false"
     "-Drust=false"
     # No network: refuse to download any subproject.wrap deps. We supply
