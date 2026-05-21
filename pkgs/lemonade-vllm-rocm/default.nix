@@ -131,6 +131,76 @@ stdenv.mkDerivation {
     cp "${./amdsmi-compat/__init__.py}" \
       "$out/lib/python3.12/site-packages/amdsmi/__init__.py"
 
+    aiter_enum_h="$out/lib/python3.12/site-packages/csrc/include/aiter_enum.h"
+    mkdir -p "$(dirname "$aiter_enum_h")"
+    cat > "$aiter_enum_h" <<'EOF'
+typedef enum {
+  AITER_DTYPE_fp8 = 0,
+  AITER_DTYPE_fp8_e8m0 = 1,
+  AITER_DTYPE_fp16 = 2,
+  AITER_DTYPE_bf16 = 3,
+  AITER_DTYPE_fp32 = 4,
+  AITER_DTYPE_i4x2 = 5,
+  AITER_DTYPE_fp4x2 = 6,
+  AITER_DTYPE_u32 = 7,
+  AITER_DTYPE_i32 = 8,
+  AITER_DTYPE_i16 = 9,
+  AITER_DTYPE_i8 = 10,
+} AiterDtype;
+EOF
+
+    gguf_loader="$out/lib/python3.12/site-packages/vllm/model_executor/model_loader/gguf_loader.py"
+    substituteInPlace "$gguf_loader" \
+      --replace-fail '        if model_type == "gemma3_text":' '        if model_type in ("gemma3_text", "gemma4_text"):' \
+      --replace-fail '            model_type = "gemma3"' '            model_type = model_type.removesuffix("_text")' \
+      --replace-fail '        is_multimodal = hasattr(model_config.hf_config, "vision_config")' '        is_multimodal = (hasattr(model_config.hf_config, "vision_config") and model_config.hf_config.vision_config is not None)'
+
+    config_py="$out/lib/python3.12/site-packages/vllm/transformers_utils/config.py"
+    substituteInPlace "$config_py" \
+      --replace-fail '    if check_gguf_file(model):
+        kwargs["gguf_file"] = Path(model).name
+        gguf_model_repo = Path(model).parent
+    elif is_remote_gguf(model):' '    if check_gguf_file(model):
+        return model, tokenizer, vllm_speculative_config
+    elif is_remote_gguf(model):'
+
+    import_utils_py="$out/lib/python3.12/site-packages/vllm/utils/import_utils.py"
+    substituteInPlace "$import_utils_py" \
+      --replace-fail 'def has_aiter() -> bool:
+    """Whether the optional `aiter` package is available."""
+    return _has_module("aiter")' 'def has_aiter() -> bool:
+    """Whether the optional `aiter` package is available."""
+    if os.environ.get("VLLM_DISABLE_AITER") == "1":
+        return False
+    return _has_module("aiter")'
+
+    envs_py="$out/lib/python3.12/site-packages/vllm/envs.py"
+    substituteInPlace "$envs_py" \
+      --replace-fail '    "VLLM_CACHE_ROOT": lambda: os.path.expanduser(
+        os.getenv(
+            "VLLM_CACHE_ROOT",
+            os.path.join(get_default_cache_root(), "vllm"),
+        )
+    ),' '    "VLLM_CACHE_ROOT": lambda: os.path.expanduser(
+        os.getenv(
+            "VLLM_CACHE_ROOT",
+            os.path.join(get_default_cache_root(), "vllm"),
+        )
+    ),
+    "VLLM_DISABLE_AITER": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_AITER", "0"))
+    ),'
+
+    quark_ocp_mx_py="$out/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py"
+    substituteInPlace "$quark_ocp_mx_py" \
+      --replace-fail 'from collections.abc import Callable' 'import os
+from collections.abc import Callable' \
+      --replace-fail 'try:
+    from aiter.ops.shuffle import shuffle_weight' 'try:
+    if os.environ.get("VLLM_DISABLE_AITER") == "1":
+        raise ImportError("aiter disabled by VLLM_DISABLE_AITER")
+    from aiter.ops.shuffle import shuffle_weight'
+
     rocm_core="$out/lib/python3.12/site-packages/_rocm_sdk_core"
     mkdir -p "$rocm_core/bin" "$rocm_core/.info"
 

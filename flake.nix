@@ -315,6 +315,7 @@
                 makeWrapper "${lemonade}/bin/vllm" "$out/bin/vllm" \
                   --set ROCR "${rocmCore}/lib" \
                   --set RCCL_ROCR_PATH "${rocmCore}/lib" \
+                  --set TRITON_LIBHIP_PATH "${rocmCore}/lib/libamdhip64.so" \
                   --set PYTHONPATH "${lemonadeSite}:${pythonExtrasSite}" \
                   --prefix PATH : "${pythonExtrasEnv}/bin" \
                   --prefix PATH : "${lemonade}/bin"
@@ -334,6 +335,7 @@
                   --set HIP_PATH "${rocmCore}" \
                   --set ROCR "${rocmCore}/lib" \
                   --set RCCL_ROCR_PATH "${rocmCore}/lib" \
+                  --set TRITON_LIBHIP_PATH "${rocmCore}/lib/libamdhip64.so" \
                   --set DEVICE_LIB_PATH "${rocmCore}/lib/llvm/amdgcn/bitcode" \
                   --set HIP_DEVICE_LIB_PATH "${rocmCore}/lib/llvm/amdgcn/bitcode" \
                   --set CC "${prev.stdenv.cc}/bin/cc" \
@@ -427,6 +429,7 @@
               dontUnpack = true;
               dontConfigure = true;
               dontStrip = true;
+              dontFixup = true;
 
               requiredSystemFeatures = [ "gfx1151" ];
               preferLocalBuild = true;
@@ -440,6 +443,13 @@
                 export VLLM_CACHE_ROOT="$TMPDIR/vllm-cache"
                 export TRITON_CACHE_DIR="$VLLM_CACHE_ROOT/triton_cache"
                 export TORCHINDUCTOR_CACHE_DIR="$VLLM_CACHE_ROOT/inductor_cache"
+                export HF_HOME="/models/.cache/huggingface"
+                export HF_HUB_OFFLINE=1
+                export TRANSFORMERS_OFFLINE=1
+                export SSL_CERT_FILE="${prev.cacert}/etc/ssl/certs/ca-bundle.crt"
+                export VLLM_DISABLE_AITER=1
+                export VLLM_CONFIG_ROOT="/tmp/vllm-lemonade-gfx1151/config"
+                export VLLM_XLA_CACHE_PATH="/tmp/vllm-lemonade-gfx1151/xla_cache"
                 export VLLM_LOGGING_LEVEL="INFO"
                 export TRITON_CACHE_AUTOTUNING="1"
                 export HSA_OVERRIDE_GFX_VERSION="11.5.1"
@@ -453,6 +463,7 @@
                 export ROCM_HOME="${rocmCore}"
                 export ROCM_PATH="$ROCM_HOME"
                 export HIP_PATH="$ROCM_HOME"
+                export TRITON_LIBHIP_PATH="$ROCM_HOME/lib/libamdhip64.so"
                 export DEVICE_LIB_PATH="${rocmCore}/lib/llvm/amdgcn/bitcode"
                 export HIP_DEVICE_LIB_PATH="$DEVICE_LIB_PATH"
                 export CC="${prev.stdenv.cc}/bin/cc"
@@ -465,7 +476,9 @@
                   "$XDG_CACHE_HOME" \
                   "$VLLM_CACHE_ROOT" \
                   "$TRITON_CACHE_DIR" \
-                  "$TORCHINDUCTOR_CACHE_DIR"
+                  "$TORCHINDUCTOR_CACHE_DIR" \
+                  "$VLLM_CONFIG_ROOT" \
+                  "$VLLM_XLA_CACHE_PATH"
 
                 ${vllm}/bin/python3 -u - <<'PY'
                 import math
@@ -796,6 +809,264 @@
               fi
 
               exec "${final.vllm-env-lemonade-gfx1151}/bin/vllm" "$@"
+            '';
+          };
+
+          gemma4-31b-it-text-config = prev.runCommand "gemma4-31b-it-text-config" { } ''
+            mkdir -p "$out"
+            cp ${./pkgs/lemonade-vllm-rocm/gemma4-31b-it-text-config.json} "$out/config.json"
+          '';
+
+          vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151 =
+            let
+              vllm = final.vllm-rocm-lemonade-gfx1151;
+              vllmCli = final.vllm-env-lemonade-gfx1151;
+              rocmCore = "${vllm}/lib/python3.12/site-packages/_rocm_sdk_core";
+              cacheRoot = "/tmp/vllm-lemonade-gfx1151/gemma4-31b-q8";
+            in
+            prev.stdenv.mkDerivation {
+              pname = "vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151";
+              version = vllm.version;
+
+              dontUnpack = true;
+              dontConfigure = true;
+              dontStrip = true;
+              dontFixup = true;
+
+              requiredSystemFeatures = [ "gfx1151" ];
+              preferLocalBuild = true;
+              allowSubstitutes = false;
+
+              buildPhase = ''
+                runHook preBuild
+
+                export HOME="$TMPDIR/home"
+                export XDG_CACHE_HOME="$TMPDIR/xdg-cache"
+                export VLLM_CACHE_ROOT="${cacheRoot}"
+                export TRITON_CACHE_DIR="$VLLM_CACHE_ROOT/triton_cache"
+                export TORCHINDUCTOR_CACHE_DIR="$VLLM_CACHE_ROOT/inductor_cache"
+                export HF_HOME="/models/.cache/huggingface"
+                export HF_HUB_OFFLINE=1
+                export TRANSFORMERS_OFFLINE=1
+                export SSL_CERT_FILE="${prev.cacert}/etc/ssl/certs/ca-bundle.crt"
+                export VLLM_DISABLE_AITER=1
+                export VLLM_CONFIG_ROOT="/tmp/vllm-lemonade-gfx1151/config"
+                export VLLM_XLA_CACHE_PATH="/tmp/vllm-lemonade-gfx1151/xla_cache"
+                export VLLM_LOGGING_LEVEL="INFO"
+                export TRITON_CACHE_AUTOTUNING="1"
+                export HSA_OVERRIDE_GFX_VERSION="11.5.1"
+                export HSA_NO_SCRATCH_RECLAIM="1"
+                export HSA_ENABLE_INTERRUPT="0"
+                export HIP_PLATFORM="amd"
+                export GPU_ARCHS="gfx1151"
+                export PYTORCH_ROCM_ARCH="gfx1151"
+                export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+                export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="1"
+                export ROCM_HOME="${rocmCore}"
+                export ROCM_PATH="$ROCM_HOME"
+                export HIP_PATH="$ROCM_HOME"
+                export TRITON_LIBHIP_PATH="$ROCM_HOME/lib/libamdhip64.so"
+                export DEVICE_LIB_PATH="${rocmCore}/lib/llvm/amdgcn/bitcode"
+                export HIP_DEVICE_LIB_PATH="$DEVICE_LIB_PATH"
+                export CC="${prev.stdenv.cc}/bin/cc"
+                export CXX="${prev.stdenv.cc}/bin/c++"
+                export PATH="${vllmCli}/bin:${vllm}/bin:${prev.stdenv.cc}/bin:$PATH"
+                export LD_PRELOAD="${vllm}/lib/libvllm-rocm-c10-hip-compat.so''${LD_PRELOAD:+ $LD_PRELOAD}"
+
+                rm -rf "$VLLM_CACHE_ROOT"
+                mkdir -p \
+                  "$HOME" \
+                  "$XDG_CACHE_HOME" \
+                  "$VLLM_CACHE_ROOT" \
+                  "$TRITON_CACHE_DIR" \
+                  "$TORCHINDUCTOR_CACHE_DIR" \
+                  "$VLLM_CONFIG_ROOT" \
+                  "$VLLM_XLA_CACHE_PATH"
+
+                gguf_repo="$HF_HOME/hub/models--unsloth--gemma-4-31B-it-GGUF"
+                gguf_rev="$(cat "$gguf_repo/refs/main")"
+                model_path="$gguf_repo/snapshots/$gguf_rev/gemma-4-31B-it-Q8_0.gguf"
+                tokenizer_repo="$HF_HOME/hub/models--unsloth--gemma-4-31B-it"
+                tokenizer_rev="$(cat "$tokenizer_repo/refs/main")"
+                tokenizer_path="$tokenizer_repo/snapshots/$tokenizer_rev"
+                test -f "$model_path"
+                test -f "$tokenizer_path/tokenizer.json"
+
+                prime_gemma4_cache() {
+                  # Use the same vLLM wrapper as the runtime app. Triton launcher
+                  # cache keys include generated launcher source, so wrapper/env
+                  # drift can leave first-run launcher work outside the derivation.
+                  ${vllmCli}/bin/vllm bench throughput \
+                    --model "$model_path" \
+                    --tokenizer "$tokenizer_path" \
+                    --hf-config-path "${final.gemma4-31b-it-text-config}" \
+                    --trust-remote-code \
+                    --load-format gguf \
+                    --quantization gguf \
+                    --dataset-name random \
+                    --random-input-len 64 \
+                    --random-output-len 16 \
+                    --random-range-ratio 0 \
+                    --num-prompts 2 \
+                    --tensor-parallel-size 1 \
+                    --max-model-len 2048 \
+                    --max-num-seqs 1 \
+                    --max-num-batched-tokens 2048 \
+                    --gpu-memory-utilization 0.85 \
+                    --dtype float16
+                }
+
+                prime_gemma4_cache
+                prime_gemma4_cache
+
+                runHook postBuild
+              '';
+
+              installPhase = ''
+                runHook preInstall
+
+                mkdir -p "$out"
+                cp -R "$VLLM_CACHE_ROOT"/. "$out"/
+                find "$out" -type f | sort > "$out/manifest.txt"
+
+                runHook postInstall
+              '';
+
+              meta = with prev.lib; {
+                description = "Primed vLLM/Triton kernel cache for Gemma4-31B Q8 smoke tests on Lemonade ROCm gfx1151";
+                platforms = platforms.linux;
+              };
+            };
+
+          vllm-lemonade-gemma4-31b-q8-gfx1151 = prev.writeShellApplication {
+            name = "vllm-lemonade-gemma4-31b-q8-gfx1151";
+            runtimeInputs = [
+              prev.coreutils
+            ];
+            text = ''
+              set -euo pipefail
+
+              # vLLM/Inductor AOT artifacts embed absolute cache paths, including
+              # inside binary blobs, so this prebuilt cache intentionally lives at
+              # the same path used by the Nix build.
+              cache_root="/tmp/vllm-lemonade-gfx1151/gemma4-31b-q8"
+              export VLLM_CACHE_ROOT="$cache_root"
+              export TRITON_CACHE_DIR="''${TRITON_CACHE_DIR:-$VLLM_CACHE_ROOT/triton_cache}"
+              export TORCHINDUCTOR_CACHE_DIR="''${TORCHINDUCTOR_CACHE_DIR:-$VLLM_CACHE_ROOT/inductor_cache}"
+              export HF_HOME="''${HF_HOME:-/models/.cache/huggingface}"
+              export VLLM_DISABLE_AITER="''${VLLM_DISABLE_AITER:-1}"
+              export VLLM_CONFIG_ROOT="''${VLLM_CONFIG_ROOT:-/tmp/vllm-lemonade-gfx1151/config}"
+              export VLLM_XLA_CACHE_PATH="''${VLLM_XLA_CACHE_PATH:-/tmp/vllm-lemonade-gfx1151/xla_cache}"
+              unset VLLM_LEMONADE_CACHE_ROOT
+              mkdir -p "$VLLM_CONFIG_ROOT" "$VLLM_XLA_CACHE_PATH"
+
+              cache_store="${final.vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151}"
+              stamp="$VLLM_CACHE_ROOT/.prebuilt-gemma4-31b-q8-kernels"
+              if [ ! -e "$stamp" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$cache_store" ]; then
+                tmp="$VLLM_CACHE_ROOT.tmp.$$"
+                rm -rf "$tmp"
+                mkdir -p "$tmp"
+                cp -R "$cache_store/." "$tmp/"
+                chmod -R u+w "$tmp"
+                printf '%s\n' "$cache_store" > "$tmp/.prebuilt-gemma4-31b-q8-kernels"
+                rm -rf "$VLLM_CACHE_ROOT"
+                mv "$tmp" "$VLLM_CACHE_ROOT"
+              fi
+
+              exec "${final.vllm-env-lemonade-gfx1151}/bin/vllm" "$@"
+            '';
+          };
+
+          vllm-lemonade-gemma4-31b-q8-prime-gfx1151 = prev.writeShellApplication {
+            name = "vllm-lemonade-gemma4-31b-q8-prime-gfx1151";
+            runtimeInputs = [
+              prev.coreutils
+            ];
+            text = ''
+              set -euo pipefail
+
+              hf_home="''${HF_HOME:-/models/.cache/huggingface}"
+              model="''${VLLM_GEMMA4_MODEL:-}"
+              tokenizer="''${VLLM_GEMMA4_TOKENIZER:-}"
+              if [ -z "$model" ]; then
+                gguf_repo="$hf_home/hub/models--unsloth--gemma-4-31B-it-GGUF"
+                if [ -r "$gguf_repo/refs/main" ]; then
+                  gguf_rev="$(cat "$gguf_repo/refs/main")"
+                  candidate="$gguf_repo/snapshots/$gguf_rev/gemma-4-31B-it-Q8_0.gguf"
+                  if [ -f "$candidate" ]; then
+                    model="$candidate"
+                  fi
+                fi
+              fi
+              if [ -z "$model" ]; then
+                model="unsloth/gemma-4-31B-it-GGUF:Q8_0"
+              fi
+              if [ -z "$tokenizer" ]; then
+                tokenizer_repo="$hf_home/hub/models--unsloth--gemma-4-31B-it"
+                if [ -r "$tokenizer_repo/refs/main" ]; then
+                  tokenizer_rev="$(cat "$tokenizer_repo/refs/main")"
+                  candidate="$tokenizer_repo/snapshots/$tokenizer_rev"
+                  if [ -f "$candidate/tokenizer.json" ]; then
+                    tokenizer="$candidate"
+                  fi
+                fi
+              fi
+              if [ -z "$tokenizer" ]; then
+                tokenizer="unsloth/gemma-4-31B-it"
+              fi
+
+              num_prompts="''${VLLM_GEMMA4_PRIME_NUM_PROMPTS:-2}"
+              input_len="''${VLLM_GEMMA4_PRIME_INPUT_LEN:-64}"
+              output_len="''${VLLM_GEMMA4_PRIME_OUTPUT_LEN:-16}"
+              tp="''${VLLM_GEMMA4_PRIME_TP:-1}"
+              max_model_len="''${VLLM_GEMMA4_PRIME_MAX_MODEL_LEN:-2048}"
+              max_num_seqs="''${VLLM_GEMMA4_PRIME_MAX_NUM_SEQS:-1}"
+              max_batched_tokens="''${VLLM_GEMMA4_PRIME_MAX_NUM_BATCHED_TOKENS:-2048}"
+              gpu_memory_utilization="''${VLLM_GEMMA4_PRIME_GPU_MEMORY_UTILIZATION:-0.85}"
+              warmup_runs="''${VLLM_GEMMA4_PRIME_WARMUP_RUNS:-0}"
+              unset \
+                VLLM_GEMMA4_PRIME_NUM_PROMPTS \
+                VLLM_GEMMA4_PRIME_INPUT_LEN \
+                VLLM_GEMMA4_PRIME_OUTPUT_LEN \
+                VLLM_GEMMA4_PRIME_TP \
+                VLLM_GEMMA4_PRIME_MAX_MODEL_LEN \
+                VLLM_GEMMA4_PRIME_MAX_NUM_SEQS \
+                VLLM_GEMMA4_PRIME_MAX_NUM_BATCHED_TOKENS \
+                VLLM_GEMMA4_PRIME_GPU_MEMORY_UTILIZATION \
+                VLLM_GEMMA4_PRIME_WARMUP_RUNS \
+                VLLM_GEMMA4_MODEL \
+                VLLM_GEMMA4_TOKENIZER
+
+              run_prime() {
+                "${final.vllm-lemonade-gemma4-31b-q8-gfx1151}/bin/vllm-lemonade-gemma4-31b-q8-gfx1151" \
+                  bench throughput \
+                  --model "$model" \
+                  --tokenizer "$tokenizer" \
+                  --hf-config-path "${final.gemma4-31b-it-text-config}" \
+                  --trust-remote-code \
+                  --load-format gguf \
+                  --quantization gguf \
+                  --dataset-name random \
+                  --random-input-len "$input_len" \
+                  --random-output-len "$output_len" \
+                  --random-range-ratio 0 \
+                  --num-prompts "$num_prompts" \
+                  --tensor-parallel-size "$tp" \
+                  --max-model-len "$max_model_len" \
+                  --max-num-seqs "$max_num_seqs" \
+                  --max-num-batched-tokens "$max_batched_tokens" \
+                  --gpu-memory-utilization "$gpu_memory_utilization" \
+                  --dtype float16 \
+                  "$@"
+              }
+
+              run=0
+              while [ "$run" -lt "$warmup_runs" ]; do
+                run_prime "$@" >/dev/null 2>&1
+                run=$((run + 1))
+              done
+
+              run_prime "$@"
             '';
           };
 
@@ -1793,6 +2064,10 @@
             vllm-lemonade-prime-cache-gfx1151
             vllm-lemonade-qwen36-27b-cache-gfx1151
             vllm-lemonade-qwen36-27b-gfx1151
+            gemma4-31b-it-text-config
+            vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151
+            vllm-lemonade-gemma4-31b-q8-gfx1151
+            vllm-lemonade-gemma4-31b-q8-prime-gfx1151
             vllm-rocm-therock-gfx1151
             vllm-env-therock-gfx1151
             vllm-env-therock-aiter-gfx1151
@@ -1967,6 +2242,18 @@
             type = "app";
             program = "${pkgs.vllm-lemonade-qwen36-27b-gfx1151}/bin/vllm-lemonade-qwen36-27b-gfx1151";
             meta.description = "Run Lemonade vLLM with the prebuilt Qwen3.6-27B Triton cache";
+          };
+
+          vllm-lemonade-gemma4-31b-q8-gfx1151 = {
+            type = "app";
+            program = "${pkgs.vllm-lemonade-gemma4-31b-q8-gfx1151}/bin/vllm-lemonade-gemma4-31b-q8-gfx1151";
+            meta.description = "Run Lemonade vLLM with the prebuilt Gemma4-31B Q8 kernel cache";
+          };
+
+          vllm-lemonade-gemma4-31b-q8-prime-gfx1151 = {
+            type = "app";
+            program = "${pkgs.vllm-lemonade-gemma4-31b-q8-prime-gfx1151}/bin/vllm-lemonade-gemma4-31b-q8-prime-gfx1151";
+            meta.description = "Prime Gemma4-31B Q8 vLLM caches before measured benchmark runs";
           };
 
           vllm-therock-aiter-gfx1151 = {
