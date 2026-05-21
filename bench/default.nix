@@ -3,6 +3,7 @@
   pkgs,
   packages,
   gpuTarget ? "gfx1151",
+  hsaOverride ? null,
 }:
 let
   runner = import ./runner.nix;
@@ -13,9 +14,33 @@ let
       name = "rocm";
       package = packages.llama-cpp-rocm;
     }
+  ]
+  ++ pkgs.lib.optionals (builtins.hasAttr "llama-cpp-rocm-therock" packages) [
+    {
+      name = "rocm-therock";
+      package = packages.llama-cpp-rocm-therock;
+    }
+  ]
+  ++ [
     {
       name = "vulkan";
       package = packages.llama-cpp-vulkan;
+    }
+    {
+      name = "master-rocm";
+      package = packages.llama-cpp-master-rocm;
+    }
+  ]
+  ++ pkgs.lib.optionals (builtins.hasAttr "llama-cpp-master-rocm-therock" packages) [
+    {
+      name = "master-rocm-therock";
+      package = packages.llama-cpp-master-rocm-therock;
+    }
+  ]
+  ++ [
+    {
+      name = "master-vulkan";
+      package = packages.llama-cpp-master-vulkan;
     }
   ];
 
@@ -144,6 +169,7 @@ let
         ngl
         rpc
         gpuTarget
+        hsaOverride
         ;
       llamaPackage = package;
       modelPath = model;

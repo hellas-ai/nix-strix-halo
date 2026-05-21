@@ -1,6 +1,5 @@
 {
   lib,
-  stdenv,
   buildPythonPackage,
   fetchPypi,
   python,
@@ -19,11 +18,13 @@
 
 let
   wheelInfo =
-    if python.pythonVersion == "3.13" then {
-      hash = "sha256-6+eLTMN+YZrkJVXgnWwY0GVSRyq80Sp9zEQB0ba9C7A=";
-      pyTag = "cp313";
-    }
-    else throw "cupy-rocm-7-0: no wheel mapping for python ${python.pythonVersion}";
+    if python.pythonVersion == "3.13" then
+      {
+        hash = "sha256-6+eLTMN+YZrkJVXgnWwY0GVSRyq80Sp9zEQB0ba9C7A=";
+        pyTag = "cp313";
+      }
+    else
+      throw "cupy-rocm-7-0: no wheel mapping for python ${python.pythonVersion}";
 in
 buildPythonPackage rec {
   pname = "cupy-rocm-7-0";
@@ -38,7 +39,7 @@ buildPythonPackage rec {
     python = wheelInfo.pyTag;
     abi = wheelInfo.pyTag;
     platform = "manylinux2014_x86_64";
-    hash = wheelInfo.hash;
+    inherit (wheelInfo) hash;
   };
 
   nativeBuildInputs = [ autoPatchelfHook ];

@@ -8,21 +8,25 @@
 with lib;
 let
   cfg = config.services.benchmark-runner;
+  hardwareTargets = import ../lib/hardware.nix { inherit lib; };
   isNvidia = hasPrefix "rtx" cfg.gpuTarget;
   isAmd = hasPrefix "gfx" cfg.gpuTarget;
+  isAmdNpu = cfg.npuTarget != null;
 in
 {
   options.services.benchmark-runner = {
     enable = mkEnableOption "benchmark runner configuration";
 
     gpuTarget = mkOption {
-      type = types.enum [
-        "gfx1010"
-        "gfx1151"
-        "rtx4090"
-      ];
+      type = types.enum (hardwareTargets.gpuSystemFeatures ++ [ "rtx4090" ]);
       default = "gfx1151";
       description = "GPU architecture target";
+    };
+
+    npuTarget = mkOption {
+      type = types.nullOr (types.enum hardwareTargets.npuSystemFeatures);
+      default = null;
+      description = "Optional AMD NPU architecture target for benchmark dispatch";
     };
 
     cpuTarget = mkOption {
@@ -81,7 +85,8 @@ in
       system-features = [
         cfg.gpuTarget
         cfg.cpuTarget
-      ];
+      ]
+      ++ optionals isAmdNpu [ cfg.npuTarget ];
 
       # Allow GPU access in sandbox
       extra-sandbox-paths = [
@@ -96,6 +101,10 @@ in
         "/dev/kfd"
         "/sys/class/kfd"
         "/sys/class/drm"
+      ]
+      ++ optionals isAmdNpu [
+        "/dev/accel"
+        "/sys/class/accel"
       ]
       ++ optionals isNvidia [
         "/dev/nvidia0"
@@ -129,6 +138,9 @@ in
     services.udev.extraRules = concatStringsSep "\n" (
       optionals isAmd [
         ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
+      ]
+      ++ optionals isAmdNpu [
+        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="nixbld", MODE="0660"''
       ]
       ++ [
         ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''

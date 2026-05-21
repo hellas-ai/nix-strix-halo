@@ -126,7 +126,7 @@ buildPythonPackage rec {
     "-Denable_plugins=UCX,POSIX,OBJ"
     "-Dbuild_tests=false"
     "-Dbuild_examples=false"
-    "-Dbuild_nixl_ep=false"  # requires sm_90 (Hopper); pure CDNA/RDNA build
+    "-Dbuild_nixl_ep=false" # requires sm_90 (Hopper); pure CDNA/RDNA build
     "-Dinstall_headers=false"
     "-Drust=false"
     # No network: refuse to download any subproject.wrap deps. We supply

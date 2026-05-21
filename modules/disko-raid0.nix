@@ -83,7 +83,10 @@
                 # doesn't hit ext4's default htree depth limit. Otherwise
                 # dmesg fills with `Directory ... index full, reach max
                 # htree level :2 / Large directory feature is not enabled`.
-                extraArgs = [ "-O" "large_dir" ];
+                extraArgs = [
+                  "-O"
+                  "large_dir"
+                ];
               };
             };
           };

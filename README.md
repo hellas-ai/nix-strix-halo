@@ -1,12 +1,14 @@
 # nix-strix-halo
 
-Small Nix flake for Strix Halo / Sixunited AXB35 systems.
+Small Nix flake for Strix Halo / Sixunited AXB35 systems and nearby AMD accelerator test hosts.
 
 It provides:
 
-- a nixpkgs overlay for `llama-cpp` with ROCm enabled for `gfx1151`
-- latest vLLM packages for CPU, Strix Halo ROCm (`gfx1151`), and RTX 4090 CUDA (`sm_89`)
-- Zen 5 tuned vLLM variants and reusable helpers for other CPU/GPU targets
+- a nixpkgs overlay for `llama-cpp` with ROCm variants for `gfx1010`, `gfx1036`, `gfx1103`, and `gfx1151`
+- shared hardware metadata under `lib.hardware` for GPU/NPU target wiring
+- an opt-in TheRock ROCm preview SDK package for Strix Halo (`gfx1151`)
+- vLLM packages for Strix Halo ROCm (`gfx1151`)
+- opt-in ROCm/vLLM experiments that stay separate from the default nixpkgs ROCm path
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
 - benchmark derivations for local `/models` GGUF files
 - a minimal `fevm-faex9` NixOS example
@@ -21,15 +23,15 @@ Main package outputs:
 
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.llama-cpp-rocm`
-- `packages.x86_64-linux.llama-cpp-rocm-zen5`
+- `packages.x86_64-linux.llama-cpp-rocm-<gpu suffix>`
 - `packages.x86_64-linux.llama-cpp-vulkan`
+- `packages.x86_64-linux.llama-cpp-master-rocm`
+- `packages.x86_64-linux.llama-cpp-master-rocm-<gpu suffix>`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
-- `packages.x86_64-linux.vllm-cpu`
-- `packages.x86_64-linux.vllm-cpu-zen5`
+- `packages.x86_64-linux.therock-rocm-gfx1151`
+- `packages.x86_64-linux.therock-rocm-gfx1151-env`
+- `packages.x86_64-linux.vllm-env-therock-runtime-gfx1151`
 - `packages.x86_64-linux.vllm-rocm-gfx1151`
-- `packages.x86_64-linux.vllm-rocm-gfx1151-zen5`
-- `packages.x86_64-linux.vllm-cuda-rtx4090`
-- `packages.x86_64-linux.vllm-cuda-rtx4090-zen5`
 - `packages.x86_64-linux.vllm-env-*`
 - `packages.x86_64-linux.bench-*`
 
@@ -37,16 +39,19 @@ Main app outputs:
 
 - `apps.x86_64-linux.llama-cli`
 - `apps.x86_64-linux.llama-server`
+- `apps.x86_64-linux.llama-{cli,server}-<gpu suffix>`
+- `apps.x86_64-linux.llama-{cli,server}-master-<gpu suffix>`
+- `apps.x86_64-linux.therock-rocm-gfx1151-env`
+- `apps.x86_64-linux.vllm-therock-runtime-gfx1151`
 
 Package-set outputs:
 
 - `legacyPackages.x86_64-linux.defaultPackages`
-- `legacyPackages.x86_64-linux.zen5Packages`
 
-Use package sets when CPU tuning should stay independent of accelerator choice:
+Use package sets when importing the overlay into another flake:
 
-- `legacyPackages.x86_64-linux.zen5Packages.llama-cpp`
-- `legacyPackages.x86_64-linux.zen5Packages.llama-cpp-rocm`
+- `legacyPackages.x86_64-linux.defaultPackages.llama-cpp-rocm`
+- `legacyPackages.x86_64-linux.defaultPackages.llama-cpp-rocm-<gpu suffix>`
 
 ## Use The Overlay
 
@@ -71,56 +76,139 @@ Use package sets when CPU tuning should stay independent of accelerator choice:
 }
 ```
 
+## Hardware Targets
+
+ROCm target metadata lives in `lib.hardware` and is used by the generated llama.cpp packages, apps, benchmark derivations, and benchmark host module.
+
+| suffix | host | ROCm agent | build target | notes |
+| --- | --- | --- | --- | --- |
+| `gfx1010` | `trex` | `gfx1010` | `gfx1010` | PCI/ROCm report Navi 10 / RX 5700-class, not the expected RX 6700 XT. |
+| `gfx1036` | `fuckup` | `gfx1036` | `gfx1030` | Granite Ridge iGPU; wrappers set `HSA_OVERRIDE_GFX_VERSION=10.3.0`. |
+| `gfx1103` | `router` | `gfx1103` | `gfx1102` | Hawk Point / Radeon 780M iGPU; wrappers set `HSA_OVERRIDE_GFX_VERSION=11.0.2`. |
+| `gfx1151` | Strix Halo hosts | `gfx1151` | `gfx1151` | Default target; wrappers set `HSA_OVERRIDE_GFX_VERSION=11.5.1`. |
+
+NPU metadata is tracked separately:
+
+| suffix | host | XRT agent | support |
+| --- | --- | --- | --- |
+| `xdna2` | Strix Halo hosts | `aie2p` | FastFlowLM target currently supported by this flake. |
+| `aie2` | `router` | `aie2` | Detected as `RyzenAI-npu1`; FastFlowLM is not wired because upstream ships XDNA2 kernels. |
+
 ## vLLM
 
 The vLLM package is a thin override of the upstream nixpkgs derivation. Its source tracks upstream `releases/v0.20.2` through the `vllm` flake input. Hardware defaults are intentionally narrow:
 
-- `vllm-cpu`: CPU backend
 - `vllm-rocm-gfx1151`: ROCm for Strix Halo / Radeon 8060S
-- `vllm-cuda-rtx4090`: CUDA for RTX 4090 / `sm_89`
-- `*-zen5`: same hardware target, imported with `localSystem.gcc.arch = "znver5"`
 - `vllm-env-*`: Python environment with `vllm` and `ray`
 
-The tuned package set exposes the same vLLM names without the `-zen5` suffix:
+The TheRock/vLLM stack remains `gfx1151`-only until the grouped TheRock target pins are added for the other GPUs.
 
 ```bash
-nix build .#zen5Packages.vllm-rocm-gfx1151
-```
-
-For custom targets, use the helper functions instead of adding more aliases:
-
-```nix
-let
-  hardware = inputs.nix-strix-halo.lib.mkRocmHardware {
-    name = "gfx1100";
-    gpuTargets = [ "gfx1100" ];
-  };
-
-  vllmPkgs = inputs.nix-strix-halo.lib.mkPackageSet {
-    system = "x86_64-linux";
-    inherit hardware;
-    cpu = "znver5";
-  };
-in
-inputs.nix-strix-halo.lib.mkVllmPackage {
-  pkgs = vllmPkgs;
-  inherit hardware;
-  tunePackage = true;
-}
+nix build .#vllm-rocm-therock-gfx1151
 ```
 
 Available overlays:
 
 - `overlays.default`
-- `overlays.tuned`: Zen 5 tuning overlay
-- `overlays.mkTunedOverlay "znver4"`: tuning overlay for another CPU target
+- `overlays.rocm-narrow`
+- `overlays.rocm-narrow-<gpu suffix>`
 
 ```nix
 overlays = [
   inputs.nix-strix-halo.overlays.default
-  (inputs.nix-strix-halo.overlays.mkTunedOverlay "znver4")
+  inputs.nix-strix-halo.overlays.rocm-narrow-gfx1103
 ];
 ```
+
+## TheRock ROCm Preview
+
+The default ROCm path stays on nixpkgs ROCm. TheRock is packaged separately so
+we can test newer ROCm builds without changing system packages or invalidating
+the stable vLLM/RCCL setup.
+
+Current pin:
+
+- `therock-rocm-gfx1151`: TheRock ROCm `7.13.0a20260515` for Strix Halo
+
+Use the environment wrapper for ad-hoc tests of the prebuilt SDK pin:
+
+```bash
+nix run .#therock-rocm-gfx1151-env -- rocminfo
+nix run .#therock-rocm-gfx1151-env -- hipcc --version
+nix run .#therock-rocm-gfx1151-env -- bash
+```
+
+There is also a runtime-only vLLM compatibility wrapper:
+
+```bash
+nix run .#vllm-therock-runtime-gfx1151 -- --help
+nix run .#vllm-therock-runtime-gfx1151 -- serve Qwen/Qwen2.5-7B-Instruct
+```
+
+That wrapper runs the existing `usb4-rdma` Strix vLLM environment with TheRock
+first on `PATH` and `LD_LIBRARY_PATH`. It is useful for runtime compatibility
+testing, but it is not the same as rebuilding PyTorch, vLLM, AITER, or Triton
+against TheRock. Expect it to build the current nixpkgs ROCm vLLM closure.
+
+Update the prebuilt SDK pin with:
+
+```bash
+python3 scripts/update-therock-rocm.py --target gfx1151 --series 7.13
+```
+
+This packages the SDK/runtime tarball only. The real "ROCm 7.13 vLLM" path is
+the source-build flow below, followed by a `rocmPackages` overlay that rebuilds
+the native Python stack against the source-built ROCm closure.
+
+For a real source build, keep the two-stage pinning pattern:
+
+```bash
+python3 scripts/update-therock-rocm-source.py
+source=$(nix build .#therock-rocm-source-gfx1151 --no-link --print-out-paths)
+python3 scripts/update-therock-rocm-third-party.py --source "$source"
+nix build .#therock-amd-llvm-gfx1151
+nix build .#therock-rocm-from-source-gfx1151
+```
+
+The update scripts record the upstream source graph in JSON:
+
+- `therock-rocm-source-sources.json`: TheRock URL, ref, resolved revision,
+  target, source fetch policy, and recursive staged-source hash.
+- `therock-rocm-third-party-sources.json`: third-party archive hashes, SPIR-V
+  headers, and the `esmi_ib_library` revision needed by the TheRock build.
+
+The flake reads those JSON files during evaluation. The ROCm build itself must
+not discover new network dependencies or mutate the pins.
+
+The source build is packaged in two stages for faster iteration:
+
+- `therock-amd-llvm-gfx1151` builds TheRock's AMD LLVM, COMGR, and hipcc
+  stages and exports them as a prebuilt TheRock build-tree slice.
+- `therock-rocm-from-source-gfx1151` imports that slice before CMake configure,
+  so TheRock's native `.prebuilt` mechanism skips the compiler rebuild while
+  still building the runtime, math, and RCCL layers from source.
+
+On a new TheRock revision, run the source build once with the reset hash, copy
+Nix's reported recursive source hash back with:
+
+```bash
+python3 scripts/update-therock-rocm-source.py --hash sha256-...
+```
+
+Then rebuild `.#therock-rocm-source-gfx1151`, refresh the third-party JSON from
+that staged source tree, review the JSON diff, and build
+`.#therock-rocm-from-source-gfx1151`. The ROCm build package consumes those
+pinned source snapshots without network access. The default `vllm` source fetch
+disables debug, media, IREE, and ML-framework source trees, leaving the core
+ROCm sources needed for compiler/runtime/math/RCCL:
+
+```text
+base, compilers, rocm-systems, rocm-libraries, math-libs
+```
+
+That is the ROCm side needed before exposing the result as a nixpkgs-compatible
+`rocmPackages` set and rebuilding PyTorch, Triton, AITER, and vLLM against it.
+That is intentionally separate from the runtime-only wrapper above.
 
 ## llama.cpp RPC Servers
 
