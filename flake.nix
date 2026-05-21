@@ -303,6 +303,7 @@
         };
         rpc-server = import ./modules/rpc-server.nix;
         benchmark-runner = import ./modules/benchmark-runner.nix;
+        fastflowlm-server = import ./modules/fastflowlm-server.nix;
         ec-su-axb35 = import ./modules/ec-su-axb35.nix;
         ryzenadj = import ./modules/ryzenadj.nix;
         disko-raid0 = import ./modules/disko-raid0.nix;
