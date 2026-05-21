@@ -42,6 +42,20 @@ in
       description = "Whether to relax sandbox restrictions for GPU access";
     };
 
+    enableNpu = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Expose the AMD Ryzen AI NPU (/dev/accel/accel0 via amdxdna) to
+        sandboxed builds and advertise the `npu-strix` system feature.
+        Required by the FastFlowLM bench derivations.
+
+        Bench models are pulled separately: run
+        `FLM_MODEL_PATH=${"\${cfg.modelsPath}"}/flm flm pull <tag>` once per
+        model before invoking the bench.
+      '';
+    };
+
     ensureModels = mkOption {
       type = types.listOf (
         types.submodule {
@@ -81,7 +95,8 @@ in
       system-features = [
         cfg.gpuTarget
         cfg.cpuTarget
-      ];
+      ]
+      ++ optional cfg.enableNpu "npu-strix";
 
       # Allow GPU access in sandbox
       extra-sandbox-paths = [
@@ -96,6 +111,12 @@ in
         "/dev/kfd"
         "/sys/class/kfd"
         "/sys/class/drm"
+      ]
+      ++ optionals cfg.enableNpu [
+        # FastFlowLM talks to the NPU via XRT, which opens
+        # /dev/accel/accel0 (the amdxdna DRM accel device).
+        "/dev/accel"
+        "/sys/class/accel"
       ]
       ++ optionals isNvidia [
         "/dev/nvidia0"
@@ -123,6 +144,11 @@ in
       # Allow nixbld group to read models
       "A ${cfg.modelsPath} - - - - group:nixbld:r-x"
       "A ${cfg.modelsPath} - - - - default:group:nixbld:r-x"
+    ]
+    ++ optionals cfg.enableNpu [
+      "d ${cfg.modelsPath}/flm 0755 root root -"
+      "A ${cfg.modelsPath}/flm - - - - group:nixbld:r-x"
+      "A ${cfg.modelsPath}/flm - - - - default:group:nixbld:r-x"
     ];
 
     # allow nixbld group to access GPU devices
@@ -133,6 +159,9 @@ in
       ++ [
         ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
         ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
+      ]
+      ++ optionals cfg.enableNpu [
+        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="nixbld", MODE="0660"''
       ]
       ++ optionals isNvidia [
         ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''

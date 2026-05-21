@@ -27,6 +27,31 @@
       url = "git+ssh://trex/home/grw/src/linux-libibverbs-usb4";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # FastFlowLM (NPU LLM runtime). Tracks upstream main; bump with
+    # `nix flake update fastflowlm`. NPU kernel binaries shipped under
+    # src/lib and src/xclbins are proprietary blobs (see LICENSE_BINARY.txt)
+    # that we ship as-is — the host-side runtime above them is MIT.
+    fastflowlm = {
+      url = "github:FastFlowLM/FastFlowLM";
+      flake = false;
+    };
+
+    # XRT and the xdna-driver plugin ship in lockstep through AMD's
+    # lemonade PPA; treat their tags as a matched pair. Bump both at
+    # once when moving versions. The `git+https://` URL with
+    # submodules=1 is required because both repos pull in `aiebu`,
+    # `gsl`, `nlohmann-json`, etc. as git submodules; `github:` URLs
+    # don't recurse.
+    xrt-src = {
+      url = "git+https://github.com/Xilinx/XRT?ref=refs/tags/2.21.75&submodules=1";
+      flake = false;
+    };
+
+    xdna-driver-src = {
+      url = "git+https://github.com/amd/xdna-driver?ref=refs/tags/2.21.75&submodules=1";
+      flake = false;
+    };
   };
 
   outputs =
@@ -61,6 +86,25 @@
             rpcSupport = true;
             rocmGpuTargets = rocmTargets;
           };
+
+          # FastFlowLM NPU stack. xrt+xdna are coupled (matching tags pinned
+          # in the flake inputs); FastFlowLM tracks upstream main. The
+          # `xrt-amdxdna` alias mirrors the combined symlinkJoin name in
+          # nixpkgs PR #513841 for downstream consumers.
+          tokenizers-cpp = prev.callPackage ./pkgs/tokenizers-cpp { };
+
+          xrt = prev.callPackage ./pkgs/xrt {
+            src = inputs.xrt-src;
+            version = "2.21.75";
+            xdnaSrc = inputs.xdna-driver-src;
+          };
+
+          xrt-amdxdna = final.xrt.xdna;
+
+          fastflowlm = prev.callPackage ./pkgs/fastflowlm {
+            inherit (final) tokenizers-cpp xrt;
+            src = inputs.fastflowlm;
+          };
         };
 
       # Python-side extras for RDMA-enabled vllm: rixl (ROCm NIXL port),
@@ -89,7 +133,7 @@
         # that's opt-in via overlays.rocm-narrow because it invalidates
         # downstream caches.
         default = nixpkgs.lib.composeManyExtensions [
-          inputs.usb4-rdma.overlays.vllm
+          inputs.usb4-rdma.overlays.rdma-core-usb4
           vllmRdmaExtrasOverlay
           strixAdditionsOverlay
         ];
@@ -98,7 +142,7 @@
         # Useful for non-strix consumers that want vllm+rixl+lmcache but
         # not ec-su/llama-cpp-rocm.
         vllm-rdma = nixpkgs.lib.composeManyExtensions [
-          inputs.usb4-rdma.overlays.vllm
+          inputs.usb4-rdma.overlays.rdma-core-usb4
           vllmRdmaExtrasOverlay
         ];
 
@@ -215,6 +259,13 @@
           }) benchs
         ) benchmarks;
 
+      mkFastflowlmBenchmarks =
+        pkgs:
+        (import ./bench/fastflowlm.nix {
+          inherit pkgs;
+          inherit (pkgs) fastflowlm;
+        }).benchmarks;
+
       mkSourceCheck =
         pkgs: name: nativeBuildInputs: command:
         pkgs.runCommandLocal "ci-${name}"
@@ -284,11 +335,16 @@
           default = pkgs.llama-cpp-rocm;
           inherit (pkgs)
             ec-su-axb35-monitor
+            fastflowlm
+            tokenizers-cpp
+            xrt
+            xrt-amdxdna
             llama-cpp-rocm
             llama-cpp-vulkan
             ;
         }
         // mkBenchmarkPackages pkgs
+        // mkFastflowlmBenchmarks pkgs
       );
 
       apps = perSystem (
@@ -314,6 +370,12 @@
               ''
             );
             meta.description = "Run llama-server with the Strix Halo ROCm environment";
+          };
+
+          flm = {
+            type = "app";
+            program = "${pkgs.fastflowlm}/bin/flm";
+            meta.description = "FastFlowLM CLI on the AMD Ryzen AI NPU (Strix Halo XDNA2)";
           };
         }
       );

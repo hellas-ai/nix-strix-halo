@@ -36,6 +36,22 @@
         "type": "github"
       }
     },
+    "fastflowlm": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778687531,
+        "narHash": "sha256-hJNZntx0GjHHmKNRCmJ3VLz7C68Y+XjrnLPHplnJJJM=",
+        "owner": "FastFlowLM",
+        "repo": "FastFlowLM",
+        "rev": "c99e5ae21b1e72d3e32fca1eb379b49d50d33756",
+        "type": "github"
+      },
+      "original": {
+        "owner": "FastFlowLM",
+        "repo": "FastFlowLM",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -122,8 +138,11 @@
       "inputs": {
         "disko": "disko",
         "ec-su-axb35": "ec-su-axb35",
+        "fastflowlm": "fastflowlm",
         "nixpkgs": "nixpkgs",
-        "usb4-rdma": "usb4-rdma"
+        "usb4-rdma": "usb4-rdma",
+        "xdna-driver-src": "xdna-driver-src",
+        "xrt-src": "xrt-src"
       }
     },
     "systems": {
@@ -271,6 +290,44 @@
         "ref": "v3.6.0",
         "repo": "triton",
         "type": "github"
+      }
+    },
+    "xdna-driver-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1770664675,
+        "narHash": "sha256-bBiI42bwap6O59MQdIylX7uz+fLUF75RTyNWTJfAFds=",
+        "ref": "refs/tags/2.21.75",
+        "rev": "beb9e450fe123ecdf395453971576179cedcf1dd",
+        "revCount": 865,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/amd/xdna-driver"
+      },
+      "original": {
+        "ref": "refs/tags/2.21.75",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/amd/xdna-driver"
+      }
+    },
+    "xrt-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1770151476,
+        "narHash": "sha256-sujiSRZuIelhvUew7yeCfApAmp/Pf2+F38KO9cxI2HE=",
+        "ref": "refs/tags/2.21.75",
+        "rev": "4eb1f4392a012b4e6eca759762389c612537f7c7",
+        "revCount": 8678,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/Xilinx/XRT"
+      },
+      "original": {
+        "ref": "refs/tags/2.21.75",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/Xilinx/XRT"
       }
     }
   },
