@@ -34,6 +34,7 @@ Main package outputs:
 - `packages.x86_64-linux.vllm-rocm-gfx1151`
 - `packages.x86_64-linux.vllm-env-*`
 - `packages.x86_64-linux.bench-*`
+- `packages.aarch64-darwin.ds4`
 
 Main app outputs:
 
@@ -43,6 +44,8 @@ Main app outputs:
 - `apps.x86_64-linux.llama-{cli,server}-master-<gpu suffix>`
 - `apps.x86_64-linux.therock-rocm-gfx1151-env`
 - `apps.x86_64-linux.vllm-therock-runtime-gfx1151`
+- `apps.aarch64-darwin.ds4`
+- `apps.aarch64-darwin.ds4-{server,bench,download-model}`
 
 Package-set outputs:
 
@@ -145,7 +148,7 @@ nix run .#vllm-therock-runtime-gfx1151 -- --help
 nix run .#vllm-therock-runtime-gfx1151 -- serve Qwen/Qwen2.5-7B-Instruct
 ```
 
-That wrapper runs the existing `usb4-rdma` Strix vLLM environment with TheRock
+That wrapper runs the existing `thunderbolt-ibverbs` Strix vLLM environment with TheRock
 first on `PATH` and `LD_LIBRARY_PATH`. It is useful for runtime compatibility
 testing, but it is not the same as rebuilding PyTorch, vLLM, AITER, or Triton
 against TheRock. Expect it to build the current nixpkgs ROCm vLLM closure.

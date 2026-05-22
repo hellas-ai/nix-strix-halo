@@ -18,10 +18,8 @@
     };
 
     # thunderbolt-ibverbs is the lower-layer RDMA stack: kernel patches,
-    # module packaging, and rdma-core-usb4. Input is named `usb4-rdma`
-    # for historical reasons; the underlying repo is now
-    # /mnt/Home/src/thunderbolt-ibverbs.
-    usb4-rdma = {
+    # module packaging, and rdma-core-usb4.
+    thunderbolt-ibverbs = {
       url = "git+file:///mnt/Home/src/thunderbolt-ibverbs";
       inputs.nixpkgs.follows = "nixpkgs";
     };
@@ -39,6 +37,11 @@
     # that we ship as-is — the host-side runtime above them is MIT.
     fastflowlm = {
       url = "github:FastFlowLM/FastFlowLM";
+      flake = false;
+    };
+
+    ds4 = {
+      url = "github:antirez/ds4";
       flake = false;
     };
 
@@ -74,7 +77,9 @@
       inherit (nixpkgs) lib;
 
       systems = [ "x86_64-linux" ];
+      darwinSystems = [ "aarch64-darwin" ];
       forAllSystems = lib.genAttrs systems;
+      forAllDarwinSystems = lib.genAttrs darwinSystems;
 
       hardwareTargets = import ./lib/hardware.nix { inherit lib; };
       defaultRocmTarget = hardwareTargets.defaultRocmTarget;
@@ -1759,7 +1764,7 @@
         # that's opt-in via overlays.rocm-narrow because it invalidates
         # downstream caches.
         default = nixpkgs.lib.composeManyExtensions [
-          inputs.usb4-rdma.overlays.rdma-core-usb4
+          inputs.thunderbolt-ibverbs.overlays.rdma-core-usb4
           vllmRdmaExtrasOverlay
           therockPythonOverlay
           strixAdditionsOverlay
@@ -1770,14 +1775,14 @@
         # Useful for non-strix consumers that want vllm+rixl+lmcache but
         # not ec-su/llama-cpp-rocm.
         vllm-rdma = nixpkgs.lib.composeManyExtensions [
-          inputs.usb4-rdma.overlays.rdma-core-usb4
+          inputs.thunderbolt-ibverbs.overlays.rdma-core-usb4
           vllmRdmaExtrasOverlay
         ];
 
         # vLLM with Python dependencies resolved against TheRock's pinned
         # cp312 Torch/Triton/ROCm wheels and the TheRock gfx1151 SDK.
         vllm-therock = nixpkgs.lib.composeManyExtensions [
-          inputs.usb4-rdma.overlays.rdma-core-usb4
+          inputs.thunderbolt-ibverbs.overlays.rdma-core-usb4
           vllmRdmaExtrasOverlay
           therockPythonOverlay
           strixAdditionsOverlay
@@ -1870,6 +1875,21 @@
             cudaSupport = true;
             cudaCapabilities = [ "8.9" ];
           };
+        };
+
+      darwinPackagesFor =
+        system:
+        import nixpkgs {
+          inherit system;
+        };
+
+      ds4Version = "unstable-${inputs.ds4.shortRev or inputs.ds4.rev or "unknown"}";
+
+      ds4For =
+        pkgs:
+        pkgs.callPackage ./pkgs/ds4 {
+          src = inputs.ds4;
+          version = ds4Version;
         };
 
       perSystem =
@@ -2020,74 +2040,87 @@
         }
       );
 
-      packages = perSystem (
-        { pkgs, system, ... }:
-        let
-          rocmLlamaPackageNames = lib.concatMap (target: [
-            "llama-cpp-rocm-${target.packageSuffix}"
-            "llama-cpp-master-rocm-${target.packageSuffix}"
-          ]) hardwareTargets.rocmTargets;
-          # Separate pkgs instance with cudaSupport=true so the CUDA
-          # variants below build against the cuda toolchain instead of
-          # the default ROCm-flavoured pkgs.
-          cudaPkgs = cudaPackagesFor system;
-        in
-        {
-          default = pkgs.llama-cpp-rocm;
-          llama-cpp-cuda = cudaPkgs.llama-cpp-cuda;
-          llama-cpp-master-cuda = cudaPkgs.llama-cpp-master-cuda;
-          inherit (pkgs)
-            ec-su-axb35-monitor
-            fastflowlm
-            tokenizers-cpp
-            xrt
-            xrt-amdxdna
-            llama-cpp-rocm
-            llama-cpp-rocm-therock
-            llama-cpp-vulkan
-            llama-cpp-master-rocm
-            llama-cpp-master-rocm-therock
-            llama-cpp-master-vulkan
-            rdma-core-usb4
-            rocm-xio-gfx1151
-            therock-python-gfx1151
-            therock-python-wheels-gfx1151
-            therock-python-overlay-smoke-gfx1151
-            therock-amd-llvm-gfx1151
-            therock-rocm-gfx1151
-            therock-rocm-gfx1151-env
-            therock-rocm-gfx1151-rocshmem-env
-            therock-rocm-source-gfx1151
-            therock-rocm-from-source-gfx1151
-            vllm-rocm-lemonade-gfx1151
-            vllm-env-lemonade-gfx1151
-            vllm-lemonade-prime-cache-gfx1151
-            vllm-lemonade-qwen36-27b-cache-gfx1151
-            vllm-lemonade-qwen36-27b-gfx1151
-            gemma4-31b-it-text-config
-            vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151
-            vllm-lemonade-gemma4-31b-q8-gfx1151
-            vllm-lemonade-gemma4-31b-q8-prime-gfx1151
-            vllm-rocm-therock-gfx1151
-            vllm-env-therock-gfx1151
-            vllm-env-therock-aiter-gfx1151
-            vllm-aiter-jit-therock-gfx1151
-            vllm-aiter-therock-gfx1151
-            ;
-        }
-        // lib.genAttrs rocmLlamaPackageNames (name: pkgs.${name})
-        // mkBenchmarkPackages pkgs
-        // mkFastflowlmBenchmarks pkgs
-      );
+      packages =
+        (perSystem (
+          { pkgs, system, ... }:
+          let
+            rocmLlamaPackageNames = lib.concatMap (target: [
+              "llama-cpp-rocm-${target.packageSuffix}"
+              "llama-cpp-master-rocm-${target.packageSuffix}"
+            ]) hardwareTargets.rocmTargets;
+            # Separate pkgs instance with cudaSupport=true so the CUDA
+            # variants below build against the cuda toolchain instead of
+            # the default ROCm-flavoured pkgs.
+            cudaPkgs = cudaPackagesFor system;
+          in
+          {
+            default = pkgs.llama-cpp-rocm;
+            llama-cpp-cuda = cudaPkgs.llama-cpp-cuda;
+            llama-cpp-master-cuda = cudaPkgs.llama-cpp-master-cuda;
+            inherit (pkgs)
+              ec-su-axb35-monitor
+              fastflowlm
+              tokenizers-cpp
+              xrt
+              xrt-amdxdna
+              llama-cpp-rocm
+              llama-cpp-rocm-therock
+              llama-cpp-vulkan
+              llama-cpp-master-rocm
+              llama-cpp-master-rocm-therock
+              llama-cpp-master-vulkan
+              rdma-core-usb4
+              rocm-xio-gfx1151
+              therock-python-gfx1151
+              therock-python-wheels-gfx1151
+              therock-python-overlay-smoke-gfx1151
+              therock-amd-llvm-gfx1151
+              therock-rocm-gfx1151
+              therock-rocm-gfx1151-env
+              therock-rocm-gfx1151-rocshmem-env
+              therock-rocm-source-gfx1151
+              therock-rocm-from-source-gfx1151
+              vllm-rocm-lemonade-gfx1151
+              vllm-env-lemonade-gfx1151
+              vllm-lemonade-prime-cache-gfx1151
+              vllm-lemonade-qwen36-27b-cache-gfx1151
+              vllm-lemonade-qwen36-27b-gfx1151
+              gemma4-31b-it-text-config
+              vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151
+              vllm-lemonade-gemma4-31b-q8-gfx1151
+              vllm-lemonade-gemma4-31b-q8-prime-gfx1151
+              vllm-rocm-therock-gfx1151
+              vllm-env-therock-gfx1151
+              vllm-env-therock-aiter-gfx1151
+              vllm-aiter-jit-therock-gfx1151
+              vllm-aiter-therock-gfx1151
+              ;
+          }
+          // lib.genAttrs rocmLlamaPackageNames (name: pkgs.${name})
+          // mkBenchmarkPackages pkgs
+          // mkFastflowlmBenchmarks pkgs
+        ))
+        // forAllDarwinSystems (
+          system:
+          let
+            pkgs = darwinPackagesFor system;
+            ds4 = ds4For pkgs;
+          in
+          {
+            default = ds4;
+            inherit ds4;
+          }
+        );
 
-      apps = perSystem (
-        { pkgs, ... }:
-        let
-          mkHsaOverrideExport =
-            target:
-            lib.optionalString (
-              target.hsaOverride != null
-            ) ''export HSA_OVERRIDE_GFX_VERSION="${target.hsaOverride}"'';
+      apps =
+        (perSystem (
+          { pkgs, ... }:
+          let
+            mkHsaOverrideExport =
+              target:
+              lib.optionalString (
+                target.hsaOverride != null
+              ) ''export HSA_OVERRIDE_GFX_VERSION="${target.hsaOverride}"'';
 
           mkLlamaApp =
             {
@@ -2267,11 +2300,48 @@
             program = "${pkgs.fastflowlm}/bin/flm";
             meta.description = "FastFlowLM CLI on the AMD Ryzen AI NPU (Strix Halo XDNA2)";
           };
-        }
-        // defaultLlamaApps
-        // defaultTherockLlamaApps
-        // targetLlamaApps
-      );
+          }
+          // defaultLlamaApps
+          // defaultTherockLlamaApps
+          // targetLlamaApps
+        ))
+        // forAllDarwinSystems (
+          system:
+          let
+            ds4 = self.packages.${system}.ds4;
+          in
+          {
+            default = {
+              type = "app";
+              program = "${ds4}/bin/ds4";
+              meta.description = "Run DwarfStar 4 with Metal";
+            };
+
+            ds4 = {
+              type = "app";
+              program = "${ds4}/bin/ds4";
+              meta.description = "Run DwarfStar 4 with Metal";
+            };
+
+            ds4-server = {
+              type = "app";
+              program = "${ds4}/bin/ds4-server";
+              meta.description = "Run the DwarfStar 4 HTTP server with Metal";
+            };
+
+            ds4-bench = {
+              type = "app";
+              program = "${ds4}/bin/ds4-bench";
+              meta.description = "Run the DwarfStar 4 benchmark with Metal";
+            };
+
+            ds4-download-model = {
+              type = "app";
+              program = "${ds4}/bin/ds4-download-model";
+              meta.description = "Download DS4 DeepSeek V4 Flash GGUF weights";
+            };
+          }
+        );
 
       devShells = perSystem (
         { pkgs, ... }:

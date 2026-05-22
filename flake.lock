@@ -20,6 +20,22 @@
         "type": "github"
       }
     },
+    "ds4": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779363163,
+        "narHash": "sha256-AnUTCeuExSxd4YZR+6iqMbYvEtQHgiLdITb6ert/NHE=",
+        "owner": "antirez",
+        "repo": "ds4",
+        "rev": "8d576642c39b9a2d782a80159ba84ef5a81c0b81",
+        "type": "github"
+      },
+      "original": {
+        "owner": "antirez",
+        "repo": "ds4",
+        "type": "github"
+      }
+    },
     "ec-su-axb35": {
       "flake": false,
       "locked": {
@@ -154,12 +170,13 @@
     "root": {
       "inputs": {
         "disko": "disko",
+        "ds4": "ds4",
         "ec-su-axb35": "ec-su-axb35",
         "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",
         "nixpkgs": "nixpkgs",
         "rocm-xio": "rocm-xio",
-        "usb4-rdma": "usb4-rdma",
+        "thunderbolt-ibverbs": "thunderbolt-ibverbs",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"
       }
@@ -179,7 +196,7 @@
         "type": "github"
       }
     },
-    "usb4-rdma": {
+    "thunderbolt-ibverbs": {
       "inputs": {
         "flake-utils": "flake-utils",
         "linux-src": "linux-src",
