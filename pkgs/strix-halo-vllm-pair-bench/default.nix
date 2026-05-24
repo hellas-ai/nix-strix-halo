@@ -4,10 +4,11 @@
 # scenarios used for kernel-module / transport regression testing on a
 # strix-1/strix-2 pair:
 #
-#   qwen-peak      Qwen3-0.6B @ concurrency 256, TP=2 RDMA vs solo
-#                  (peak aggregate throughput — ~2700 tok/s on old module).
-#   llama-tp2-win  Meta-Llama-3.1-8B @ concurrency 256, TP=2 RDMA vs solo
-#                  (~890 tok/s RDMA vs ~565 tok/s solo).
+#   qwen-peak      Qwen3-0.6B @ concurrency 256, TP=2 RDMA vs solo.
+#   llama-tp2-win  Meta-Llama-3.1-8B @ concurrency 256, TP=2 RDMA vs solo.
+#
+# Both scenarios use longer prompts and completions than the broad matrix
+# defaults so the measured section dominates startup and JIT overhead.
 #
 # All toolchain (gcc-wrapper, rdma-core-usb4, vllm-env, openssh, rsync)
 # is built via nix and either baked into this derivation or `nix copy`'d
@@ -57,6 +58,10 @@ writeShellApplication {
     OUT_DIR=""
     DRY_RUN=0
     EXTRA_TRANSPORTS=""
+    PROMPT_SECTIONS=36
+    MAX_MODEL_LEN=2048
+    CLIENT_TIMEOUT_S=1800
+    STARTUP_TIMEOUT_S=600
 
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -86,13 +91,13 @@ writeShellApplication {
         MODELS="Qwen/Qwen3-0.6B"
         BASE_TRANSPORTS="solo usb4_rdma"
         CONCURRENCIES="256"
-        MAX_TOKENS=64
+        MAX_TOKENS=256
         ;;
       llama-tp2-win)
         MODELS="unsloth/Meta-Llama-3.1-8B-Instruct"
         BASE_TRANSPORTS="solo usb4_rdma"
         CONCURRENCIES="256"
-        MAX_TOKENS=64
+        MAX_TOKENS=256
         ;;
       *)
         echo "scenario must be one of: qwen-peak | llama-tp2-win (got '$SCENARIO')" >&2
@@ -126,6 +131,8 @@ writeShellApplication {
     echo "worker:          $WORKER"
     echo "transports:      $TRANSPORTS"
     echo "concurrencies:   $CONCURRENCIES"
+    echo "max_tokens:      $MAX_TOKENS"
+    echo "prompt_sections: $PROMPT_SECTIONS"
     echo "usb4_hca:        $USB4_HCA"
     echo "vllm-env:        $VLLM_ENV"
     echo "gcc-wrapper:     $GCC_PREFIX"
@@ -156,11 +163,24 @@ writeShellApplication {
     TRANSPORTS="$TRANSPORTS"
     CONCURRENCIES="$CONCURRENCIES"
     MAX_TOKENS=$MAX_TOKENS
+    MAX_MODEL_LEN=$MAX_MODEL_LEN
+    PROMPT_SECTIONS=$PROMPT_SECTIONS
+    CLIENT_TIMEOUT_S=$CLIENT_TIMEOUT_S
+    STARTUP_TIMEOUT_S=$STARTUP_TIMEOUT_S
     SAMPLE_CASES=0
     SETUP_RXE=0
     RUN_ID=$RUN_ID
     LOG_DIR=$REMOTE_LOG_DIR
     OUTPUT_CSV=$REMOTE_CSV
+    NCCL_IB_GID_INDEX=1
+    NCCL_NET_MERGE_LEVEL=LOC
+    NCCL_MIN_NCHANNELS=4
+    NCCL_MAX_NCHANNELS=4
+    NCCL_IB_QPS_PER_CONNECTION=1
+    NCCL_IB_SPLIT_DATA_ON_QPS=0
+    NCCL_DEBUG_LEVEL=INFO
+    NCCL_DEBUG_SUBSYS=INIT,NET,ENV
+    RAY_DEDUP_LOGS=0
     EOF
     )
 
