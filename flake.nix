@@ -45,6 +45,11 @@
       flake = false;
     };
 
+    ds4-hip = {
+      url = "github:ejpir/ds4-hip/rocm-upstream-shape-cyberneurova";
+      flake = false;
+    };
+
     rocm-xio = {
       url = "git+file:///mnt/Home/src/rocm-xio";
       flake = false;
@@ -82,7 +87,7 @@
       forAllDarwinSystems = lib.genAttrs darwinSystems;
 
       hardwareTargets = import ./lib/hardware.nix { inherit lib; };
-      defaultRocmTarget = hardwareTargets.defaultRocmTarget;
+      inherit (hardwareTargets) defaultRocmTarget;
       rocmTargets = defaultRocmTarget.buildTargets;
       therockRocmSources = builtins.fromJSON (builtins.readFile ./therock-rocm-sources.json);
       therockPythonWheelSources = builtins.fromJSON (
@@ -93,1669 +98,45 @@
         builtins.readFile ./therock-rocm-third-party-sources.json
       );
 
-      strixAdditionsOverlay =
-        final: prev:
-        let
-          ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
-            ec-su-axb35-src = inputs.ec-su-axb35;
-          };
-          therockGfx1151 = therockRocmSources.linux.gfx1151;
-
-          # Add libibverbs (rdma-core-usb4) to a llama-cpp variant so ggml's
-          # RPC backend auto-detects it at cmake configure time and enables
-          # GGML_RPC_RDMA. We also force the flag ON explicitly so a future
-          # nixpkgs bump that flips the default doesn't silently disable it.
-          applyRdmaSupport =
-            pkg:
-            pkg.overrideAttrs (old: {
-              buildInputs = (old.buildInputs or [ ]) ++ [ final.rdma-core-usb4 ];
-              cmakeFlags = (old.cmakeFlags or [ ]) ++ [
-                (prev.lib.cmakeBool "GGML_RPC_RDMA" true)
-              ];
-            });
-
-          # Override `src` to upstream ggml-org master, leaving the rest of
-          # the nixpkgs derivation (cmake config, backend flags, deps) intact.
-          # The attribute name is set as `pname` so derivation store paths
-          # disambiguate from the nixpkgs-pinned variants.
-          #
-          # Master moved the embedded web UI from tools/server/webui/ to
-          # tools/ui/ and made it optional via LLAMA_BUILD_UI. The nixpkgs
-          # derivation's npm plumbing hard-codes the old path, so we strip
-          # it out and set LLAMA_BUILD_UI=OFF — llama-server still builds
-          # (linking a stub llama-ui static lib) and reports UI as disabled
-          # at runtime. Restore the UI separately if you actually need it.
-          applyMasterSrc =
-            attrName: pkg:
-            pkg.overrideAttrs (old: {
-              pname = attrName;
-              version =
-                "master-" + (inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown");
-              src = inputs.llama-cpp-master;
-              npmDeps = null;
-              nativeBuildInputs = prev.lib.filter (x: x.pname or "" != "npm-config-hook") (
-                old.nativeBuildInputs or [ ]
-              );
-              preConfigure = ''
-                prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${
-                  inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "master"
-                }"
-              '';
-              cmakeFlags = (old.cmakeFlags or [ ]) ++ [
-                (prev.lib.cmakeBool "LLAMA_BUILD_UI" false)
-                # LLAMA_BUILD_NUMBER is substituted into common/build-info.cpp
-                # as `int LLAMA_BUILD_NUMBER = @LLAMA_BUILD_NUMBER@;`, so it
-                # must be a numeric literal. nixpkgs's cmakeFeature already
-                # emitted `-DLLAMA_BUILD_NUMBER:STRING=master-6a257d4` (our
-                # non-numeric version above); the duplicate here wins by
-                # cmake's last-D-flag semantics. Commit ref still lives in
-                # LLAMA_BUILD_COMMIT (set by preConfigure).
-                (prev.lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
-              ];
-            });
-
-          rocmHardwareTargets = hardwareTargets.rocmTargets;
-
-          # Backend "bases": before applyRdmaSupport / applyMasterSrc.
-          mkLlamaCppRocmBaseFor =
-            target:
-            prev.llama-cpp.override {
-              rocmSupport = true;
-              rpcSupport = true;
-              rocmGpuTargets = target.buildTargets;
-            };
-
-          mkTargetedPackage =
-            pname: pkg:
-            pkg.overrideAttrs (_old: {
-              inherit pname;
-            });
-
-          mkTargetPackageAttrs =
-            prefix: mkPackage:
-            builtins.listToAttrs (
-              map (target: {
-                name = "${prefix}-${target.packageSuffix}";
-                value = mkPackage target;
-              }) rocmHardwareTargets
-            );
-
-          llamaCppRocmTargetPackages = mkTargetPackageAttrs "llama-cpp-rocm" (
-            target:
-            applyRdmaSupport (
-              mkTargetedPackage "llama-cpp-rocm-${target.packageSuffix}" (mkLlamaCppRocmBaseFor target)
-            )
-          );
-
-          llamaCppMasterRocmTargetPackages = mkTargetPackageAttrs "llama-cpp-master-rocm" (
-            target:
-            applyRdmaSupport (
-              applyMasterSrc "llama-cpp-master-rocm-${target.packageSuffix}" (mkLlamaCppRocmBaseFor target)
-            )
-          );
-
-          llamaCppRocmBase = mkLlamaCppRocmBaseFor defaultRocmTarget;
-
-          llamaCppRocmTherockBase =
-            let
-              sdkBase = final.therock-rocm-gfx1151;
-              sdk = sdkBase // {
-                localGpuTargets = rocmTargets;
-                gpuTargets = rocmTargets;
-                # llama-cpp's default cmakeFlags read
-                # ${rocmPackages.clr.hipClangPath}/clang++. We override
-                # CMAKE_HIP_COMPILER below, but the attribute must exist for
-                # the override to evaluate.
-                hipClangPath = "${sdkBase}/llvm/bin";
-              };
-              therockRocmPackages = {
-                clr = sdk;
-                hipblas = sdk;
-                rocblas = sdk;
-              };
-            in
-            (prev.llama-cpp.override {
-              rocmSupport = true;
-              rpcSupport = true;
-              rocmGpuTargets = rocmTargets;
-              rocmPackages = therockRocmPackages;
-            }).overrideAttrs
-              (old: {
-                pname = "llama-cpp-rocm-therock";
-                buildInputs = (old.buildInputs or [ ]) ++ [ sdkBase ];
-                cmakeFlags = (old.cmakeFlags or [ ]) ++ [
-                  "-DCMAKE_HIP_COMPILER=${sdkBase}/bin/therock-hip-clang++"
-                  "-DCMAKE_HIP_COMPILER_ROCM_ROOT=${sdkBase}"
-                  # Bake ${sdkBase}/lib into the RUNPATH of every linked
-                  # output (executables and shared libraries) so libggml-hip.so
-                  # can find libhipblas.so.3/libamdhip64.so.7 at runtime. The
-                  # HIP-language link is performed by therock-hip-clang++,
-                  # which bypasses cc-wrapper / NIX_LDFLAGS, so setting this
-                  # via CMake is the only way to reach it. Also covers the
-                  # postInstall shell-completion step which invokes
-                  # llama-server before the fixup-phase patchelf would run.
-                  "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-rpath,${sdkBase}/lib"
-                  "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath,${sdkBase}/lib"
-                ];
-                env = (old.env or { }) // {
-                  HIP_PATH = "${sdkBase}";
-                  HIP_PLATFORM = "amd";
-                  # -L lets the host-side link of rpc-server resolve symbols
-                  # in libamdhip64.so.7 (pulled in transitively via
-                  # libggml-hip.so's DT_NEEDED).
-                  NIX_LDFLAGS = "${(old.env or { }).NIX_LDFLAGS or ""} -L${sdkBase}/lib";
-                };
-              });
-
-          llamaCppVulkanBase = prev.llama-cpp.override {
-            vulkanSupport = true;
-            rpcSupport = true;
-          };
-
-          # CUDA variant for NVIDIA hosts (e.g. fuckup, RTX 4090 / sm89).
-          # Skips applyRdmaSupport: NVIDIA hosts don't ship the
-          # usb4_rdma kernel module / rdma-core-usb4 userspace, so
-          # linking libibverbs is just dead weight there. cudaSupport
-          # / cudaCapabilities come from the consuming pkgs instance
-          # (e.g. nixos-config's pkgsForCuda or our cudaPackagesFor
-          # below).
-          llamaCppCudaBase = prev.llama-cpp.override {
-            cudaSupport = true;
-            rpcSupport = true;
-          };
-        in
-        {
-          ec-su-axb35 = ecPackages.kernelModule;
-          ec-su-axb35-monitor = ecPackages.monitor;
-
-          # Backend × source-pin matrix. RDMA support is universal for
-          # strix-halo variants (every ROCm/Vulkan variant links
-          # libibverbs via rdma-core-usb4 and enables GGML_RPC_RDMA).
-          # CUDA variants stay RDMA-free — see llamaCppCudaBase above.
-          # The `master` axis swaps in upstream ggml-org/master via
-          # the llama-cpp-master flake input.
-          llama-cpp-rocm = applyRdmaSupport llamaCppRocmBase;
-          llama-cpp-rocm-therock = applyRdmaSupport llamaCppRocmTherockBase;
-          llama-cpp-vulkan = applyRdmaSupport llamaCppVulkanBase;
-          llama-cpp-cuda = llamaCppCudaBase;
-          llama-cpp-master-rocm = applyRdmaSupport (applyMasterSrc "llama-cpp-master-rocm" llamaCppRocmBase);
-          llama-cpp-master-rocm-therock = applyRdmaSupport (
-            applyMasterSrc "llama-cpp-master-rocm-therock" llamaCppRocmTherockBase
-          );
-          llama-cpp-master-vulkan = applyRdmaSupport (
-            applyMasterSrc "llama-cpp-master-vulkan" llamaCppVulkanBase
-          );
-          llama-cpp-master-cuda = applyMasterSrc "llama-cpp-master-cuda" llamaCppCudaBase;
-
-          therock-rocm-gfx1151 = prev.callPackage ./pkgs/therock-rocm-sdk {
-            target = "gfx1151";
-            inherit (therockGfx1151) version url hash;
-          };
-
-          vllm-rocm-lemonade-gfx1151 = prev.callPackage ./pkgs/lemonade-vllm-rocm {
-            target = "gfx1151";
-            releaseTag = "vllm0.21.0-rocm7.13.0-gfx1151";
-          };
-
-          vllm-env-lemonade-gfx1151 =
-            let
-              lemonade = final.vllm-rocm-lemonade-gfx1151;
-              pythonExtrasEnv = final.python312.withPackages (ps: [
-                ps.ray
-                ps.rixl
-              ]);
-              lemonadeSite = "${lemonade}/lib/python3.12/site-packages";
-              pythonExtrasSite = "${pythonExtrasEnv}/${final.python312.sitePackages}";
-              rocmCore = "${lemonade}/lib/python3.12/site-packages/_rocm_sdk_core";
-            in
-            prev.runCommand "vllm-env-lemonade-gfx1151"
-              {
-                nativeBuildInputs = [
-                  prev.makeWrapper
-                ];
-              }
-              ''
-                mkdir -p "$out/bin"
-
-                makeWrapper "${lemonade}/bin/vllm" "$out/bin/vllm" \
-                  --set ROCR "${rocmCore}/lib" \
-                  --set RCCL_ROCR_PATH "${rocmCore}/lib" \
-                  --set TRITON_LIBHIP_PATH "${rocmCore}/lib/libamdhip64.so" \
-                  --set PYTHONPATH "${lemonadeSite}:${pythonExtrasSite}" \
-                  --prefix PATH : "${pythonExtrasEnv}/bin" \
-                  --prefix PATH : "${lemonade}/bin"
-
-                makeWrapper "${lemonade}/bin/python3" "$out/bin/ray" \
-                  --add-flags "-m ray.scripts.scripts" \
-                  --set HSA_OVERRIDE_GFX_VERSION 11.5.1 \
-                  --set HSA_NO_SCRATCH_RECLAIM 1 \
-                  --set HSA_ENABLE_INTERRUPT 0 \
-                  --set HIP_PLATFORM amd \
-                  --set GPU_ARCHS gfx1151 \
-                  --set PYTORCH_ROCM_ARCH gfx1151 \
-                  --set FLASH_ATTENTION_TRITON_AMD_ENABLE TRUE \
-                  --set TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL 1 \
-                  --set ROCM_HOME "${rocmCore}" \
-                  --set ROCM_PATH "${rocmCore}" \
-                  --set HIP_PATH "${rocmCore}" \
-                  --set ROCR "${rocmCore}/lib" \
-                  --set RCCL_ROCR_PATH "${rocmCore}/lib" \
-                  --set TRITON_LIBHIP_PATH "${rocmCore}/lib/libamdhip64.so" \
-                  --set DEVICE_LIB_PATH "${rocmCore}/lib/llvm/amdgcn/bitcode" \
-                  --set HIP_DEVICE_LIB_PATH "${rocmCore}/lib/llvm/amdgcn/bitcode" \
-                  --set CC "${prev.stdenv.cc}/bin/cc" \
-                  --set CXX "${prev.stdenv.cc}/bin/c++" \
-                  --set PYTHONPATH "${lemonadeSite}:${pythonExtrasSite}" \
-                  --prefix PATH : "${lemonade}/bin" \
-                  --prefix PATH : "${lib.makeBinPath [ prev.stdenv.cc ]}" \
-                  --set PYTHONNOUSERSITE true \
-                  --run 'export LD_PRELOAD="${lemonade}/lib/libvllm-rocm-c10-hip-compat.so''${LD_PRELOAD:+ $LD_PRELOAD}"'
-
-                makeWrapper "${lemonade}/bin/python3" "$out/bin/python3" \
-                  --set PYTHONPATH "${lemonadeSite}:${pythonExtrasSite}" \
-                  --set PYTHONNOUSERSITE true
-                makeWrapper "${lemonade}/bin/python3" "$out/bin/python" \
-                  --set PYTHONPATH "${lemonadeSite}:${pythonExtrasSite}" \
-                  --set PYTHONNOUSERSITE true
-              '';
-
-          # FastFlowLM NPU stack. xrt+xdna are coupled (matching tags pinned
-          # in the flake inputs); FastFlowLM tracks upstream main. The
-          # `xrt-amdxdna` alias mirrors the combined symlinkJoin name in
-          # PR #513841 for downstream consumers.
-          tokenizers-cpp = prev.callPackage ./pkgs/tokenizers-cpp { };
-
-          xrt = prev.callPackage ./pkgs/xrt {
-            src = inputs.xrt-src;
-            version = "2.21.75";
-            xdnaSrc = inputs.xdna-driver-src;
-          };
-
-          xrt-amdxdna = final.xrt.xdna;
-
-          fastflowlm = prev.callPackage ./pkgs/fastflowlm {
-            inherit (final) tokenizers-cpp xrt;
-            src = inputs.fastflowlm;
-          };
-
-          vllm-lemonade-prime-cache-gfx1151 = prev.writeShellApplication {
-            name = "vllm-lemonade-prime-cache-gfx1151";
-            runtimeInputs = [
-              prev.coreutils
-            ];
-            text = ''
-              set -euo pipefail
-
-              model="''${1:-Qwen/Qwen3.6-27B}"
-              if [ "$#" -gt 0 ]; then
-                shift
-              fi
-
-              cache_root="''${VLLM_LEMONADE_CACHE_ROOT:-''${XDG_CACHE_HOME:-''${HOME:-/tmp}/.cache}/vllm/lemonade-gfx1151}"
-              export VLLM_CACHE_ROOT="''${VLLM_CACHE_ROOT:-$cache_root}"
-              export TRITON_CACHE_DIR="''${TRITON_CACHE_DIR:-$VLLM_CACHE_ROOT/triton_cache}"
-              export TORCHINDUCTOR_CACHE_DIR="''${TORCHINDUCTOR_CACHE_DIR:-$VLLM_CACHE_ROOT/inductor_cache}"
-              export HF_HOME="''${HF_HOME:-/models/.cache/huggingface}"
-              export VLLM_LOGGING_LEVEL="''${VLLM_LOGGING_LEVEL:-INFO}"
-              export TRITON_CACHE_AUTOTUNING="''${TRITON_CACHE_AUTOTUNING:-1}"
-
-              mkdir -p "$VLLM_CACHE_ROOT" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
-
-              echo "Priming Lemonade vLLM ROCm cache"
-              echo "  model:             $model"
-              echo "  VLLM_CACHE_ROOT:   $VLLM_CACHE_ROOT"
-              echo "  TRITON_CACHE_DIR:  $TRITON_CACHE_DIR"
-              echo "  HF_HOME:           $HF_HOME"
-
-              exec "${final.vllm-rocm-lemonade-gfx1151}/bin/vllm" bench throughput \
-                --model "$model" \
-                --dataset-name random \
-                --num-prompts "''${VLLM_PRIME_NUM_PROMPTS:-1}" \
-                --random-input-len "''${VLLM_PRIME_INPUT_LEN:-512}" \
-                --random-output-len "''${VLLM_PRIME_OUTPUT_LEN:-1}" \
-                --max-model-len "''${VLLM_PRIME_MAX_MODEL_LEN:-4096}" \
-                --gpu-memory-utilization "''${VLLM_PRIME_GPU_MEMORY_UTILIZATION:-0.85}" \
-                --trust-remote-code \
-                --enforce-eager \
-                --limit-mm-per-prompt '{"image":0,"video":0}' \
-                "$@"
-            '';
-          };
-
-          vllm-lemonade-qwen36-27b-cache-gfx1151 =
-            let
-              vllm = final.vllm-rocm-lemonade-gfx1151;
-              rocmCore = "${vllm}/lib/python3.12/site-packages/_rocm_sdk_core";
-            in
-            prev.stdenv.mkDerivation {
-              pname = "vllm-lemonade-qwen36-27b-cache-gfx1151";
-              version = vllm.version;
-
-              dontUnpack = true;
-              dontConfigure = true;
-              dontStrip = true;
-              dontFixup = true;
-
-              requiredSystemFeatures = [ "gfx1151" ];
-              preferLocalBuild = true;
-              allowSubstitutes = false;
-
-              buildPhase = ''
-                runHook preBuild
-
-                export HOME="$TMPDIR/home"
-                export XDG_CACHE_HOME="$TMPDIR/xdg-cache"
-                export VLLM_CACHE_ROOT="$TMPDIR/vllm-cache"
-                export TRITON_CACHE_DIR="$VLLM_CACHE_ROOT/triton_cache"
-                export TORCHINDUCTOR_CACHE_DIR="$VLLM_CACHE_ROOT/inductor_cache"
-                export HF_HOME="/models/.cache/huggingface"
-                export HF_HUB_OFFLINE=1
-                export TRANSFORMERS_OFFLINE=1
-                export SSL_CERT_FILE="${prev.cacert}/etc/ssl/certs/ca-bundle.crt"
-                export VLLM_DISABLE_AITER=1
-                export VLLM_CONFIG_ROOT="/tmp/vllm-lemonade-gfx1151/config"
-                export VLLM_XLA_CACHE_PATH="/tmp/vllm-lemonade-gfx1151/xla_cache"
-                export VLLM_LOGGING_LEVEL="INFO"
-                export TRITON_CACHE_AUTOTUNING="1"
-                export HSA_OVERRIDE_GFX_VERSION="11.5.1"
-                export HSA_NO_SCRATCH_RECLAIM="1"
-                export HSA_ENABLE_INTERRUPT="0"
-                export HIP_PLATFORM="amd"
-                export GPU_ARCHS="gfx1151"
-                export PYTORCH_ROCM_ARCH="gfx1151"
-                export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
-                export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="1"
-                export ROCM_HOME="${rocmCore}"
-                export ROCM_PATH="$ROCM_HOME"
-                export HIP_PATH="$ROCM_HOME"
-                export TRITON_LIBHIP_PATH="$ROCM_HOME/lib/libamdhip64.so"
-                export DEVICE_LIB_PATH="${rocmCore}/lib/llvm/amdgcn/bitcode"
-                export HIP_DEVICE_LIB_PATH="$DEVICE_LIB_PATH"
-                export CC="${prev.stdenv.cc}/bin/cc"
-                export CXX="${prev.stdenv.cc}/bin/c++"
-                export PATH="${vllm}/bin:${prev.stdenv.cc}/bin:$PATH"
-                export LD_PRELOAD="${vllm}/lib/libvllm-rocm-c10-hip-compat.so''${LD_PRELOAD:+ $LD_PRELOAD}"
-
-                mkdir -p \
-                  "$HOME" \
-                  "$XDG_CACHE_HOME" \
-                  "$VLLM_CACHE_ROOT" \
-                  "$TRITON_CACHE_DIR" \
-                  "$TORCHINDUCTOR_CACHE_DIR" \
-                  "$VLLM_CONFIG_ROOT" \
-                  "$VLLM_XLA_CACHE_PATH"
-
-                ${vllm}/bin/python3 -u - <<'PY'
-                import math
-                import torch
-
-                from vllm.model_executor.layers.fla.ops import (
-                    chunk_gated_delta_rule,
-                    fused_post_conv_prep,
-                )
-                from vllm.model_executor.layers.fla.ops.fused_recurrent import (
-                    fused_recurrent_gated_delta_rule_packed_decode,
-                )
-                from vllm.model_executor.layers.fla.ops.layernorm_guard import (
-                    layer_norm_fwd,
-                )
-                from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
-                from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-                    causal_conv1d_fn,
-                    causal_conv1d_update,
-                )
-                from vllm.model_executor.layers.rotary_embedding.mrope import (
-                    triton_mrope,
-                )
-                from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
-                    chunked_prefill_paged_decode,
-                )
-                from vllm.v1.worker.block_table import BlockTable
-                from vllm.v1.worker.utils import _zero_kv_blocks_kernel
-
-                device = "cuda"
-                dtype = torch.bfloat16
-                seq_len = FLA_CHUNK_SIZE
-
-                # Qwen3.6-27B GDN/linear-attention dimensions from config.json.
-                num_k_heads = 16
-                num_v_heads = 48
-                head_k_dim = 128
-                head_v_dim = 128
-                qkv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
-
-                print("priming qwen3.6 gdn prefill kernels", flush=True)
-                a_log = torch.zeros(num_v_heads, device=device, dtype=torch.float32)
-                dt_bias = torch.zeros(num_v_heads, device=device, dtype=torch.float32)
-                mixed_qkv = torch.randn(seq_len, qkv_dim, device=device, dtype=dtype)
-                a = torch.randn(seq_len, num_v_heads, device=device, dtype=dtype)
-                b = torch.randn(seq_len, num_v_heads, device=device, dtype=dtype)
-
-                q, k, v, g, beta = fused_post_conv_prep(
-                    conv_output=mixed_qkv,
-                    a=a,
-                    b=b,
-                    A_log=a_log,
-                    dt_bias=dt_bias,
-                    num_k_heads=num_k_heads,
-                    head_k_dim=head_k_dim,
-                    head_v_dim=head_v_dim,
-                    apply_l2norm=True,
-                    output_g_exp=False,
-                )
-
-                state = torch.zeros(
-                    1,
-                    num_v_heads,
-                    head_v_dim,
-                    head_k_dim,
-                    device=device,
-                    dtype=torch.float32,
-                )
-                cu_seqlens = torch.tensor([0, seq_len], device=device, dtype=torch.int32)
-                out, final_state = chunk_gated_delta_rule(
-                    q=q.unsqueeze(0),
-                    k=k.unsqueeze(0),
-                    v=v.unsqueeze(0),
-                    g=g.unsqueeze(0),
-                    beta=beta.unsqueeze(0),
-                    initial_state=state,
-                    output_final_state=True,
-                    cu_seqlens=cu_seqlens,
-                    use_qk_l2norm_in_kernel=False,
-                )
-                torch.cuda.synchronize()
-                print(
-                    "primed qwen3.6 gdn kernels",
-                    tuple(out.shape),
-                    None if final_state is None else tuple(final_state.shape),
-                    flush=True,
-                )
-
-                print("priming qwen3.6 recurrent decode kernel", flush=True)
-                packed_out = torch.empty(
-                    1, 1, num_v_heads, head_v_dim, device=device, dtype=dtype
-                )
-                fused_recurrent_gated_delta_rule_packed_decode(
-                    mixed_qkv[:1].contiguous(),
-                    a[:1].contiguous(),
-                    b[:1].contiguous(),
-                    a_log,
-                    dt_bias,
-                    1.0 / math.sqrt(head_k_dim),
-                    torch.zeros(
-                        2,
-                        num_v_heads,
-                        head_v_dim,
-                        head_k_dim,
-                        device=device,
-                        dtype=torch.float32,
-                    ),
-                    packed_out,
-                    torch.tensor([1], device=device, dtype=torch.int32),
-                    use_qk_l2norm_in_kernel=True,
-                )
-
-                print("priming qwen3.6 causal-conv kernels", flush=True)
-                conv_dim = qkv_dim
-                conv_width = 4
-                conv_weight = torch.randn(
-                    conv_dim, conv_width, device=device, dtype=dtype
-                )
-                conv_bias = torch.zeros(conv_dim, device=device, dtype=dtype)
-                conv_state = torch.zeros(
-                    4,
-                    conv_dim,
-                    conv_width - 1,
-                    device=device,
-                    dtype=torch.float32,
-                )
-                cache_indices = torch.tensor([1], device=device, dtype=torch.int32)
-                causal_conv1d_fn(
-                    torch.randn(512, conv_dim, device=device, dtype=dtype).t(),
-                    conv_weight,
-                    conv_bias,
-                    conv_state,
-                    torch.tensor([0, 512], device=device, dtype=torch.int32),
-                    cache_indices=cache_indices,
-                    has_initial_state=torch.tensor(
-                        [False], device=device, dtype=torch.bool
-                    ),
-                    activation="silu",
-                )
-                causal_conv1d_update(
-                    torch.randn(1, conv_dim, device=device, dtype=dtype),
-                    conv_state,
-                    conv_weight,
-                    conv_bias,
-                    activation="silu",
-                    conv_state_indices=cache_indices,
-                )
-
-                print("priming qwen3.6 attention prefill/decode kernels", flush=True)
-                num_query_heads = 24
-                num_kv_heads = 4
-                attn_head_dim = 256
-                physical_block = 784
-                cache_x = 16
-                key_cache = torch.randn(
-                    2,
-                    num_kv_heads,
-                    attn_head_dim // cache_x,
-                    physical_block,
-                    cache_x,
-                    device=device,
-                    dtype=dtype,
-                )
-                value_cache = torch.randn(
-                    2,
-                    num_kv_heads,
-                    attn_head_dim,
-                    physical_block,
-                    device=device,
-                    dtype=dtype,
-                )
-                block_table = torch.tensor([[0]], device=device, dtype=torch.int32)
-                seq_lens = torch.tensor([512], device=device, dtype=torch.int32)
-                k_scale = torch.tensor(1.0, device=device, dtype=torch.float32)
-                v_scale = torch.tensor(1.0, device=device, dtype=torch.float32)
-                for query_len in (512, 1):
-                    query = torch.randn(
-                        query_len,
-                        num_query_heads,
-                        attn_head_dim,
-                        device=device,
-                        dtype=dtype,
-                    )
-                    chunked_prefill_paged_decode(
-                        query,
-                        torch.randn(
-                            query_len,
-                            num_kv_heads,
-                            attn_head_dim,
-                            device=device,
-                            dtype=dtype,
-                        ),
-                        torch.randn(
-                            query_len,
-                            num_kv_heads,
-                            attn_head_dim,
-                            device=device,
-                            dtype=dtype,
-                        ),
-                        torch.empty_like(query),
-                        "auto",
-                        key_cache,
-                        value_cache,
-                        block_table,
-                        torch.tensor([0, query_len], device=device, dtype=torch.int32),
-                        seq_lens,
-                        512,
-                        query_len,
-                        k_scale,
-                        v_scale,
-                        sm_scale=1.0 / math.sqrt(attn_head_dim),
-                    )
-
-                print("priming qwen3.6 worker helper kernels", flush=True)
-                zero_buf = torch.empty(2048, device=device, dtype=torch.int32)
-                _zero_kv_blocks_kernel[(1,)](
-                    torch.tensor([zero_buf.data_ptr()], device=device, dtype=torch.uint64),
-                    torch.tensor([0], device=device, dtype=torch.int64),
-                    1,
-                    N_SEGS=1,
-                    PAGE_SIZE_EL=1024,
-                    BLOCK_SIZE=1024,
-                )
-                block_table_helper = BlockTable(
-                    16,
-                    1,
-                    64,
-                    512,
-                    False,
-                    torch.device(device),
-                    16,
-                    1,
-                )
-                block_table_helper.add_row(list(range(32)), 0)
-                block_table_helper.commit_block_table(1)
-                block_table_helper.compute_slot_mapping(
-                    1,
-                    torch.tensor([0, 512], device=device, dtype=torch.int32),
-                    torch.arange(512, device=device, dtype=torch.int64),
-                )
-
-                print("priming qwen3.6 norm and mrope kernels", flush=True)
-                layer_norm_fwd(
-                    torch.randn(1, 5120, device=device, dtype=dtype),
-                    torch.ones(5120, device=device, dtype=dtype),
-                    None,
-                    1e-6,
-                    z=torch.randn(1, 5120, device=device, dtype=dtype),
-                    group_size=None,
-                    norm_before_gate=True,
-                    is_rms_norm=True,
-                )
-                layer_norm_fwd(
-                    torch.randn(1, 128, device=device, dtype=dtype),
-                    torch.ones(128, device=device, dtype=dtype),
-                    None,
-                    1e-6,
-                    group_size=128,
-                    is_rms_norm=True,
-                )
-                triton_mrope(
-                    torch.randn(
-                        512,
-                        num_query_heads * attn_head_dim,
-                        device=device,
-                        dtype=dtype,
-                    ),
-                    torch.randn(
-                        512,
-                        num_kv_heads * attn_head_dim,
-                        device=device,
-                        dtype=dtype,
-                    ),
-                    torch.randn(3, 512, 32, device=device, dtype=dtype),
-                    torch.randn(3, 512, 32, device=device, dtype=dtype),
-                    [11, 11, 10],
-                    attn_head_dim,
-                    64,
-                    True,
-                )
-                torch.cuda.synchronize()
-                print("primed qwen3.6 decode/runtime kernels", flush=True)
-                PY
-
-                runHook postBuild
-              '';
-
-              installPhase = ''
-                runHook preInstall
-
-                mkdir -p "$out"
-                cp -R "$VLLM_CACHE_ROOT"/. "$out"/
-                find "$out" -type f | sort > "$out/manifest.txt"
-
-                runHook postInstall
-              '';
-
-              meta = with prev.lib; {
-                description = "Primed vLLM/Triton cache for Qwen3.6-27B on Lemonade ROCm gfx1151";
-                platforms = platforms.linux;
-              };
-            };
-
-          vllm-lemonade-qwen36-27b-gfx1151 = prev.writeShellApplication {
-            name = "vllm-lemonade-qwen36-27b-gfx1151";
-            runtimeInputs = [
-              prev.coreutils
-            ];
-            text = ''
-              set -euo pipefail
-
-              cache_root="''${VLLM_LEMONADE_CACHE_ROOT:-''${XDG_CACHE_HOME:-''${HOME:-/tmp}/.cache}/vllm/lemonade-gfx1151}"
-              export VLLM_CACHE_ROOT="''${VLLM_CACHE_ROOT:-$cache_root}"
-              export TRITON_CACHE_DIR="''${TRITON_CACHE_DIR:-$VLLM_CACHE_ROOT/triton_cache}"
-              export TORCHINDUCTOR_CACHE_DIR="''${TORCHINDUCTOR_CACHE_DIR:-$VLLM_CACHE_ROOT/inductor_cache}"
-
-              cache_store="${final.vllm-lemonade-qwen36-27b-cache-gfx1151}"
-              stamp="$VLLM_CACHE_ROOT/.prebuilt-qwen36-27b"
-              if [ ! -e "$stamp" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$cache_store" ]; then
-                tmp="$VLLM_CACHE_ROOT.tmp.$$"
-                rm -rf "$tmp"
-                mkdir -p "$tmp"
-                cp -R "$cache_store/." "$tmp/"
-                chmod -R u+w "$tmp"
-                printf '%s\n' "$cache_store" > "$tmp/.prebuilt-qwen36-27b"
-                rm -rf "$VLLM_CACHE_ROOT"
-                mv "$tmp" "$VLLM_CACHE_ROOT"
-              fi
-
-              exec "${final.vllm-env-lemonade-gfx1151}/bin/vllm" "$@"
-            '';
-          };
-
-          gemma4-31b-it-text-config = prev.runCommand "gemma4-31b-it-text-config" { } ''
-            mkdir -p "$out"
-            cp ${./pkgs/lemonade-vllm-rocm/gemma4-31b-it-text-config.json} "$out/config.json"
-          '';
-
-          vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151 =
-            let
-              vllm = final.vllm-rocm-lemonade-gfx1151;
-              vllmCli = final.vllm-env-lemonade-gfx1151;
-              rocmCore = "${vllm}/lib/python3.12/site-packages/_rocm_sdk_core";
-              cacheRoot = "/tmp/vllm-lemonade-gfx1151/gemma4-31b-q8";
-            in
-            prev.stdenv.mkDerivation {
-              pname = "vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151";
-              version = vllm.version;
-
-              dontUnpack = true;
-              dontConfigure = true;
-              dontStrip = true;
-              dontFixup = true;
-
-              requiredSystemFeatures = [ "gfx1151" ];
-              preferLocalBuild = true;
-              allowSubstitutes = false;
-
-              buildPhase = ''
-                runHook preBuild
-
-                export HOME="$TMPDIR/home"
-                export XDG_CACHE_HOME="$TMPDIR/xdg-cache"
-                export VLLM_CACHE_ROOT="${cacheRoot}"
-                export TRITON_CACHE_DIR="$VLLM_CACHE_ROOT/triton_cache"
-                export TORCHINDUCTOR_CACHE_DIR="$VLLM_CACHE_ROOT/inductor_cache"
-                export HF_HOME="/models/.cache/huggingface"
-                export HF_HUB_OFFLINE=1
-                export TRANSFORMERS_OFFLINE=1
-                export SSL_CERT_FILE="${prev.cacert}/etc/ssl/certs/ca-bundle.crt"
-                export VLLM_DISABLE_AITER=1
-                export VLLM_CONFIG_ROOT="/tmp/vllm-lemonade-gfx1151/config"
-                export VLLM_XLA_CACHE_PATH="/tmp/vllm-lemonade-gfx1151/xla_cache"
-                export VLLM_LOGGING_LEVEL="INFO"
-                export TRITON_CACHE_AUTOTUNING="1"
-                export HSA_OVERRIDE_GFX_VERSION="11.5.1"
-                export HSA_NO_SCRATCH_RECLAIM="1"
-                export HSA_ENABLE_INTERRUPT="0"
-                export HIP_PLATFORM="amd"
-                export GPU_ARCHS="gfx1151"
-                export PYTORCH_ROCM_ARCH="gfx1151"
-                export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
-                export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="1"
-                export ROCM_HOME="${rocmCore}"
-                export ROCM_PATH="$ROCM_HOME"
-                export HIP_PATH="$ROCM_HOME"
-                export TRITON_LIBHIP_PATH="$ROCM_HOME/lib/libamdhip64.so"
-                export DEVICE_LIB_PATH="${rocmCore}/lib/llvm/amdgcn/bitcode"
-                export HIP_DEVICE_LIB_PATH="$DEVICE_LIB_PATH"
-                export CC="${prev.stdenv.cc}/bin/cc"
-                export CXX="${prev.stdenv.cc}/bin/c++"
-                export PATH="${vllmCli}/bin:${vllm}/bin:${prev.stdenv.cc}/bin:$PATH"
-                export LD_PRELOAD="${vllm}/lib/libvllm-rocm-c10-hip-compat.so''${LD_PRELOAD:+ $LD_PRELOAD}"
-
-                rm -rf "$VLLM_CACHE_ROOT"
-                mkdir -p \
-                  "$HOME" \
-                  "$XDG_CACHE_HOME" \
-                  "$VLLM_CACHE_ROOT" \
-                  "$TRITON_CACHE_DIR" \
-                  "$TORCHINDUCTOR_CACHE_DIR" \
-                  "$VLLM_CONFIG_ROOT" \
-                  "$VLLM_XLA_CACHE_PATH"
-
-                gguf_repo="$HF_HOME/hub/models--unsloth--gemma-4-31B-it-GGUF"
-                gguf_rev="$(cat "$gguf_repo/refs/main")"
-                model_path="$gguf_repo/snapshots/$gguf_rev/gemma-4-31B-it-Q8_0.gguf"
-                tokenizer_repo="$HF_HOME/hub/models--unsloth--gemma-4-31B-it"
-                tokenizer_rev="$(cat "$tokenizer_repo/refs/main")"
-                tokenizer_path="$tokenizer_repo/snapshots/$tokenizer_rev"
-                test -f "$model_path"
-                test -f "$tokenizer_path/tokenizer.json"
-
-                prime_gemma4_cache() {
-                  # Use the same vLLM wrapper as the runtime app. Triton launcher
-                  # cache keys include generated launcher source, so wrapper/env
-                  # drift can leave first-run launcher work outside the derivation.
-                  ${vllmCli}/bin/vllm bench throughput \
-                    --model "$model_path" \
-                    --tokenizer "$tokenizer_path" \
-                    --hf-config-path "${final.gemma4-31b-it-text-config}" \
-                    --trust-remote-code \
-                    --load-format gguf \
-                    --quantization gguf \
-                    --dataset-name random \
-                    --random-input-len 64 \
-                    --random-output-len 16 \
-                    --random-range-ratio 0 \
-                    --num-prompts 2 \
-                    --tensor-parallel-size 1 \
-                    --max-model-len 2048 \
-                    --max-num-seqs 1 \
-                    --max-num-batched-tokens 2048 \
-                    --gpu-memory-utilization 0.85 \
-                    --dtype float16
-                }
-
-                prime_gemma4_cache
-                prime_gemma4_cache
-
-                runHook postBuild
-              '';
-
-              installPhase = ''
-                runHook preInstall
-
-                mkdir -p "$out"
-                cp -R "$VLLM_CACHE_ROOT"/. "$out"/
-                find "$out" -type f | sort > "$out/manifest.txt"
-
-                runHook postInstall
-              '';
-
-              meta = with prev.lib; {
-                description = "Primed vLLM/Triton kernel cache for Gemma4-31B Q8 smoke tests on Lemonade ROCm gfx1151";
-                platforms = platforms.linux;
-              };
-            };
-
-          vllm-lemonade-gemma4-31b-q8-gfx1151 = prev.writeShellApplication {
-            name = "vllm-lemonade-gemma4-31b-q8-gfx1151";
-            runtimeInputs = [
-              prev.coreutils
-            ];
-            text = ''
-              set -euo pipefail
-
-              # vLLM/Inductor AOT artifacts embed absolute cache paths, including
-              # inside binary blobs, so this prebuilt cache intentionally lives at
-              # the same path used by the Nix build.
-              cache_root="/tmp/vllm-lemonade-gfx1151/gemma4-31b-q8"
-              export VLLM_CACHE_ROOT="$cache_root"
-              export TRITON_CACHE_DIR="''${TRITON_CACHE_DIR:-$VLLM_CACHE_ROOT/triton_cache}"
-              export TORCHINDUCTOR_CACHE_DIR="''${TORCHINDUCTOR_CACHE_DIR:-$VLLM_CACHE_ROOT/inductor_cache}"
-              export HF_HOME="''${HF_HOME:-/models/.cache/huggingface}"
-              export VLLM_DISABLE_AITER="''${VLLM_DISABLE_AITER:-1}"
-              export VLLM_CONFIG_ROOT="''${VLLM_CONFIG_ROOT:-/tmp/vllm-lemonade-gfx1151/config}"
-              export VLLM_XLA_CACHE_PATH="''${VLLM_XLA_CACHE_PATH:-/tmp/vllm-lemonade-gfx1151/xla_cache}"
-              unset VLLM_LEMONADE_CACHE_ROOT
-              mkdir -p "$VLLM_CONFIG_ROOT" "$VLLM_XLA_CACHE_PATH"
-
-              cache_store="${final.vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151}"
-              stamp="$VLLM_CACHE_ROOT/.prebuilt-gemma4-31b-q8-kernels"
-              if [ ! -e "$stamp" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$cache_store" ]; then
-                tmp="$VLLM_CACHE_ROOT.tmp.$$"
-                rm -rf "$tmp"
-                mkdir -p "$tmp"
-                cp -R "$cache_store/." "$tmp/"
-                chmod -R u+w "$tmp"
-                printf '%s\n' "$cache_store" > "$tmp/.prebuilt-gemma4-31b-q8-kernels"
-                rm -rf "$VLLM_CACHE_ROOT"
-                mv "$tmp" "$VLLM_CACHE_ROOT"
-              fi
-
-              exec "${final.vllm-env-lemonade-gfx1151}/bin/vllm" "$@"
-            '';
-          };
-
-          vllm-lemonade-gemma4-31b-q8-prime-gfx1151 = prev.writeShellApplication {
-            name = "vllm-lemonade-gemma4-31b-q8-prime-gfx1151";
-            runtimeInputs = [
-              prev.coreutils
-            ];
-            text = ''
-              set -euo pipefail
-
-              hf_home="''${HF_HOME:-/models/.cache/huggingface}"
-              model="''${VLLM_GEMMA4_MODEL:-}"
-              tokenizer="''${VLLM_GEMMA4_TOKENIZER:-}"
-              if [ -z "$model" ]; then
-                gguf_repo="$hf_home/hub/models--unsloth--gemma-4-31B-it-GGUF"
-                if [ -r "$gguf_repo/refs/main" ]; then
-                  gguf_rev="$(cat "$gguf_repo/refs/main")"
-                  candidate="$gguf_repo/snapshots/$gguf_rev/gemma-4-31B-it-Q8_0.gguf"
-                  if [ -f "$candidate" ]; then
-                    model="$candidate"
-                  fi
-                fi
-              fi
-              if [ -z "$model" ]; then
-                model="unsloth/gemma-4-31B-it-GGUF:Q8_0"
-              fi
-              if [ -z "$tokenizer" ]; then
-                tokenizer_repo="$hf_home/hub/models--unsloth--gemma-4-31B-it"
-                if [ -r "$tokenizer_repo/refs/main" ]; then
-                  tokenizer_rev="$(cat "$tokenizer_repo/refs/main")"
-                  candidate="$tokenizer_repo/snapshots/$tokenizer_rev"
-                  if [ -f "$candidate/tokenizer.json" ]; then
-                    tokenizer="$candidate"
-                  fi
-                fi
-              fi
-              if [ -z "$tokenizer" ]; then
-                tokenizer="unsloth/gemma-4-31B-it"
-              fi
-
-              num_prompts="''${VLLM_GEMMA4_PRIME_NUM_PROMPTS:-2}"
-              input_len="''${VLLM_GEMMA4_PRIME_INPUT_LEN:-64}"
-              output_len="''${VLLM_GEMMA4_PRIME_OUTPUT_LEN:-16}"
-              tp="''${VLLM_GEMMA4_PRIME_TP:-1}"
-              max_model_len="''${VLLM_GEMMA4_PRIME_MAX_MODEL_LEN:-2048}"
-              max_num_seqs="''${VLLM_GEMMA4_PRIME_MAX_NUM_SEQS:-1}"
-              max_batched_tokens="''${VLLM_GEMMA4_PRIME_MAX_NUM_BATCHED_TOKENS:-2048}"
-              gpu_memory_utilization="''${VLLM_GEMMA4_PRIME_GPU_MEMORY_UTILIZATION:-0.85}"
-              warmup_runs="''${VLLM_GEMMA4_PRIME_WARMUP_RUNS:-0}"
-              unset \
-                VLLM_GEMMA4_PRIME_NUM_PROMPTS \
-                VLLM_GEMMA4_PRIME_INPUT_LEN \
-                VLLM_GEMMA4_PRIME_OUTPUT_LEN \
-                VLLM_GEMMA4_PRIME_TP \
-                VLLM_GEMMA4_PRIME_MAX_MODEL_LEN \
-                VLLM_GEMMA4_PRIME_MAX_NUM_SEQS \
-                VLLM_GEMMA4_PRIME_MAX_NUM_BATCHED_TOKENS \
-                VLLM_GEMMA4_PRIME_GPU_MEMORY_UTILIZATION \
-                VLLM_GEMMA4_PRIME_WARMUP_RUNS \
-                VLLM_GEMMA4_MODEL \
-                VLLM_GEMMA4_TOKENIZER
-
-              run_prime() {
-                "${final.vllm-lemonade-gemma4-31b-q8-gfx1151}/bin/vllm-lemonade-gemma4-31b-q8-gfx1151" \
-                  bench throughput \
-                  --model "$model" \
-                  --tokenizer "$tokenizer" \
-                  --hf-config-path "${final.gemma4-31b-it-text-config}" \
-                  --trust-remote-code \
-                  --load-format gguf \
-                  --quantization gguf \
-                  --dataset-name random \
-                  --random-input-len "$input_len" \
-                  --random-output-len "$output_len" \
-                  --random-range-ratio 0 \
-                  --num-prompts "$num_prompts" \
-                  --tensor-parallel-size "$tp" \
-                  --max-model-len "$max_model_len" \
-                  --max-num-seqs "$max_num_seqs" \
-                  --max-num-batched-tokens "$max_batched_tokens" \
-                  --gpu-memory-utilization "$gpu_memory_utilization" \
-                  --dtype float16 \
-                  "$@"
-              }
-
-              run=0
-              while [ "$run" -lt "$warmup_runs" ]; do
-                run_prime "$@" >/dev/null 2>&1
-                run=$((run + 1))
-              done
-
-              run_prime "$@"
-            '';
-          };
-
-          therock-python-gfx1151 = prev.callPackage ./pkgs/therock-python-env {
-            wheelSources = therockPythonWheelSources;
-          };
-
-          therock-python-wheels-gfx1151 = prev.callPackage ./pkgs/therock-python-wheels {
-            wheelSources = therockPythonWheelSources;
-          };
-          therock-amdsmi-gfx1151 = prev.python312Packages.callPackage ./pkgs/therock-amdsmi {
-            wheels = final.therock-python-wheels-gfx1151;
-          };
-
-          therock-rocm-source-gfx1151 =
-            let
-              source = therockRocmSourceSources."therock-7.13-gfx1151-vllm";
-            in
-            prev.callPackage ./pkgs/therock-rocm-source {
-              name = "therock-rocm-source-gfx1151-vllm";
-              inherit (source)
-                url
-                ref
-                rev
-                hash
-                fetchArgs
-                ;
-            };
-
-          therock-rocm-from-source-gfx1151 =
-            let
-              source = therockRocmSourceSources."therock-7.13-gfx1151-vllm";
-              esmi = therockRocmThirdPartySources.esmiIbLibrary;
-            in
-            prev.callPackage ./pkgs/therock-rocm-from-source {
-              stdenv = prev.gcc14Stdenv;
-              target = "gfx1151";
-              inherit (source) version;
-              profile = "vllm";
-              therockSource = final.therock-rocm-source-gfx1151;
-              prebuiltStageTree = final.therock-amd-llvm-gfx1151;
-              thirdPartySources = therockRocmThirdPartySources.archives;
-              esmiIbLibrarySource = prev.fetchgit {
-                inherit (esmi) url rev hash;
-              };
-              spirvHeadersSource = prev.fetchzip {
-                inherit (therockRocmThirdPartySources.spirvHeaders) url hash;
-                stripRoot = true;
-              };
-            };
-
-          therock-amd-llvm-gfx1151 =
-            let
-              source = therockRocmSourceSources."therock-7.13-gfx1151-vllm";
-            in
-            prev.callPackage ./pkgs/therock-rocm-from-source {
-              stdenv = prev.gcc14Stdenv;
-              target = "gfx1151";
-              inherit (source) version;
-              profile = "compiler";
-              therockSource = final.therock-rocm-source-gfx1151;
-              thirdPartySources = therockRocmThirdPartySources.archives;
-              buildTargets = [ "artifact-amd-llvm" ];
-              installMode = "prebuilt-stages";
-              spirvHeadersSource = prev.fetchzip {
-                inherit (therockRocmThirdPartySources.spirvHeaders) url hash;
-                stripRoot = true;
-              };
-            };
-
-          therock-rocm-gfx1151-env = prev.writeShellApplication {
-            name = "therock-rocm-gfx1151-env";
-            text = ''
-              rocm=${final.therock-rocm-gfx1151}
-
-              export ROCM_HOME="$rocm"
-              export ROCM_PATH="$rocm"
-              export HIP_PATH="$rocm"
-              export HIP_PLATFORM=amd
-              export HSA_OVERRIDE_GFX_VERSION="11.5.1"
-
-              export PATH="$rocm/bin:$rocm/llvm/bin''${PATH:+:$PATH}"
-
-              lib_paths=(
-                "$rocm/lib"
-                "$rocm/lib64"
-                "$rocm/lib/llvm/lib"
-                "$rocm/llvm/lib"
-                "${prev.stdenv.cc.cc.lib}/lib"
-                "${prev.gfortran.cc.lib}/lib"
-                "${prev.zlib}/lib"
-                "${prev.ncurses}/lib"
-                "${prev.ocl-icd}/lib"
-                "${prev.numactl}/lib"
-                "${final.rdma-core-usb4}/lib"
-              )
-
-              ld_path=
-              for path in "''${lib_paths[@]}"; do
-                if [ -d "$path" ]; then
-                  if [ -n "$ld_path" ]; then
-                    ld_path="$ld_path:$path"
-                  else
-                    ld_path="$path"
-                  fi
-                fi
-              done
-              export LD_LIBRARY_PATH="$ld_path''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-              for path in \
-                "$rocm/lib/llvm/amdgcn/bitcode" \
-                "$rocm/amdgcn/bitcode" \
-                "$rocm/lib/llvm/lib/clang"/*/amdgcn/bitcode \
-                "$rocm/llvm/lib/clang"/*/amdgcn/bitcode; do
-                if [ -d "$path" ]; then
-                  export DEVICE_LIB_PATH="$path"
-                  export HIP_DEVICE_LIB_PATH="$path"
-                  break
-                fi
-              done
-
-              if [ "$#" -eq 0 ]; then
-                exec ${prev.bashInteractive}/bin/bash
-              fi
-
-              exec "$@"
-            '';
-          };
-
-          therock-rocm-gfx1151-rocshmem-env = prev.writeShellApplication {
-            name = "therock-rocm-gfx1151-rocshmem-env";
-            runtimeInputs = [ prev.coreutils ];
-            text = ''
-              setup_rocshmem_sysfs_filter() {
-                local root fallback_device verbs name file
-
-                root="$(mktemp -d "''${TMPDIR:-/tmp}/rocshmem-sysfs.XXXXXX")"
-                mkdir -p "$root/class/infiniband" "$root/class/infiniband_verbs"
-
-                shopt -s nullglob
-
-                for verbs in /sys/class/infiniband_verbs/*; do
-                  if [ -e "$verbs/device" ]; then
-                    fallback_device="$verbs/device"
-                    break
-                  fi
-                done
-
-                for verbs in /sys/class/infiniband/*; do
-                  ln -s "$verbs" "$root/class/infiniband/$(basename "$verbs")"
-                done
-
-                for verbs in /sys/class/infiniband_verbs/*; do
-                  name="$(basename "$verbs")"
-                  if [ -e "$verbs/device" ] || [ -z "''${fallback_device:-}" ]; then
-                    ln -s "$verbs" "$root/class/infiniband_verbs/$name"
-                    continue
-                  fi
-
-                  mkdir -p "$root/class/infiniband_verbs/$name"
-                  for file in abi_version dev ibdev; do
-                    if [ -e "$verbs/$file" ]; then
-                      ln -s "$verbs/$file" "$root/class/infiniband_verbs/$name/$file"
-                    fi
-                  done
-                  ln -s "$fallback_device" "$root/class/infiniband_verbs/$name/device"
-                done
-
-                printf '%s\n' "$root"
-              }
-
-              rocshmem_sysfs_filter=
-              if [ -z "''${SYSFS_PATH:-}" ] && [ -d /sys/class/infiniband_verbs ]; then
-                rocshmem_sysfs_filter="$(setup_rocshmem_sysfs_filter)"
-                export SYSFS_PATH="$rocshmem_sysfs_filter"
-              fi
-
-              cleanup_rocshmem_sysfs_filter() {
-                if [ -n "$rocshmem_sysfs_filter" ]; then
-                  rm -rf "$rocshmem_sysfs_filter"
-                fi
-              }
-              trap cleanup_rocshmem_sysfs_filter EXIT
-
-              export PATH="${prev.openmpi}/bin:${prev.python3}/bin:${final.therock-rocm-gfx1151}/share/rocshmem:$PATH"
-              export LD_LIBRARY_PATH="${prev.openmpi}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-              export OMPI_MCA_pml="''${OMPI_MCA_pml:-^ucx}"
-              export OMPI_MCA_osc="''${OMPI_MCA_osc:-^ucx}"
-
-              ${final.therock-rocm-gfx1151-env}/bin/therock-rocm-gfx1151-env "$@"
-            '';
-          };
-
-          rocm-xio-gfx1151 = prev.callPackage ./pkgs/rocm-xio {
-            src = inputs.rocm-xio;
-            rocmSdk = final.therock-rocm-gfx1151;
-            rdma-core = final.rdma-core-usb4;
-            offloadArch = "gfx1151";
-            version = "0.1.0-${inputs.rocm-xio.shortRev or "local"}";
-          };
-
-        }
-        // llamaCppRocmTargetPackages
-        // llamaCppMasterRocmTargetPackages;
-
-      # Python-side extras for RDMA-enabled vLLM: rixl (ROCm NIXL port),
-      # lmcache (KV-cache layer on top of rixl), and cupy-rocm-7-0. These
-      # stay here because they're ROCm/Strix-specific; thunderbolt-ibverbs
-      # owns only the kernel + rdma-core layer.
-      vllmRdmaExtrasOverlay = _final: prev: {
-        pythonPackagesExtensions = (prev.pythonPackagesExtensions or [ ]) ++ [
-          (pyfinal: _pyprev: {
-            rixl = pyfinal.callPackage ./pkgs/rixl { };
-            cupy-rocm-7-0 = pyfinal.callPackage ./pkgs/cupy-rocm { };
-            lmcache = pyfinal.callPackage ./pkgs/lmcache {
-              inherit (pyfinal) rixl;
-            };
-          })
-        ];
+      # ---------------------------------------------------------------
+      # Overlays
+      # ---------------------------------------------------------------
+
+      strixAdditionsOverlay = import ./overlays/strix-additions.nix {
+        inherit
+          inputs
+          lib
+          hardwareTargets
+          defaultRocmTarget
+          rocmTargets
+          therockRocmSources
+          therockPythonWheelSources
+          therockRocmSourceSources
+          therockRocmThirdPartySources
+          ;
       };
 
-      # Opt-in TheRock Python overlay. The TheRock wheels are currently cp312,
-      # so keep the substitution scoped to python312 package sets. Other Python
-      # interpreters stay on the nixpkgs/libibverbs defaults.
-      therockPythonOverlay = final: prev: {
-        pythonPackagesExtensions = (prev.pythonPackagesExtensions or [ ]) ++ [
-          (
-            _pyfinal: pyprev:
-            if lib.versions.majorMinor pyprev.python.version == "3.12" then
-              let
-                wheels = final.therock-python-wheels-gfx1151;
-              in
-              {
-                amdsmi = final.therock-amdsmi-gfx1151;
-                torch = wheels;
-                triton = wheels;
-                triton-no-cuda = wheels;
-                torchaudio = wheels;
-                rocm = wheels;
-                "rocm-sdk-core" = wheels;
-                "rocm-sdk-devel" = wheels;
-                "rocm-sdk-libraries-gfx1151" = wheels;
-              }
-            else
-              { }
-          )
-        ];
+      vllmRdmaExtrasOverlay = import ./overlays/vllm-rdma-extras.nix;
+      therockPythonOverlay = import ./overlays/therock-python.nix {
+        inherit lib;
+        target = defaultRocmTarget;
       };
 
-      therockVllmOverlay =
-        final: prev:
-        let
-          sdkBase = final.therock-rocm-gfx1151;
-          sdk = sdkBase // {
-            localGpuTargets = rocmTargets;
-            gpuTargets = rocmTargets;
-          };
-          therockRocmPackages = {
-            clr = sdk;
-            hipcc = sdk;
-            rocminfo = sdk;
-            rocm-device-libs = sdk;
-            llvm = sdk;
-            rocthrust = sdk;
-            rocprim = sdk;
-            hipcub = sdk;
-            hipblas = sdk;
-            hipblas-common = sdk;
-            hipblaslt = sdk;
-            hipfft = sdk;
-            hipsparse = sdk;
-            hiprand = sdk;
-            hipsolver = sdk;
-            miopen-hip = sdk;
-            miopen = sdk;
-            rccl = sdk;
-            rocblas = sdk;
-            rocm-comgr = sdk;
-            rocfft = sdk;
-            rocrand = sdk;
-            rocm-runtime = sdk;
-            rocsolver = sdk;
-            rocsparse = sdk;
-            composable_kernel = sdk;
-          };
-          rocmRuntimePath = prev.lib.makeBinPath [
-            sdk
-            prev.gcc
-            prev.ninja
-            prev.openssl
-          ];
-          aiterRuntimePath = prev.lib.makeBinPath [
-            sdk
-            prev.gcc
-            prev.ninja
-            prev.openssl
-          ];
-          aiterComposableKernelSrc = "${prev.rocmPackages.composable_kernel.src}/projects/composablekernel";
-          cxxIncludePath = prev.lib.concatStringsSep ":" [
-            "${prev.stdenv.cc.cc}/include/c++/${prev.stdenv.cc.cc.version}"
-            "${prev.stdenv.cc.cc}/include/c++/${prev.stdenv.cc.cc.version}/${prev.stdenv.hostPlatform.config}"
-            "${prev.glibc.dev}/include"
-          ];
-          nativeLibraryPath = prev.lib.makeLibraryPath [
-            sdk
-            prev.stdenv.cc.cc.lib
-            prev.glibc
-          ];
-          hipccLinkFlags = prev.lib.concatStringsSep " " [
-            "-L${sdk}/lib"
-            "-L${prev.stdenv.cc.cc.lib}/lib"
-            "-L${prev.stdenv.cc.cc}/lib/gcc/${prev.stdenv.hostPlatform.config}/${prev.stdenv.cc.cc.version}"
-            "-L${prev.glibc}/lib"
-            "-B${prev.glibc}/lib"
-          ];
-          wrapWithHsa =
-            name: env:
-            prev.symlinkJoin {
-              inherit name;
-              paths = [ env ];
-              buildInputs = [ prev.makeWrapper ];
-              postBuild = ''
-                for bin in "$out"/bin/*; do
-                  [[ -L "$bin" || -f "$bin" ]] || continue
-                  target=$(readlink -f "$bin")
-                  rm "$bin"
-                  makeWrapper "$target" "$bin" \
-                    --set HSA_NO_SCRATCH_RECLAIM 1 \
-                    --set HSA_ENABLE_INTERRUPT 0 \
-                    --set HSA_OVERRIDE_GFX_VERSION 11.5.1 \
-                    --set ROCM_HOME ${sdk} \
-                    --set ROCM_PATH ${sdk} \
-                    --set HIP_PATH ${sdk} \
-                    --set HIP_PLATFORM amd \
-                    --set DEVICE_LIB_PATH ${sdk}/amdgcn/bitcode \
-                    --set HIP_DEVICE_LIB_PATH ${sdk}/amdgcn/bitcode \
-                    --prefix PATH : ${rocmRuntimePath} \
-                    --prefix CPATH : ${prev.glibc.dev}/include \
-                    --prefix CPLUS_INCLUDE_PATH : ${cxxIncludePath} \
-                    --prefix LIBRARY_PATH : ${nativeLibraryPath} \
-                    --run 'export HIPCC_LINK_FLAGS_APPEND="${hipccLinkFlags}''${HIPCC_LINK_FLAGS_APPEND:+ $HIPCC_LINK_FLAGS_APPEND}"' \
-                    --run 'if [ -z "''${AITER_JIT_DIR:-}" ]; then export AITER_JIT_DIR="''${XDG_CACHE_HOME:-''${HOME:-/tmp}/.cache}/aiter/raw-gfx1151"; fi' \
-                    --run 'export GPU_ARCHS="''${GPU_ARCHS:-gfx1151}"' \
-                    --run 'export PYTORCH_ROCM_ARCH="''${PYTORCH_ROCM_ARCH:-gfx1151}"' \
-                    --run 'export FLASH_ATTENTION_TRITON_AMD_ENABLE="''${FLASH_ATTENTION_TRITON_AMD_ENABLE:-TRUE}"' \
-                    --run 'export TORCH_BLAS_PREFER_HIPBLASLT="''${TORCH_BLAS_PREFER_HIPBLASLT:-1}"' \
-                    --run 'export PYTORCH_TUNABLEOP_ENABLED="''${PYTORCH_TUNABLEOP_ENABLED:-0}"' \
-                    --run 'export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="''${TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL:-1}"'
-                done
-              '';
-              passthru = {
-                inherit (env) python;
-                rocm = sdk;
-                unwrapped = env;
-              };
-            };
-          mkAiterJitCache =
-            {
-              name,
-              vllmEnv,
-              modules ? [
-                "module_aiter_enum"
-                "module_rmsnorm"
-              ],
-            }:
-            prev.stdenv.mkDerivation {
-              pname = name;
-              version = final.python312Packages.amd-aiter.version;
-              dontUnpack = true;
-              dontStrip = true;
-              requiredSystemFeatures = [ "gfx1151" ];
-              nativeBuildInputs = [
-                prev.gcc
-                prev.ninja
-                sdk
-              ];
-
-              buildPhase = ''
-                runHook preBuild
-
-                export HOME="$TMPDIR/home"
-                export AITER_JIT_DIR="$TMPDIR/aiter-jit"
-                export GPU_ARCHS="gfx1151"
-                export PYTORCH_ROCM_ARCH="gfx1151"
-                export ROCM_HOME="${sdk}"
-                export ROCM_PATH="$ROCM_HOME"
-                export HIP_PATH="$ROCM_HOME"
-                export HIP_PLATFORM="amd"
-                export DEVICE_LIB_PATH="${sdk}/amdgcn/bitcode"
-                export HIP_DEVICE_LIB_PATH="$DEVICE_LIB_PATH"
-                export CPATH="${prev.glibc.dev}/include''${CPATH:+:$CPATH}"
-                export CPLUS_INCLUDE_PATH="${cxxIncludePath}''${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
-                export LIBRARY_PATH="${nativeLibraryPath}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
-                export HIPCC_LINK_FLAGS_APPEND="${hipccLinkFlags}''${HIPCC_LINK_FLAGS_APPEND:+ $HIPCC_LINK_FLAGS_APPEND}"
-                export MAX_JOBS="''${NIX_BUILD_CORES:-8}"
-                export PATH="${aiterRuntimePath}:$PATH"
-
-                mkdir -p "$HOME" "$AITER_JIT_DIR"
-                ${vllmEnv}/bin/python - <<'PY'
-                from aiter.jit.core import build_module, get_args_of_build
-
-                modules = ${builtins.toJSON modules}
-                for md_name in modules:
-                    args = get_args_of_build(md_name)
-                    build_module(
-                        md_name=md_name,
-                        srcs=args["srcs"],
-                        flags_extra_cc=args["flags_extra_cc"],
-                        flags_extra_hip=args["flags_extra_hip"],
-                        blob_gen_cmd=args["blob_gen_cmd"],
-                        extra_include=args["extra_include"],
-                        extra_ldflags=args["extra_ldflags"],
-                        verbose=args["verbose"],
-                        is_python_module=args["is_python_module"],
-                        is_standalone=args["is_standalone"],
-                        torch_exclude=args["torch_exclude"],
-                        hipify=args.get("hipify", False),
-                    )
-                PY
-
-                ${prev.lib.concatMapStringsSep "\n" (module: ''
-                  test -f "$AITER_JIT_DIR/${module}.so"
-                '') modules}
-
-                runHook postBuild
-              '';
-
-              installPhase = ''
-                runHook preInstall
-
-                mkdir -p "$out/build"
-                cp "$AITER_JIT_DIR"/module_*.so "$out"/
-
-                runHook postInstall
-              '';
-
-              meta = with prev.lib; {
-                description = "Prebuilt AITER runtime-JIT modules for vLLM/TheRock on gfx1151";
-                platforms = platforms.linux;
-              };
-            };
-          mkVllmAiterWrapper =
-            {
-              name,
-              vllmEnv,
-              aiterJitCache,
-            }:
-            prev.writeShellApplication {
-              inherit name;
-              runtimeInputs = [
-                prev.coreutils
-                prev.gcc
-                prev.ninja
-                sdk
-              ];
-              text = ''
-                export GPU_ARCHS="''${GPU_ARCHS:-gfx1151}"
-                export PYTORCH_ROCM_ARCH="''${PYTORCH_ROCM_ARCH:-gfx1151}"
-                export ROCM_HOME="''${ROCM_HOME:-${sdk}}"
-                export ROCM_PATH="''${ROCM_PATH:-$ROCM_HOME}"
-                export HIP_PATH="''${HIP_PATH:-$ROCM_HOME}"
-                export HIP_PLATFORM="''${HIP_PLATFORM:-amd}"
-                export DEVICE_LIB_PATH="''${DEVICE_LIB_PATH:-${sdk}/amdgcn/bitcode}"
-                export HIP_DEVICE_LIB_PATH="''${HIP_DEVICE_LIB_PATH:-$DEVICE_LIB_PATH}"
-                export CPATH="${prev.glibc.dev}/include''${CPATH:+:$CPATH}"
-                export CPLUS_INCLUDE_PATH="${cxxIncludePath}''${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
-                export LIBRARY_PATH="${nativeLibraryPath}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
-                export HIPCC_LINK_FLAGS_APPEND="${hipccLinkFlags}''${HIPCC_LINK_FLAGS_APPEND:+ $HIPCC_LINK_FLAGS_APPEND}"
-                export HSA_NO_SCRATCH_RECLAIM="''${HSA_NO_SCRATCH_RECLAIM:-1}"
-                export HSA_ENABLE_INTERRUPT="''${HSA_ENABLE_INTERRUPT:-0}"
-                export HSA_OVERRIDE_GFX_VERSION="''${HSA_OVERRIDE_GFX_VERSION:-11.5.1}"
-                export FLASH_ATTENTION_TRITON_AMD_ENABLE="''${FLASH_ATTENTION_TRITON_AMD_ENABLE:-TRUE}"
-                export TORCH_BLAS_PREFER_HIPBLASLT="''${TORCH_BLAS_PREFER_HIPBLASLT:-1}"
-                export PYTORCH_TUNABLEOP_ENABLED="''${PYTORCH_TUNABLEOP_ENABLED:-0}"
-                export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="''${TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL:-1}"
-                export VLLM_ROCM_USE_AITER="''${VLLM_ROCM_USE_AITER:-1}"
-                export VLLM_ROCM_USE_AITER_LINEAR="''${VLLM_ROCM_USE_AITER_LINEAR:-1}"
-                export VLLM_ROCM_USE_AITER_MOE="''${VLLM_ROCM_USE_AITER_MOE:-0}"
-                export VLLM_ROCM_USE_AITER_RMSNORM="''${VLLM_ROCM_USE_AITER_RMSNORM:-0}"
-                export VLLM_ROCM_USE_AITER_MHA="''${VLLM_ROCM_USE_AITER_MHA:-1}"
-                export VLLM_ROCM_USE_AITER_TRITON_GEMM="''${VLLM_ROCM_USE_AITER_TRITON_GEMM:-1}"
-                export VLLM_ROCM_USE_AITER_TRITON_ROPE="''${VLLM_ROCM_USE_AITER_TRITON_ROPE:-1}"
-                export VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="''${VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:-1}"
-                export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS="''${VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS:-0}"
-
-                if [ -z "''${AITER_JIT_DIR:-}" ]; then
-                  cache_root="''${XDG_CACHE_HOME:-''${HOME:-/tmp}/.cache}/aiter"
-                  cache_dir="$cache_root/${aiterJitCache.name}"
-                  stamp="$cache_dir/.prebuilt-${aiterJitCache.name}"
-                  if [ ! -e "$stamp" ]; then
-                    rm -rf "$cache_dir.tmp"
-                    mkdir -p "$cache_dir.tmp"
-                    cp -R "${aiterJitCache}/." "$cache_dir.tmp/"
-                    chmod -R u+w "$cache_dir.tmp"
-                    touch "$cache_dir.tmp/.prebuilt-${aiterJitCache.name}"
-                    rm -rf "$cache_dir"
-                    mv "$cache_dir.tmp" "$cache_dir"
-                  fi
-                  export AITER_JIT_DIR="$cache_dir"
-                fi
-
-                exec "${vllmEnv}/bin/vllm" "$@"
-              '';
-            };
-          dropVllmDependencyNames = [
-            "bitsandbytes"
-            "datasets"
-            "diskcache"
-            "lark"
-            "mistral-common"
-            "mistral_common"
-            "mistralai"
-            "opencv-python-headless"
-            "outlines"
-            "outlines-core"
-            "peft"
-            "pyarrow"
-            "timm"
-            "torchcodec"
-            "torchvision"
-            "xformers"
-          ];
-          dropVllmDeps =
-            names: deps:
-            prev.lib.filter (
-              dep:
-              let
-                name = dep.pname or dep.name or "";
-              in
-              !(prev.lib.elem name names)
-            ) deps;
-          disablePythonChecks =
-            pkg:
-            pkg.overridePythonAttrs (_old: {
-              doCheck = false;
-              pythonImportsCheck = [ ];
-            });
-          vllmTherock =
-            (final.python312Packages.vllm.override {
-              rocmSupport = true;
-              cudaSupport = false;
-              gpuTargets = rocmTargets;
-              rocmPackages = therockRocmPackages;
-              amdsmi = final.python312Packages.amdsmi;
-            }).overridePythonAttrs
-              (old: {
-                patches = (old.patches or [ ]) ++ [
-                  ./pkgs/vllm/patches/0001-hipify-copy-unchanged-cu-to-hip.patch
-                ];
-                postPatch = (old.postPatch or "") + ''
-                                substituteInPlace csrc/quantization/gptq/compat.cuh \
-                                  --replace-fail 'namespace gptq {' 'namespace gptq {
-
-                  #if defined(USE_ROCM) && defined(TORCH_HIP_VERSION) && TORCH_HIP_VERSION >= 713
-                  #define VLLM_GPTQ_SKIP_LEGACY_HALF_ATOMIC_ADD 1
-                  #endif'
-                                substituteInPlace csrc/quantization/gptq/compat.cuh \
-                                  --replace-fail '#if defined(__CUDA_ARCH__) || defined(USE_ROCM)' \
-                                    '#if !defined(VLLM_GPTQ_SKIP_LEGACY_HALF_ATOMIC_ADD) && (defined(__CUDA_ARCH__) || defined(USE_ROCM))'
-                '';
-                env = (old.env or { }) // {
-                  HIP_PATH = "${sdk}";
-                  HIP_PLATFORM = "amd";
-                  CMAKE_ARGS = prev.lib.concatStringsSep " " [
-                    ((old.env or { }).CMAKE_ARGS or "")
-                    "-DCMAKE_HIP_COMPILER=${sdk}/bin/therock-hip-clang++"
-                    "-DCMAKE_HIP_COMPILER_ROCM_ROOT=${sdk}"
-                    "-DHIP_ROOT_DIR=${sdk}"
-                  ];
-                };
-                nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
-                  final.pkg-config
-                ];
-                pythonRemoveDeps = (old.pythonRemoveDeps or [ ]) ++ dropVllmDependencyNames;
-                dependencies = dropVllmDeps dropVllmDependencyNames (old.dependencies or [ ]) ++ [
-                  final.python312Packages.amdsmi
-                  final.python312Packages.cloudpickle
-                ];
-                propagatedBuildInputs = dropVllmDeps dropVllmDependencyNames (old.propagatedBuildInputs or [ ]) ++ [
-                  final.python312Packages.amdsmi
-                  final.python312Packages.cloudpickle
-                ];
-              });
-          vllmEnvTherock = wrapWithHsa "vllm-env-therock-gfx1151" (
-            final.python312.withPackages (_ps: [
-              vllmTherock
-              final.python312Packages.diskcache
-              final.python312Packages."mistral-common"
-              final.python312Packages.pycountry
-              final.python312Packages.ray
-            ])
-          );
-          vllmEnvTherockAiter = wrapWithHsa "vllm-env-therock-aiter-gfx1151" (
-            final.python312.withPackages (_ps: [
-              vllmTherock
-              final.python312Packages.amd-aiter
-              final.python312Packages.diskcache
-              final.python312Packages."mistral-common"
-              final.python312Packages.pycountry
-              final.python312Packages.ray
-            ])
-          );
-          vllmAiterJitTherock = mkAiterJitCache {
-            name = "vllm-aiter-jit-therock-gfx1151";
-            vllmEnv = vllmEnvTherockAiter;
-          };
-        in
-        {
-          pythonPackagesExtensions = (prev.pythonPackagesExtensions or [ ]) ++ [
-            (
-              pyfinal: pyprev:
-              if lib.versions.majorMinor pyprev.python.version == "3.12" then
-                {
-                  amd-aiter =
-                    (pyprev.amd-aiter.override {
-                      rocmPackages = therockRocmPackages;
-                    }).overridePythonAttrs
-                      (old: {
-                        env = (old.env or { }) // {
-                          ROCM_PATH = "${sdk}";
-                          ROCM_HOME = "${sdk}";
-                          HIP_PATH = "${sdk}";
-                        };
-                        postPatch = (old.postPatch or "") + ''
-                          rm -rf 3rdparty/composable_kernel
-                          ln -s ${aiterComposableKernelSrc} 3rdparty/composable_kernel
-                        '';
-                        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
-                          sdk
-                        ];
-                        buildInputs = (old.buildInputs or [ ]) ++ [
-                          sdk
-                        ];
-                      });
-                  "compressed-tensors" = pyprev."compressed-tensors".overridePythonAttrs (old: {
-                    dependencies = (old.dependencies or [ ]) ++ [
-                      pyfinal.psutil
-                    ];
-                    nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [
-                      final.openssl
-                    ];
-                    propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [
-                      pyfinal.psutil
-                    ];
-                  });
-                  depyf = disablePythonChecks pyprev.depyf;
-                  llguidance = disablePythonChecks pyprev.llguidance;
-                  pydevd = disablePythonChecks pyprev.pydevd;
-                  "mistral-common" = disablePythonChecks pyprev."mistral-common";
-                }
-              else
-                { }
-            )
-          ];
-          therock-rocm-packages-gfx1151 = therockRocmPackages;
-          therock-python-overlay-smoke-gfx1151 = final.python312.withPackages (ps: [
-            ps.torch
-            ps.triton
-          ]);
-          vllm-rocm-therock-gfx1151 = vllmTherock;
-          vllm-env-therock-gfx1151 = vllmEnvTherock;
-          vllm-env-therock-aiter-gfx1151 = vllmEnvTherockAiter;
-          vllm-aiter-jit-therock-gfx1151 = vllmAiterJitTherock;
-          vllm-aiter-therock-gfx1151 = mkVllmAiterWrapper {
-            name = "vllm-aiter-therock-gfx1151";
-            vllmEnv = vllmEnvTherockAiter;
-            aiterJitCache = vllmAiterJitTherock;
-          };
-        };
-
-      mkRocmNarrowOverlay = target: _: prev: {
-        rocmPackages = prev.rocmPackages.overrideScope (
-          _: rocmPrev: {
-            clr = rocmPrev.clr.override {
-              localGpuTargets = target.buildTargets;
-            };
-          }
-        );
+      therockVllmOverlay = import ./overlays/therock-vllm.nix {
+        inherit lib rocmTargets;
+        target = defaultRocmTarget;
       };
+
+      mkRocmNarrowOverlay = import ./overlays/rocm-narrow.nix;
 
       rocmNarrowOverlays = lib.mapAttrs' (_: target: {
         name = "rocm-narrow-${target.packageSuffix}";
         value = mkRocmNarrowOverlay target;
       }) hardwareTargets.rocm;
+
+      # ---------------------------------------------------------------
+      # Flake outputs
+      # ---------------------------------------------------------------
 
       overlays = {
         # Composed default for strix-halo NixOS machines. Order matters:
@@ -1817,7 +198,7 @@
         # Same logic is also inline in linux-libibverbs-usb4/flake.nix as
         # `gfx1151Overlay`; consolidating that copy into this one is a
         # separate cleanup. For now both should produce equivalent results.
-        rocm-narrow-deep = final: prev: {
+        rocm-narrow-deep = _final: prev: {
           rocmPackages = prev.rocmPackages.overrideScope (
             _: rocmPrev:
             let
@@ -1918,17 +299,15 @@
             {
               llama-cpp-rocm =
                 if isDefault then pkgs.llama-cpp-rocm else pkgs."llama-cpp-rocm-${target.packageSuffix}";
-              llama-cpp-vulkan = pkgs.llama-cpp-vulkan;
               llama-cpp-master-rocm =
                 if isDefault then
                   pkgs.llama-cpp-master-rocm
                 else
                   pkgs."llama-cpp-master-rocm-${target.packageSuffix}";
-              llama-cpp-master-vulkan = pkgs.llama-cpp-master-vulkan;
+              inherit (pkgs) llama-cpp-vulkan llama-cpp-master-vulkan;
             }
             // lib.optionalAttrs isDefault {
-              llama-cpp-rocm-therock = pkgs.llama-cpp-rocm-therock;
-              llama-cpp-master-rocm-therock = pkgs.llama-cpp-master-rocm-therock;
+              inherit (pkgs) llama-cpp-rocm-therock llama-cpp-master-rocm-therock;
             };
 
           mkForTarget =
@@ -1938,7 +317,7 @@
                 inherit pkgs;
                 packages = mkPackageSetForTarget target;
                 gpuTarget = target.systemFeature;
-                hsaOverride = target.hsaOverride;
+                inherit (target) hsaOverride;
               };
               targetPrefix = lib.optionalString (
                 target.packageSuffix != defaultRocmTarget.packageSuffix
@@ -2041,13 +420,52 @@
       );
 
       packages =
-        (perSystem (
+        perSystem (
           { pkgs, system, ... }:
           let
-            rocmLlamaPackageNames = lib.concatMap (target: [
-              "llama-cpp-rocm-${target.packageSuffix}"
-              "llama-cpp-master-rocm-${target.packageSuffix}"
-            ]) hardwareTargets.rocmTargets;
+            # Per-target package attr names to expose. `lib.optional`
+            # filters out arches whose package isn't actually defined
+            # (most lemonade/therock bundles only exist for gfx1151).
+            perTargetPackageNames =
+              target:
+              let
+                s = target.packageSuffix;
+                wanted = [
+                  "rocm-xio-${s}"
+                  "therock-amd-llvm-${s}"
+                  "therock-rocm-${s}"
+                  "therock-rocm-${s}-env"
+                  "therock-rocm-${s}-rocshmem-env"
+                  "therock-rocm-7_13-${s}-core"
+                  "therock-rocm-7_13-${s}-cmake"
+                  "therock-rocm-from-source-${s}"
+                  "therock-rocm-from-source-${s}-configure"
+                  "therock-rocm-source-${s}"
+                  "therock-rocm-third-party-mirror-${s}"
+                  "therock-python-${s}"
+                  "therock-python-overlay-smoke-${s}"
+                  "therock-python-wheels-${s}"
+                  "ds4-rocm-${s}"
+                  "torch-rocm-7_13-${s}"
+                  "llama-cpp-rocm-${s}"
+                  "llama-cpp-master-rocm-${s}"
+                  "vllm-rocm-lemonade-${s}"
+                  "vllm-env-lemonade-${s}"
+                  "vllm-lemonade-prime-cache-${s}"
+                  "vllm-lemonade-qwen36-27b-cache-${s}"
+                  "vllm-lemonade-qwen36-27b-${s}"
+                  "vllm-lemonade-gemma4-31b-q8-kernel-cache-${s}"
+                  "vllm-lemonade-gemma4-31b-q8-${s}"
+                  "vllm-lemonade-gemma4-31b-q8-prime-${s}"
+                  "vllm-rocm-therock-${s}"
+                  "vllm-env-therock-${s}"
+                  "vllm-env-therock-aiter-${s}"
+                  "vllm-aiter-jit-therock-${s}"
+                  "vllm-aiter-therock-${s}"
+                ];
+              in
+              builtins.filter (n: pkgs ? ${n}) wanted;
+            allPerTargetPackageNames = lib.concatMap perTargetPackageNames hardwareTargets.rocmTargets;
             # Separate pkgs instance with cudaSupport=true so the CUDA
             # variants below build against the cuda toolchain instead of
             # the default ROCm-flavoured pkgs.
@@ -2055,8 +473,7 @@
           in
           {
             default = pkgs.llama-cpp-rocm;
-            llama-cpp-cuda = cudaPkgs.llama-cpp-cuda;
-            llama-cpp-master-cuda = cudaPkgs.llama-cpp-master-cuda;
+            inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
             inherit (pkgs)
               ec-su-axb35-monitor
               fastflowlm
@@ -2070,36 +487,13 @@
               llama-cpp-master-rocm-therock
               llama-cpp-master-vulkan
               rdma-core-usb4
-              rocm-xio-gfx1151
-              therock-python-gfx1151
-              therock-python-wheels-gfx1151
-              therock-python-overlay-smoke-gfx1151
-              therock-amd-llvm-gfx1151
-              therock-rocm-gfx1151
-              therock-rocm-gfx1151-env
-              therock-rocm-gfx1151-rocshmem-env
-              therock-rocm-source-gfx1151
-              therock-rocm-from-source-gfx1151
-              vllm-rocm-lemonade-gfx1151
-              vllm-env-lemonade-gfx1151
-              vllm-lemonade-prime-cache-gfx1151
-              vllm-lemonade-qwen36-27b-cache-gfx1151
-              vllm-lemonade-qwen36-27b-gfx1151
               gemma4-31b-it-text-config
-              vllm-lemonade-gemma4-31b-q8-kernel-cache-gfx1151
-              vllm-lemonade-gemma4-31b-q8-gfx1151
-              vllm-lemonade-gemma4-31b-q8-prime-gfx1151
-              vllm-rocm-therock-gfx1151
-              vllm-env-therock-gfx1151
-              vllm-env-therock-aiter-gfx1151
-              vllm-aiter-jit-therock-gfx1151
-              vllm-aiter-therock-gfx1151
               ;
           }
-          // lib.genAttrs rocmLlamaPackageNames (name: pkgs.${name})
+          // lib.genAttrs allPerTargetPackageNames (n: pkgs.${n})
           // mkBenchmarkPackages pkgs
           // mkFastflowlmBenchmarks pkgs
-        ))
+        )
         // forAllDarwinSystems (
           system:
           let
@@ -2113,233 +507,283 @@
         );
 
       apps =
-        (perSystem (
+        perSystem (
           { pkgs, ... }:
           let
+            # `pkg`'s default binary is named after the package; specify
+            # `binary` to point at a different one.
+            mkApp =
+              {
+                pkg,
+                binary ? pkg.pname or pkg.name,
+                description,
+              }:
+              {
+                type = "app";
+                program = "${pkg}/bin/${binary}";
+                meta = { inherit description; };
+              };
+
             mkHsaOverrideExport =
               target:
               lib.optionalString (
                 target.hsaOverride != null
               ) ''export HSA_OVERRIDE_GFX_VERSION="${target.hsaOverride}"'';
 
-          mkLlamaApp =
-            {
-              name,
-              package,
-              binary,
-              target,
-              description,
-            }:
-            {
-              type = "app";
-              program = toString (
-                pkgs.writeShellScript name ''
-                  ${mkHsaOverrideExport target}
-                  ${package}/bin/${binary} "$@"
-                ''
-              );
-              meta.description = description;
-            };
-
-          llamaAppAxes = {
-            cli = {
-              appPrefix = "llama-cli";
-              packagePrefix = "llama-cpp-rocm";
-              binary = "llama-cli";
-              descriptionPrefix = "Run llama-cli with ROCm for";
-            };
-            server = {
-              appPrefix = "llama-server";
-              packagePrefix = "llama-cpp-rocm";
-              binary = "llama-server";
-              descriptionPrefix = "Run llama-server with ROCm for";
-            };
-            cliMaster = {
-              appPrefix = "llama-cli-master";
-              packagePrefix = "llama-cpp-master-rocm";
-              binary = "llama-cli";
-              descriptionPrefix = "Run llama-cli from ggml-org master with ROCm for";
-            };
-            serverMaster = {
-              appPrefix = "llama-server-master";
-              packagePrefix = "llama-cpp-master-rocm";
-              binary = "llama-server";
-              descriptionPrefix = "Run llama-server from ggml-org master with ROCm for";
-            };
-          };
-
-          mkLlamaAppSet =
-            {
-              target,
-              appSuffix ? "",
-              packageSuffix ? "",
-              packageNameFor ? null,
-              descriptionFor ? null,
-            }:
-            let
-              packageName =
-                spec:
-                if packageNameFor == null then "${spec.packagePrefix}${packageSuffix}" else packageNameFor spec;
-              description =
-                spec:
-                if descriptionFor == null then
-                  "${spec.descriptionPrefix} ${target.marketingName}"
-                else
-                  descriptionFor spec;
-            in
-            lib.mapAttrs' (
-              _: spec:
-              let
-                name = "${spec.appPrefix}${appSuffix}";
-              in
+            mkLlamaApp =
               {
-                inherit name;
-                value = mkLlamaApp {
-                  inherit name target;
-                  package = pkgs.${packageName spec};
-                  inherit (spec) binary;
-                  description = description spec;
-                };
+                name,
+                package,
+                binary,
+                target,
+                description,
+              }:
+              {
+                type = "app";
+                program = toString (
+                  pkgs.writeShellScript name ''
+                    ${mkHsaOverrideExport target}
+                    ${package}/bin/${binary} "$@"
+                  ''
+                );
+                meta.description = description;
+              };
+
+            llamaAppAxes = {
+              cli = {
+                appPrefix = "llama-cli";
+                packagePrefix = "llama-cpp-rocm";
+                binary = "llama-cli";
+                descriptionPrefix = "Run llama-cli with ROCm for";
+              };
+              server = {
+                appPrefix = "llama-server";
+                packagePrefix = "llama-cpp-rocm";
+                binary = "llama-server";
+                descriptionPrefix = "Run llama-server with ROCm for";
+              };
+              cliMaster = {
+                appPrefix = "llama-cli-master";
+                packagePrefix = "llama-cpp-master-rocm";
+                binary = "llama-cli";
+                descriptionPrefix = "Run llama-cli from ggml-org master with ROCm for";
+              };
+              serverMaster = {
+                appPrefix = "llama-server-master";
+                packagePrefix = "llama-cpp-master-rocm";
+                binary = "llama-server";
+                descriptionPrefix = "Run llama-server from ggml-org master with ROCm for";
+              };
+            };
+
+            mkLlamaAppSet =
+              {
+                target,
+                appSuffix ? "",
+                packageSuffix ? "",
+                packageNameFor ? null,
+                descriptionFor ? null,
+              }:
+              let
+                packageName =
+                  spec:
+                  if packageNameFor == null then "${spec.packagePrefix}${packageSuffix}" else packageNameFor spec;
+                description =
+                  spec:
+                  if descriptionFor == null then
+                    "${spec.descriptionPrefix} ${target.marketingName}"
+                  else
+                    descriptionFor spec;
+              in
+              lib.mapAttrs' (
+                _: spec:
+                let
+                  name = "${spec.appPrefix}${appSuffix}";
+                in
+                {
+                  inherit name;
+                  value = mkLlamaApp {
+                    inherit name target;
+                    package = pkgs.${packageName spec};
+                    inherit (spec) binary;
+                    description = description spec;
+                  };
+                }
+              ) llamaAppAxes;
+
+            targetLlamaApps = lib.foldl' (
+              acc: target:
+              acc
+              // mkLlamaAppSet {
+                inherit target;
+                appSuffix = "-${target.packageSuffix}";
+                packageSuffix = "-${target.packageSuffix}";
               }
-            ) llamaAppAxes;
+            ) { } hardwareTargets.rocmTargets;
 
-          targetLlamaApps = lib.foldl' (
-            acc: target:
-            acc
-            // mkLlamaAppSet {
-              inherit target;
-              appSuffix = "-${target.packageSuffix}";
-              packageSuffix = "-${target.packageSuffix}";
-            }
-          ) { } hardwareTargets.rocmTargets;
+            defaultLlamaApps = mkLlamaAppSet { target = defaultRocmTarget; };
+            defaultTherockLlamaApps = mkLlamaAppSet {
+              target = defaultRocmTarget;
+              appSuffix = "-therock";
+              packageNameFor = spec: "${spec.packagePrefix}-therock";
+              descriptionFor =
+                spec: "${spec.descriptionPrefix} ${defaultRocmTarget.marketingName} with TheRock ROCm";
+            };
 
-          defaultLlamaApps = mkLlamaAppSet { target = defaultRocmTarget; };
-          defaultTherockLlamaApps = mkLlamaAppSet {
-            target = defaultRocmTarget;
-            appSuffix = "-therock";
-            packageNameFor = spec: "${spec.packagePrefix}-therock";
-            descriptionFor =
-              spec: "${spec.descriptionPrefix} ${defaultRocmTarget.marketingName} with TheRock ROCm";
-          };
-        in
-        {
-          therock-rocm-gfx1151-env = {
-            type = "app";
-            program = "${pkgs.therock-rocm-gfx1151-env}/bin/therock-rocm-gfx1151-env";
-            meta.description = "Run a command in the opt-in TheRock ROCm 7.13 gfx1151 environment";
-          };
+            # Per-target apps for the strix-halo SDK / lemonade / therock
+            # bundles. Adding a new arch auto-generates these apps as
+            # soon as the matching packages exist in `pkgs`; entries
+            # whose backing package isn't present are silently dropped.
+            mkPerTargetApps =
+              target:
+              let
+                s = target.packageSuffix;
+                m = target.marketingName;
+                # appName, package attr name, binary, description.
+                specs = [
+                  [
+                    "therock-rocm-${s}-env"
+                    "therock-rocm-${s}-env"
+                    null
+                    "Run a command in the opt-in TheRock ROCm 7.13 ${s} environment"
+                  ]
+                  [
+                    "therock-rocm-${s}-rocshmem-env"
+                    "therock-rocm-${s}-rocshmem-env"
+                    null
+                    "Run a command in the TheRock ROCm 7.13 ${s} rocSHMEM test environment"
+                  ]
+                  [
+                    "ds4-rocm-${s}"
+                    "ds4-rocm-${s}"
+                    "ds4"
+                    "Run experimental ds4 ROCm/HIP on ${m}"
+                  ]
+                  [
+                    "ds4-bench-rocm-${s}"
+                    "ds4-rocm-${s}"
+                    "ds4-bench"
+                    "Run experimental ds4 ROCm/HIP benchmark on ${m}"
+                  ]
+                  [
+                    "ds4-bench-fast-full-${s}"
+                    "ds4-rocm-${s}"
+                    "ds4-bench-fast-full"
+                    "Run experimental ds4 ROCm/HIP fast-full benchmark preset on ${m}"
+                  ]
+                  [
+                    "therock-python-${s}"
+                    "therock-python-${s}"
+                    "therock-python"
+                    "Run Python in the pinned TheRock ROCm/PyTorch wheel environment"
+                  ]
+                  [
+                    "therock-python-${s}-env"
+                    "therock-python-${s}"
+                    "therock-python-env"
+                    "Run a command in the pinned TheRock ROCm/PyTorch wheel environment"
+                  ]
+                  [
+                    "vllm-therock-${s}"
+                    "vllm-env-therock-${s}"
+                    "vllm"
+                    "Run vLLM built against the TheRock ROCm/PyTorch/Triton overlay"
+                  ]
+                  [
+                    "vllm-therock-aiter-${s}"
+                    "vllm-aiter-therock-${s}"
+                    "vllm-aiter-therock-${s}"
+                    "Run vLLM with TheRock ROCm and a preseeded AITER JIT cache"
+                  ]
+                  [
+                    "vllm-lemonade-${s}"
+                    "vllm-rocm-lemonade-${s}"
+                    "vllm"
+                    "Run Lemonade's vLLM ROCm binary bundle for ${m}"
+                  ]
+                  [
+                    "vllm-env-lemonade-${s}"
+                    "vllm-env-lemonade-${s}"
+                    "vllm"
+                    "Run Lemonade's vLLM ROCm bundle with Ray available for distributed serving"
+                  ]
+                  [
+                    "vllm-lemonade-prime-cache-${s}"
+                    "vllm-lemonade-prime-cache-${s}"
+                    null
+                    "Prime Lemonade vLLM ROCm Triton/autotune caches on a ${s} host"
+                  ]
+                  [
+                    "vllm-lemonade-qwen36-27b-${s}"
+                    "vllm-lemonade-qwen36-27b-${s}"
+                    null
+                    "Run Lemonade vLLM with the prebuilt Qwen3.6-27B Triton cache"
+                  ]
+                  [
+                    "vllm-lemonade-gemma4-31b-q8-${s}"
+                    "vllm-lemonade-gemma4-31b-q8-${s}"
+                    null
+                    "Run Lemonade vLLM with the prebuilt Gemma4-31B Q8 kernel cache"
+                  ]
+                  [
+                    "vllm-lemonade-gemma4-31b-q8-prime-${s}"
+                    "vllm-lemonade-gemma4-31b-q8-prime-${s}"
+                    null
+                    "Prime Gemma4-31B Q8 vLLM caches before measured benchmark runs"
+                  ]
+                ];
+                toAttr =
+                  spec:
+                  let
+                    appName = builtins.elemAt spec 0;
+                    pkgName = builtins.elemAt spec 1;
+                    binary = builtins.elemAt spec 2;
+                    description = builtins.elemAt spec 3;
+                  in
+                  lib.optionalAttrs (pkgs ? ${pkgName}) {
+                    ${appName} = mkApp (
+                      {
+                        pkg = pkgs.${pkgName};
+                        inherit description;
+                      }
+                      // lib.optionalAttrs (binary != null) { inherit binary; }
+                    );
+                  };
+              in
+              lib.foldl' (a: b: a // b) { } (map toAttr specs);
 
-          therock-rocm-gfx1151-rocshmem-env = {
-            type = "app";
-            program = "${pkgs.therock-rocm-gfx1151-rocshmem-env}/bin/therock-rocm-gfx1151-rocshmem-env";
-            meta.description = "Run a command in the TheRock ROCm 7.13 gfx1151 rocSHMEM test environment";
-          };
-
-          therock-python-gfx1151 = {
-            type = "app";
-            program = "${pkgs.therock-python-gfx1151}/bin/therock-python";
-            meta.description = "Run Python in the pinned TheRock ROCm/PyTorch wheel environment";
-          };
-
-          therock-python-gfx1151-env = {
-            type = "app";
-            program = "${pkgs.therock-python-gfx1151}/bin/therock-python-env";
-            meta.description = "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
-          };
-
-          vllm-therock-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-env-therock-gfx1151}/bin/vllm";
-            meta.description = "Run vLLM built against the TheRock ROCm/PyTorch/Triton overlay";
-          };
-
-          vllm-lemonade-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-rocm-lemonade-gfx1151}/bin/vllm";
-            meta.description = "Run Lemonade's vLLM ROCm binary bundle for Strix Halo";
-          };
-
-          vllm-env-lemonade-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-env-lemonade-gfx1151}/bin/vllm";
-            meta.description = "Run Lemonade's vLLM ROCm bundle with Ray available for distributed serving";
-          };
-
-          vllm-lemonade-prime-cache-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-lemonade-prime-cache-gfx1151}/bin/vllm-lemonade-prime-cache-gfx1151";
-            meta.description = "Prime Lemonade vLLM ROCm Triton/autotune caches on a gfx1151 host";
-          };
-
-          vllm-lemonade-qwen36-27b-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-lemonade-qwen36-27b-gfx1151}/bin/vllm-lemonade-qwen36-27b-gfx1151";
-            meta.description = "Run Lemonade vLLM with the prebuilt Qwen3.6-27B Triton cache";
-          };
-
-          vllm-lemonade-gemma4-31b-q8-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-lemonade-gemma4-31b-q8-gfx1151}/bin/vllm-lemonade-gemma4-31b-q8-gfx1151";
-            meta.description = "Run Lemonade vLLM with the prebuilt Gemma4-31B Q8 kernel cache";
-          };
-
-          vllm-lemonade-gemma4-31b-q8-prime-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-lemonade-gemma4-31b-q8-prime-gfx1151}/bin/vllm-lemonade-gemma4-31b-q8-prime-gfx1151";
-            meta.description = "Prime Gemma4-31B Q8 vLLM caches before measured benchmark runs";
-          };
-
-          vllm-therock-aiter-gfx1151 = {
-            type = "app";
-            program = "${pkgs.vllm-aiter-therock-gfx1151}/bin/vllm-aiter-therock-gfx1151";
-            meta.description = "Run vLLM with TheRock ROCm and a preseeded AITER JIT cache";
-          };
-
-          flm = {
-            type = "app";
-            program = "${pkgs.fastflowlm}/bin/flm";
-            meta.description = "FastFlowLM CLI on the AMD Ryzen AI NPU (Strix Halo XDNA2)";
-          };
+            perTargetApps = lib.foldl' (
+              acc: target: acc // mkPerTargetApps target
+            ) { } hardwareTargets.rocmTargets;
+          in
+          {
+            flm = mkApp {
+              pkg = pkgs.fastflowlm;
+              binary = "flm";
+              description = "FastFlowLM CLI on the AMD Ryzen AI NPU (Strix Halo XDNA2)";
+            };
           }
+          // perTargetApps
           // defaultLlamaApps
           // defaultTherockLlamaApps
           // targetLlamaApps
-        ))
+        )
         // forAllDarwinSystems (
           system:
           let
-            ds4 = self.packages.${system}.ds4;
+            inherit (self.packages.${system}) ds4;
+            mkDs4App = binary: description: {
+              type = "app";
+              program = "${ds4}/bin/${binary}";
+              meta.description = description;
+            };
           in
           {
-            default = {
-              type = "app";
-              program = "${ds4}/bin/ds4";
-              meta.description = "Run DwarfStar 4 with Metal";
-            };
-
-            ds4 = {
-              type = "app";
-              program = "${ds4}/bin/ds4";
-              meta.description = "Run DwarfStar 4 with Metal";
-            };
-
-            ds4-server = {
-              type = "app";
-              program = "${ds4}/bin/ds4-server";
-              meta.description = "Run the DwarfStar 4 HTTP server with Metal";
-            };
-
-            ds4-bench = {
-              type = "app";
-              program = "${ds4}/bin/ds4-bench";
-              meta.description = "Run the DwarfStar 4 benchmark with Metal";
-            };
-
-            ds4-download-model = {
-              type = "app";
-              program = "${ds4}/bin/ds4-download-model";
-              meta.description = "Download DS4 DeepSeek V4 Flash GGUF weights";
-            };
+            default = mkDs4App "ds4" "Run DwarfStar 4 with Metal";
+            ds4 = mkDs4App "ds4" "Run DwarfStar 4 with Metal";
+            ds4-server = mkDs4App "ds4-server" "Run the DwarfStar 4 HTTP server with Metal";
+            ds4-bench = mkDs4App "ds4-bench" "Run the DwarfStar 4 benchmark with Metal";
+            ds4-download-model = mkDs4App "ds4-download-model" "Download DS4 DeepSeek V4 Flash GGUF weights";
           }
         );
 
