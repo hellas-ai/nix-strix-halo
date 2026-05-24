@@ -1,0 +1,453 @@
+{
+  lib,
+  config,
+  callPackage,
+  newScope,
+  boost179,
+  opencv,
+  python3Packages,
+  openmpi,
+  stdenv,
+  pkgs,
+  runCommand,
+  therockSource ? null,
+  therockVersion ? "7.13.0",
+}:
+
+let
+  requireTheRockSource =
+    if therockSource == null then
+      throw "therock-rocm-7_13 rocm-modules requires therockSource"
+    else
+      therockSource;
+  sourcePathName = sourcePath: lib.replaceStrings [ "/" "." ] [ "-" "-" ] sourcePath;
+  therockSourceSlice =
+    sourcePath:
+    let
+      copyRoots =
+        if lib.hasPrefix "rocm-systems/" sourcePath then
+          [
+            sourcePath
+            "rocm-systems/shared"
+          ]
+        else if lib.hasPrefix "rocm-libraries/projects/" sourcePath then
+          [
+            sourcePath
+            "rocm-libraries/shared"
+            "rocm-libraries/cmake"
+          ]
+        else if lib.hasPrefix "rocm-libraries/shared/" sourcePath then
+          [ "rocm-libraries/shared" ]
+        else
+          [ sourcePath ];
+      copyCommands = lib.concatMapStringsSep "\n" (
+        relPath: "copy_path ${lib.escapeShellArg relPath}"
+      ) copyRoots;
+    in
+    runCommand "therock-rocm-7_13-source-${sourcePathName sourcePath}" { } ''
+      copy_path() {
+        rel="$1"
+        if [ ! -e "${requireTheRockSource}/$rel" ]; then
+          echo "missing TheRock source path: $rel" >&2
+          exit 1
+        fi
+        mkdir -p "$out/$(dirname "$rel")"
+        cp -a --reflink=auto "${requireTheRockSource}/$rel" "$out/$rel"
+      }
+
+      mkdir -p "$out"
+      ${copyCommands}
+      chmod -R u+w "$out"
+    '';
+  fromTheRock =
+    sourcePath: drv:
+    let
+      src = therockSourceSlice sourcePath;
+    in
+    drv.overrideAttrs (old: {
+      version = therockVersion;
+      inherit src;
+      sourceRoot = "${src.name}/${sourcePath}";
+      # nixpkgs's ROCm packages typically carry backport fetchpatches for
+      # bugs that landed upstream after their pinned (7.2.x) tag. TheRock
+      # 7.13 already has those merged, so applying them would reverse-fail.
+      # Keep local path patches (Nix-only fixes that we own), drop anything
+      # else (fetchpatch-style derivations).
+      patches = lib.filter (p: lib.isPath p) (old.patches or [ ]);
+      passthru = builtins.removeAttrs (old.passthru or { }) [ "updateScript" ] // {
+        inherit sourcePath;
+        sourceProvider = "TheRock";
+      };
+    });
+
+  outer = lib.makeScope newScope (
+    self:
+    let
+      inherit (self) llvm;
+      origStdenv = stdenv;
+      pyPackages = python3Packages;
+      openmpi-orig = openmpi;
+      rocmClangStdenv = llvm.rocmClangStdenv;
+    in
+    {
+      inherit therockSource therockVersion;
+      inherit rocmClangStdenv;
+      stdenv = rocmClangStdenv;
+
+      rocmUpdateScript = self.callPackage ./update.nix { };
+
+      ## ROCm ##
+      llvm = lib.recurseIntoAttrs (
+        callPackage ./llvm/default.nix {
+          # rocm-device-libs is used for .src only
+          # otherwise would cause infinite recursion
+          inherit (self) rocm-device-libs therockSource therockVersion;
+        }
+      );
+      inherit (self.llvm) rocm-toolchain clang openmp;
+
+      rocm-core = fromTheRock "rocm-systems/projects/rocm-core" (
+        self.callPackage ./rocm-core { stdenv = origStdenv; }
+      );
+
+      rocm-cmake = fromTheRock "base/rocm-cmake" (self.callPackage ./rocm-cmake { stdenv = origStdenv; });
+
+      rocm-device-libs = self.callPackage ./rocm-device-libs { };
+
+      rocm-runtime = fromTheRock "rocm-systems/projects/rocr-runtime" (
+        self.callPackage ./rocm-runtime {
+          stdenv = origStdenv;
+        }
+      );
+
+      rocm-comgr = self.callPackage ./rocm-comgr { };
+
+      rocminfo = fromTheRock "rocm-systems/projects/rocminfo" (
+        self.callPackage ./rocminfo { stdenv = origStdenv; }
+      );
+
+      amdsmi = fromTheRock "rocm-systems/projects/amdsmi" (
+        pyPackages.callPackage ./amdsmi {
+          inherit (self) rocmUpdateScript;
+        }
+      );
+
+      rocm-smi = fromTheRock "rocm-systems/projects/rocm-smi-lib" (
+        pyPackages.callPackage ./rocm-smi {
+          inherit (self) rocmUpdateScript;
+        }
+      );
+
+      aqlprofile = fromTheRock "rocm-systems/projects/aqlprofile" (self.callPackage ./aqlprofile { });
+
+      rdc = fromTheRock "rocm-systems/projects/rdc" (self.callPackage ./rdc { });
+
+      rocm-docs-core = python3Packages.callPackage ./rocm-docs-core { };
+
+      hip-common = fromTheRock "rocm-systems/projects/hip" (self.callPackage ./hip-common { });
+
+      hipcc = self.callPackage ./hipcc { stdenv = origStdenv; };
+
+      # Replaces hip, opencl-runtime, and rocclr
+      clr = fromTheRock "rocm-systems/projects/clr" (self.callPackage ./clr { });
+
+      aotriton = self.callPackage ./aotriton { stdenv = origStdenv; };
+
+      hipify = fromTheRock "compiler/hipify" (
+        self.callPackage ./hipify {
+          stdenv = origStdenv;
+        }
+      );
+
+      # hsakmt was merged into rocm-runtime
+      hsakmt = self.rocm-runtime;
+
+      rocprofiler = fromTheRock "rocm-systems/projects/rocprofiler" (
+        self.callPackage ./rocprofiler {
+          inherit (llvm) clang;
+        }
+      );
+      rocprofiler-register = fromTheRock "rocm-systems/projects/rocprofiler-register" (
+        self.callPackage ./rocprofiler-register {
+          inherit (llvm) clang;
+        }
+      );
+      rocprofiler-sdk = fromTheRock "rocm-systems/projects/rocprofiler-sdk" (
+        self.callPackage ./rocprofiler-sdk { }
+      );
+
+      rocprof-compute-viewer = self.callPackage ./rocprof-compute-viewer { };
+
+      rocprof-trace-decoder = fromTheRock "rocm-systems/projects/rocprof-trace-decoder" (
+        self.callPackage ./rocprof-trace-decoder { }
+      );
+
+      roctracer = fromTheRock "rocm-systems/projects/roctracer" (self.callPackage ./roctracer { });
+
+      rocgdb = fromTheRock "debug-tools/rocgdb" (self.callPackage ./rocgdb { });
+
+      rocdbgapi = fromTheRock "rocm-systems/projects/rocdbgapi" (self.callPackage ./rocdbgapi { });
+
+      rocr-debug-agent = fromTheRock "rocm-systems/projects/rocr-debug-agent" (
+        self.callPackage ./rocr-debug-agent { }
+      );
+
+      rocprim = fromTheRock "rocm-libraries/projects/rocprim" (self.callPackage ./rocprim { });
+
+      rocsparse = fromTheRock "rocm-libraries/projects/rocsparse" (self.callPackage ./rocsparse { });
+
+      rocthrust = fromTheRock "rocm-libraries/projects/rocthrust" (self.callPackage ./rocthrust { });
+
+      rocrand = fromTheRock "rocm-libraries/projects/rocrand" (self.callPackage ./rocrand { });
+
+      hiprand = fromTheRock "rocm-libraries/projects/hiprand" (self.callPackage ./hiprand { });
+
+      rocfft = fromTheRock "rocm-libraries/projects/rocfft" (self.callPackage ./rocfft { });
+
+      mscclpp = self.callPackage ./mscclpp { };
+
+      rccl = fromTheRock "rocm-systems/projects/rccl" (self.callPackage ./rccl { });
+
+      hipcub = fromTheRock "rocm-libraries/projects/hipcub" (self.callPackage ./hipcub { });
+
+      hipsparse = fromTheRock "rocm-libraries/projects/hipsparse" (self.callPackage ./hipsparse { });
+
+      hipfort = self.callPackage ./hipfort { };
+
+      hipfft = fromTheRock "rocm-libraries/projects/hipfft" (self.callPackage ./hipfft { });
+
+      hiprt = self.callPackage ./hiprt { };
+
+      tensile = fromTheRock "rocm-libraries/shared/tensile" (
+        pyPackages.callPackage ./tensile {
+          inherit (self)
+            rocmUpdateScript
+            clr
+            ;
+        }
+      );
+
+      rocblas = fromTheRock "rocm-libraries/projects/rocblas" (self.callPackage ./rocblas { });
+
+      rocsolver = fromTheRock "rocm-libraries/projects/rocsolver" (self.callPackage ./rocsolver { });
+
+      rocwmma = fromTheRock "rocm-libraries/projects/rocwmma" (self.callPackage ./rocwmma { });
+
+      rocalution = self.callPackage ./rocalution { };
+
+      rocmlir-rock = self.callPackage ./rocmlir {
+        buildRockCompiler = true;
+      };
+      rocmlir = self.rocmlir-rock;
+
+      hipsolver = fromTheRock "rocm-libraries/projects/hipsolver" (self.callPackage ./hipsolver { });
+
+      hipblas-common = fromTheRock "rocm-libraries/projects/hipblas-common" (
+        self.callPackage ./hipblas-common { }
+      );
+
+      hipblas = fromTheRock "rocm-libraries/projects/hipblas" (self.callPackage ./hipblas { });
+
+      hipblaslt = fromTheRock "rocm-libraries/projects/hipblaslt" (self.callPackage ./hipblaslt { });
+
+      # hipTensor - Only supports GFX9
+
+      composable_kernel_base = fromTheRock "rocm-libraries/projects/composablekernel" (
+        self.callPackage ./composable_kernel/base.nix { }
+      );
+      # The wrapper hard-codes `broken = !anyGfx9Target` based on the
+      # assumption that the FULL multi-part build (mha/gemm/conv/...)
+      # needs MFMA. The wrapper actually consults the same `parts` map
+      # below — those parts that depend on MFMA (`enabled = !miOpenReqLibsOnly`
+      # or `onlyFor = [ gfx9 ]`) get filtered out for non-gfx9 builds, so
+      # the wrapper SHOULD work for miopen-only consumers on gfx11+.
+      # Clear the broken flag so miopen and friends can depend on
+      # `composable_kernel`. Pytorch wires CK as header-only via
+      # `composable_kernel.anyMfmaTarget`, so it skips this output
+      # regardless.
+      composable_kernel = (self.callPackage ./composable_kernel { }).overrideAttrs (old: {
+        meta = old.meta // {
+          broken = false;
+        };
+      });
+
+      ck4inductor = pyPackages.callPackage ./composable_kernel/ck4inductor.nix {
+        inherit (self) composable_kernel rocm-toolchain;
+      };
+
+      half = fromTheRock "base/half" (self.callPackage ./half { });
+
+      miopen = fromTheRock "rocm-libraries/projects/miopen" (
+        self.callPackage ./miopen {
+          boost = boost179.override { enableStatic = true; };
+        }
+      );
+
+      miopen-hip = self.miopen;
+
+      migraphx = self.callPackage ./migraphx { stdenv = origStdenv; };
+
+      rpp = self.callPackage ./rpp { };
+
+      rpp-hip = self.rpp.override { useCPU = false; };
+
+      rpp-cpu = self.rpp.override { useCPU = true; };
+
+      mivisionx = self.callPackage ./mivisionx {
+        stdenv = origStdenv;
+        opencv = opencv.override { enablePython = true; };
+      };
+
+      mivisionx-hip = self.mivisionx.override {
+        rpp = self.rpp-hip;
+        useOpenCL = false;
+        useCPU = false;
+      };
+
+      mivisionx-cpu = self.mivisionx.override {
+        rpp = self.rpp-cpu;
+        useOpenCL = false;
+        useCPU = true;
+      };
+
+      # Even if config.rocmSupport is false we need rocmSupport true
+      # version of ucc/ucx in openmpi in this package set
+      openmpi = openmpi-orig.override (
+        prev:
+        let
+          ucx = prev.ucx.override {
+            enableCuda = false;
+            enableRocm = true;
+            rocmPackages = self;
+          };
+        in
+        {
+          inherit ucx;
+          ucc = prev.ucc.override {
+            enableCuda = false;
+            inherit ucx;
+          };
+        }
+      );
+      mpi = self.openmpi;
+
+      meta = {
+        # eval all pkgsRocm release attrs with
+        # nix-eval-jobs --force-recurse pkgs/top-level/release.nix -I . --select "p: p.pkgsRocm" --no-instantiate
+        release-packagePlatforms =
+          let
+            platforms = [
+              "x86_64-linux"
+            ];
+            attrPaths = (builtins.fromJSON (builtins.readFile ./release-attrPaths.json)).attrPaths;
+          in
+          lib.foldl' (
+            acc: path:
+            if lib.hasAttrByPath (lib.splitString "." path) pkgs then
+              lib.recursiveUpdate acc (lib.setAttrByPath (lib.splitString "." path) platforms)
+            else
+              acc
+          ) { } attrPaths;
+      };
+
+      rocm-bandwidth-test = self.callPackage ./rocm-bandwidth-test {
+        rocmPackages = self;
+      };
+
+      rocm-tests = self.callPackage ./rocm-tests {
+        rocmPackages = self;
+      };
+    }
+    // lib.optionalAttrs config.allowAliases {
+      rpp-opencl = throw ''
+        'rpp-opencl' has been removed as it has been broken for a year and has no consuming packages.
+        Use 'rpp' or 'rpp-cpu' instead.
+      ''; # Added 2026-03-08
+
+      rocmPath = throw ''
+        'rocm-path' has been removed. If a ROCM_PATH value is required in nixpkgs please
+        construct one with the minimal set of required deps.
+        For convenience use outside of nixpkgs consider one of the entries in
+        'rocmPackages.meta'.
+      ''; # Added 2025-09-30
+
+      rocm-merged-llvm = throw ''
+        'rocm-merged-llvm' has been removed.
+        For 'libllvm' or 'libclang' use 'rocmPackages.llvm.libllvm/clang'.
+        For a ROCm compiler toolchain use 'rocmPackages.rocm-toolchain'.
+        If a package uses '$<TARGET_FILE:clang>' in CMake from 'libclang'
+        it may be necessary to convince it to use 'rocm-toolchain' instead.
+        'rocm-merged-llvm' avoided this at the cost of significantly bloating closure
+        size.
+      ''; # Added 2025-09-30
+
+      hsa-amd-aqlprofile-bin = lib.warn ''
+        'hsa-amd-aqlprofile-bin' has been replaced by 'aqlprofile'.
+      '' self.aqlprofile; # Added 2025-08-27
+
+      triton = throw ''
+        'rocmPackages.triton' has been removed. Please use python3Packages.triton
+      ''; # Added 2025-08-24
+
+      rocm-thunk = throw ''
+        'rocm-thunk' has been removed. It's now part of the ROCm runtime.
+      ''; # Added 2025-3-16
+
+      clang-ocl = throw ''
+        'clang-ocl' has been deprecated upstream. Use ROCm's clang directly.
+      ''; # Added 2025-3-16
+
+      miopengemm = throw ''
+        'miopengemm' has been deprecated.
+      ''; # Added 2024-3-3
+
+      miopen-opencl = throw ''
+        'miopen-opencl' has been deprecated.
+      ''; # Added 2024-3-3
+
+      mivisionx-opencl = throw ''
+        'mivisionx-opencl' has been deprecated.
+        Other versions of mivisionx are still available.
+      ''; # Added 2024-3-24
+    }
+  );
+  scopeForArches =
+    arches:
+    outer.overrideScope (
+      _final: prev: {
+        clr = prev.clr.override {
+          localGpuTargets = arches;
+        };
+      }
+    );
+in
+outer
+// builtins.listToAttrs (
+  map (arch: {
+    name = arch;
+    value = scopeForArches [ arch ];
+  }) outer.clr.gpuTargets
+)
+// {
+  gfx9 = scopeForArches [
+    "gfx906"
+    "gfx908"
+    "gfx90a"
+    "gfx942"
+  ];
+  gfx10 = scopeForArches [
+    "gfx1010"
+    "gfx1030"
+  ];
+  gfx11 = scopeForArches [
+    "gfx1100"
+    "gfx1101"
+    "gfx1102"
+    "gfx1150"
+    "gfx1151"
+  ];
+  gfx12 = scopeForArches [
+    "gfx1200"
+    "gfx1201"
+  ];
+}

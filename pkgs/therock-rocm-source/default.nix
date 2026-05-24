@@ -9,6 +9,7 @@
   rev,
   hash,
   fetchArgs ? [ ],
+  deepNestedSubmodules ? [ ],
   fetchDepth ? 1,
   name ? "therock-rocm-source",
 }:
@@ -27,6 +28,17 @@ let
       --depth ${toString fetchDepth} \
       ${lib.escapeShellArgs fetchArgs}
   '';
+
+  fetchDeepNestedSubmodules = lib.concatMapStringsSep "\n" (
+    item:
+    let
+      parent = lib.escapeShellArg item.parent;
+      paths = lib.escapeShellArgs item.paths;
+    in
+    ''
+      git -C ${parent} submodule update --init --depth ${toString fetchDepth} --jobs "$fetch_jobs" -- ${paths}
+    ''
+  ) deepNestedSubmodules;
 in
 stdenvNoCC.mkDerivation {
   pname = name;
@@ -61,6 +73,7 @@ stdenvNoCC.mkDerivation {
 
     fetch_jobs="''${NIX_BUILD_CORES:-1}"
     ${fetchSources}
+    ${fetchDeepNestedSubmodules}
 
     find . -name .git -exec rm -rf {} +
 

@@ -1,0 +1,149 @@
+--- a/debug-tools/CMakeLists.txt
++++ b/debug-tools/CMakeLists.txt
+@@ -270,6 +270,15 @@
+       "-DSHARED_PYTHON_EXECUTABLES=${_rocgdb_python_executables_escaped}"
+       "-DTHEROCK_BUNDLE_SYSDEPS=${THEROCK_BUNDLE_SYSDEPS}"
+       "-DROCGDB_SOURCE_DIR=${THEROCK_ROCGDB_SOURCE_DIR}"
++      "-DROCGDB_EXTRA_LDFLAGS=${ROCGDB_EXTRA_LDFLAGS}"
++      "-DROCGDB_EXTRA_CPPFLAGS=${ROCGDB_EXTRA_CPPFLAGS}"
++      "-DROCGDB_EXTRA_PKG_CONFIG_PATH=${ROCGDB_EXTRA_PKG_CONFIG_PATH}"
++      "-DROCGDB_MAKE_JOBS=${ROCGDB_MAKE_JOBS}"
++      "-DROCGDB_FILE_CMD=${ROCGDB_FILE_CMD}"
++      "-DROCGDB_GMP_INCLUDE_DIR=${ROCGDB_GMP_INCLUDE_DIR}"
++      "-DROCGDB_GMP_LIBRARY_DIR=${ROCGDB_GMP_LIBRARY_DIR}"
++      "-DROCGDB_MPFR_INCLUDE_DIR=${ROCGDB_MPFR_INCLUDE_DIR}"
++      "-DROCGDB_MPFR_LIBRARY_DIR=${ROCGDB_MPFR_LIBRARY_DIR}"
+     COMPILER_TOOLCHAIN
+       amd-llvm
+     RUNTIME_DEPS
+--- a/debug-tools/rocgdb/CMakeLists.txt
++++ b/debug-tools/rocgdb/CMakeLists.txt
+@@ -97,14 +97,30 @@
+   set(CMAKE_BUILD_TYPE Release)
+ endif()
+ 
+-# Standard flags are handled by CMAKE_C_FLAGS, CMAKE_C_FLAGS_DEBUG, etc.
+-set(CUSTOM_C_FLAGS)
+-set(CUSTOM_CXX_FLAGS)
++set(ROCGDB_MAKE_JOBS "" CACHE STRING "Parallel jobs for ROCgdb's recursive make")
++if(NOT ROCGDB_MAKE_JOBS)
++  set(ROCGDB_MAKE_JOBS "${PAR_JOBS}")
++endif()
++
++# Forward the CMake compiler flags to ROCgdb's Autoconf build. This includes
++# toolchain flags from the superproject, such as sysroot and gcc-toolchain
++# selections needed when CMAKE_C_COMPILER points at a freshly built compiler.
++set(CUSTOM_C_FLAGS "${CMAKE_C_FLAGS}")
++set(CUSTOM_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
++string(TOUPPER "${CMAKE_BUILD_TYPE}" ROCGDB_BUILD_TYPE_UPPER)
++if(ROCGDB_BUILD_TYPE_UPPER)
++  if(DEFINED CMAKE_C_FLAGS_${ROCGDB_BUILD_TYPE_UPPER})
++    string(APPEND CUSTOM_C_FLAGS " ${CMAKE_C_FLAGS_${ROCGDB_BUILD_TYPE_UPPER}}")
++  endif()
++  if(DEFINED CMAKE_CXX_FLAGS_${ROCGDB_BUILD_TYPE_UPPER})
++    string(APPEND CUSTOM_CXX_FLAGS " ${CMAKE_CXX_FLAGS_${ROCGDB_BUILD_TYPE_UPPER}}")
++  endif()
++endif()
+ 
+ # Set custom flags for Debug builds.
+ if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
+-  set(CUSTOM_C_FLAGS "-O0 -g3")
+-  set(CUSTOM_CXX_FLAGS "-O0 -g3")
++  string(APPEND CUSTOM_C_FLAGS " -O0 -g3")
++  string(APPEND CUSTOM_CXX_FLAGS " -O0 -g3")
+ endif()
+ 
+ # Compiler commands to chain to autotools.
+@@ -144,12 +160,43 @@
+   set(CUSTOM_CXX_FLAGS "${CUSTOM_CXX_FLAGS} ${NCURSES_INCLUDE}")
+ endif()
+ 
++# Extra linker flags can be injected by the superproject for toolchains that
++# need non-default executable runtime settings.
++set(ROCGDB_EXTRA_LDFLAGS "" CACHE STRING "Extra linker flags to pass to ROCgdb configure")
++set(ROCGDB_EXTRA_CPPFLAGS "" CACHE STRING "Extra preprocessor flags to pass to ROCgdb configure")
++set(ROCGDB_EXTRA_PKG_CONFIG_PATH "" CACHE STRING "Extra pkg-config search path to pass to ROCgdb configure")
++set(ROCGDB_FILE_CMD "file" CACHE FILEPATH "file(1) executable to pass to libtool configure probes")
++set(ROCGDB_GMP_INCLUDE_DIR "" CACHE PATH "GMP include directory to pass to ROCgdb configure")
++set(ROCGDB_GMP_LIBRARY_DIR "" CACHE PATH "GMP library directory to pass to ROCgdb configure")
++set(ROCGDB_MPFR_INCLUDE_DIR "" CACHE PATH "MPFR include directory to pass to ROCgdb configure")
++set(ROCGDB_MPFR_LIBRARY_DIR "" CACHE PATH "MPFR library directory to pass to ROCgdb configure")
++
++if(ROCGDB_EXTRA_CPPFLAGS)
++  string(APPEND CUSTOM_C_FLAGS " ${ROCGDB_EXTRA_CPPFLAGS}")
++  string(APPEND CUSTOM_CXX_FLAGS " ${ROCGDB_EXTRA_CPPFLAGS}")
++endif()
++set(CUSTOM_CPP_FLAGS "${CUSTOM_C_FLAGS}")
++
+ # Adjust LDFLAGS. NCURSES_RPATH is empty when not using bundled sysdeps.
+-set(LDFLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${NCURSES_RPATH} -Wl,--enable-new-dtags")
++# Use executable linker flags because Autoconf probes create executables and
++# need any superproject-provided dynamic linker/sysroot settings.
++set(LDFLAGS "${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS} ${ROCGDB_EXTRA_LDFLAGS} ${NCURSES_RPATH} -Wl,--enable-new-dtags")
++
++# TheRock exposes private stage libraries to subprojects with -rpath-link,
++# which is sufficient for the linker but not for ROCgdb's Autoconf probes:
++# those probes immediately execute the linked test binaries.
++string(REGEX REPLACE "-Wl,-rpath-link,([^ ]+)" "-Wl,-rpath-link,\\1 -Wl,-rpath,\\1" LDFLAGS "${LDFLAGS}")
+ 
+ # Replace all semicolons (the CMake separator) with colons (the ENV separator).
+ # We need this to pass it on to rocgdb's configure.
+ string(REPLACE ";" ":" PKG_CONFIG_PATH_ENV_VAR "${THEROCK_PKG_CONFIG_DIRS}")
++if(ROCGDB_EXTRA_PKG_CONFIG_PATH)
++  if(PKG_CONFIG_PATH_ENV_VAR)
++    string(APPEND PKG_CONFIG_PATH_ENV_VAR ":${ROCGDB_EXTRA_PKG_CONFIG_PATH}")
++  else()
++    set(PKG_CONFIG_PATH_ENV_VAR "${ROCGDB_EXTRA_PKG_CONFIG_PATH}")
++  endif()
++endif()
+ 
+ # Set conditional configure flags for bundled sysdep prefixes. When using system
+ # libraries, these are left empty so autotools discovers them via pkg-config.
+@@ -163,6 +209,14 @@
+   set(ROCGDB_GMP_FLAG "--with-gmp=${GMP_PREFIX}")
+   set(ROCGDB_MPFR_FLAG "--with-mpfr=${MPFR_PREFIX}")
+   set(ROCGDB_SYSDEPS_RPATH_SEGMENT ":\\\$ORIGIN/../lib/rocm_sysdeps/lib")
++elseif(ROCGDB_GMP_INCLUDE_DIR AND ROCGDB_GMP_LIBRARY_DIR AND
++       ROCGDB_MPFR_INCLUDE_DIR AND ROCGDB_MPFR_LIBRARY_DIR)
++  set(ROCGDB_GMP_FLAG
++      "--with-gmp-include=${ROCGDB_GMP_INCLUDE_DIR}"
++      "--with-gmp-lib=${ROCGDB_GMP_LIBRARY_DIR}")
++  set(ROCGDB_MPFR_FLAG
++      "--with-mpfr-include=${ROCGDB_MPFR_INCLUDE_DIR}"
++      "--with-mpfr-lib=${ROCGDB_MPFR_LIBRARY_DIR}")
+ endif()
+ 
+ # Set some global variables for the configure/build.
+@@ -249,6 +304,9 @@
+         "PKG_CONFIG_PATH=${PKG_CONFIG_PATH_ENV_VAR}"
+         "CFLAGS=${CUSTOM_C_FLAGS}"
+         "CXXFLAGS=${CUSTOM_CXX_FLAGS}"
++        "CPPFLAGS=${CUSTOM_CPP_FLAGS}"
++        "lt_cv_path_MAGIC_CMD=${ROCGDB_FILE_CMD}"
++        "MAGIC_CMD=${ROCGDB_FILE_CMD}"
+         "LDFLAGS=${ALL_LDFLAGS}"
+       --
+       # The actual configure command.
+@@ -296,7 +353,21 @@
+     # Build
+     COMMAND
+       ${CMAKE_COMMAND} -E chdir "${ROCGDB_BUILD_DIR}"
+-      ${MAKE_EXECUTABLE} -s -j "${PAR_JOBS}"
++      ${CMAKE_COMMAND} -E env
++        "PKG_CONFIG_PATH=${PKG_CONFIG_PATH_ENV_VAR}"
++        "CFLAGS=${CUSTOM_C_FLAGS}"
++        "CXXFLAGS=${CUSTOM_CXX_FLAGS}"
++        "CPPFLAGS=${CUSTOM_CPP_FLAGS}"
++        "LDFLAGS=${ALL_LDFLAGS}"
++        "lt_cv_path_MAGIC_CMD=${ROCGDB_FILE_CMD}"
++        "MAGIC_CMD=${ROCGDB_FILE_CMD}"
++      --
++      ${MAKE_EXECUTABLE} -s -j "${ROCGDB_MAKE_JOBS}"
++        "CFLAGS=${CUSTOM_C_FLAGS}"
++        "CXXFLAGS=${CUSTOM_CXX_FLAGS}"
++        "CPPFLAGS=${CUSTOM_CPP_FLAGS}"
++        "LDFLAGS=${ALL_LDFLAGS}"
++        "MAGIC_CMD=${ROCGDB_FILE_CMD}"
+     # Install gdb.
+     COMMAND
+       ${CMAKE_COMMAND} -E chdir "${ROCGDB_BUILD_DIR}"

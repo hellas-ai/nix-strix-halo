@@ -118,6 +118,7 @@ stdenv.mkDerivation {
     "-DGDA_MLX5=OFF"
     "-DGDA_IONIC=OFF"
     "-DGDA_ERNIC=OFF"
+    "-DGDA_USB4_RDMA=ON"
     "-DBUILD_CLIENTS=ON"
     "-DINSTALL_TESTER=ON"
     "-DBUILD_TESTING=OFF"

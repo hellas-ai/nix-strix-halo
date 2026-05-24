@@ -60,6 +60,10 @@
       "hash": "sha512-6FoNq1GViJlIo0YhifDgWY0zHTRXYS4tM1B5nbouJEMW0lb4Fh31IZU46wA+S1ND+YmqoA+WMhVZBj7YyPKf0g==",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/gmp-6.3.0.tar.xz"
     },
+    "googletest-1.16.0.tar.gz": {
+      "hash": "sha256-eMZ2/GOIFSm/l7+dRZSNkFpmgz+/pTGOos10eMuY85k=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/googletest-1.16.0.tar.gz"
+    },
     "googletest-1.17.0.tar.gz": {
       "hash": "sha256-Zfq3AdmCnTjLd8FKzcQx0hCL/b+JeeQOuK5Wft8Qsnw=",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/googletest-1.17.0.tar.gz"

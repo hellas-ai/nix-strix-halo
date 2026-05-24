@@ -1,0 +1,61 @@
+clang-offload-bundler chooses between zstd (CompressionFormat == 1) and
+zlib (CompressionFormat == 0) depending on what compression backends LLVM
+detected at runtime. The kpack ccob_parser.py only handles zstd, so when
+the bundler produces a zlib-compressed CCOB (as observed for rccl on this
+nix build) the splitter aborts with "Unsupported compression method: 0".
+Accept method 0 as well by decompressing with the standard library zlib.
+
+--- a/rocm-systems/shared/kpack/python/rocm_kpack/ccob_parser.py
++++ b/rocm-systems/shared/kpack/python/rocm_kpack/ccob_parser.py
+@@ -13,6 +13,7 @@
+ """
+
+ import struct
++import zlib
+ import zstandard as zstd
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -27,7 +28,7 @@
+     Attributes:
+         magic: Magic string (should be "CCOB")
+         version: Format version (e.g., 0x00010003 for version 1.3)
+-        compression_method: Compression type (1 = zstd)
++        compression_method: Compression type (0 = zlib, 1 = zstd)
+         total_size: Total size of this CCOB bundle (header + compressed data)
+         uncompressed_size: Size after decompression
+         hash: Truncated MD5 hash
+@@ -254,18 +255,24 @@
+     header_size = 32 if header.version == 3 else 24
+     compressed_data = data[header_size : header.total_size]
+
+-    # Decompress using zstd
+-    if header.compression_method != 1:
++    # clang-offload-bundler selects between zlib (0) and zstd (1) based on
++    # which compression backend LLVM detected when it was built.
++    if header.compression_method == 1:
++        dctx = zstd.ZstdDecompressor()
++        try:
++            decompressed = dctx.decompress(
++                compressed_data, max_output_size=header.uncompressed_size
++            )
++        except zstd.ZstdError as e:
++            raise ValueError(f"Decompression failed: {e}") from e
++    elif header.compression_method == 0:
++        try:
++            decompressed = zlib.decompress(compressed_data)
++        except zlib.error as e:
++            raise ValueError(f"Decompression failed: {e}") from e
++    else:
+         raise ValueError(f"Unsupported compression method: {header.compression_method}")
+
+-    dctx = zstd.ZstdDecompressor()
+-    try:
+-        decompressed = dctx.decompress(
+-            compressed_data, max_output_size=header.uncompressed_size
+-        )
+-    except zstd.ZstdError as e:
+-        raise ValueError(f"Decompression failed: {e}") from e
+-
+     # Verify size
+     if len(decompressed) != header.uncompressed_size:
+         raise ValueError(
