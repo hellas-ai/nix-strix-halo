@@ -70,6 +70,14 @@
       url = "git+https://github.com/amd/xdna-driver?ref=refs/tags/2.21.75&submodules=1";
       flake = false;
     };
+
+    # Upstream Strix-Halo LLM finetuning toolbox (workspace/train.py,
+    # start-finetuning-cluster.py). Used by strix-halo-finetune-env-*
+    # for FSDP / DDP fine-tuning smoke tests against our gfx1151 torch.
+    amd-strix-halo-llm-finetuning = {
+      url = "github:kyuz0/amd-strix-halo-llm-finetuning";
+      flake = false;
+    };
   };
 
   outputs =
@@ -457,6 +465,9 @@
                   "vllm-lemonade-gemma4-31b-q8-kernel-cache-${s}"
                   "vllm-lemonade-gemma4-31b-q8-${s}"
                   "vllm-lemonade-gemma4-31b-q8-prime-${s}"
+                  "strix-halo-finetune-env-${s}"
+                  "strix-halo-finetune-bench-${s}"
+                  "strix-halo-vllm-pair-bench-${s}"
                   "vllm-rocm-therock-${s}"
                   "vllm-env-therock-${s}"
                   "vllm-env-therock-aiter-${s}"

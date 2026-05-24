@@ -193,13 +193,6 @@ let
       rocmPackages = final.therockRocmPackages_7_13.${target.runtimeArch};
     }).overrideAttrs
       (old: {
-        # GCC 15.2 randomly ICEs (segfault in
-        # gt_ggc_mx_lang_tree_node) on pytorch's heavily-templated
-        # CPU kernels under parallel compilation. Capping MAX_JOBS
-        # lowers the probability of hitting the GC bug; 4 is
-        # empirically reliable on builders with ~250G RAM.
-        preBuild = lib.replaceStrings [ "MAX_JOBS=$NIX_BUILD_CORES" ] [ "MAX_JOBS=4" ] (old.preBuild or "");
-
         postPatch = (old.postPatch or "") + ''
           # RCCL 7.13 reports NCCL_VERSION_CODE 22803 (2.28.3)
           # but does not ship the NCCL 2.28+ device-side
@@ -357,6 +350,36 @@ let
   lemonadeTargets = [ defaultRocmTarget ];
 
   lemonadePerArch = lib.foldl' lib.recursiveUpdate { } (map mkLemonadeStack lemonadeTargets);
+
+  # Per-arch finetuning env from kyuz0/amd-strix-halo-llm-finetuning.
+  # Bundles workspace/train.py + start-finetuning-cluster.py against our
+  # torch-rocm-7_13 build. Smoke-target for FSDP / DDP runs on
+  # Strix Halo boxes; only meaningful for arches we ship torch for.
+  mkStrixHaloFinetuneStack =
+    target:
+    let s = target.packageSuffix; in
+    {
+      "strix-halo-finetune-env-${s}" = prev.callPackage ../pkgs/strix-halo-finetune-env {
+        src = inputs.amd-strix-halo-llm-finetuning;
+        torch = final."torch-rocm-7_13-${s}";
+        packageSuffix = s;
+      };
+      "strix-halo-finetune-bench-${s}" = prev.callPackage ../pkgs/strix-halo-finetune-bench {
+        strix-halo-finetune-env = final."strix-halo-finetune-env-${s}";
+        packageSuffix = s;
+      };
+      "strix-halo-vllm-pair-bench-${s}" = prev.callPackage ../pkgs/strix-halo-vllm-pair-bench {
+        vllm-env-lemonade = final."vllm-env-lemonade-${s}";
+        thunderboltIbverbsSrc = inputs.thunderbolt-ibverbs;
+        packageSuffix = s;
+      };
+    };
+
+  strixHaloFinetunePerArch = lib.foldl' lib.recursiveUpdate { } (
+    map mkStrixHaloFinetuneStack (
+      builtins.filter (t: builtins.elem t.runtimeArch torchRocm713Arches) hardwareTargets.rocmTargets
+    )
+  );
 
   # Per-arch TheRock Python wheel bundle: pinned wheel sources from
   # therock-python-wheel-sources.json. Only one arch present today.
@@ -569,3 +592,4 @@ in
 // therockPythonPerArch
 // therockFromSourcePerArch
 // lemonadePerArch
+// strixHaloFinetunePerArch
