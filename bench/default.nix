@@ -141,7 +141,12 @@ let
     in
     benchLib.mkLlamaCppBenchmark {
       inherit pkgs name params;
-      inherit (tool) package env requirements;
+      inherit (tool)
+        env
+        package
+        packages
+        requirements
+        ;
       executable = "${tool.package}/bin/${tool.executable}";
       model = removeAttrs model [ "benchmarks" ];
       extraArgs = tool.args;
