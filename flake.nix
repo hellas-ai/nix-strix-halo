@@ -8,6 +8,11 @@
       url = "github:cmetz/ec-su_axb35-linux";
       flake = false;
     };
+
+    llama-cpp-master = {
+      url = "github:ggml-org/llama.cpp";
+      flake = false;
+    };
   };
 
   outputs =
@@ -88,6 +93,18 @@
         import nixpkgs {
           inherit system;
           overlays = [ self.overlays.default ];
+        };
+
+      cudaPackagesFor =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ self.overlays.default ];
+          config = {
+            allowUnfree = true;
+            cudaSupport = true;
+            cudaCapabilities = [ "8.9" ];
+          };
         };
 
       perSystem = f: forAllSystems (system: f (pkgsFor system));
@@ -214,17 +231,65 @@
               ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
                 ec-su-axb35-src = inputs.ec-su-axb35;
               };
-              llamaCppTargetPackages = lib.listToAttrs (
+              applyMasterSrc =
+                attrName: pkg:
+                pkg.overrideAttrs (old: {
+                  pname = attrName;
+                  version =
+                    "master-" + (inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown");
+                  src = inputs.llama-cpp-master;
+                  npmDeps = null;
+                  nativeBuildInputs = prev.lib.filter (x: x.pname or "" != "npm-config-hook") (
+                    old.nativeBuildInputs or [ ]
+                  );
+                  preConfigure = ''
+                    prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${
+                      inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "master"
+                    }"
+                  '';
+                  cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+                    (prev.lib.cmakeBool "LLAMA_BUILD_UI" false)
+                    (prev.lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
+                  ];
+                });
+              mkTargetedPackage =
+                pname: pkg:
+                pkg.overrideAttrs (_old: {
+                  inherit pname;
+                });
+              mkLlamaCppRocmBase =
+                rocmTarget:
+                prev.llama-cpp.override {
+                  rocmSupport = true;
+                  rpcSupport = true;
+                  inherit (final) rocmPackages;
+                  inherit (rocmTarget) rocmGpuTargets;
+                };
+              llamaCppRocmTargetPackages = lib.listToAttrs (
                 map (rocmTarget: {
                   name = "llama-cpp-rocm-${rocmTarget.packageSuffix}";
-                  value = prev.llama-cpp.override {
-                    rocmSupport = true;
-                    rpcSupport = true;
-                    inherit (final) rocmPackages;
-                    inherit (rocmTarget) rocmGpuTargets;
-                  };
+                  value = mkTargetedPackage "llama-cpp-rocm-${rocmTarget.packageSuffix}" (
+                    mkLlamaCppRocmBase rocmTarget
+                  );
                 }) rocmTargets
               );
+              llamaCppMasterRocmTargetPackages = lib.listToAttrs (
+                map (rocmTarget: {
+                  name = "llama-cpp-master-rocm-${rocmTarget.packageSuffix}";
+                  value = applyMasterSrc "llama-cpp-master-rocm-${rocmTarget.packageSuffix}" (
+                    mkLlamaCppRocmBase rocmTarget
+                  );
+                }) rocmTargets
+              );
+              llamaCppRocmBase = mkLlamaCppRocmBase defaultRocmTarget;
+              llamaCppVulkanBase = prev.llama-cpp.override {
+                vulkanSupport = true;
+                rpcSupport = true;
+              };
+              llamaCppCudaBase = prev.llama-cpp.override {
+                cudaSupport = true;
+                rpcSupport = true;
+              };
             in
             {
               # EC-SU_AXB35 packages
@@ -233,13 +298,15 @@
               strix-halo-mes-firmware = prev.callPackage ./pkgs/strix-halo-mes-firmware.nix { };
 
               # Generic ROCm llama.cpp build; target narrowing is explicit below.
-              llama-cpp-rocm = prev.llama-cpp.override {
-                rocmSupport = true;
-                rpcSupport = true;
-                inherit (final) rocmPackages;
-              };
+              llama-cpp-rocm = llamaCppRocmBase;
+              llama-cpp-vulkan = llamaCppVulkanBase;
+              llama-cpp-cuda = llamaCppCudaBase;
+              llama-cpp-master-rocm = applyMasterSrc "llama-cpp-master-rocm" llamaCppRocmBase;
+              llama-cpp-master-vulkan = applyMasterSrc "llama-cpp-master-vulkan" llamaCppVulkanBase;
+              llama-cpp-master-cuda = applyMasterSrc "llama-cpp-master-cuda" llamaCppCudaBase;
             }
-            // llamaCppTargetPackages
+            // llamaCppRocmTargetPackages
+            // llamaCppMasterRocmTargetPackages
             // (therockRocmOverlay final prev)
           );
 
@@ -320,7 +387,13 @@
               llamaCppTargetPackageNames = map (
                 rocmTarget: "llama-cpp-rocm-${rocmTarget.packageSuffix}"
               ) rocmTargets;
-              llamaCppTargetPackages = lib.genAttrs llamaCppTargetPackageNames (name: pkgs.${name});
+              llamaCppMasterTargetPackageNames = map (
+                rocmTarget: "llama-cpp-master-rocm-${rocmTarget.packageSuffix}"
+              ) rocmTargets;
+              llamaCppTargetPackages = lib.genAttrs (
+                llamaCppTargetPackageNames ++ llamaCppMasterTargetPackageNames
+              ) (name: pkgs.${name});
+              cudaPkgs = cudaPackagesFor pkgs.stdenv.hostPlatform.system;
 
               therockPackages =
                 assert lib.assertMsg (missingRequiredTherockPackages == [ ])
@@ -335,8 +408,11 @@
                 ec-su-axb35-monitor
                 llama-cpp-rocm
                 llama-cpp-vulkan
+                llama-cpp-master-rocm
+                llama-cpp-master-vulkan
                 strix-halo-mes-firmware
                 ;
+              inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
             }
             // llamaCppTargetPackages
             // therockPackages;
