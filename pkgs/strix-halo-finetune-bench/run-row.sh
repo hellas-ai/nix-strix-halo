@@ -171,14 +171,14 @@ snap "$WORKER_HOST" worker post
 # Parse training metrics from rank 0 log.
 read_metric() {
   # e.g. "{'train_runtime': '541'", grab the number after the key
-  grep -oE "'$1':[[:space:]]*'[0-9.eE+-]+'" "$MASTER_LOG" | tail -1 | sed -E "s/.*'([0-9.eE+-]+)'/\1/"
+  grep -oE "'$1':[[:space:]]*'[0-9.eE+-]+'" "$MASTER_LOG" | tail -1 | sed -E "s/.*'([0-9.eE+-]+)'/\1/" || true
 }
 TR=$(read_metric train_runtime)
 TSPS=$(read_metric train_samples_per_second)
 TSTS=$(read_metric train_steps_per_second)
 TL=$(read_metric train_loss)
 EL=$(read_metric eval_loss)
-PEAK=$(grep -oE 'Peak:[[:space:]]+[0-9.]+ GB' "$MASTER_LOG" | tail -1 | grep -oE '[0-9.]+')
+PEAK=$(grep -oE 'Peak:[[:space:]]+[0-9.]+ GB' "$MASTER_LOG" | tail -1 | grep -oE '[0-9.]+' || true)
 
 # Compute deltas: pre/post snapshot files are flat KEY=VALUE; for each
 # key present in both, emit (post - pre) into a JSON object.
