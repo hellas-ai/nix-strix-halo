@@ -1,0 +1,11 @@
+diff --git a/tensilelite/Tensile/Toolchain/Source.py b/tensilelite/Tensile/Toolchain/Source.py
+--- a/tensilelite/Tensile/Toolchain/Source.py
++++ b/tensilelite/Tensile/Toolchain/Source.py
+@@ -117,6 +117,7 @@ def buildSourceCodeObjectFiles(
+
+     objPath = str(tmpObjDir / objFilename)
+     with timing_context("python_kernel_build_src_co.compile"):
++        compiler.default_args += ["-parallel-jobs=8"]
+         compiler(str(includeDir), cmdlineArchs, str(kernelPath), objPath)
+
+     with timing_context("python_kernel_build_src_co.unbundle"):

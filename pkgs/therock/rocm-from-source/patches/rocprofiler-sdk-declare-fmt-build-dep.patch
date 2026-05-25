@@ -1,0 +1,13 @@
+diff --git a/profiler/CMakeLists.txt b/profiler/CMakeLists.txt
+index e96a558..f12ad0a 100644
+--- a/profiler/CMakeLists.txt
++++ b/profiler/CMakeLists.txt
+@@ -98,6 +98,8 @@ if(THEROCK_ENABLE_ROCPROFV3)
+       rocprofiler-sdk-tests
+     COMPILER_TOOLCHAIN
+       amd-hip
++    BUILD_DEPS
++      therock-fmt
+     RUNTIME_DEPS
+       aqlprofile
+       hip-clr

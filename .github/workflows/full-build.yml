@@ -30,7 +30,7 @@ jobs:
               let
                 hasPrefix = prefix: value:
                   builtins.substring 0 (builtins.stringLength prefix) value == prefix;
-                systems = builtins.attrNames packages;
+                systems = builtins.filter (system: system == "x86_64-linux") (builtins.attrNames packages);
                 packageNames = system:
                   builtins.filter
                     (name: name != "default" && !(hasPrefix "bench-" name))

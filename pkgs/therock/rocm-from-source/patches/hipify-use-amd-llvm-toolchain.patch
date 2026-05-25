@@ -1,0 +1,12 @@
+diff --git a/compiler/CMakeLists.txt b/compiler/CMakeLists.txt
+index 6fd618d7..f4d85ead 100644
+--- a/compiler/CMakeLists.txt
++++ b/compiler/CMakeLists.txt
+@@ -231,6 +231,7 @@ if(THEROCK_ENABLE_HIPIFY)
+     USE_DIST_AMDGPU_TARGETS
+     NO_INSTALL_RPATH  # See manual handling in the pre_hook.
+     EXTERNAL_SOURCE_DIR "hipify"
++    COMPILER_TOOLCHAIN amd-llvm
+     BACKGROUND_BUILD
+     INTERFACE_PROGRAM_DIRS
+       bin

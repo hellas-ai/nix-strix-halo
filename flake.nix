@@ -18,15 +18,71 @@
     }@inputs:
     let
       inherit (nixpkgs) lib;
-      systems = [ "x86_64-linux" ];
-      forAllSystems = lib.genAttrs systems;
-
-      # gfx90a added as workaround for composable_kernel sharding bug
-      # (nixpkgs CK build fails without at least one gfx9 target)
-      targets = [
-        "gfx1151"
-        "gfx90a"
+      linuxSystems = [ "x86_64-linux" ];
+      darwinSystems = [
+        "aarch64-darwin"
+        "x86_64-darwin"
       ];
+      systems = linuxSystems ++ darwinSystems;
+      forAllSystems = lib.genAttrs systems;
+      forLinuxSystems = lib.genAttrs linuxSystems;
+
+      rocmTargetLib = import ./lib/rocm-targets.nix { inherit lib; };
+      therockTargetConfig = import ./pkgs/therock/targets.nix {
+        inherit (rocmTargetLib) mkRocmTarget;
+      };
+      inherit (therockTargetConfig)
+        defaultRocmGpuTargets
+        defaultRocmTarget
+        rocmTargets
+        ;
+
+      defaultTherockSources = {
+        rocm = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm.json);
+        pythonWheels = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/python-wheels.json);
+        rocmSource = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm-source.json);
+        rocmThirdParty = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm-third-party.json);
+      };
+
+      mkTherockRocmOverlay =
+        {
+          rocmTargets,
+          target ? builtins.head rocmTargets,
+          sources ? defaultTherockSources,
+        }:
+        import ./overlays/therock-rocm.nix {
+          inherit lib rocmTargets target;
+          therockRocmSources = sources.rocm;
+          therockPythonWheelSources = sources.pythonWheels;
+          therockRocmSourceSources = sources.rocmSource;
+          therockRocmThirdPartySources = sources.rocmThirdParty;
+        };
+
+      mkTherockPythonOverlay =
+        { target }:
+        import ./overlays/therock-python.nix {
+          inherit lib target;
+        };
+
+      mkTherockOverlays =
+        args:
+        let
+          target = args.target or (builtins.head args.rocmTargets);
+          rocmOverlay = mkTherockRocmOverlay args;
+          pythonOverlay = mkTherockPythonOverlay { inherit target; };
+        in
+        {
+          rocm = rocmOverlay;
+          python = pythonOverlay;
+        };
+
+      therockOverlays = mkTherockOverlays {
+        inherit rocmTargets;
+        target = defaultRocmTarget;
+      };
+
+      therockRocmOverlay = therockOverlays.rocm;
+      therockPythonOverlay = therockOverlays.python;
 
       pkgsFor =
         system:
@@ -36,6 +92,7 @@
         };
 
       perSystem = f: forAllSystems (system: f (pkgsFor system));
+      perLinuxSystem = f: forLinuxSystems (system: f (pkgsFor system));
 
       mkFevmFaex9Configuration =
         {
@@ -59,38 +116,65 @@
     in
     {
       lib = {
-        inherit mkFevmFaex9Configuration;
+        inherit
+          defaultTherockSources
+          mkFevmFaex9Configuration
+          mkTherockOverlays
+          mkTherockPythonOverlay
+          mkTherockRocmOverlay
+          ;
+        inherit (rocmTargetLib)
+          mkRocmNarrowOverlay
+          mkRocmTarget
+          ;
+        therockTargets = therockTargetConfig;
       };
 
-      overlays.default =
-        final: prev:
-        let
-          ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
-            ec-su-axb35-src = inputs.ec-su-axb35;
-          };
-        in
-        {
-          # EC-SU_AXB35 packages
-          ec-su-axb35 = ecPackages.kernelModule;
-          ec-su-axb35-monitor = ecPackages.monitor;
+      overlays = {
+        default =
+          final: prev:
+          lib.optionalAttrs prev.stdenv.isLinux (
+            let
+              ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
+                ec-su-axb35-src = inputs.ec-su-axb35;
+              };
+              llamaCppTargetPackages = lib.listToAttrs (
+                map (rocmTarget: {
+                  name = "llama-cpp-rocm-${rocmTarget.packageSuffix}";
+                  value = prev.llama-cpp.override {
+                    rocmSupport = true;
+                    rpcSupport = true;
+                    inherit (final) rocmPackages;
+                    inherit (rocmTarget) rocmGpuTargets;
+                  };
+                }) rocmTargets
+              );
+            in
+            {
+              # EC-SU_AXB35 packages
+              ec-su-axb35 = ecPackages.kernelModule;
+              ec-su-axb35-monitor = ecPackages.monitor;
+              strix-halo-mes-firmware = prev.callPackage ./pkgs/strix-halo-mes-firmware.nix { };
 
-          # Build our gpu targets for nixos rocm
-          rocmPackages = prev.rocmPackages.overrideScope (
-            _: rocmPrev: {
-              clr = rocmPrev.clr.override {
-                localGpuTargets = targets;
+              # Generic ROCm llama.cpp build; target narrowing is explicit below.
+              llama-cpp-rocm = prev.llama-cpp.override {
+                rocmSupport = true;
+                rpcSupport = true;
+                inherit (final) rocmPackages;
               };
             }
+            // llamaCppTargetPackages
+            // (therockRocmOverlay final prev)
           );
 
-          # Llama.cpp with ROCm support using upstream nixpkgs
-          llama-cpp-rocm = prev.llama-cpp.override {
-            rocmSupport = true;
-            rpcSupport = true;
-            inherit (final) rocmPackages;
-            rocmGpuTargets = targets;
-          };
+        rocm-narrow-gfx1151 = rocmTargetLib.mkRocmNarrowOverlay {
+          rocmGpuTargets = defaultRocmGpuTargets;
         };
+
+        therock-rocm = final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockRocmOverlay final prev);
+        therock-python =
+          final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockPythonOverlay final prev);
+      };
 
       # NixOS modules
       nixosModules = {
@@ -111,77 +195,239 @@
       packages = perSystem (
         pkgs:
         let
-          benchmarks = import ./bench/default.nix {
-            inherit pkgs;
-            packages = {
-              inherit (pkgs) llama-cpp-rocm llama-cpp-vulkan;
+          genericPackages = {
+            default = pkgs.llama-cpp;
+            inherit (pkgs) llama-cpp;
+          };
+
+          linuxPackages =
+            let
+              therockPackageNamesFor =
+                rocmTarget:
+                let
+                  s = rocmTarget.packageSuffix;
+                in
+                [
+                  "therock-amd-llvm-${s}"
+                  "therock-rocm-${s}"
+                  "therock-rocm-${s}-env"
+                  "therock-rocm-${s}-rocshmem-env"
+                  "therock-rocm-${s}-core"
+                  "therock-rocm-${s}-cmake"
+                  "therock-rocm-from-source-${s}"
+                  "therock-rocm-from-source-${s}-configure"
+                  "therock-rocm-source-${s}"
+                  "therock-rocm-source-${s}-compiler-stage"
+                  "therock-rocm-third-party-mirror-${s}"
+                  "therock-python-${s}"
+                  "therock-python-wheels-${s}"
+                  "therock-amdsmi-${s}"
+                  "torch-rocm-${s}"
+                ];
+              therockPackageNames = lib.concatMap therockPackageNamesFor rocmTargets;
+              requiredTherockPackageNames = therockPackageNamesFor defaultRocmTarget;
+              missingRequiredTherockPackages = builtins.filter (
+                name: !(builtins.hasAttr name pkgs)
+              ) requiredTherockPackageNames;
+
+              llamaCppTargetPackageNames = map (
+                rocmTarget: "llama-cpp-rocm-${rocmTarget.packageSuffix}"
+              ) rocmTargets;
+              llamaCppTargetPackages = lib.genAttrs llamaCppTargetPackageNames (name: pkgs.${name});
+
+              therockPackages =
+                assert lib.assertMsg (missingRequiredTherockPackages == [ ])
+                  "missing expected default TheRock package(s): ${lib.concatStringsSep ", " missingRequiredTherockPackages}";
+                lib.genAttrs (builtins.filter (name: builtins.hasAttr name pkgs) therockPackageNames) (
+                  name: pkgs.${name}
+                );
+
+              benchmarks = import ./bench/default.nix {
+                inherit pkgs;
+                packages = {
+                  inherit (pkgs) llama-cpp-vulkan;
+                  llama-cpp-rocm = pkgs.llama-cpp-rocm-gfx1151;
+                };
+              };
+            in
+            {
+              inherit (pkgs)
+                ec-su-axb35-monitor
+                llama-cpp-rocm
+                llama-cpp-vulkan
+                strix-halo-mes-firmware
+                ;
+            }
+            // llamaCppTargetPackages
+            // therockPackages
+            // (pkgs.lib.concatMapAttrs (
+              model: benchs:
+              pkgs.lib.mapAttrs' (name: drv: {
+                name = "bench-${model}-${name}";
+                value = drv;
+              }) benchs
+            ) benchmarks);
+        in
+        genericPackages // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
+      );
+
+      apps = perSystem (
+        pkgs:
+        let
+          s = defaultRocmTarget.packageSuffix;
+          mkApp =
+            {
+              name,
+              packageName ? name,
+              binary ? name,
+              description,
+            }:
+            {
+              type = "app";
+              program = "${builtins.getAttr packageName pkgs}/bin/${binary}";
+              meta.description = description;
+            };
+          mkDirectApp =
+            {
+              package,
+              binary,
+              description,
+            }:
+            {
+              type = "app";
+              program = "${package}/bin/${binary}";
+              meta.description = description;
+            };
+          mkTargetLlamaApp =
+            {
+              name,
+              package,
+              hsaOverride ? null,
+              binary,
+              description,
+            }:
+            {
+              type = "app";
+              program = toString (
+                pkgs.writeShellScript name ''
+                  ${lib.optionalString (
+                    hsaOverride != null
+                  ) "export HSA_OVERRIDE_GFX_VERSION=${lib.escapeShellArg hsaOverride}"}
+                  ${package}/bin/${binary} "$@"
+                ''
+              );
+              meta.description = description;
+            };
+
+          mkTargetLlamaApps =
+            rocmTarget:
+            let
+              suffix = rocmTarget.packageSuffix;
+              package = builtins.getAttr "llama-cpp-rocm-${suffix}" pkgs;
+              hsaOverride = rocmTarget.hsaOverride or null;
+            in
+            {
+              "llama-cli-${suffix}" = mkTargetLlamaApp {
+                name = "llama-cli-${suffix}";
+                inherit package hsaOverride;
+                binary = "llama-cli";
+                description = "Run llama-cli with ROCm narrowed for ${rocmTarget.description}";
+              };
+
+              "llama-server-${suffix}" = mkTargetLlamaApp {
+                name = "llama-server-${suffix}";
+                inherit package hsaOverride;
+                binary = "llama-server";
+                description = "Run llama-server with ROCm narrowed for ${rocmTarget.description}";
+              };
+            };
+
+          genericApps = {
+            llama-cli = mkDirectApp {
+              package = pkgs.llama-cpp;
+              binary = "llama-cli";
+              description = "Run llama-cli";
+            };
+
+            llama-server = mkDirectApp {
+              package = pkgs.llama-cpp;
+              binary = "llama-server";
+              description = "Run llama-server";
+            };
+          };
+
+          linuxApps = {
+            llama-cli-rocm = mkDirectApp {
+              package = pkgs.llama-cpp-rocm;
+              binary = "llama-cli";
+              description = "Run llama-cli with generic ROCm support";
+            };
+
+            llama-server-rocm = mkDirectApp {
+              package = pkgs.llama-cpp-rocm;
+              binary = "llama-server";
+              description = "Run llama-server with generic ROCm support";
+            };
+          }
+          // (lib.foldl' lib.recursiveUpdate { } (map mkTargetLlamaApps rocmTargets))
+          // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-env" pkgs) {
+            "therock-rocm-${s}-env" = mkApp {
+              name = "therock-rocm-${s}-env";
+              description = "Run a command in the pinned TheRock ROCm ${s} environment";
+            };
+          }
+          // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-rocshmem-env" pkgs) {
+            "therock-rocm-${s}-rocshmem-env" = mkApp {
+              name = "therock-rocm-${s}-rocshmem-env";
+              description = "Run a command in the pinned TheRock ROCm ${s} rocSHMEM environment";
+            };
+          }
+          // lib.optionalAttrs (builtins.hasAttr "therock-python-${s}" pkgs) {
+            "therock-python-${s}" = mkApp {
+              name = "therock-python-${s}";
+              binary = "therock-python";
+              description = "Run Python in the pinned TheRock ROCm/PyTorch wheel environment";
+            };
+            "therock-python-${s}-env" = mkApp {
+              name = "therock-python-${s}-env";
+              packageName = "therock-python-${s}";
+              binary = "therock-python-env";
+              description = "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
             };
           };
         in
-        {
-          default = pkgs.llama-cpp-rocm;
-          inherit (pkgs)
-            ec-su-axb35-monitor
-            llama-cpp-rocm
-            llama-cpp-vulkan
-            ;
-        }
-        // (pkgs.lib.concatMapAttrs (
-          model: benchs:
-          pkgs.lib.mapAttrs' (name: drv: {
-            name = "bench-${model}-${name}";
-            value = drv;
-          }) benchs
-        ) benchmarks)
+        genericApps // lib.optionalAttrs pkgs.stdenv.isLinux linuxApps
       );
-
-      apps = perSystem (pkgs: {
-        llama-cli = {
-          type = "app";
-          program = toString (
-            pkgs.writeShellScript "llama-cli" ''
-              export HSA_OVERRIDE_GFX_VERSION=11.5.1
-              ${pkgs.llama-cpp-rocm}/bin/llama-cli "$@"
-            ''
-          );
-          meta.description = "Run llama-cli with the Strix Halo ROCm environment";
-        };
-
-        llama-server = {
-          type = "app";
-          program = toString (
-            pkgs.writeShellScript "llama-server" ''
-              export HSA_OVERRIDE_GFX_VERSION=11.5.1
-              ${pkgs.llama-cpp-rocm}/bin/llama-server "$@"
-            ''
-          );
-          meta.description = "Run llama-server with the Strix Halo ROCm environment";
-        };
-      });
 
       devShells = perSystem (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [
-            deadnix
-            nix-fast-build
-            nixfmt-tree
-            statix
-            (python3.withPackages (
-              ps: with ps; [
-                numpy
-                pandas
-                plotly
-              ]
-            ))
-          ];
+          packages =
+            (with pkgs; [
+              deadnix
+              nix-fast-build
+              nixfmt-tree
+              statix
+            ])
+            ++ lib.optionals pkgs.stdenv.isLinux [
+              (pkgs.python3.withPackages (
+                ps: with ps; [
+                  numpy
+                  pandas
+                  plotly
+                ]
+              ))
+            ];
         };
       });
 
       formatter = perSystem (pkgs: pkgs.nixfmt-tree);
 
-      checks = perSystem (
+      checks = perLinuxSystem (
         pkgs:
         let
+          s = defaultRocmTarget.packageSuffix;
+          therockPytorchPackage = "torch-rocm-${s}";
+
           mkSourceCheck =
             name: nativeBuildInputs: command:
             pkgs.runCommandLocal "ci-${name}"
@@ -200,7 +446,7 @@
         in
         {
           format = mkSourceCheck "format" [ pkgs.nixfmt-tree ] ''
-            treefmt --fail-on-change
+            treefmt --ci --tree-root . --walk filesystem .
           '';
 
           deadnix = mkSourceCheck "deadnix" [ pkgs.deadnix ] ''
@@ -210,6 +456,8 @@
           statix = mkSourceCheck "statix" [ pkgs.statix ] ''
             statix check .
           '';
+
+          "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
         }
       );
     };
