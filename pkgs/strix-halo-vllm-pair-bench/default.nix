@@ -6,6 +6,13 @@
 #
 #   qwen-peak      Qwen3-0.6B @ concurrency 256, TP=2 RDMA vs solo.
 #   llama-tp2-win  Meta-Llama-3.1-8B @ concurrency 256, TP=2 RDMA vs solo.
+#   qwen35-122b-awq-capacity
+#                  Qwen3.5-122B-A10B AWQ-8bit, TP=2 only, LAN TCP vs
+#                  four-HCA USB4 RDMA with a longer prompt/completion.
+#   qwen35-122b-awq-prime
+#                  Qwen3.5-122B-A10B AWQ-8bit, TP=2 over LAN TCP only,
+#                  intended to populate vLLM/Triton caches before measured
+#                  transport runs.
 #
 # Both scenarios use longer prompts and completions than the broad matrix
 # defaults so the measured section dominates startup and JIT overhead.
@@ -60,6 +67,9 @@ writeShellApplication {
     EXTRA_TRANSPORTS=""
     PROMPT_SECTIONS=36
     MAX_MODEL_LEN=2048
+    MAX_NUM_SEQS=512
+    MAX_NUM_BATCHED_TOKENS=""
+    VLLM_EXTRA_ARGS=""
     CLIENT_TIMEOUT_S=1800
     STARTUP_TIMEOUT_S=600
 
@@ -73,7 +83,7 @@ writeShellApplication {
         --dry-run)          DRY_RUN=1; shift ;;
         --extra-transports) EXTRA_TRANSPORTS="$2"; shift 2 ;;
         -h|--help)
-          echo "Usage: $(basename "$0") --scenario {qwen-peak|llama-tp2-win} [opts]" >&2
+          echo "Usage: $(basename "$0") --scenario {qwen-peak|llama-tp2-win|qwen35-122b-awq-capacity|qwen35-122b-awq-prime} [opts]" >&2
           echo "  --master HOST       default: grw@strix-1.lan.satanic.link" >&2
           echo "  --worker HOST       default: grw@strix-2.lan.satanic.link" >&2
           echo "  --usb4-hca CSV      default: usb4_rdma0,usb4_rdma1,usb4_rdma5,usb4_rdma6" >&2
@@ -99,8 +109,34 @@ writeShellApplication {
         CONCURRENCIES="256"
         MAX_TOKENS=256
         ;;
+      qwen35-122b-awq-capacity)
+        MODELS="cyankiwi/Qwen3.5-122B-A10B-AWQ-8bit"
+        BASE_TRANSPORTS="lan_tcp usb4_rdma"
+        CONCURRENCIES="1 2 4 8 16"
+        MAX_TOKENS=1024
+        PROMPT_SECTIONS=72
+        MAX_MODEL_LEN=8192
+        MAX_NUM_SEQS=16
+        MAX_NUM_BATCHED_TOKENS=16384
+        VLLM_EXTRA_ARGS="--language-model-only"
+        CLIENT_TIMEOUT_S=3600
+        STARTUP_TIMEOUT_S=1800
+        ;;
+      qwen35-122b-awq-prime)
+        MODELS="cyankiwi/Qwen3.5-122B-A10B-AWQ-8bit"
+        BASE_TRANSPORTS="lan_tcp"
+        CONCURRENCIES="1 4 16"
+        MAX_TOKENS=64
+        PROMPT_SECTIONS=72
+        MAX_MODEL_LEN=8192
+        MAX_NUM_SEQS=16
+        MAX_NUM_BATCHED_TOKENS=16384
+        VLLM_EXTRA_ARGS="--language-model-only"
+        CLIENT_TIMEOUT_S=3600
+        STARTUP_TIMEOUT_S=1800
+        ;;
       *)
-        echo "scenario must be one of: qwen-peak | llama-tp2-win (got '$SCENARIO')" >&2
+        echo "scenario must be one of: qwen-peak | llama-tp2-win | qwen35-122b-awq-capacity | qwen35-122b-awq-prime (got '$SCENARIO')" >&2
         exit 2 ;;
     esac
 
@@ -133,17 +169,16 @@ writeShellApplication {
     echo "concurrencies:   $CONCURRENCIES"
     echo "max_tokens:      $MAX_TOKENS"
     echo "prompt_sections: $PROMPT_SECTIONS"
+    echo "max_model_len:   $MAX_MODEL_LEN"
+    echo "max_num_seqs:    $MAX_NUM_SEQS"
+    echo "batched_tokens:  ''${MAX_NUM_BATCHED_TOKENS:-<default>}"
+    echo "vllm_extra_args: ''${VLLM_EXTRA_ARGS:-<none>}"
     echo "usb4_hca:        $USB4_HCA"
     echo "vllm-env:        $VLLM_ENV"
     echo "gcc-wrapper:     $GCC_PREFIX"
     echo "rdma-core-usb4:  $RDMA"
     echo "bench-dir:       $BENCH_DIR"
     echo "out:             $OUT_DIR"
-
-    echo
-    echo "=== copying closures to master ($MASTER) ==="
-    nix copy --no-check-sigs --to "ssh://$MASTER" \
-      "$VLLM_ENV" "$RDMA" "$GCC_PREFIX" "$BENCH_DIR"
 
     RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$SCENARIO"
     REMOTE_LOG_DIR="/tmp/vllm-pair-$RUN_ID"
@@ -164,7 +199,10 @@ writeShellApplication {
     CONCURRENCIES="$CONCURRENCIES"
     MAX_TOKENS=$MAX_TOKENS
     MAX_MODEL_LEN=$MAX_MODEL_LEN
+    MAX_NUM_SEQS=$MAX_NUM_SEQS
+    MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS
     PROMPT_SECTIONS=$PROMPT_SECTIONS
+    VLLM_EXTRA_ARGS="$VLLM_EXTRA_ARGS"
     CLIENT_TIMEOUT_S=$CLIENT_TIMEOUT_S
     STARTUP_TIMEOUT_S=$STARTUP_TIMEOUT_S
     SAMPLE_CASES=0
@@ -185,13 +223,23 @@ writeShellApplication {
     )
 
     echo
-    echo "=== invoking matrix script on master ==="
+    echo "=== planned matrix invocation ==="
     printf 'env: %s\n' "$REMOTE_ENV"
 
     if [ "$DRY_RUN" = "1" ]; then
       echo "(dry-run: not invoking)"
       exit 0
     fi
+
+    echo
+    echo "=== copying closures to hosts ($MASTER, $WORKER) ==="
+    for host in "$MASTER" "$WORKER"; do
+      nix copy --no-check-sigs --to "ssh://$host" \
+        "$VLLM_ENV" "$RDMA" "$GCC_PREFIX" "$BENCH_DIR"
+    done
+
+    echo
+    echo "=== invoking matrix script on master ==="
 
     # Word-split REMOTE_ENV (newline-separated KEY=VALUE lines) into
     # individual env args. Need to read it line-by-line into an array to

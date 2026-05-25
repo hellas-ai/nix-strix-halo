@@ -19,6 +19,7 @@
   roctracer,
   rocprofiler,
   rocprofiler-register,
+  rdma-core,
   autoPatchelfHook,
   buildTests ? false,
   gpuTargets ? (clr.localGpuTargets or [ ]),
@@ -81,6 +82,11 @@ stdenv.mkDerivation (finalAttrs: {
     rocprofiler
     rocprofiler-register
     mscclpp
+    # libibverbs so RCCL builds the IB transport; without it, the
+    # `ibv_*` symbol set is absent from librccl.so and NCCL falls back
+    # to TCP sockets for all inter-rank traffic. Needed to compare
+    # br0.lan vs usb4_rdma0 transports in 2-node FSDP runs.
+    rdma-core
   ]
   ++ lib.optionals buildTests [
     chrpath

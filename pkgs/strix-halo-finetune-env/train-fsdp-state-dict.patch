@@ -1,0 +1,65 @@
+--- a/workspace/train.py
++++ b/workspace/train.py
+@@ -119,6 +119,12 @@
+     parser.add_argument("--unsloth", action="store_true",
+                         help="Use Unsloth FastLanguageModel for optimized loading and training")
+     parser.add_argument("--debug", action="store_true", help="Enable per-step device/memory debug output")
++    parser.add_argument("--no-save", action="store_true",
++                        help="Skip checkpoint saving (smoke tests / benchmarks)")
++    parser.add_argument("--no-eval", action="store_true",
++                        help="Skip evaluation (smoke tests / benchmarks)")
++    parser.add_argument("--max-steps", type=int, default=-1,
++                        help="Override Trainer max_steps for bounded benchmark probes")
+     args = parser.parse_args()
+ 
+     if args.unsloth and args.strategy == "fsdp":
+@@ -353,6 +355,16 @@
+         }
+         if layer_cls:
++            # PEFT's update_fsdp_plugin_peft() ignores the Trainer's
++            # fsdp_config auto-wrap entry and re-runs its own policy from
++            # FSDP_TRANSFORMER_CLS_TO_WRAP. Keep both paths aligned.
++            os.environ["FSDP_TRANSFORMER_CLS_TO_WRAP"] = layer_cls
+             fsdp_config["transformer_layer_cls_to_wrap"] = [layer_cls]
++        # Save sharded state — avoids the post-training _all_gather_into_tensor
++        # that the deprecated FullyShardedDataParallel.set_state_dict_type path
++        # triggers in transformers Trainer. With FULL_STATE_DICT, the rank
++        # that finishes first tears down its NCCL comm before the others
++        # finish the gather, causing the misleading "socketProgress" abort.
++        fsdp_config["state_dict_type"] = "SHARDED_STATE_DICT"
+         fsdp_args["fsdp_config"] = fsdp_config
+ 
+     # Unsloth uses pre-formatted "text" column; standard HF uses "messages"
+@@ -375,7 +385,8 @@
+         gradient_checkpointing_kwargs=grad_ckpt_kwargs,
+         optim=optim,
+         logging_steps=10,
+-        save_strategy="epoch",
++        save_strategy="no" if args.no_save else "epoch",
++        max_steps=args.max_steps,
+-        eval_strategy="epoch",
++        eval_strategy="no" if args.no_eval else "epoch",
+         learning_rate=args.learning_rate,
+         fp16=fp16,
+@@ -420,10 +428,20 @@
+         print(f"Time:   {elapsed:.2f}s")
+         print(f"Peak:   {peak:.2f} GB")
+         print("-" * 50)
+-        trainer.save_model()
++        if not args.no_save:
++            trainer.save_model()
+ 
+     full_cleanup(model, trainer)
+ 
++    # Explicit process-group teardown before peft/trl deinit fires a
++    # deprecated FSDP1 all-gather that crashes on rank 0 when other
++    # ranks have already exited.
++    if is_distributed:
++        import torch.distributed as _dist
++        if _dist.is_initialized():
++            _dist.barrier()
++            _dist.destroy_process_group()
++
+ 
+ if __name__ == "__main__":
+     main()

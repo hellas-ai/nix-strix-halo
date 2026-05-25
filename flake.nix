@@ -467,6 +467,7 @@
                   "vllm-lemonade-gemma4-31b-q8-prime-${s}"
                   "strix-halo-finetune-env-${s}"
                   "strix-halo-finetune-bench-${s}"
+                  "strix-halo-gemma3-27b-lora-fsdp-bench-${s}"
                   "strix-halo-vllm-pair-bench-${s}"
                   "vllm-rocm-therock-${s}"
                   "vllm-env-therock-${s}"

@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "amd-strix-halo-llm-finetuning": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772963300,
+        "narHash": "sha256-Plh7iwBfoAjlOhaZFrErEJwmFI9jpWh65UcbyM8O6no=",
+        "owner": "kyuz0",
+        "repo": "amd-strix-halo-llm-finetuning",
+        "rev": "093a23c0d49418aef08e5053aa19faf65b35236a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kyuz0",
+        "repo": "amd-strix-halo-llm-finetuning",
+        "type": "github"
+      }
+    },
     "disko": {
       "inputs": {
         "nixpkgs": [
@@ -106,18 +122,19 @@
     "linux-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1777679768,
-        "narHash": "sha256-I6s/jok7jasJxN2CSJygKBK5SMbHS02dhZs9HhKNr2o=",
-        "owner": "torvalds",
-        "repo": "linux",
-        "rev": "f1a5e78a55ebf2b05777fd5eb738038ddae609d6",
-        "type": "github"
+        "lastModified": 1779366545,
+        "narHash": "sha256-CB7OTvBBmHkQEcKzCI5WUOWU4/F+ajqxTA1Rj6S8Eq4=",
+        "ref": "refs/heads/next",
+        "rev": "15bcac35ba045a9a459144901443210d8b1df7a3",
+        "revCount": 1444051,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
       },
       "original": {
-        "owner": "torvalds",
-        "repo": "linux",
-        "rev": "f1a5e78a55ebf2b05777fd5eb738038ddae609d6",
-        "type": "github"
+        "ref": "refs/heads/next",
+        "rev": "15bcac35ba045a9a459144901443210d8b1df7a3",
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
       }
     },
     "llama-cpp-master": {
@@ -186,6 +203,7 @@
     },
     "root": {
       "inputs": {
+        "amd-strix-halo-llm-finetuning": "amd-strix-halo-llm-finetuning",
         "disko": "disko",
         "ds4": "ds4",
         "ds4-hip": "ds4-hip",
@@ -224,10 +242,11 @@
         ]
       },
       "locked": {
-        "dirtyRev": "d31b913574a0101e67c9d07fe70dadeec008c1d2-dirty",
-        "dirtyShortRev": "d31b913-dirty",
-        "lastModified": 1779328284,
-        "narHash": "sha256-7LCCpIjXErSOBugvyCttDcCoY5gRPpmuEQJYlNcCeig=",
+        "lastModified": 1779710004,
+        "narHash": "sha256-gv7NJUR73tqYDDu+hIq22ktDtC/ZtHLqXY15SB9KSb8=",
+        "ref": "refs/heads/master",
+        "rev": "f9c41896a83daea027cbe3503348c5ab1cf8a761",
+        "revCount": 350,
         "type": "git",
         "url": "file:///mnt/Home/src/thunderbolt-ibverbs"
       },

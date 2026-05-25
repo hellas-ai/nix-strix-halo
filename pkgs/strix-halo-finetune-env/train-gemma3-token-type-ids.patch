@@ -1,0 +1,38 @@
+--- a/workspace/train.py
++++ b/workspace/train.py
+@@ -29 +29 @@
+-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainerCallback
++from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, DataCollatorForLanguageModeling, TrainerCallback
+@@ -50 +50,9 @@
+-class DebugCallback(TrainerCallback):
++class Gemma3TokenTypeCollator(DataCollatorForLanguageModeling):
++    """Gemma 3 requires token_type_ids during training, even text-only."""
++
++    def torch_call(self, examples):
++        batch = super().torch_call(examples)
++        batch.setdefault("token_type_ids", torch.zeros_like(batch["input_ids"]))
++        return batch
++
++class DebugCallback(TrainerCallback):
+@@ -394,8 +402,13 @@
+-    trainer = SFTTrainer(
+-        model=model,
+-        args=training_args,
+-        train_dataset=ds["train"],
+-        eval_dataset=ds["test"],
+-        processing_class=tokenizer,
+-        callbacks=[DebugCallback()] if args.debug else [],
+-    )
++    trainer_kwargs = {
++        "model": model,
++        "args": training_args,
++        "train_dataset": ds["train"],
++        "eval_dataset": ds["test"],
++        "processing_class": tokenizer,
++        "callbacks": [DebugCallback()] if args.debug else [],
++    }
++    if getattr(model.config, "model_type", "") == "gemma3":
++        trainer_kwargs["data_collator"] = Gemma3TokenTypeCollator(
++            tokenizer=tokenizer, mlm=False
++        )
++    trainer = SFTTrainer(**trainer_kwargs)

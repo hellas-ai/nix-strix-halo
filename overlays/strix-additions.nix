@@ -357,7 +357,41 @@ let
   # Strix Halo boxes; only meaningful for arches we ship torch for.
   mkStrixHaloFinetuneStack =
     target:
-    let s = target.packageSuffix; in
+    let
+      s = target.packageSuffix;
+      rdmaCoreUsb4Env = ''export LD_LIBRARY_PATH="$(find /nix/store -maxdepth 1 -type d -name '*-rdma-core-usb4-*[0-9]' 2>/dev/null | sort -u | tail -1)/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"'';
+      gemma3_27bLoraFsdpMatrix = [
+        {
+          name = "gemma3-27b-lora-fsdp-eth";
+          transport = "eth";
+          model = "google/gemma-3-27b-it";
+          dataset = "Abirate/english_quotes";
+          ft_type = "lora";
+          strategy = "fsdp";
+          epochs = 1;
+          batch_size = 1;
+          max_length = 512;
+          gradient_accumulation = 8;
+          learning_rate = 0.00005;
+          note = "Non-quantized LoRA; FSDP shards the 27B Gemma weights. Ethernet comparison row.";
+        }
+        {
+          name = "gemma3-27b-lora-fsdp-rdma-4hca";
+          transport = "rdma-4hca";
+          model = "google/gemma-3-27b-it";
+          dataset = "Abirate/english_quotes";
+          ft_type = "lora";
+          strategy = "fsdp";
+          epochs = 1;
+          batch_size = 1;
+          max_length = 512;
+          gradient_accumulation = 8;
+          learning_rate = 0.00005;
+          extra_env = rdmaCoreUsb4Env;
+          note = "Same FSDP LoRA row over the native four-HCA USB4 RDMA path.";
+        }
+      ];
+    in
     {
       "strix-halo-finetune-env-${s}" = prev.callPackage ../pkgs/strix-halo-finetune-env {
         src = inputs.amd-strix-halo-llm-finetuning;
@@ -367,6 +401,12 @@ let
       "strix-halo-finetune-bench-${s}" = prev.callPackage ../pkgs/strix-halo-finetune-bench {
         strix-halo-finetune-env = final."strix-halo-finetune-env-${s}";
         packageSuffix = s;
+      };
+      "strix-halo-gemma3-27b-lora-fsdp-bench-${s}" = prev.callPackage ../pkgs/strix-halo-finetune-bench {
+        strix-halo-finetune-env = final."strix-halo-finetune-env-${s}";
+        packageSuffix = s;
+        packageName = "strix-halo-gemma3-27b-lora-fsdp-bench-${s}";
+        matrix = gemma3_27bLoraFsdpMatrix;
       };
       "strix-halo-vllm-pair-bench-${s}" = prev.callPackage ../pkgs/strix-halo-vllm-pair-bench {
         vllm-env-lemonade = final."vllm-env-lemonade-${s}";
