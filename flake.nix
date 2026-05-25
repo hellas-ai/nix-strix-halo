@@ -4,11 +4,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    disko = {
-      url = "github:nix-community/disko";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     ec-su-axb35 = {
       url = "github:cmetz/ec-su_axb35-linux";
       flake = false;
@@ -41,8 +36,32 @@
         };
 
       perSystem = f: forAllSystems (system: f (pkgsFor system));
+
+      mkFevmFaex9Configuration =
+        {
+          diskoModule,
+          system ? "x86_64-linux",
+          extraModules ? [ ],
+          specialArgs ? { },
+        }:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          specialArgs = {
+            inherit inputs self;
+          }
+          // specialArgs;
+          modules = [
+            diskoModule
+            ./examples/fevm-faex9/configuration.nix
+          ]
+          ++ extraModules;
+        };
     in
     {
+      lib = {
+        inherit mkFevmFaex9Configuration;
+      };
+
       overlays.default =
         final: prev:
         let
@@ -86,21 +105,6 @@
         ryzenadj = import ./modules/ryzenadj.nix;
         disko-raid0 = import ./modules/disko-raid0.nix;
         tuning = import ./modules/tuning.nix;
-      };
-
-      # NixOS configurations
-      nixosConfigurations = {
-        fevm-faex9 = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          specialArgs = {
-            inherit inputs;
-            inherit self;
-          };
-          modules = [
-            inputs.disko.nixosModules.disko
-            ./examples/fevm-faex9/configuration.nix
-          ];
-        };
       };
     }
     // {
