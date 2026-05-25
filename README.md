@@ -7,7 +7,7 @@ It provides:
 - a nixpkgs overlay for `llama-cpp` with ROCm enabled for `gfx1151`
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
 - benchmark derivations for local `/models` GGUF files
-- a minimal `fevm-faex9` NixOS example
+- a minimal `fevm-faex9` NixOS example builder
 
 ## Outputs
 
@@ -27,6 +27,10 @@ Main app outputs:
 
 - `apps.x86_64-linux.llama-cli`
 - `apps.x86_64-linux.llama-server`
+
+Example configuration helper:
+
+- `lib.mkFevmFaex9Configuration`
 
 ## Use The Overlay
 
@@ -82,7 +86,17 @@ The module supports named instances under `services.llama-cpp-rpc-servers`.
 - `nixosModules.disko-raid0`: dual-NVMe RAID0 Disko layout
 - `nixosModules.benchmark-runner`: benchmark host setup, model downloads, and sandbox GPU access
 
-`disko-raid0` targets `/dev/nvme0n1` and `/dev/nvme1n1`; treat it as machine-specific.
+`disko-raid0` defines Disko options but does not import Disko itself. Callers must provide `disko.nixosModules.disko` before using it. It targets `/dev/nvme0n1` and `/dev/nvme1n1`; treat it as machine-specific.
+
+## Example Host
+
+The `fevm-faex9` example requires a caller-provided Disko module:
+
+```bash
+nix build --impure --file ./examples/fevm-faex9 \
+  --arg diskoModule '(builtins.getFlake "github:nix-community/disko").nixosModules.disko' \
+  config.system.build.toplevel
+```
 
 ## Benchmarks
 
