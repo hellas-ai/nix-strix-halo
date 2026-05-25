@@ -1,0 +1,50 @@
+diff --git a/rocm-systems/projects/rccl/cmake/DeviceLinker.cmake b/rocm-systems/projects/rccl/cmake/DeviceLinker.cmake
+index 01b372ba91..ee34fd1c2f 100644
+--- a/rocm-systems/projects/rccl/cmake/DeviceLinker.cmake
++++ b/rocm-systems/projects/rccl/cmake/DeviceLinker.cmake
+@@ -30,15 +30,22 @@ find_program(DL_BUNDLER NAMES clang-offload-bundler
+-# Extract --hip-path and --hip-device-lib-path from CMAKE_CXX_FLAGS.
+-# TheRock's amd-hip toolchain injects these so amdclang++ can locate HIP
+-# headers and device bitcode in its split directory layout.  Standard ROCm
+-# installs don't set them (amdclang++ auto-discovers from its own location).
+-# We must forward any that exist to every amdclang++ -x hip invocation we make.
++# Extract compiler-driver flags from CMAKE_CXX_FLAGS. TheRock's amd-hip
++# toolchain injects HIP layout flags, and Nix builds also need the sysroot/GCC
++# toolchain flags so the unwrapped amdclang++ can find the C++ standard library.
++# Forward any such flags to every amdclang++ -x hip invocation we make.
+ set(DL_HIP_COMPILER_FLAGS "")
+-string(REGEX MATCHALL "--hip-path=[^ ]+" _hip_path_flags "${CMAKE_CXX_FLAGS}")
+-list(APPEND DL_HIP_COMPILER_FLAGS ${_hip_path_flags})
+-string(REGEX MATCHALL "--hip-device-lib-path=[^ ]+" _hip_devlib_flags "${CMAKE_CXX_FLAGS}")
+-list(APPEND DL_HIP_COMPILER_FLAGS ${_hip_devlib_flags})
++separate_arguments(_dl_cxx_flags UNIX_COMMAND "${CMAKE_CXX_FLAGS}")
++foreach(_flag IN LISTS _dl_cxx_flags)
++  if(_flag MATCHES "^(--sysroot=|--gcc-toolchain=|-B|--hip-path=|--hip-device-lib-path=)")
++    list(APPEND DL_HIP_COMPILER_FLAGS "${_flag}")
++  endif()
++endforeach()
+ if(DL_HIP_COMPILER_FLAGS)
+-  message(STATUS "Device Linker: forwarding HIP flags from toolchain: ${DL_HIP_COMPILER_FLAGS}")
++  message(STATUS "Device Linker: forwarding compiler driver flags from toolchain: ${DL_HIP_COMPILER_FLAGS}")
+ else()
+-  message(STATUS "Device Linker: no --hip-path/--hip-device-lib-path in CMAKE_CXX_FLAGS (standard ROCm install)")
++  message(STATUS "Device Linker: no compiler driver flags found in CMAKE_CXX_FLAGS")
+ endif()
++
++if(CMAKE_OBJCOPY)
++  get_filename_component(DL_OBJCOPY_DIR "${CMAKE_OBJCOPY}" DIRECTORY)
++else()
++  get_filename_component(DL_OBJCOPY_DIR "${DL_BUNDLER}" DIRECTORY)
++endif()
+ 
+ set(DEVICE_BUILD_DIR "${PROJECT_BINARY_DIR}/device_build")
+ set(SPECIALIZED_DIR  "${GEN_DIR}/specialized")
+@@ -370,7 +377,7 @@ if(ENABLE_COMPRESS)
+ 
+ add_custom_command(
+   OUTPUT  ${DEVICE_HIPFB}
+-  COMMAND ${DL_BUNDLER}
++  COMMAND ${CMAKE_COMMAND} -E env "PATH=${DL_OBJCOPY_DIR}:$ENV{PATH}" ${DL_BUNDLER}
+     --type=bc
+     --targets=${_bundler_targets_str}
+     ${DL_BUNDLER_INPUTS}

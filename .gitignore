@@ -2,4 +2,5 @@
 /.claude/
 /result
 /result-*
+/out-*/
 /gcroots/

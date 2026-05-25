@@ -1,0 +1,18 @@
+diff --git a/rocm-systems/projects/rdc/CMakeLists.txt b/rocm-systems/projects/rdc/CMakeLists.txt
+index 4b5f4374e..f2e0c6f79 100644
+--- a/rocm-systems/projects/rdc/CMakeLists.txt
++++ b/rocm-systems/projects/rdc/CMakeLists.txt
+@@ -437,8 +437,12 @@ install(
+ 
+ #Identify between SLES and Centos for setting symlink for rdc.service
+ #SLES need service file in /usr/lib/systemd/system/rdc.service
+ #CENTOS/RHEL Require file in /lib/systemd/system/rdc.service
+-file(STRINGS /etc/os-release LINUX_DISTRO LIMIT_COUNT 1 REGEX "NAME=")
++set(
++    RDC_LINUX_DISTRO ""
++    CACHE STRING "Linux distribution name used to choose RDC package systemd unit path"
++)
++set(LINUX_DISTRO "${RDC_LINUX_DISTRO}")
+ message("Using Linux Distro: ${LINUX_DISTRO}")
+ if(LINUX_DISTRO MATCHES "SLES")
+     set(DISTRO_ROOT "/usr/lib/systemd/system")

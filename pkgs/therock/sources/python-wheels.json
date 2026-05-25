@@ -1,0 +1,103 @@
+{
+  "targets": {
+    "gfx1151": {
+      "target": "gfx1151",
+      "series": "7.13",
+      "rocmVersion": "7.13.0a20260513",
+      "pythonTag": "cp312",
+      "index": "https://rocm.nightlies.amd.com/v2/gfx1151/",
+      "packages": {
+        "rocm": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/rocm-7.13.0a20260513.tar.gz",
+          "hash": "sha256-bD5ja9af4LNkujOyVWCC8Gj38rxnT0Vhsggy88NTx2A=",
+          "filename": "rocm-7.13.0a20260513.tar.gz",
+          "packageVersion": "7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "source",
+          "abiTag": "source",
+          "platformTag": "source",
+          "kind": "sdist"
+        },
+        "torch": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/torch-2.9.1%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "hash": "sha256-KT7OsGNR+RAyngK2ovKF6sKloSGOgTLCRCWULmotegA=",
+          "filename": "torch-2.9.1+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "packageVersion": "2.9.1+rocm7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "cp312",
+          "abiTag": "cp312",
+          "platformTag": "linux_x86_64",
+          "kind": "wheel"
+        },
+        "torchvision": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/torchvision-0.25.0%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "hash": "sha256-LTS7jnV5xjl7jfWZG/8ZKM37RxMmWAzvQPcesmXTdVY=",
+          "filename": "torchvision-0.25.0+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "packageVersion": "0.25.0+rocm7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "cp312",
+          "abiTag": "cp312",
+          "platformTag": "linux_x86_64",
+          "kind": "wheel"
+        },
+        "torchaudio": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/torchaudio-2.9.0%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "hash": "sha256-3dHettgsMH8rGhB6vX7s7WDXbvdc0ZDTYbftfdIRI7s=",
+          "filename": "torchaudio-2.9.0+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "packageVersion": "2.9.0+rocm7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "cp312",
+          "abiTag": "cp312",
+          "platformTag": "linux_x86_64",
+          "kind": "wheel"
+        },
+        "triton": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/triton-3.6.0%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "hash": "sha256-Pn6o4qyzBGLgEte+mNPD+Ojsf00fXI/1E/dqKIfGtpA=",
+          "filename": "triton-3.6.0+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "packageVersion": "3.6.0+rocm7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "cp312",
+          "abiTag": "cp312",
+          "platformTag": "linux_x86_64",
+          "kind": "wheel"
+        },
+        "rocm-sdk-core": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/rocm_sdk_core-7.13.0a20260513-py3-none-linux_x86_64.whl",
+          "hash": "sha256-035eumipXGeLx7G7QS7C5QDS3fwOP0zVy5MnhTIOZuc=",
+          "filename": "rocm_sdk_core-7.13.0a20260513-py3-none-linux_x86_64.whl",
+          "packageVersion": "7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "py3",
+          "abiTag": "none",
+          "platformTag": "linux_x86_64",
+          "kind": "wheel"
+        },
+        "rocm-sdk-devel": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/rocm_sdk_devel-7.13.0a20260513-py3-none-linux_x86_64.whl",
+          "hash": "sha256-KPAKzWG8yNiOdr3TgYNL0oxcWH+wwpcUCVUzmMpPl30=",
+          "filename": "rocm_sdk_devel-7.13.0a20260513-py3-none-linux_x86_64.whl",
+          "packageVersion": "7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "py3",
+          "abiTag": "none",
+          "platformTag": "linux_x86_64",
+          "kind": "wheel"
+        },
+        "rocm-sdk-libraries-gfx1151": {
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/rocm_sdk_libraries_gfx1151-7.13.0a20260513-py3-none-linux_x86_64.whl",
+          "hash": "sha256-C7QTmXoPnjzQKUaJu5vnsnEubYyHuPMfYyfrivHKNEg=",
+          "filename": "rocm_sdk_libraries_gfx1151-7.13.0a20260513-py3-none-linux_x86_64.whl",
+          "packageVersion": "7.13.0a20260513",
+          "rocmVersion": "7.13.0a20260513",
+          "pythonTag": "py3",
+          "abiTag": "none",
+          "platformTag": "linux_x86_64",
+          "kind": "wheel"
+        }
+      },
+      "updated": "2026-05-20T16:11:31.764139+00:00"
+    }
+  },
+  "updated": "2026-05-20T16:11:31.764139+00:00"
+}
