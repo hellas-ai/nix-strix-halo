@@ -93,6 +93,15 @@
 
       perSystem = f: forAllSystems (system: f (pkgsFor system));
       perLinuxSystem = f: forLinuxSystems (system: f (pkgsFor system));
+      flattenBenchmarks =
+        benchmarks:
+        lib.concatMapAttrs (
+          model: benchs:
+          lib.mapAttrs' (name: drv: {
+            name = "bench-${model}-${name}";
+            value = drv;
+          }) benchs
+        ) benchmarks;
 
       mkFevmFaex9Configuration =
         {
@@ -123,6 +132,7 @@
           mkTherockPythonOverlay
           mkTherockRocmOverlay
           ;
+        benchmarks = import ./bench/lib.nix { inherit lib; };
         inherit (rocmTargetLib)
           mkRocmNarrowOverlay
           mkRocmTarget
@@ -195,10 +205,26 @@
       packages = perSystem (
         pkgs:
         let
+          genericBenchmarks = import ./bench/default.nix {
+            inherit pkgs;
+            tools = [
+              {
+                name = "cpu";
+                package = pkgs.llama-cpp;
+                executable = "llama-bench";
+                backend = "cpu";
+                metadata = {
+                  accelerator = "cpu";
+                };
+              }
+            ];
+          };
+
           genericPackages = {
             default = pkgs.llama-cpp;
             inherit (pkgs) llama-cpp;
-          };
+          }
+          // flattenBenchmarks genericBenchmarks;
 
           linuxPackages =
             let
@@ -242,12 +268,53 @@
                   name: pkgs.${name}
                 );
 
-              benchmarks = import ./bench/default.nix {
+              defaultTargetMetadata = {
+                inherit (defaultRocmTarget)
+                  packageSuffix
+                  rocmGpuTargets
+                  runtimeArch
+                  systemFeature
+                  ;
+              }
+              // lib.optionalAttrs (defaultRocmTarget.hsaOverride != null) {
+                inherit (defaultRocmTarget) hsaOverride;
+              };
+
+              acceleratedBenchmarks = import ./bench/default.nix {
                 inherit pkgs;
-                packages = {
-                  inherit (pkgs) llama-cpp-vulkan;
-                  llama-cpp-rocm = pkgs.llama-cpp-rocm-gfx1151;
-                };
+                tools = [
+                  {
+                    name = "rocm";
+                    package = pkgs.llama-cpp-rocm-gfx1151;
+                    executable = "llama-bench";
+                    backend = "rocm";
+                    env = lib.optionalAttrs (defaultRocmTarget.hsaOverride != null) {
+                      HSA_OVERRIDE_GFX_VERSION = defaultRocmTarget.hsaOverride;
+                    };
+                    requirements = {
+                      systemFeatures = [ defaultRocmTarget.systemFeature ];
+                      hostProfiles = [ "linux-amd-kfd" ];
+                    };
+                    metadata = {
+                      accelerator = "rocm";
+                      target = defaultTargetMetadata;
+                    };
+                  }
+                  {
+                    name = "vulkan";
+                    package = pkgs.llama-cpp-vulkan;
+                    executable = "llama-bench";
+                    backend = "vulkan";
+                    requirements = {
+                      systemFeatures = [ defaultRocmTarget.systemFeature ];
+                      hostProfiles = [ "linux-drm-render" ];
+                    };
+                    metadata = {
+                      accelerator = "vulkan";
+                      target = defaultTargetMetadata;
+                    };
+                  }
+                ];
               };
             in
             {
@@ -260,13 +327,7 @@
             }
             // llamaCppTargetPackages
             // therockPackages
-            // (pkgs.lib.concatMapAttrs (
-              model: benchs:
-              pkgs.lib.mapAttrs' (name: drv: {
-                name = "bench-${model}-${name}";
-                value = drv;
-              }) benchs
-            ) benchmarks);
+            // flattenBenchmarks acceleratedBenchmarks;
         in
         genericPackages // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
       );

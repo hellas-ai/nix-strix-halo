@@ -1,188 +1,192 @@
-# Benchmark matrix generator
 {
   pkgs,
-  packages,
-  gpuTarget ? "gfx1151",
+  tools,
+  modelRoot ? "/models",
+  matrixMetadata ? { },
 }:
 let
-  runner = import ./runner.nix;
+  inherit (pkgs) lib;
+  benchLib = import ./lib.nix { inherit lib; };
 
-  # Standard package set for all benchmarks
-  standardPackages = [
-    {
-      name = "rocm";
-      package = packages.llama-cpp-rocm;
-    }
-    {
-      name = "vulkan";
-      package = packages.llama-cpp-vulkan;
-    }
-  ];
+  benchmarkTools = map benchLib.normalizeTool tools;
 
-  # Model configurations with their benchmark parameters
   modelConfigs = {
-    llama2-7b = {
-      path = "/models/llama-2-7b/llama-2-7b.Q4_K_M.gguf";
-      benchmarks = {
-        # Batch size effects
-        batchSizes = {
-          params =
-            map
-              (b: {
-                batch = b;
+    llama2-7b =
+      benchLib.mkModel {
+        name = "llama2-7b";
+        path = "${modelRoot}/llama-2-7b/llama-2-7b.Q4_K_M.gguf";
+      }
+      // {
+        benchmarks = {
+          batchSizes = {
+            params =
+              map
+                (batch: {
+                  inherit batch;
+                  fa = 1;
+                })
+                [
+                  1
+                  2
+                  4
+                  8
+                  32
+                  64
+                  128
+                  256
+                  512
+                ];
+          };
+
+          flashAttention = {
+            params = [
+              {
+                fa = 0;
+                ngl = 999;
+              }
+              {
                 fa = 1;
-              })
-              [
-                1
-                2
-                4
-                8
-                32
-                64
-                128
-                256
-                512
-              ];
-        };
-
-        # Flash attention comparison
-        flashAttention = {
-          params = [
-            {
-              fa = 0;
-              ngl = 999;
-            }
-            {
-              fa = 1;
-              ngl = 999;
-            }
-          ];
+                ngl = 999;
+              }
+            ];
+          };
         };
       };
-    };
 
-    qwen25-32b = {
-      path = "/models/qwen2.5-32b-instruct/qwen2.5-32b-instruct-q8_0-00001-of-00009.gguf";
-      benchmarks = {
-        # Memory offloading tests
-        memoryTests = {
-          params = [
-            {
-              fa = 1;
-              ngl = 50;
-            }
-            {
-              fa = 1;
-              ngl = 99;
-            }
-          ];
+    qwen25-32b =
+      benchLib.mkModel {
+        name = "qwen25-32b";
+        path = "${modelRoot}/qwen2.5-32b-instruct/qwen2.5-32b-instruct-q8_0-00001-of-00009.gguf";
+      }
+      // {
+        benchmarks = {
+          memoryTests = {
+            params = [
+              {
+                fa = 1;
+                ngl = 50;
+              }
+              {
+                fa = 1;
+                ngl = 99;
+              }
+            ];
+          };
         };
       };
-    };
 
-    qwen3-coder-30b = {
-      path = "/models/qwen3-coder-30b-a3b/BF16/Qwen3-Coder-30B-A3B-Instruct-BF16-00001-of-00002.gguf";
-      benchmarks = {
-        flashAttention = {
-          params = [
-            {
-              fa = 0;
-              ngl = 999;
-            }
-            {
-              fa = 1;
-              ngl = 999;
-            }
-          ];
-        };
+    qwen3-coder-30b =
+      benchLib.mkModel {
+        name = "qwen3-coder-30b";
+        path = "${modelRoot}/qwen3-coder-30b-a3b/BF16/Qwen3-Coder-30B-A3B-Instruct-BF16-00001-of-00002.gguf";
+      }
+      // {
+        benchmarks = {
+          flashAttention = {
+            params = [
+              {
+                fa = 0;
+                ngl = 999;
+              }
+              {
+                fa = 1;
+                ngl = 999;
+              }
+            ];
+          };
 
-        promptProcessing = {
-          params = [
-            {
-              batch = 128;
-              fa = 1;
-              ngl = 999;
-            }
-            {
-              batch = 512;
-              fa = 1;
-              ngl = 999;
-            }
-          ];
+          promptProcessing = {
+            params = [
+              {
+                batch = 128;
+                fa = 1;
+                ngl = 999;
+              }
+              {
+                batch = 512;
+                fa = 1;
+                ngl = 999;
+              }
+            ];
+          };
         };
       };
-    };
   };
 
-  # Generate benchmark name from config
   mkName =
-    config:
+    {
+      tool,
+      params,
+      ...
+    }:
     builtins.concatStringsSep "-" (
-      [ config.package.pname ]
-      ++ (pkgs.lib.optional (config ? packageName) config.packageName)
-      ++ (pkgs.lib.optional (config ? batch) "b${toString config.batch}")
-      ++ (pkgs.lib.optional (config ? fa) "fa${toString config.fa}")
-      ++ (pkgs.lib.optional (config ? ngl) "ngl${toString config.ngl}")
+      [
+        (tool.package.pname or tool.package.name)
+        tool.name
+      ]
+      ++ (lib.optional (params ? batch) "b${toString params.batch}")
+      ++ (lib.optional (params ? fa) "fa${toString params.fa}")
+      ++ (lib.optional (params ? ngl) "ngl${toString params.ngl}")
     );
 
-  # Generate benchmark runner invocation
   mkBenchmark =
+    model:
     {
-      model,
-      package,
-      batch ? null,
-      fa ? null,
-      ngl ? null,
-      rpc ? null,
-      ...
-    }@args:
-    runner {
-      inherit
-        pkgs
-        batch
-        fa
-        ngl
-        rpc
-        gpuTarget
-        ;
-      llamaPackage = package;
-      modelPath = model;
-      extraArgs = args.extraArgs or "";
+      tool,
+      params,
+      scenario,
+    }@config:
+    let
+      name = mkName config;
+    in
+    benchLib.mkLlamaCppBenchmark {
+      inherit pkgs name params;
+      inherit (tool) package env requirements;
+      executable = "${tool.package}/bin/${tool.executable}";
+      model = removeAttrs model [ "benchmarks" ];
+      extraArgs = tool.args;
+      metadata = lib.recursiveUpdate {
+        suite = "local-gguf";
+        inherit scenario;
+        tool = {
+          inherit (tool) backend;
+          packageRole = tool.name;
+        };
+      } (lib.recursiveUpdate matrixMetadata tool.metadata);
     };
 
-  # Generate all benchmarks for a model
   generateModelBenchmarks =
-    modelConfig:
+    model:
     let
-      # Expand benchmark definitions into concrete configs
-      allConfigs = pkgs.lib.flatten (
-        pkgs.lib.mapAttrsToList (
-          _: benchDef:
-          pkgs.lib.flatten (
+      expanded = lib.flatten (
+        lib.mapAttrsToList (
+          scenario: benchDef:
+          lib.flatten (
             map (
-              packageConfig:
-              map (
-                params:
-                {
-                  inherit (packageConfig) package;
-                  packageName = packageConfig.name;
-                }
-                // params
-              ) benchDef.params
-            ) standardPackages
+              tool:
+              map (params: {
+                inherit
+                  scenario
+                  tool
+                  params
+                  ;
+              }) benchDef.params
+            ) benchmarkTools
           )
-        ) modelConfig.benchmarks
+        ) model.benchmarks
       );
     in
     builtins.listToAttrs (
       map (config: {
         name = mkName config;
-        value = mkBenchmark (config // { model = modelConfig.path; });
-      }) allConfigs
+        value = mkBenchmark model config;
+      }) expanded
     );
 in
+assert lib.assertMsg (
+  benchmarkTools != [ ]
+) "bench/default.nix requires at least one tool descriptor";
 {
-  # Generate benchmarks for each model
   llama2-7b = generateModelBenchmarks modelConfigs.llama2-7b;
   qwen25-32b = generateModelBenchmarks modelConfigs.qwen25-32b;
   qwen3-coder-30b = generateModelBenchmarks modelConfigs.qwen3-coder-30b;
