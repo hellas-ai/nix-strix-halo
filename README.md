@@ -223,6 +223,6 @@ nix flake check --no-build
 
 ## CI
 
-Pull requests run a matrix derived from the flake's `checks` output on the shared self-hosted runner. Protect `master` by requiring the `required checks` job.
+CI is driven by the flake's `checks` output. The buildbot should build `.#checks.<system>.*` for the systems it owns.
 
-Pushes to `master` run a full build of non-benchmark package outputs. Benchmark derivations are evaluated by `nix flake check --no-build`, but are not built in CI because they require local models and hardware-specific system features.
+The checks include source formatting/linting, representative package builds, benchmark metadata validation, and Linux benchmark-runner module composition. Benchmark packages are evaluated by `nix flake check --no-build`, but the hardware/model-dependent benchmark derivations are not checks because they require local models and host-specific device access.

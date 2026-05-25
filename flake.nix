@@ -25,7 +25,6 @@
       ];
       systems = linuxSystems ++ darwinSystems;
       forAllSystems = lib.genAttrs systems;
-      forLinuxSystems = lib.genAttrs linuxSystems;
 
       rocmTargetLib = import ./lib/rocm-targets.nix { inherit lib; };
       therockTargetConfig = import ./pkgs/therock/targets.nix {
@@ -92,7 +91,6 @@
         };
 
       perSystem = f: forAllSystems (system: f (pkgsFor system));
-      perLinuxSystem = f: forLinuxSystems (system: f (pkgsFor system));
       flattenBenchmarks =
         benchmarks:
         lib.concatMapAttrs (
@@ -485,11 +483,45 @@
 
       formatter = perSystem (pkgs: pkgs.nixfmt-tree);
 
-      checks = perLinuxSystem (
+      checks = perSystem (
         pkgs:
         let
+          system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
           therockPytorchPackage = "torch-rocm-${s}";
+          packageSet = self.packages.${system};
+          cpuBenchmark = packageSet.bench-llama2-7b-llama-cpp-cpu-b512-fa1;
+          cpuBenchmarkMetadata = builtins.toJSON cpuBenchmark.passthru.benchmark;
+
+          benchmarkRunnerProfileConfig =
+            (nixpkgs.lib.nixosSystem {
+              system = "x86_64-linux";
+              modules = [
+                self.nixosModules.benchmark-runner
+                (_: {
+                  services.benchmark-runner = {
+                    enable = true;
+                    systemFeatures = [ defaultRocmTarget.systemFeature ];
+                    enabledProfiles = [
+                      "linux-amd-kfd"
+                      "caller-profile"
+                    ];
+                    profiles.caller-profile = {
+                      systemFeatures = [ "caller-feature" ];
+                      sandboxPaths = [ "/caller/device" ];
+                      udevRules = [
+                        ''KERNEL=="caller-device", GROUP="nixbld", MODE="0660"''
+                      ];
+                    };
+                  };
+                })
+              ];
+            }).config;
+          benchmarkRunnerProfileMetadata = builtins.toJSON {
+            features = benchmarkRunnerProfileConfig.nix.settings.system-features;
+            sandboxPaths = benchmarkRunnerProfileConfig.nix.settings.extra-sandbox-paths;
+            udevRules = benchmarkRunnerProfileConfig.services.udev.extraRules;
+          };
 
           mkSourceCheck =
             name: nativeBuildInputs: command:
@@ -501,7 +533,8 @@
               ''
                 export HOME="$TMPDIR"
                 export XDG_CACHE_HOME="$TMPDIR/cache"
-                cp -r --no-preserve=mode "$src" source
+                cp -R "$src" source
+                chmod -R u+w source
                 cd source
                 ${command}
                 touch "$out"
@@ -520,6 +553,58 @@
             statix check .
           '';
 
+          benchmark-metadata =
+            pkgs.runCommandLocal "ci-benchmark-metadata"
+              {
+                nativeBuildInputs = [ pkgs.jq ];
+              }
+              ''
+                cat > metadata.json <<'JSON'
+                ${cpuBenchmarkMetadata}
+                JSON
+
+                jq -e '
+                  .kind == "llama-cpp"
+                  and .accelerator == "cpu"
+                  and .requirements.systemFeatures == []
+                  and .requirements.hostProfiles == []
+                  and .requirements.sandboxPaths == []
+                  and .model.path == "/models/llama-2-7b/llama-2-7b.Q4_K_M.gguf"
+                  and .params.batch == 512
+                  and .params.fa == 1
+                  and (.command | length) >= 6
+                ' metadata.json
+
+                touch "$out"
+              '';
+
+          package-llama-cpp = pkgs.llama-cpp;
+        }
+        // lib.optionalAttrs pkgs.stdenv.isLinux {
+          benchmark-runner-profiles =
+            pkgs.runCommandLocal "ci-benchmark-runner-profiles"
+              {
+                nativeBuildInputs = [ pkgs.jq ];
+              }
+              ''
+                cat > profile.json <<'JSON'
+                ${benchmarkRunnerProfileMetadata}
+                JSON
+
+                jq -e '
+                  (.features | index("${defaultRocmTarget.systemFeature}") != null)
+                  and (.features | index("caller-feature") != null)
+                  and (.sandboxPaths | index("/dev/dri") != null)
+                  and (.sandboxPaths | index("/dev/kfd") != null)
+                  and (.sandboxPaths | index("/caller/device") != null)
+                  and (.udevRules | contains("caller-device"))
+                ' profile.json
+
+                touch "$out"
+              '';
+
+          "package-llama-cpp-rocm-${s}" = pkgs."llama-cpp-rocm-${s}";
+          package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
           "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
         }
       );
