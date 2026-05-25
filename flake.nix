@@ -570,6 +570,7 @@
                   and .requirements.hostProfiles == []
                   and .requirements.sandboxPaths == []
                   and .model.path == "/models/llama-2-7b/llama-2-7b.Q4_K_M.gguf"
+                  and .packages == [ "llama-cpp" ]
                   and .params.batch == 512
                   and .params.fa == 1
                   and (.command | length) >= 6

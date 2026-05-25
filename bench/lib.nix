@@ -37,12 +37,19 @@ let
 
   packageName = package: package.pname or package.name;
 
+  emptyRequirements = {
+    systemFeatures = [ ];
+    hostProfiles = [ ];
+    sandboxPaths = [ ];
+  };
+
   normalizeRequirements =
     requirements:
-    {
-      systemFeatures = requirements.systemFeatures or [ ];
-      hostProfiles = requirements.hostProfiles or [ ];
-      sandboxPaths = requirements.sandboxPaths or [ ];
+    emptyRequirements
+    // {
+      systemFeatures = requirements.systemFeatures or emptyRequirements.systemFeatures;
+      hostProfiles = requirements.hostProfiles or emptyRequirements.hostProfiles;
+      sandboxPaths = requirements.sandboxPaths or emptyRequirements.sandboxPaths;
     }
     // removeAttrs requirements [
       "systemFeatures"
@@ -50,10 +57,60 @@ let
       "sandboxPaths"
     ];
 
+  mergeRequirements =
+    requirements:
+    let
+      normalized = map normalizeRequirements requirements;
+      extraAttrs = map (
+        attrs:
+        removeAttrs attrs [
+          "systemFeatures"
+          "hostProfiles"
+          "sandboxPaths"
+        ]
+      ) normalized;
+    in
+    (lib.foldl' lib.recursiveUpdate { } extraAttrs)
+    // {
+      systemFeatures = lib.unique (lib.concatMap (attrs: attrs.systemFeatures) normalized);
+      hostProfiles = lib.unique (lib.concatMap (attrs: attrs.hostProfiles) normalized);
+      sandboxPaths = lib.unique (lib.concatMap (attrs: attrs.sandboxPaths) normalized);
+    };
+
+  normalizePackages =
+    {
+      package ? null,
+      packages ? [ ],
+    }:
+    lib.optional (package != null) package ++ packages;
+
+  packageNames = packages: map packageName packages;
+
+  benchmarkMetadata =
+    {
+      name,
+      command,
+      env,
+      packages,
+      requirements,
+      metadata,
+    }:
+    metadata
+    // {
+      inherit
+        command
+        env
+        name
+        requirements
+        ;
+      packages = packageNames packages;
+    };
+
   normalizeTool =
     {
       name,
       package,
+      packages ? [ ],
       executable ? name,
       backend ? name,
       env ? { },
@@ -65,20 +122,25 @@ let
       inherit
         name
         package
-        executable
         backend
-        env
-        args
+        executable
+        packages
         metadata
         ;
-      requirements = normalizeRequirements requirements;
+      args = normalizeArgs args;
+      env = nonNullAttrs env;
+      requirements = mergeRequirements [ requirements ];
     };
 in
 rec {
   inherit
+    emptyRequirements
     envExports
+    mergeRequirements
     normalizeRequirements
+    normalizePackages
     normalizeTool
+    packageNames
     shellArgs
     ;
 
@@ -106,7 +168,7 @@ rec {
       name,
       command,
       package ? null,
-      packages ? lib.optional (package != null) package,
+      packages ? [ ],
       env ? { },
       requirements ? { },
       metadata ? { },
@@ -116,20 +178,25 @@ rec {
     let
       normalizedEnv = nonNullAttrs env;
       normalizedCommand = map stringify command;
-      normalizedRequirements = normalizeRequirements requirements;
-      benchmarkMetadata = metadata // {
-        inherit name;
+      normalizedPackages = normalizePackages { inherit package packages; };
+      normalizedRequirements = mergeRequirements [ requirements ];
+      normalizedMetadata = benchmarkMetadata {
+        inherit
+          name
+          metadata
+          ;
         command = normalizedCommand;
         env = normalizedEnv;
         requirements = normalizedRequirements;
+        packages = normalizedPackages;
       };
       commandLine = shellArgs normalizedCommand;
     in
     pkgs.runCommand name
       {
-        buildInputs = packages;
+        buildInputs = normalizedPackages;
         requiredSystemFeatures = normalizedRequirements.systemFeatures;
-        passthru.benchmark = benchmarkMetadata;
+        passthru.benchmark = normalizedMetadata;
         meta = {
           inherit description;
         }
@@ -141,7 +208,7 @@ rec {
         mkdir -p "$out"
 
         cat > "$out/metadata.json" <<'JSON'
-        ${builtins.toJSON benchmarkMetadata}
+        ${builtins.toJSON normalizedMetadata}
         JSON
 
         cat > "$out/command.json" <<'JSON'
@@ -186,6 +253,7 @@ rec {
       pkgs,
       name,
       package,
+      packages ? [ ],
       executable ? "${package}/bin/llama-bench",
       model,
       params ? { },
@@ -211,6 +279,7 @@ rec {
         pkgs
         name
         package
+        packages
         env
         requirements
         meta
