@@ -1,4 +1,4 @@
-# NixOS module for systems that run benchmarks
+# NixOS adapter for hosts that run benchmark derivations.
 {
   config,
   lib,
@@ -8,38 +8,173 @@
 with lib;
 let
   cfg = config.services.benchmark-runner;
-  isNvidia = hasPrefix "rtx" cfg.gpuTarget;
-  isAmd = hasPrefix "gfx" cfg.gpuTarget;
+
+  builtinProfiles = {
+    linux-drm-render = {
+      sandboxPaths = [
+        "/dev/dri"
+        "/sys/class/drm"
+        "/sys/dev"
+        "/sys/devices"
+      ];
+      udevRules = [
+        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
+        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
+      ];
+    };
+
+    linux-amd-kfd = {
+      includes = [ "linux-drm-render" ];
+      sandboxPaths = [
+        "/dev/kfd"
+        "/sys/class/kfd"
+      ];
+      udevRules = [
+        ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
+      ];
+    };
+
+    linux-nvidia = {
+      sandboxPaths = [
+        "/dev/nvidia0"
+        "/dev/nvidiactl"
+        "/dev/nvidia-uvm"
+        "/dev/nvidia-uvm-tools"
+        "/dev/nvidia-caps"
+        # Bind-mount the NVIDIA driver package to /run/opengl-driver so
+        # autoAddDriverRunpath RUNPATH entries resolve inside the sandbox.
+        "/run/opengl-driver=${config.hardware.nvidia.package}"
+      ];
+      udevRules = [
+        ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidiactl", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidia-uvm", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidia-uvm-tools", GROUP="nixbld", MODE="0660"''
+      ];
+    };
+  };
+
+  emptyProfile = {
+    includes = [ ];
+    systemFeatures = [ ];
+    sandboxPaths = [ ];
+    udevRules = [ ];
+  };
+
+  profileSet = builtinProfiles // cfg.profiles;
+  profileOrEmpty = name: emptyProfile // (profileSet.${name} or { });
+
+  collectProfileNames =
+    seen: names:
+    concatMap (
+      name:
+      if elem name seen then
+        [ ]
+      else
+        let
+          profile = profileOrEmpty name;
+        in
+        collectProfileNames (seen ++ [ name ]) profile.includes ++ [ name ]
+    ) names;
+
+  activeProfileNames = unique (collectProfileNames [ ] cfg.enabledProfiles);
+  activeProfiles = map profileOrEmpty activeProfileNames;
+
+  featureList = unique (
+    cfg.systemFeatures ++ concatMap (profile: profile.systemFeatures) activeProfiles
+  );
+
+  sandboxPaths = unique (
+    [
+      "/dev/shm"
+      "/proc"
+    ]
+    ++ optional (cfg.modelsPath != null) cfg.modelsPath
+    ++ concatMap (profile: profile.sandboxPaths) activeProfiles
+    ++ cfg.extraSandboxPaths
+  );
+
+  udevRules = concatMap (profile: profile.udevRules) activeProfiles ++ cfg.extraUdevRules;
 in
 {
   options.services.benchmark-runner = {
-    enable = mkEnableOption "benchmark runner configuration";
+    enable = mkEnableOption "benchmark host configuration";
 
-    gpuTarget = mkOption {
-      type = types.enum [
-        "gfx1010"
+    systemFeatures = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [
         "gfx1151"
-        "rtx4090"
+        "aimax395"
+        "cuda-sm_89"
       ];
-      default = "gfx1151";
-      description = "GPU architecture target";
+      description = "Nix system features required by benchmark derivations that this host may run.";
     };
 
-    cpuTarget = mkOption {
-      type = types.str;
-      description = "CPU identifier for benchmark dispatch (e.g., '9950x3d', 'aimax395')";
+    enabledProfiles = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [
+        "linux-amd-kfd"
+        "my-accelerator"
+      ];
+      description = "Named host profiles to apply for sandbox paths and device permissions.";
+    };
+
+    profiles = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            includes = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Other benchmark-runner profiles included by this profile.";
+            };
+            systemFeatures = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Nix system features contributed by this profile.";
+            };
+            sandboxPaths = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Sandbox paths contributed by this profile.";
+            };
+            udevRules = mkOption {
+              type = types.listOf types.lines;
+              default = [ ];
+              description = "udev rules contributed by this profile.";
+            };
+          };
+        }
+      );
+      default = { };
+      description = "Additional benchmark host profiles. These are merged over the built-in profiles.";
+    };
+
+    extraSandboxPaths = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "/sys/class/infiniband" ];
+      description = "Additional sandbox paths required by caller-provided benchmark profiles.";
+    };
+
+    extraUdevRules = mkOption {
+      type = types.listOf types.lines;
+      default = [ ];
+      description = "Additional udev rules required by caller-provided benchmark profiles.";
     };
 
     modelsPath = mkOption {
-      type = types.path;
+      type = types.nullOr types.str;
       default = "/models";
-      description = "Path where benchmark models are stored";
+      description = "Path where benchmark models are stored, or null to skip model path setup.";
     };
 
     enableSandboxRelaxation = mkOption {
       type = types.bool;
       default = false;
-      description = "Whether to relax sandbox restrictions for GPU access";
+      description = "Whether to relax sandbox restrictions for benchmark builds.";
     };
 
     ensureModels = mkOption {
@@ -48,28 +183,46 @@ in
           options = {
             repo = mkOption {
               type = types.str;
-              description = "HuggingFace repository ID (e.g., 'meta-llama/Llama-2-7b')";
+              description = "Hugging Face repository ID.";
             };
             files = mkOption {
               type = types.listOf types.str;
               default = [ ];
               example = [ "model.gguf" ];
-              description = "Specific files to download from the repository";
+              description = "Specific files to download from the repository.";
             };
             name = mkOption {
               type = types.str;
-              description = "Local directory name for the model";
+              description = "Local directory name for the model.";
             };
           };
         }
       );
       default = [ ];
-      description = "Models to ensure are downloaded from HuggingFace";
+      description = "Models to ensure are downloaded from Hugging Face.";
     };
   };
 
   config = mkIf cfg.enable {
     assertions = [
+      {
+        assertion = all (name: hasAttr name profileSet) cfg.enabledProfiles;
+        message = "services.benchmark-runner.enabledProfiles contains an unknown profile";
+      }
+      {
+        assertion = all (profile: all (name: hasAttr name profileSet) profile.includes) (
+          attrValues profileSet
+        );
+        message = "services.benchmark-runner.profiles contains an unknown included profile";
+      }
+      {
+        assertion = cfg.modelsPath == null || hasPrefix "/" cfg.modelsPath;
+        message = "services.benchmark-runner.modelsPath must be null or an absolute path";
+      }
+      {
+        assertion = cfg.modelsPath != null || cfg.ensureModels == [ ];
+        message = "services.benchmark-runner.ensureModels requires services.benchmark-runner.modelsPath";
+      }
       {
         assertion = all (model: model.files != [ ]) cfg.ensureModels;
         message = "services.benchmark-runner.ensureModels entries must include at least one file";
@@ -77,75 +230,22 @@ in
     ];
 
     nix.settings = {
-      # Add GPU and CPU features to system
-      system-features = [
-        cfg.gpuTarget
-        cfg.cpuTarget
-      ];
-
-      # Allow GPU access in sandbox
-      extra-sandbox-paths = [
-        "/dev/dri"
-        "/dev/shm"
-        "/sys/dev"
-        "/sys/devices"
-        "/proc"
-        cfg.modelsPath
-      ]
-      ++ optionals isAmd [
-        "/dev/kfd"
-        "/sys/class/kfd"
-        "/sys/class/drm"
-      ]
-      ++ optionals isNvidia [
-        "/dev/nvidia0"
-        "/dev/nvidiactl"
-        "/dev/nvidia-uvm"
-        "/dev/nvidia-uvm-tools"
-        "/dev/nvidia-caps"
-        # Bind-mount the NVIDIA driver package to /run/opengl-driver so
-        # autoAddDriverRunpath RUNPATH entries resolve inside the sandbox.
-        # A plain "/run/opengl-driver" only mounts the symlink; the target
-        # store path is not a build input so it won't be available.
-        "/run/opengl-driver=${config.hardware.nvidia.package}"
-      ];
-
-      # Optionally relax sandbox for benchmark builds
-      sandbox = mkIf cfg.enableSandboxRelaxation "relaxed";
+      system-features = featureList;
+      extra-sandbox-paths = sandboxPaths;
+    }
+    // optionalAttrs cfg.enableSandboxRelaxation {
+      sandbox = "relaxed";
     };
 
-    # Limit concurrent builds for benchmarks
-    # nix.settings.max-jobs = mkDefault 1;
+    systemd.tmpfiles.rules =
+      optional (cfg.modelsPath != null) "d ${cfg.modelsPath} 0755 root root -"
+      ++ optional (cfg.modelsPath != null) "A ${cfg.modelsPath} - - - - group:nixbld:r-x"
+      ++ optional (cfg.modelsPath != null) "A ${cfg.modelsPath} - - - - default:group:nixbld:r-x";
 
-    # Create models directory with proper permissions
-    systemd.tmpfiles.rules = [
-      "d ${cfg.modelsPath} 0755 root root -"
-      # Allow nixbld group to read models
-      "A ${cfg.modelsPath} - - - - group:nixbld:r-x"
-      "A ${cfg.modelsPath} - - - - default:group:nixbld:r-x"
-    ];
+    services.udev.extraRules = mkIf (udevRules != [ ]) (concatStringsSep "\n" udevRules);
 
-    # allow nixbld group to access GPU devices
-    services.udev.extraRules = concatStringsSep "\n" (
-      optionals isAmd [
-        ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
-      ]
-      ++ [
-        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
-        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
-      ]
-      ++ optionals isNvidia [
-        ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidiactl", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidia-uvm", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidia-uvm-tools", GROUP="nixbld", MODE="0660"''
-      ]
-    );
-
-    # Systemd services to ensure models are downloaded
     systemd.services =
       let
-        # Create individual download services for each file
         fileServices = flatten (
           map (
             model:
@@ -157,8 +257,8 @@ in
                 path = with pkgs; [
                   (python3.withPackages (
                     ps: with ps; [
-                      huggingface-hub
                       hf-transfer
+                      huggingface-hub
                     ]
                   ))
                   coreutils
@@ -194,7 +294,6 @@ in
           ) cfg.ensureModels
         );
 
-        # Create orchestrator services to coordinate downloads
         orchestratorServices = map (model: {
           name = "ensure-model-${model.name}";
           value = {

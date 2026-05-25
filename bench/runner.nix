@@ -1,4 +1,3 @@
-# Simple benchmark runner
 {
   pkgs,
   llamaPackage,
@@ -10,28 +9,41 @@
   batch ? null,
   ubatch ? null,
   rpc ? null,
-  extraArgs ? "",
-  gpuTarget ? "gfx1151",
+  extraArgs ? [ ],
+  env ? { },
+  requirements ? { },
+  requiredSystemFeatures ? [ ],
+  name ? "benchmark-${llamaPackage.pname or llamaPackage.name}",
+  metadata ? { },
+  meta ? { },
 }:
-pkgs.runCommand "benchmark-${llamaPackage.pname}"
-  {
-    buildInputs = [ llamaPackage ];
-    requiredSystemFeatures = [ gpuTarget ];
-  }
-  ''
-    echo "Running benchmark with the following parameters:"
-    echo "Model Path: ${modelPath}"
-
-    export HSA_OVERRIDE_GFX_VERSION=11.5.1
-    ${llamaPackage}/bin/llama-bench \
-      ${pkgs.lib.optionalString (modelPath != null) "-m ${modelPath}"} \
-      ${pkgs.lib.optionalString (mmap != null) "--mmap ${toString mmap}"} \
-      ${pkgs.lib.optionalString (fa != null) "-fa ${toString fa}"} \
-      ${pkgs.lib.optionalString (ngl != null) "-ngl ${toString ngl}"} \
-      ${pkgs.lib.optionalString (threads != null) "-t ${toString threads}"} \
-      ${pkgs.lib.optionalString (batch != null) "-b ${toString batch}"} \
-      ${pkgs.lib.optionalString (ubatch != null) "-ub ${toString ubatch}"} \
-      ${pkgs.lib.optionalString (rpc != null) "--rpc ${rpc}"} \
-      ${extraArgs} \
-      > $out
-  ''
+let
+  benchLib = import ./lib.nix { inherit (pkgs) lib; };
+  normalizedRequirements = benchLib.normalizeRequirements requirements;
+in
+benchLib.mkLlamaCppBenchmark {
+  inherit
+    pkgs
+    name
+    extraArgs
+    env
+    metadata
+    meta
+    ;
+  requirements = normalizedRequirements // {
+    systemFeatures = normalizedRequirements.systemFeatures ++ requiredSystemFeatures;
+  };
+  package = llamaPackage;
+  model = modelPath;
+  params = {
+    inherit
+      mmap
+      fa
+      ngl
+      threads
+      batch
+      ubatch
+      rpc
+      ;
+  };
+}

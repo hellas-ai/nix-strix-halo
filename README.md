@@ -8,7 +8,7 @@ It provides:
 - Linux-only ROCm outputs, including generic ROCm builds and Strix Halo `gfx1151` narrowed builds
 - TheRock ROCm/PyTorch packaging for configured Linux GPU targets
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
-- benchmark derivations for local `/models` GGUF files
+- cross-platform benchmark helpers and derivations for reproducible local model/tool runs
 - a minimal `fevm-faex9` NixOS example builder
 
 ## Outputs
@@ -20,8 +20,10 @@ nix flake show
 Main package outputs:
 
 - `packages.aarch64-darwin.default`
+- `packages.aarch64-darwin.bench-*`
 - `packages.aarch64-darwin.llama-cpp`
 - `packages.x86_64-darwin.default`
+- `packages.x86_64-darwin.bench-*`
 - `packages.x86_64-darwin.llama-cpp`
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.llama-cpp`
@@ -73,7 +75,7 @@ Example configuration helper:
 }
 ```
 
-On macOS, the overlay intentionally exposes only generic non-ROCm outputs such as `llama-cpp` and the CPU `llama-cli`/`llama-server` apps. ROCm, TheRock, EC, firmware, and benchmark outputs are Linux-only.
+On macOS, the overlay intentionally exposes only generic non-ROCm outputs such as `llama-cpp`, CPU `llama-cli`/`llama-server` apps, and CPU benchmark derivations. ROCm, TheRock, EC, and firmware outputs are Linux-only.
 
 ## TheRock ROCm Targets
 
@@ -144,7 +146,7 @@ The module supports named instances under `services.llama-cpp-rpc-servers`.
 - `nixosModules.ryzenadj`: power and curve optimizer settings through `ryzenadj`
 - `nixosModules.tuning`: high-performance kernel defaults, pinned Strix Halo MES firmware, and TuneD defaults
 - `nixosModules.disko-raid0`: dual-NVMe RAID0 Disko layout
-- `nixosModules.benchmark-runner`: benchmark host setup, model downloads, and sandbox GPU access
+- `nixosModules.benchmark-runner`: generic benchmark host setup, model downloads, and sandbox device access
 
 `disko-raid0` defines Disko options but does not import Disko itself. Callers must provide `disko.nixosModules.disko` before using it. It targets `/dev/nvme0n1` and `/dev/nvme1n1`; treat it as machine-specific.
 
@@ -160,14 +162,56 @@ nix build --impure --file ./examples/fevm-faex9 \
 
 ## Benchmarks
 
-Benchmark packages expect model files under `/models` and require GPU access from the Nix build sandbox.
+Benchmark packages are generated from structured tool/model/scenario records. The default cross-platform matrix runs CPU `llama-bench` against local GGUF files under `/models`. Linux also exposes this flake's ROCm and Vulkan llama.cpp tool variants.
 
 ```bash
-nix build .#bench-llama2-7b-llama-cpp-rocm-b512-fa1
-cat result
+nix build .#bench-llama2-7b-llama-cpp-cpu-b512-fa1
+cat result/stdout.txt
+cat result/metadata.json
 ```
 
-Use `services.benchmark-runner` on benchmark hosts to add system features, GPU device access, and optional Hugging Face model download services.
+External flakes can reuse `lib.benchmarks` while injecting their own packages, model paths, required system features, environment variables, and host profile names. For example, with a caller-provided CUDA-enabled `myCudaLlamaCpp` package:
+
+```nix
+let
+  bench = inputs.nix-strix-halo.lib.benchmarks;
+in
+bench.mkLlamaCppBenchmark {
+  inherit pkgs;
+  name = "llama-cpp-cuda-b512-fa1";
+  package = myCudaLlamaCpp;
+  model = "/models/llama-2-7b/llama-2-7b.Q4_K_M.gguf";
+  params = {
+    batch = 512;
+    fa = 1;
+  };
+  requirements = {
+    systemFeatures = [ "cuda-sm_89" ];
+    hostProfiles = [ "linux-nvidia" ];
+  };
+  metadata = {
+    accelerator = "cuda";
+  };
+}
+```
+
+Use `services.benchmark-runner` on NixOS benchmark hosts to add the Nix system features and sandbox device access required by benchmark derivations:
+
+```nix
+{
+  services.benchmark-runner = {
+    enable = true;
+    systemFeatures = [
+      "gfx1151"
+      "aimax395"
+    ];
+    enabledProfiles = [ "linux-amd-kfd" ];
+    modelsPath = "/models";
+  };
+}
+```
+
+The NixOS module is only a host adapter. It has built-in profiles for `linux-drm-render`, `linux-amd-kfd`, and `linux-nvidia`, and callers can define more profiles with their own sandbox paths and udev rules.
 
 ## Development
 
