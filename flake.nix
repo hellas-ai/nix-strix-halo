@@ -101,6 +101,76 @@
           }) benchs
         ) benchmarks;
 
+      mkBenchmarkSuites =
+        pkgs:
+        let
+          defaultTargetMetadata = {
+            inherit (defaultRocmTarget)
+              packageSuffix
+              rocmGpuTargets
+              runtimeArch
+              systemFeature
+              ;
+          }
+          // lib.optionalAttrs (defaultRocmTarget.hsaOverride != null) {
+            inherit (defaultRocmTarget) hsaOverride;
+          };
+
+          genericBenchmarks = import ./bench/default.nix {
+            inherit pkgs;
+            tools = [
+              {
+                name = "cpu";
+                package = pkgs.llama-cpp;
+                executable = "llama-bench";
+                backend = "cpu";
+                metadata = {
+                  accelerator = "cpu";
+                };
+              }
+            ];
+          };
+
+          acceleratedBenchmarks = import ./bench/default.nix {
+            inherit pkgs;
+            tools = [
+              {
+                name = "rocm";
+                package = pkgs.${"llama-cpp-rocm-${defaultRocmTarget.packageSuffix}"};
+                executable = "llama-bench";
+                backend = "rocm";
+                env = lib.optionalAttrs (defaultRocmTarget.hsaOverride != null) {
+                  HSA_OVERRIDE_GFX_VERSION = defaultRocmTarget.hsaOverride;
+                };
+                requirements = {
+                  systemFeatures = [ defaultRocmTarget.systemFeature ];
+                  hostProfiles = [ "linux-amd-kfd" ];
+                };
+                metadata = {
+                  accelerator = "rocm";
+                  target = defaultTargetMetadata;
+                };
+              }
+              {
+                name = "vulkan";
+                package = pkgs.llama-cpp-vulkan;
+                executable = "llama-bench";
+                backend = "vulkan";
+                requirements = {
+                  systemFeatures = [ defaultRocmTarget.systemFeature ];
+                  hostProfiles = [ "linux-drm-render" ];
+                };
+                metadata = {
+                  accelerator = "vulkan";
+                  target = defaultTargetMetadata;
+                };
+              }
+            ];
+          };
+        in
+        flattenBenchmarks genericBenchmarks
+        // lib.optionalAttrs pkgs.stdenv.isLinux (flattenBenchmarks acceleratedBenchmarks);
+
       mkFevmFaex9Configuration =
         {
           system ? "x86_64-linux",
@@ -190,6 +260,7 @@
           ];
         };
         rpc-server = import ./modules/rpc-server.nix;
+        benchmark-executor = import ./modules/benchmark-executor.nix;
         benchmark-runner = import ./modules/benchmark-runner.nix;
         ec-su-axb35 = import ./modules/ec-su-axb35.nix;
         ryzenadj = import ./modules/ryzenadj.nix;
@@ -200,31 +271,21 @@
       nixosConfigurations = {
         fevm-faex9 = mkFevmFaex9Configuration { };
       };
+
+      darwinModules = {
+        benchmark-executor = import ./modules/benchmark-executor.nix;
+      };
     }
     // {
+      benchmarks = perSystem mkBenchmarkSuites;
+
       packages = perSystem (
         pkgs:
         let
-          genericBenchmarks = import ./bench/default.nix {
-            inherit pkgs;
-            tools = [
-              {
-                name = "cpu";
-                package = pkgs.llama-cpp;
-                executable = "llama-bench";
-                backend = "cpu";
-                metadata = {
-                  accelerator = "cpu";
-                };
-              }
-            ];
-          };
-
           genericPackages = {
             default = pkgs.llama-cpp;
             inherit (pkgs) llama-cpp;
-          }
-          // flattenBenchmarks genericBenchmarks;
+          };
 
           linuxPackages =
             let
@@ -268,54 +329,6 @@
                   name: pkgs.${name}
                 );
 
-              defaultTargetMetadata = {
-                inherit (defaultRocmTarget)
-                  packageSuffix
-                  rocmGpuTargets
-                  runtimeArch
-                  systemFeature
-                  ;
-              }
-              // lib.optionalAttrs (defaultRocmTarget.hsaOverride != null) {
-                inherit (defaultRocmTarget) hsaOverride;
-              };
-
-              acceleratedBenchmarks = import ./bench/default.nix {
-                inherit pkgs;
-                tools = [
-                  {
-                    name = "rocm";
-                    package = pkgs.llama-cpp-rocm-gfx1151;
-                    executable = "llama-bench";
-                    backend = "rocm";
-                    env = lib.optionalAttrs (defaultRocmTarget.hsaOverride != null) {
-                      HSA_OVERRIDE_GFX_VERSION = defaultRocmTarget.hsaOverride;
-                    };
-                    requirements = {
-                      systemFeatures = [ defaultRocmTarget.systemFeature ];
-                      hostProfiles = [ "linux-amd-kfd" ];
-                    };
-                    metadata = {
-                      accelerator = "rocm";
-                      target = defaultTargetMetadata;
-                    };
-                  }
-                  {
-                    name = "vulkan";
-                    package = pkgs.llama-cpp-vulkan;
-                    executable = "llama-bench";
-                    backend = "vulkan";
-                    requirements = {
-                      systemFeatures = [ defaultRocmTarget.systemFeature ];
-                      hostProfiles = [ "linux-drm-render" ];
-                    };
-                    metadata = {
-                      accelerator = "vulkan";
-                      target = defaultTargetMetadata;
-                    };
-                  }
-                ];
-              };
             in
             {
               inherit (pkgs)
@@ -326,8 +339,7 @@
                 ;
             }
             // llamaCppTargetPackages
-            // therockPackages
-            // flattenBenchmarks acceleratedBenchmarks;
+            // therockPackages;
         in
         genericPackages // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
       );
@@ -489,8 +501,8 @@
           system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
           therockPytorchPackage = "torch-rocm-${s}";
-          packageSet = self.packages.${system};
-          cpuBenchmark = packageSet.bench-llama2-7b-llama-cpp-cpu-b512-fa1;
+          benchmarkSet = self.benchmarks.${system};
+          cpuBenchmark = benchmarkSet.bench-llama2-7b-llama-cpp-cpu-b512-fa1;
           cpuBenchmarkMetadata = builtins.toJSON cpuBenchmark.passthru.benchmark;
 
           benchmarkRunnerProfileConfig =
@@ -499,20 +511,19 @@
               modules = [
                 self.nixosModules.benchmark-runner
                 (_: {
-                  services.benchmark-runner = {
-                    enable = true;
-                    systemFeatures = [ defaultRocmTarget.systemFeature ];
-                    enabledProfiles = [
-                      "linux-amd-kfd"
-                      "caller-profile"
+                  boot.kernelParams = [ "iommu=off" ];
+                  benchmark.runners.ci = {
+                    gpus = [
+                      {
+                        type = "amd";
+                        arch = defaultRocmTarget.systemFeature;
+                      }
                     ];
-                    profiles.caller-profile = {
-                      systemFeatures = [ "caller-feature" ];
-                      sandboxPaths = [ "/caller/device" ];
-                      udevRules = [
-                        ''KERNEL=="caller-device", GROUP="nixbld", MODE="0660"''
-                      ];
-                    };
+                    systemFeatures = [
+                      defaultRocmTarget.systemFeature
+                      "caller-feature"
+                    ];
+                    extraSandboxPaths = [ "/caller/device" ];
                   };
                 })
               ];
@@ -521,6 +532,35 @@
             features = benchmarkRunnerProfileConfig.nix.settings.system-features;
             sandboxPaths = benchmarkRunnerProfileConfig.nix.settings.extra-sandbox-paths;
             udevRules = benchmarkRunnerProfileConfig.services.udev.extraRules;
+          };
+
+          benchmarkExecutorConfig =
+            (nixpkgs.lib.nixosSystem {
+              system = "x86_64-linux";
+              modules = [
+                self.nixosModules.benchmark-executor
+                (_: {
+                  benchmark.executor = {
+                    enable = true;
+                    builders.gpu-builder = {
+                      hostName = "gpu-builder.example";
+                      sshUser = "builder";
+                      systemFeatures = [ "rocm" ];
+                      gpus = [
+                        {
+                          type = "amd";
+                          arch = "1151";
+                        }
+                      ];
+                      publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBenchmarkExecutorCheck";
+                    };
+                  };
+                })
+              ];
+            }).config;
+          benchmarkExecutorMetadata = builtins.toJSON {
+            buildMachines = benchmarkExecutorConfig.nix.buildMachines;
+            knownHosts = benchmarkExecutorConfig.programs.ssh.knownHosts;
           };
 
           mkSourceCheck =
@@ -579,6 +619,28 @@
                 touch "$out"
               '';
 
+          benchmark-executor =
+            pkgs.runCommandLocal "ci-benchmark-executor"
+              {
+                nativeBuildInputs = [ pkgs.jq ];
+              }
+              ''
+                cat > executor.json <<'JSON'
+                ${benchmarkExecutorMetadata}
+                JSON
+
+                jq -e '
+                  (.buildMachines | length) == 1
+                  and .buildMachines[0].hostName == "gpu-builder.example"
+                  and .buildMachines[0].sshUser == "builder"
+                  and (.buildMachines[0].supportedFeatures | index("rocm") != null)
+                  and (.buildMachines[0].supportedFeatures | index("gfx1151") != null)
+                  and .knownHosts."gpu-builder.example".publicKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBenchmarkExecutorCheck"
+                ' executor.json
+
+                touch "$out"
+              '';
+
           package-llama-cpp = pkgs.llama-cpp;
         }
         // lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -597,8 +659,9 @@
                   and (.features | index("caller-feature") != null)
                   and (.sandboxPaths | index("/dev/dri") != null)
                   and (.sandboxPaths | index("/dev/kfd") != null)
+                  and (.sandboxPaths | index("/dev/accel") == null)
                   and (.sandboxPaths | index("/caller/device") != null)
-                  and (.udevRules | contains("caller-device"))
+                  and (.udevRules | contains("KERNEL==\"kfd\""))
                 ' profile.json
 
                 touch "$out"

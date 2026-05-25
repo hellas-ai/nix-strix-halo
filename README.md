@@ -146,7 +146,8 @@ The module supports named instances under `services.llama-cpp-rpc-servers`.
 - `nixosModules.ryzenadj`: power and curve optimizer settings through `ryzenadj`
 - `nixosModules.tuning`: high-performance kernel defaults, pinned Strix Halo MES firmware, and TuneD defaults
 - `nixosModules.disko-raid0`: dual-NVMe RAID0 Disko layout
-- `nixosModules.benchmark-runner`: generic benchmark host setup, model downloads, and sandbox device access
+- `nixosModules.benchmark-runner`: local benchmark runner capabilities and sandbox device access
+- `nixosModules.benchmark-executor` / `darwinModules.benchmark-executor`: remote builder setup for machines that submit benchmark builds
 
 `disko-raid0` defines Disko options but does not import Disko itself. Callers must provide `disko.nixosModules.disko` before using it. It targets `/dev/nvme0n1` and `/dev/nvme1n1`; treat it as machine-specific.
 
@@ -162,10 +163,10 @@ nix build --impure --file ./examples/fevm-faex9 \
 
 ## Benchmarks
 
-Benchmark packages are generated from structured tool/model/scenario records. The default cross-platform matrix runs CPU `llama-bench` against local GGUF files under `/models`. Linux also exposes this flake's ROCm and Vulkan llama.cpp tool variants.
+Benchmark derivations are generated from structured tool/model/scenario records and exposed under `benchmarks.<system>`. The default cross-platform matrix runs CPU `llama-bench` against local GGUF files under `/models`. Linux also exposes this flake's ROCm and Vulkan llama.cpp tool variants.
 
 ```bash
-nix build .#bench-llama2-7b-llama-cpp-cpu-b512-fa1
+nix build .#benchmarks.x86_64-linux.bench-llama2-7b-llama-cpp-cpu-b512-fa1
 cat result/stdout.txt
 cat result/metadata.json
 ```
@@ -195,23 +196,47 @@ bench.mkLlamaCppBenchmark {
 }
 ```
 
-Use `services.benchmark-runner` on NixOS benchmark hosts to add the Nix system features and sandbox device access required by benchmark derivations:
+Use `benchmark.runners` on NixOS benchmark hosts to add Nix system features and sandbox device access required by benchmark derivations:
 
 ```nix
-{
-  services.benchmark-runner = {
-    enable = true;
-    systemFeatures = [
-      "gfx1151"
-      "aimax395"
-    ];
-    enabledProfiles = [ "linux-amd-kfd" ];
-    modelsPath = "/models";
-  };
-}
+boot.kernelParams = [
+  "iommu=off"
+];
+
+benchmark.runners.my-strix-gpu = {
+  gpus = [
+    {
+      type = "amd";
+      arch = "1151";
+    }
+  ];
+};
 ```
 
-The NixOS module is only a host adapter. It has built-in profiles for `linux-drm-render`, `linux-amd-kfd`, and `linux-nvidia`, and callers can define more profiles with their own sandbox paths and udev rules.
+The runner module does not manage model files; benchmark derivations define their own workload inputs. By default, benchmark runners assert `iommu=off`; NPU hosts should use a separate runner profile with IOMMU passthrough.
+
+Use `benchmark.executor` on machines that submit benchmark builds to register runner hosts as Nix remotes:
+
+```nix
+benchmark.executor = {
+  enable = true;
+  builders.my-gpu-runner = {
+    hostName = "gpu-runner.example";
+    sshUser = "grw";
+    systemFeatures = [
+      "rocm"
+      "kvm"
+      "big-parallel"
+    ];
+    gpus = [
+      {
+        type = "amd";
+        arch = "1151";
+      }
+    ];
+  };
+};
+```
 
 ## Development
 
@@ -225,4 +250,4 @@ nix flake check --no-build
 
 CI is driven by the flake's `checks` output. The buildbot should build `.#checks.<system>.*` for the systems it owns.
 
-The checks include source formatting/linting, representative package builds, benchmark metadata validation, and Linux benchmark-runner module composition. Benchmark packages are evaluated by `nix flake check --no-build`, but the hardware/model-dependent benchmark derivations are not checks because they require local models and host-specific device access.
+The checks include source formatting/linting, representative package builds, benchmark metadata validation, executor builder translation, and Linux benchmark-runner module composition. Hardware/model-dependent benchmark derivations remain under `benchmarks` because they require local models and host-specific device access.

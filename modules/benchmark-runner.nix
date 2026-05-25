@@ -1,316 +1,220 @@
-# NixOS adapter for hosts that run benchmark derivations.
+# NixOS module for machines that execute benchmark derivations.
+#
+# Benchmarks define their workload inputs. This module only advertises
+# host capabilities to Nix and exposes the matching devices in the sandbox.
 {
   config,
   lib,
   pkgs,
   ...
 }:
-with lib;
-let
-  cfg = config.services.benchmark-runner;
 
-  builtinProfiles = {
-    linux-drm-render = {
-      sandboxPaths = [
-        "/dev/dri"
-        "/sys/class/drm"
-        "/sys/dev"
-        "/sys/devices"
-      ];
-      udevRules = [
+let
+  inherit (lib)
+    any
+    concatMap
+    concatStringsSep
+    filter
+    hasPrefix
+    mapAttrsToList
+    mkIf
+    mkOption
+    optionals
+    types
+    unique
+    ;
+
+  common = import ./benchmark-common.nix { inherit lib pkgs; };
+  cfg = config.benchmark;
+  enabledRunnerEntries = filter (entry: entry.value.enable) (
+    mapAttrsToList (name: value: { inherit name value; }) cfg.runners
+  );
+  enabledRunners = map (entry: entry.value) enabledRunnerEntries;
+  hasEnabledRunner = enabledRunners != [ ];
+
+  runnerFeatures =
+    runner:
+    runner.systemFeatures ++ map common.gpuFeature runner.gpus ++ map common.npuFeature runner.npus;
+
+  gpus = concatMap (runner: runner.gpus) enabledRunners;
+  npus = concatMap (runner: runner.npus) enabledRunners;
+
+  hasGpu = gpus != [ ];
+  hasAmdGpu = any (gpu: gpu.type == "amd") gpus;
+  hasNvidiaGpu = any (gpu: gpu.type == "nvidia") gpus;
+  hasNpu = npus != [ ];
+  hasAmdNpu = any (npu: npu.type == "amd") npus;
+
+  systemFeatures = unique (concatMap runnerFeatures enabledRunners);
+  extraSandboxPaths = unique (
+    concatMap (runner: runner.extraSandboxPaths) enabledRunners
+    ++ optionals (hasGpu || hasNpu) [
+      "/dev/shm"
+      "/proc"
+      "/sys/dev"
+      "/sys/devices"
+    ]
+    ++ optionals hasGpu [
+      "/dev/dri"
+      "/sys/class/drm"
+    ]
+    ++ optionals hasAmdGpu [
+      "/dev/kfd"
+      "/sys/class/kfd"
+    ]
+    ++ optionals hasAmdNpu [
+      "/dev/accel"
+      "/sys/class/accel"
+    ]
+    ++ optionals hasNvidiaGpu [
+      "/dev/nvidia0"
+      "/dev/nvidiactl"
+      "/dev/nvidia-uvm"
+      "/dev/nvidia-uvm-tools"
+      "/dev/nvidia-caps"
+      # autoAddDriverRunpath points binaries at /run/opengl-driver.
+      # Mount the symlink target too, otherwise the sandbox sees a
+      # dangling link instead of the NVIDIA userspace driver package.
+      "/run/opengl-driver=${config.hardware.nvidia.package}"
+    ]
+  );
+
+  relaxSandbox = any (runner: runner.relaxSandbox) enabledRunners;
+
+  isIommuParam =
+    param:
+    hasPrefix "iommu=" param
+    || hasPrefix "amd_iommu=" param
+    || hasPrefix "intel_iommu=" param
+    || hasPrefix "iommu.passthrough=" param;
+  iommuParams = filter isIommuParam config.boot.kernelParams;
+  iommuOff = iommuParams == [ "iommu=off" ];
+
+  runnerModule = types.submodule (
+    { name, ... }:
+    {
+      options = {
+        enable = mkOption {
+          type = types.bool;
+          default = true;
+          description = "Whether to include this benchmark runner in host setup.";
+        };
+
+        gpus = mkOption {
+          type = types.listOf common.gpuModule;
+          default = [ ];
+          example = [
+            {
+              type = "amd";
+              arch = "1151";
+            }
+          ];
+          description = "GPU capabilities available to benchmark derivations.";
+        };
+
+        npus = mkOption {
+          type = types.listOf common.npuModule;
+          default = [ ];
+          example = [
+            {
+              type = "amd";
+              arch = "xdna2";
+            }
+          ];
+          description = "NPU capabilities available to benchmark derivations.";
+        };
+
+        systemFeatures = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          example = [ "big-memory" ];
+          description = "Additional Nix system features advertised by this runner.";
+        };
+
+        extraSandboxPaths = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          example = [ "/mnt/bench-data" ];
+          description = "Additional paths bind-mounted into benchmark build sandboxes.";
+        };
+
+        relaxSandbox = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Whether this runner requires `nix.settings.sandbox = relaxed`.";
+        };
+
+        requireIommuOff = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Assert that the host boots with `iommu=off`. Strix Halo GPU
+            benchmark hosts use this by default because IOMMU translation
+            measurably slows GPU-memory workloads. Set this to false only
+            for runners that intentionally need IOMMU, such as NPU hosts.
+          '';
+        };
+
+        description = mkOption {
+          type = types.str;
+          default = name;
+          description = "Human-readable runner description.";
+        };
+      };
+    }
+  );
+in
+{
+  imports = [
+    ./benchmark-executor.nix
+  ];
+
+  options.benchmark.runners = mkOption {
+    type = types.attrsOf runnerModule;
+    default = { };
+    description = "Named local benchmark runner capabilities.";
+  };
+
+  config = mkIf hasEnabledRunner {
+    assertions =
+      map (entry: {
+        assertion = !entry.value.requireIommuOff || iommuOff;
+        message = ''
+          benchmark.runners.${entry.name} requires IOMMU disabled, but boot.kernelParams has IOMMU settings: ${concatStringsSep " " iommuParams}
+          Use boot.kernelParams = [ "iommu=off" ] for Strix Halo benchmark runners, or set benchmark.runners.${entry.name}.requireIommuOff = false for an IOMMU-dependent runner.
+        '';
+      }) enabledRunnerEntries
+      ++ map (entry: {
+        assertion = !entry.value.requireIommuOff || entry.value.npus == [ ];
+        message = ''
+          benchmark.runners.${entry.name} declares NPUs while requireIommuOff=true.
+          AMD NPU support requires IOMMU passthrough; do not advertise NPUs from an IOMMU-off benchmark runner.
+        '';
+      }) enabledRunnerEntries;
+
+    nix.settings = {
+      "system-features" = systemFeatures;
+      "extra-sandbox-paths" = extraSandboxPaths;
+      sandbox = mkIf relaxSandbox "relaxed";
+    };
+
+    services.udev.extraRules = concatStringsSep "\n" (
+      optionals hasAmdGpu [
+        ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
+      ]
+      ++ optionals hasAmdNpu [
+        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="nixbld", MODE="0660"''
+      ]
+      ++ optionals hasGpu [
         ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
         ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
-      ];
-    };
-
-    linux-amd-kfd = {
-      includes = [ "linux-drm-render" ];
-      sandboxPaths = [
-        "/dev/kfd"
-        "/sys/class/kfd"
-      ];
-      udevRules = [
-        ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
-      ];
-    };
-
-    linux-nvidia = {
-      sandboxPaths = [
-        "/dev/nvidia0"
-        "/dev/nvidiactl"
-        "/dev/nvidia-uvm"
-        "/dev/nvidia-uvm-tools"
-        "/dev/nvidia-caps"
-        # Bind-mount the NVIDIA driver package to /run/opengl-driver so
-        # autoAddDriverRunpath RUNPATH entries resolve inside the sandbox.
-        "/run/opengl-driver=${config.hardware.nvidia.package}"
-      ];
-      udevRules = [
+      ]
+      ++ optionals hasNvidiaGpu [
         ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''
         ''KERNEL=="nvidiactl", GROUP="nixbld", MODE="0660"''
         ''KERNEL=="nvidia-uvm", GROUP="nixbld", MODE="0660"''
         ''KERNEL=="nvidia-uvm-tools", GROUP="nixbld", MODE="0660"''
-      ];
-    };
-  };
-
-  emptyProfile = {
-    includes = [ ];
-    systemFeatures = [ ];
-    sandboxPaths = [ ];
-    udevRules = [ ];
-  };
-
-  profileSet = builtinProfiles // cfg.profiles;
-  profileOrEmpty = name: emptyProfile // (profileSet.${name} or { });
-
-  collectProfileNames =
-    seen: names:
-    concatMap (
-      name:
-      if elem name seen then
-        [ ]
-      else
-        let
-          profile = profileOrEmpty name;
-        in
-        collectProfileNames (seen ++ [ name ]) profile.includes ++ [ name ]
-    ) names;
-
-  activeProfileNames = unique (collectProfileNames [ ] cfg.enabledProfiles);
-  activeProfiles = map profileOrEmpty activeProfileNames;
-
-  featureList = unique (
-    cfg.systemFeatures ++ concatMap (profile: profile.systemFeatures) activeProfiles
-  );
-
-  sandboxPaths = unique (
-    [
-      "/dev/shm"
-      "/proc"
-    ]
-    ++ optional (cfg.modelsPath != null) cfg.modelsPath
-    ++ concatMap (profile: profile.sandboxPaths) activeProfiles
-    ++ cfg.extraSandboxPaths
-  );
-
-  udevRules = concatMap (profile: profile.udevRules) activeProfiles ++ cfg.extraUdevRules;
-in
-{
-  options.services.benchmark-runner = {
-    enable = mkEnableOption "benchmark host configuration";
-
-    systemFeatures = mkOption {
-      type = types.listOf types.str;
-      default = [ ];
-      example = [
-        "gfx1151"
-        "aimax395"
-        "cuda-sm_89"
-      ];
-      description = "Nix system features required by benchmark derivations that this host may run.";
-    };
-
-    enabledProfiles = mkOption {
-      type = types.listOf types.str;
-      default = [ ];
-      example = [
-        "linux-amd-kfd"
-        "my-accelerator"
-      ];
-      description = "Named host profiles to apply for sandbox paths and device permissions.";
-    };
-
-    profiles = mkOption {
-      type = types.attrsOf (
-        types.submodule {
-          options = {
-            includes = mkOption {
-              type = types.listOf types.str;
-              default = [ ];
-              description = "Other benchmark-runner profiles included by this profile.";
-            };
-            systemFeatures = mkOption {
-              type = types.listOf types.str;
-              default = [ ];
-              description = "Nix system features contributed by this profile.";
-            };
-            sandboxPaths = mkOption {
-              type = types.listOf types.str;
-              default = [ ];
-              description = "Sandbox paths contributed by this profile.";
-            };
-            udevRules = mkOption {
-              type = types.listOf types.lines;
-              default = [ ];
-              description = "udev rules contributed by this profile.";
-            };
-          };
-        }
-      );
-      default = { };
-      description = "Additional benchmark host profiles. These are merged over the built-in profiles.";
-    };
-
-    extraSandboxPaths = mkOption {
-      type = types.listOf types.str;
-      default = [ ];
-      example = [ "/sys/class/infiniband" ];
-      description = "Additional sandbox paths required by caller-provided benchmark profiles.";
-    };
-
-    extraUdevRules = mkOption {
-      type = types.listOf types.lines;
-      default = [ ];
-      description = "Additional udev rules required by caller-provided benchmark profiles.";
-    };
-
-    modelsPath = mkOption {
-      type = types.nullOr types.str;
-      default = "/models";
-      description = "Path where benchmark models are stored, or null to skip model path setup.";
-    };
-
-    enableSandboxRelaxation = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Whether to relax sandbox restrictions for benchmark builds.";
-    };
-
-    ensureModels = mkOption {
-      type = types.listOf (
-        types.submodule {
-          options = {
-            repo = mkOption {
-              type = types.str;
-              description = "Hugging Face repository ID.";
-            };
-            files = mkOption {
-              type = types.listOf types.str;
-              default = [ ];
-              example = [ "model.gguf" ];
-              description = "Specific files to download from the repository.";
-            };
-            name = mkOption {
-              type = types.str;
-              description = "Local directory name for the model.";
-            };
-          };
-        }
-      );
-      default = [ ];
-      description = "Models to ensure are downloaded from Hugging Face.";
-    };
-  };
-
-  config = mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = all (name: hasAttr name profileSet) cfg.enabledProfiles;
-        message = "services.benchmark-runner.enabledProfiles contains an unknown profile";
-      }
-      {
-        assertion = all (profile: all (name: hasAttr name profileSet) profile.includes) (
-          attrValues profileSet
-        );
-        message = "services.benchmark-runner.profiles contains an unknown included profile";
-      }
-      {
-        assertion = cfg.modelsPath == null || hasPrefix "/" cfg.modelsPath;
-        message = "services.benchmark-runner.modelsPath must be null or an absolute path";
-      }
-      {
-        assertion = cfg.modelsPath != null || cfg.ensureModels == [ ];
-        message = "services.benchmark-runner.ensureModels requires services.benchmark-runner.modelsPath";
-      }
-      {
-        assertion = all (model: model.files != [ ]) cfg.ensureModels;
-        message = "services.benchmark-runner.ensureModels entries must include at least one file";
-      }
-    ];
-
-    nix.settings = {
-      system-features = featureList;
-      extra-sandbox-paths = sandboxPaths;
-    }
-    // optionalAttrs cfg.enableSandboxRelaxation {
-      sandbox = "relaxed";
-    };
-
-    systemd.tmpfiles.rules =
-      optional (cfg.modelsPath != null) "d ${cfg.modelsPath} 0755 root root -"
-      ++ optional (cfg.modelsPath != null) "A ${cfg.modelsPath} - - - - group:nixbld:r-x"
-      ++ optional (cfg.modelsPath != null) "A ${cfg.modelsPath} - - - - default:group:nixbld:r-x";
-
-    services.udev.extraRules = mkIf (udevRules != [ ]) (concatStringsSep "\n" udevRules);
-
-    systemd.services =
-      let
-        fileServices = flatten (
-          map (
-            model:
-            map (file: {
-              name = "ensure-model-${model.name}-${builtins.replaceStrings [ "." "/" ] [ "-" "-" ] file}";
-              value = {
-                description = "Download ${file} for model ${model.name}";
-                after = [ "network.target" ];
-                path = with pkgs; [
-                  (python3.withPackages (
-                    ps: with ps; [
-                      hf-transfer
-                      huggingface-hub
-                    ]
-                  ))
-                  coreutils
-                ];
-                environment = {
-                  HF_HUB_ENABLE_HF_TRANSFER = "1";
-                  HF_HOME = "${cfg.modelsPath}/.cache/huggingface";
-                };
-                serviceConfig = {
-                  Type = "oneshot";
-                  RemainAfterExit = true;
-                };
-                script = ''
-                  MODEL_DIR="${cfg.modelsPath}/${model.name}"
-                  FILE_PATH="$MODEL_DIR/${file}"
-
-                  if [ -f "$FILE_PATH" ]; then
-                    echo "File ${file} already exists"
-                    exit 0
-                  fi
-
-                  echo "Downloading ${file} from ${model.repo}"
-                  mkdir -p "$MODEL_DIR"
-
-                  huggingface-cli download "${model.repo}" "${file}" \
-                    --local-dir "$MODEL_DIR"
-
-                  chmod -R a+r "$MODEL_DIR"
-                  echo "File ${file} downloaded successfully"
-                '';
-              };
-            }) model.files
-          ) cfg.ensureModels
-        );
-
-        orchestratorServices = map (model: {
-          name = "ensure-model-${model.name}";
-          value = {
-            description = "Orchestrate downloads for model ${model.name}";
-            wantedBy = [ "multi-user.target" ];
-            after = [ "network.target" ];
-            wants = map (
-              file: "ensure-model-${model.name}-${builtins.replaceStrings [ "." "/" ] [ "-" "-" ] file}.service"
-            ) model.files;
-            serviceConfig = {
-              Type = "oneshot";
-              RemainAfterExit = true;
-              ExecStart = "${pkgs.coreutils}/bin/true";
-            };
-          };
-        }) cfg.ensureModels;
-      in
-      builtins.listToAttrs (fileServices ++ orchestratorServices);
+      ]
+    );
   };
 }
