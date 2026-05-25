@@ -31,12 +31,11 @@
       systems = linuxSystems ++ darwinSystems;
       forAllSystems = lib.genAttrs systems;
 
-      rocmTargetLib = import ./lib/rocm-targets.nix { inherit lib; };
+      rocmTargetLib = import ./lib/rocm-targets.nix;
       therockTargetConfig = import ./pkgs/therock/targets.nix {
         inherit (rocmTargetLib) mkRocmTarget;
       };
       inherit (therockTargetConfig)
-        defaultRocmGpuTargets
         defaultRocmTarget
         rocmTargets
         ;
@@ -216,10 +215,7 @@
           mkTherockRocmOverlay
           ;
         benchmarks = import ./bench/lib.nix { inherit lib; };
-        inherit (rocmTargetLib)
-          mkRocmNarrowOverlay
-          mkRocmTarget
-          ;
+        inherit (rocmTargetLib) mkRocmTarget;
         therockTargets = therockTargetConfig;
       };
 
@@ -309,10 +305,6 @@
             // llamaCppMasterRocmTargetPackages
             // (therockRocmOverlay final prev)
           );
-
-        rocm-narrow-gfx1151 = rocmTargetLib.mkRocmNarrowOverlay {
-          rocmGpuTargets = defaultRocmGpuTargets;
-        };
 
         therock-rocm = final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockRocmOverlay final prev);
         therock-python =
