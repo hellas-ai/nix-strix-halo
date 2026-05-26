@@ -108,10 +108,24 @@ let
       backend
       "--dataset-name"
       datasetName
-      "--input-len"
-      inputLen
-      "--output-len"
-      outputLen
+    ]
+    ++ (
+      if datasetName == "random" then
+        [
+          "--random-input-len"
+          inputLen
+          "--random-output-len"
+          outputLen
+        ]
+      else
+        [
+          "--input-len"
+          inputLen
+          "--output-len"
+          outputLen
+        ]
+    )
+    ++ [
       "--num-prompts"
       numPrompts
     ]
@@ -168,6 +182,7 @@ let
     model: case:
     let
       vllmArgs = mkArgs model case;
+      hfCacheRepo = "models--${lib.replaceStrings [ "/" ] [ "--" ] model.id}";
     in
     pkgs.writeShellScript "vllm-${target.packageSuffix}-${case.mode}-${case.scenario}-runner" ''
       set -euo pipefail
@@ -183,6 +198,24 @@ let
         "$VLLM_CACHE_ROOT" \
         "$TORCHINDUCTOR_CACHE_DIR" \
         "$TRITON_CACHE_DIR"
+
+      model_cache="$HF_HOME/hub/${hfCacheRepo}"
+      if [ ! -d "$HF_HOME" ]; then
+        echo "HF_HOME does not exist: $HF_HOME" >&2
+        exit 2
+      fi
+      if [ ! -d "$model_cache" ]; then
+        echo "Hugging Face model cache is missing: $model_cache" >&2
+        if [ -d "$HF_HOME/hub" ]; then
+          echo "available cached models:" >&2
+          find "$HF_HOME/hub" -maxdepth 1 -type d -name 'models--*' -printf '  %f\n' | sort >&2
+        fi
+        exit 2
+      fi
+      if [ -z "$(find "$model_cache/snapshots" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]; then
+        echo "Hugging Face model cache has no snapshots: $model_cache" >&2
+        exit 2
+      fi
 
       ${package}/bin/vllm ${benchLib.shellArgs vllmArgs} --output-json "$out/results.json"
       cat "$out/results.json"

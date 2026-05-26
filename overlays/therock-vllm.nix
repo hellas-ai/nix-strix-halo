@@ -19,6 +19,19 @@ let
   opentelemetrySemanticConventionsAi =
     py.callPackage ../pkgs/opentelemetry-semantic-conventions-ai
       { };
+  mistralCommon = py.mistral-common.overridePythonAttrs (old: rec {
+    version = "1.11.2";
+    src = py.fetchPypi {
+      pname = "mistral_common";
+      inherit version;
+      hash = "sha256-efaPwtEZDyhjf0DgU/kZyMJpfgCyqmed3uViqVGD9K0=";
+    };
+    dependencies = lib.unique ((old.dependencies or [ ]) ++ [ py.pycountry ]);
+    propagatedBuildInputs = lib.unique ((old.propagatedBuildInputs or [ ]) ++ [ py.pycountry ]);
+    pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "numpy" ];
+    # PyPI sdists do not include all fixtures needed by the upstream tests.
+    doCheck = false;
+  });
   tritonKernels = prev.fetchFromGitHub {
     owner = "triton-lang";
     repo = "triton";
@@ -159,9 +172,8 @@ let
           py.av
           py.scipy
           py.soundfile
-          py.mistral-common
         ]
-        ++ (py.mistral-common.optional-dependencies.audio or [ ]);
+        ++ (mistralCommon.optional-dependencies.audio or [ ]);
         flashinfer = [ ];
         otel = [
           py.opentelemetry-api
@@ -182,6 +194,7 @@ let
         py.cloudpickle
         py.diskcache
         py.lark
+        mistralCommon
         py.outlines-core
         py.pillow
         py.prometheus-client
