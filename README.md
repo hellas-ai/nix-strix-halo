@@ -7,6 +7,7 @@ It provides:
 - generic `llama-cpp` outputs for Linux and macOS
 - Linux-only ROCm outputs, including generic ROCm builds and Strix Halo `gfx1151` narrowed builds
 - TheRock ROCm/PyTorch packaging for configured Linux GPU targets
+- FastFlowLM packaging for AMD XDNA2 NPU inference
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
 - cross-platform benchmark helpers and derivations for reproducible local model/tool runs
 - a minimal `fevm-faex9` NixOS example builder
@@ -20,19 +21,18 @@ nix flake show
 Main package outputs:
 
 - `packages.aarch64-darwin.default`
-- `packages.aarch64-darwin.bench-*`
 - `packages.aarch64-darwin.llama-cpp`
 - `packages.x86_64-darwin.default`
-- `packages.x86_64-darwin.bench-*`
 - `packages.x86_64-darwin.llama-cpp`
 - `packages.x86_64-linux.default`
+- `packages.x86_64-linux.fastflowlm`
 - `packages.x86_64-linux.llama-cpp`
 - `packages.x86_64-linux.llama-cpp-rocm`
 - `packages.x86_64-linux.llama-cpp-rocm-gfx1151`
 - `packages.x86_64-linux.llama-cpp-vulkan`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
-- `packages.x86_64-linux.bench-*`
+- `packages.x86_64-linux.xrt-amdxdna`
 
 Main app outputs:
 
@@ -46,6 +46,7 @@ Main app outputs:
 - `apps.x86_64-linux.llama-server-rocm`
 - `apps.x86_64-linux.llama-cli-gfx1151`
 - `apps.x86_64-linux.llama-server-gfx1151`
+- `apps.x86_64-linux.flm`
 
 Example configuration helper:
 
@@ -140,12 +141,40 @@ To add another top-level target to this flake's default outputs, add a target re
 
 The module supports named instances under `services.llama-cpp-rpc-servers`.
 
+## FastFlowLM
+
+`packages.x86_64-linux.fastflowlm` provides the `flm` CLI, with `xrt-amdxdna` and `tokenizers-cpp` packaged in the same overlay. It expects FastFlowLM models to be pre-pulled outside the Nix build sandbox, typically under `/models/flm`.
+
+```bash
+nix run .#flm -- list
+```
+
+The NixOS server module requires IOMMU passthrough for the AMD XDNA device:
+
+```nix
+{
+  imports = [
+    inputs.nix-strix-halo.nixosModules.default
+    inputs.nix-strix-halo.nixosModules.fastflowlm-server
+  ];
+
+  boot.kernelParams = [ "iommu=pt" ];
+
+  services.fastflowlm-server = {
+    enable = true;
+    model = "llama3.2:1b";
+    modelsPath = "/models/flm";
+  };
+}
+```
+
 ## Strix Halo Modules
 
 - `nixosModules.ec-su-axb35`: kernel module and optional monitor script for the Sixunited AXB35 EC
 - `nixosModules.ryzenadj`: power and curve optimizer settings through `ryzenadj`
 - `nixosModules.tuning`: high-performance kernel defaults, pinned Strix Halo MES firmware, and TuneD defaults
 - `nixosModules.disko-raid0`: dual-NVMe RAID0 Disko layout
+- `nixosModules.fastflowlm-server`: FastFlowLM OpenAI-compatible server for AMD XDNA NPUs
 - `nixosModules.benchmark-runner`: local benchmark runner capabilities and sandbox device access
 - `nixosModules.benchmark-executor` / `darwinModules.benchmark-executor`: remote builder setup for machines that submit benchmark builds
 
@@ -208,6 +237,22 @@ benchmark.runners.my-strix-gpu = {
     {
       type = "amd";
       arch = "1151";
+    }
+  ];
+};
+```
+
+For FastFlowLM NPU benchmarks, advertise a separate runner with IOMMU passthrough rather than reusing an IOMMU-off GPU runner:
+
+```nix
+boot.kernelParams = [ "iommu=pt" ];
+
+benchmark.runners.my-strix-npu = {
+  requireIommuOff = false;
+  npus = [
+    {
+      type = "amd";
+      arch = "xdna2";
     }
   ];
 };
