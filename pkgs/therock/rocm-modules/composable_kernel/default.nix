@@ -290,6 +290,7 @@ in
 composable_kernel_base.overrideAttrs (
   finalAttrs: old: {
     pname = "composable_kernel${clr.gpuArchSuffix}";
+    requiredSystemFeatures = [ "big-parallel" ];
     parts_dirs = builtins.filter (x: x != null) (builtins.attrValues composable_kernel_parts);
     disallowedReferences = builtins.filter (x: x != null) (builtins.attrValues composable_kernel_parts);
     preBuild = ''

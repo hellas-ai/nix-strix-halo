@@ -87,6 +87,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   strictDeps = true;
   enableParallelBuilding = true;
+  requiredSystemFeatures = [ "big-parallel" ];
   env = {
     ROCM_PATH = clr;
     # Speed up build by ~7% with jemalloc (template torture test workload means allocation heavy clang invocations)

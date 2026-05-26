@@ -10,6 +10,7 @@
 buildPythonPackage {
   pyproject = true;
   pname = "ck4inductor";
+  requiredSystemFeatures = [ "big-parallel" ];
   build-system = [
     setuptools
     setuptools-scm
