@@ -34,6 +34,11 @@
       flake = false;
     };
 
+    mlx-src = {
+      url = "github:ml-explore/mlx/e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1";
+      flake = false;
+    };
+
     xrt-src = {
       url = "git+https://github.com/Xilinx/XRT?ref=XRT-2.21&submodules=1";
       flake = false;
@@ -534,11 +539,18 @@
                   package = pkgs.${"vllm-rocm-therock-${defaultRocmTarget.packageSuffix}"};
                   target = defaultTargetMetadata;
                 }).benchmarks;
+              mlxRocmBenchmarks =
+                (import ./bench/suites/mlx.nix {
+                  inherit pkgs;
+                  package = self.packages.${system}."mlx-rocm-${defaultRocmTarget.packageSuffix}";
+                  target = defaultTargetMetadata;
+                }).benchmarks;
             in
             flattenBenchmarks acceleratedBenchmarks
             // flattenBenchmarks fastflowlmBenchmarks
             // flattenBenchmarks ds4Benchmarks
             // flattenBenchmarks vllmBenchmarks
+            // flattenBenchmarks mlxRocmBenchmarks
           );
 
           darwinBenchmarks = lib.optionalAttrs pkgs.stdenv.isDarwin (
@@ -549,8 +561,14 @@
                   package = self.packages.${system}.ds4;
                   accelerator = "metal";
                 }).benchmarks;
+              mlxMetalBenchmarks =
+                (import ./bench/suites/mlx.nix {
+                  inherit pkgs;
+                  package = self.packages.${system}.mlx;
+                  accelerator = "metal";
+                }).benchmarks;
             in
-            flattenBenchmarks ds4MetalBenchmarks
+            flattenBenchmarks ds4MetalBenchmarks // flattenBenchmarks mlxMetalBenchmarks
           );
         in
         flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks;
@@ -780,9 +798,14 @@
       packages = perSystem (
         pkgs:
         let
+          s = defaultRocmTarget.packageSuffix;
+          jacclPackage = pkgs.callPackage ./pkgs/jaccl {
+            inherit (inputs) mlx-src;
+          };
           genericPackages = {
             default = pkgs.llama-cpp;
             inherit (pkgs) llama-cpp;
+            jaccl = jacclPackage;
           };
 
           linuxPackages =
@@ -829,6 +852,26 @@
                 name: builtins.hasAttr name pkgs
               ) ds4RocmPackageNames) (name: pkgs.${name});
               cudaPkgs = cudaPackagesFor pkgs.stdenv.hostPlatform.system;
+              mkMlxRocm =
+                rocmTarget:
+                let
+                  buildTarget = builtins.head rocmTarget.buildTargets;
+                in
+                pkgs.python3Packages.callPackage ./pkgs/mlx/rocm.nix {
+                  pname = "mlx-rocm-${rocmTarget.packageSuffix}";
+                  rocmPackages = pkgs.therockRocmPackages.${buildTarget};
+                  gfx = buildTarget;
+                };
+              mlxRocmTargets = builtins.filter (
+                rocmTarget: builtins.hasAttr (builtins.head rocmTarget.buildTargets) pkgs.therockRocmPackages
+              ) rocmTargets;
+              mlxRocmTargetPackages = lib.listToAttrs (
+                map (rocmTarget: {
+                  name = "mlx-rocm-${rocmTarget.packageSuffix}";
+                  value = mkMlxRocm rocmTarget;
+                }) mlxRocmTargets
+              );
+              mlxRocm = mlxRocmTargetPackages."mlx-rocm-${s}";
 
               therockPackages =
                 assert lib.assertMsg (missingRequiredTherockPackages == [ ])
@@ -854,16 +897,35 @@
                 ;
               inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
               fevm-faex9-live-iso = self.nixosConfigurations.fevm-faex9-live.config.system.build.isoImage;
+              mlx = mlxRocm;
+              mlx-rocm = mlxRocm;
             }
             // ds4RocmPackages
+            // mlxRocmTargetPackages
             // llamaCppTargetPackages
             // therockPackages;
-          darwinPackages = {
-            ds4 = pkgs.callPackage ./pkgs/ds4 {
-              src = inputs.ds4;
-              version = unstableInputVersion inputs.ds4;
+          darwinPackages =
+            let
+              mlxMetalBackend = pkgs.python3Packages.callPackage ./pkgs/mlx/metal.nix {
+                inherit (inputs) mlx-src;
+                pname = "mlx-metal";
+                buildStage = 2;
+              };
+              mlxMetal = pkgs.python3Packages.callPackage ./pkgs/mlx/metal.nix {
+                inherit (inputs) mlx-src;
+                pname = "mlx";
+                buildStage = 1;
+                backendPackage = mlxMetalBackend;
+              };
+            in
+            {
+              ds4 = pkgs.callPackage ./pkgs/ds4 {
+                src = inputs.ds4;
+                version = unstableInputVersion inputs.ds4;
+              };
+              mlx = mlxMetal;
+              mlx-metal = mlxMetalBackend;
             };
-          };
         in
         genericPackages
         // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
@@ -1116,6 +1178,15 @@
             sandboxPaths = benchmarkRunnerProfileConfig.nix.settings.extra-sandbox-paths;
             tmpfilesRules = benchmarkRunnerProfileConfig.systemd.tmpfiles.rules;
             udevRules = benchmarkRunnerProfileConfig.services.udev.extraRules;
+            devicePermissionService = {
+              wantedBy =
+                benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.wantedBy;
+              wants = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.wants;
+              after = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.after;
+              script = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.script;
+            };
+            devicePermissionActivation =
+              benchmarkRunnerProfileConfig.system.activationScripts.benchmark-runner-device-permissions.text;
           };
 
           benchmarkExecutorConfig =
@@ -1272,6 +1343,7 @@
               '';
 
           package-llama-cpp = pkgs.llama-cpp;
+          package-jaccl = self.packages.${system}.jaccl;
         }
         // lib.optionalAttrs pkgs.stdenv.isLinux (
           let
@@ -1279,6 +1351,8 @@
             fastflowlmBenchmarkMetadata = builtins.toJSON fastflowlmBenchmark.passthru.benchmark;
             ds4Benchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
             ds4BenchmarkMetadata = builtins.toJSON ds4Benchmark.passthru.benchmark;
+            mlxRocmSmokeBenchmark = benchmarkSet.bench-mlx-rocm-gfx1151-gemm-smoke;
+            mlxRocmSmokeBenchmarkMetadata = builtins.toJSON mlxRocmSmokeBenchmark.passthru.benchmark;
             vllmThroughputBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
             vllmThroughputBenchmarkMetadata = builtins.toJSON (
               removeAttrs vllmThroughputBenchmark.passthru.benchmark [ "command" ]
@@ -1312,7 +1386,22 @@
                     and (.sandboxPaths | index("/dev/accel") == null)
                     and (.sandboxPaths | index("/caller/device") != null)
                     and (.tmpfilesRules | index("d /models 0755 root root -") != null)
-                    and (.udevRules | contains("KERNEL==\"kfd\""))
+                    and (.tmpfilesRules | index("z /dev/kfd 0660 root nixbld -") != null)
+                    and (.tmpfilesRules | index("z /dev/dri/card* 0660 root nixbld -") != null)
+                    and (.tmpfilesRules | index("z /dev/dri/renderD* 0660 root nixbld -") != null)
+                    and (.udevRules | contains("KERNEL==\"kfd\", GROUP:=\"nixbld\", MODE:=\"0660\""))
+                    and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP:=\"nixbld\", MODE:=\"0660\""))
+                    and (.devicePermissionService.wantedBy | index("multi-user.target") != null)
+                    and (.devicePermissionService.wants | index("systemd-udev-trigger.service") != null)
+                    and (.devicePermissionService.wants | index("systemd-udev-settle.service") != null)
+                    and (.devicePermissionService.after | index("systemd-tmpfiles-setup-dev.service") != null)
+                    and (.devicePermissionService.after | index("systemd-udev-settle.service") != null)
+                    and (.devicePermissionService.script | contains("/dev/kfd"))
+                    and (.devicePermissionService.script | contains("/dev/dri/renderD*"))
+                    and (.devicePermissionService.script | contains("chgrp nixbld"))
+                    and (.devicePermissionService.script | contains("chmod 0660"))
+                    and (.devicePermissionActivation | contains("/dev/kfd"))
+                    and (.devicePermissionActivation | contains("/dev/dri/renderD*"))
                   ' profile.json
 
                   touch "$out"
@@ -1366,6 +1455,37 @@
                     and .params.ctxStart == 128
                     and .params.ctxMax == 256
                     and .params.genTokens == 8
+                  ' metadata.json
+
+                  touch "$out"
+                '';
+
+            mlx-rocm-gemm-smoke-metadata =
+              pkgs.runCommandLocal "ci-mlx-rocm-gemm-smoke-metadata"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > metadata.json <<'JSON'
+                  ${mlxRocmSmokeBenchmarkMetadata}
+                  JSON
+
+                  jq -e '
+                    .kind == "mlx-gpu-smoke"
+                    and .suite == "mlx"
+                    and .accelerator == "rocm"
+                    and .backend == "rocm"
+                    and .scenario == "gemm-smoke"
+                    and .requirements.systemFeatures == [ "gfx1151" ]
+                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
+                    and (.requirements.sandboxPaths | index("/dev/kfd") != null)
+                    and (.requirements.sandboxPaths | index("/dev/dri") != null)
+                    and .packages == [ "mlx-rocm-gfx1151" ]
+                    and .params.op == "matmul"
+                    and .params.n == 256
+                    and .target.packageSuffix == "gfx1151"
+                    and .tool.packageRole == "mlx-rocm-gfx1151"
+                    and .tool.executable == "python"
                   ' metadata.json
 
                   touch "$out"
@@ -1426,6 +1546,8 @@
 
             "package-llama-cpp-rocm-${s}" = pkgs."llama-cpp-rocm-${s}";
             "package-ds4-rocm-${s}" = pkgs."ds4-rocm-${s}";
+            package-mlx-rocm = self.packages.${system}.mlx-rocm;
+            package-mlx-rocm-gfx1151 = self.packages.${system}.mlx-rocm-gfx1151;
             "package-vllm-rocm-therock-${s}" = pkgs."vllm-rocm-therock-${s}";
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
@@ -1496,8 +1618,12 @@
           let
             ds4MetalBenchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-metal-smoke;
             ds4MetalBenchmarkMetadata = builtins.toJSON ds4MetalBenchmark.passthru.benchmark;
+            mlxMetalSmokeBenchmark = benchmarkSet.bench-mlx-metal-gemm-smoke;
+            mlxMetalSmokeBenchmarkMetadata = builtins.toJSON mlxMetalSmokeBenchmark.passthru.benchmark;
           in
           {
+            package-mlx = self.packages.${system}.mlx;
+            package-mlx-metal = self.packages.${system}.mlx-metal;
             ds4-metal-benchmark-metadata =
               pkgs.runCommandLocal "ci-ds4-metal-benchmark-metadata"
                 {
@@ -1524,6 +1650,36 @@
                     and .params.ctxStart == 128
                     and .params.ctxMax == 256
                     and .params.genTokens == 8
+                  ' metadata.json
+
+                  touch "$out"
+                '';
+
+            mlx-metal-gemm-smoke-metadata =
+              pkgs.runCommandLocal "ci-mlx-metal-gemm-smoke-metadata"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > metadata.json <<'JSON'
+                  ${mlxMetalSmokeBenchmarkMetadata}
+                  JSON
+
+                  jq -e '
+                    .kind == "mlx-gpu-smoke"
+                    and .suite == "mlx"
+                    and .accelerator == "metal"
+                    and .backend == "metal"
+                    and .scenario == "gemm-smoke"
+                    and .requirements.systemFeatures == [ "metal", "benchmark" ]
+                    and .requirements.hostProfiles == [ "darwin-metal" ]
+                    and .requirements.sandboxPaths == []
+                    and .packages == [ "mlx" ]
+                    and .params.op == "matmul"
+                    and .params.n == 256
+                    and .target.packageSuffix == "metal"
+                    and .tool.packageRole == "mlx"
+                    and .tool.executable == "python"
                   ' metadata.json
 
                   touch "$out"
@@ -1567,14 +1723,22 @@
 
           prFullJobs = {
             default = afterPrQuick "default" self.packages.${system}.default;
+            jaccl = afterPrQuick "jaccl" self.packages.${system}.jaccl;
           }
           // lib.optionalAttrs (system == "aarch64-darwin") {
             ds4 = afterPrQuick "ds4" self.packages.${system}.ds4;
-            ds4-metal-smoke =
-              afterPrQuick "ds4-metal-smoke"
-                self.benchmarks.${system}.bench-deepseek-v4-flash-ds4-metal-smoke;
+            mlx = afterPrQuick "mlx" self.packages.${system}.mlx;
+            mlx-metal = afterPrQuick "mlx-metal" self.packages.${system}.mlx-metal;
+            mlx-metal-gemm-smoke =
+              afterPrQuick "mlx-metal-gemm-smoke"
+                self.benchmarks.${system}.bench-mlx-metal-gemm-smoke;
           }
           // lib.optionalAttrs (system == "x86_64-linux") {
+            mlx-rocm = afterPrQuick "mlx-rocm" self.packages.${system}.mlx-rocm;
+            mlx-rocm-gfx1151 = afterPrQuick "mlx-rocm-gfx1151" self.packages.${system}.mlx-rocm-gfx1151;
+            mlx-rocm-gemm-smoke =
+              afterPrQuick "mlx-rocm-gemm-smoke"
+                self.benchmarks.${system}.bench-mlx-rocm-gfx1151-gemm-smoke;
             system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
             fevm-faex9-live-iso =
               afterPrQuick "fevm-faex9-live-iso"
@@ -1582,9 +1746,6 @@
             vllm =
               afterPrQuick "vllm"
                 self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
-            vllm-throughput-smoke =
-              afterPrQuick "vllm-throughput-smoke"
-                self.benchmarks.${system}.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
           };
         in
         lib.optionalAttrs isSourceCheckSystem {

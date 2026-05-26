@@ -1,0 +1,69 @@
+Add rocblas + hipblaslt + hipblas-common include paths to the HIP compile
+flags and the mlx target's C++ include dirs.
+
+The MLX ROCm backend's gemms/rocblas_gemm.cpp and gemms/hipblaslt_gemm.cpp
+include <rocblas/rocblas.h> and <hipblaslt/hipblaslt.h>, and hipblaslt.h
+in turn includes <hipblas-common/hipblas-common.h>. The ROCm CMakeLists
+plumbs rocthrust/rocprim/hiprand/rocwmma but not rocblas/hipblaslt.
+
+--- a/mlx/backend/rocm/CMakeLists.txt
++++ b/mlx/backend/rocm/CMakeLists.txt
+@@ -7,6 +7,7 @@
+ # Find ROCm packages
+ find_package(hip REQUIRED CONFIG)
+ find_package(rocblas REQUIRED CONFIG)
++find_package(hipblaslt REQUIRED CONFIG)
+ find_package(rocthrust REQUIRED CONFIG)
+ find_package(rocprim REQUIRED CONFIG)
+ find_package(hiprand REQUIRED CONFIG)
+@@ -58,6 +59,12 @@
+   get_target_property(ROCWMMA_INCLUDES roc::rocwmma
+                       INTERFACE_INCLUDE_DIRECTORIES)
+ endif()
++get_target_property(ROCBLAS_INCLUDES roc::rocblas
++                    INTERFACE_INCLUDE_DIRECTORIES)
++get_target_property(HIPBLASLT_INCLUDES roc::hipblaslt
++                    INTERFACE_INCLUDE_DIRECTORIES)
++get_target_property(HIPBLAS_COMMON_INCLUDES roc::hipblas-common
++                    INTERFACE_INCLUDE_DIRECTORIES)
+
+ # Find GCC installation for C++ standard library headers ROCm's clang needs to
+ # know where to find libstdc++ headers
+@@ -120,6 +127,21 @@
+     list(APPEND HIP_INCLUDE_FLAGS "-I${inc}")
+   endif()
+ endforeach()
++foreach(inc ${ROCBLAS_INCLUDES})
++  if(inc)
++    list(APPEND HIP_INCLUDE_FLAGS "-I${inc}")
++  endif()
++endforeach()
++foreach(inc ${HIPBLASLT_INCLUDES})
++  if(inc)
++    list(APPEND HIP_INCLUDE_FLAGS "-I${inc}")
++  endif()
++endforeach()
++foreach(inc ${HIPBLAS_COMMON_INCLUDES})
++  if(inc)
++    list(APPEND HIP_INCLUDE_FLAGS "-I${inc}")
++  endif()
++endforeach()
+ if(MLX_HAS_ROCM_WMMA)
+   foreach(inc ${ROCWMMA_INCLUDES})
+     if(inc)
+@@ -321,6 +343,15 @@
+   target_include_directories(mlx PRIVATE ${HIP_HOST_INCLUDES})
+ endif()
+ target_include_directories(mlx PRIVATE ${HIP_INCLUDE_DIRS})
++if(ROCBLAS_INCLUDES)
++  target_include_directories(mlx PRIVATE ${ROCBLAS_INCLUDES})
++endif()
++if(HIPBLASLT_INCLUDES)
++  target_include_directories(mlx PRIVATE ${HIPBLASLT_INCLUDES})
++endif()
++if(HIPBLAS_COMMON_INCLUDES)
++  target_include_directories(mlx PRIVATE ${HIPBLAS_COMMON_INCLUDES})
++endif()
+
+ # Add HIP platform define for C++ files
+ target_compile_definitions(mlx PRIVATE __HIP_PLATFORM_AMD__=1)

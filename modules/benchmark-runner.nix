@@ -20,6 +20,7 @@ let
     mkIf
     mkOption
     optionals
+    stringAfter
     types
     unique
     ;
@@ -89,6 +90,32 @@ let
   );
 
   relaxSandbox = any (runner: runner.relaxSandbox) enabledRunners;
+  devicePermissionGlobs =
+    optionals hasAmdGpu [
+      "/dev/kfd"
+    ]
+    ++ optionals hasGpu [
+      "/dev/dri/card*"
+      "/dev/dri/renderD*"
+    ]
+    ++ optionals hasAmdNpu [
+      "/dev/accel/accel*"
+    ]
+    ++ optionals hasNvidiaGpu [
+      "/dev/nvidia[0-9]*"
+      "/dev/nvidiactl"
+      "/dev/nvidia-uvm"
+      "/dev/nvidia-uvm-tools"
+    ];
+  applyDevicePermissions = concatStringsSep "\n" (
+    map (glob: ''
+      for path in ${glob}; do
+        [ -e "$path" ] || continue
+        ${pkgs.coreutils}/bin/chgrp nixbld -- "$path" 2>/dev/null || true
+        ${pkgs.coreutils}/bin/chmod 0660 -- "$path" 2>/dev/null || true
+      done
+    '') devicePermissionGlobs
+  );
 
   isIommuParam =
     param:
@@ -222,24 +249,65 @@ in
 
     systemd.tmpfiles.rules = [
       "d ${modelsPath} 0755 root root -"
+    ]
+    ++ optionals hasAmdGpu [
+      "z /dev/kfd 0660 root nixbld -"
+    ]
+    ++ optionals hasGpu [
+      "z /dev/dri/card* 0660 root nixbld -"
+      "z /dev/dri/renderD* 0660 root nixbld -"
+    ]
+    ++ optionals hasAmdNpu [
+      "z /dev/accel/accel* 0660 root nixbld -"
+    ]
+    ++ optionals hasNvidiaGpu [
+      "z /dev/nvidia[0-9]* 0660 root nixbld -"
+      "z /dev/nvidiactl 0660 root nixbld -"
+      "z /dev/nvidia-uvm 0660 root nixbld -"
+      "z /dev/nvidia-uvm-tools 0660 root nixbld -"
     ];
+
+    system.activationScripts.benchmark-runner-device-permissions = mkIf (devicePermissionGlobs != [ ]) (
+      stringAfter [ "users" ] applyDevicePermissions
+    );
+
+    systemd.services = mkIf (devicePermissionGlobs != [ ]) {
+      benchmark-runner-device-permissions = {
+        description = "Apply benchmark runner device permissions";
+        wantedBy = [ "multi-user.target" ];
+        wants = [
+          "systemd-udev-trigger.service"
+          "systemd-udev-settle.service"
+        ];
+        after = [
+          "systemd-udev-trigger.service"
+          "systemd-udev-settle.service"
+          "systemd-tmpfiles-setup-dev.service"
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = applyDevicePermissions;
+      };
+    };
 
     services.udev.extraRules = concatStringsSep "\n" (
       optionals hasAmdGpu [
-        ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="kfd", GROUP:="nixbld", MODE:="0660"''
       ]
       ++ optionals hasAmdNpu [
-        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="nixbld", MODE="0660"''
+        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP:="nixbld", MODE:="0660"''
       ]
       ++ optionals hasGpu [
-        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
-        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
+        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP:="nixbld", MODE:="0660"''
+        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP:="nixbld", MODE:="0660"''
       ]
       ++ optionals hasNvidiaGpu [
-        ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidiactl", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidia-uvm", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidia-uvm-tools", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidia[0-9]*", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="nvidiactl", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="nvidia-uvm", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="nvidia-uvm-tools", GROUP:="nixbld", MODE:="0660"''
       ]
     );
   };
