@@ -1422,6 +1422,66 @@
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
+
+            fevm-faex9-live-iso-boot =
+              let
+                iso = self.packages.${system}.fevm-faex9-live-iso;
+              in
+              pkgs.runCommand "ci-fevm-faex9-live-iso-boot"
+                {
+                  nativeBuildInputs = [
+                    pkgs.qemu_test
+                    pkgs.expect
+                  ];
+                  requiredSystemFeatures = [
+                    "kvm"
+                    "nixos-test"
+                  ];
+                  meta.timeout = 900;
+                }
+                ''
+                  set -euo pipefail
+                  iso_file=$(echo ${iso}/iso/*.iso)
+                  if [ ! -f "$iso_file" ]; then
+                    echo "ISO not found at $iso_file" >&2
+                    exit 1
+                  fi
+
+                  echo "Booting $iso_file in QEMU..."
+
+                  ISO_FILE=$iso_file expect <<'EXPECT'
+                    set timeout 300
+                    spawn qemu-system-x86_64 \
+                      -enable-kvm \
+                      -cpu host \
+                      -m 2G \
+                      -smp 2 \
+                      -cdrom $env(ISO_FILE) \
+                      -boot d \
+                      -nographic \
+                      -no-reboot
+                    expect {
+                      "fevm-faex9-live login: nixos (automatic login)" {
+                        send_user "\n>>> auto-login OK\n"
+                      }
+                      timeout { send_user "\n!!! TIMEOUT waiting for login prompt\n"; exit 1 }
+                      eof { send_user "\n!!! VM exited before login prompt\n"; exit 1 }
+                    }
+                    expect {
+                      "fevm-faex9-live:" {
+                        send_user "\n>>> shell prompt OK\n"
+                      }
+                      timeout { send_user "\n!!! TIMEOUT waiting for shell prompt\n"; exit 1 }
+                    }
+                    send "command -v llama-cli && command -v flm && grep -F amd_iommu=pt /proc/cmdline && echo BOOTOK\r"
+                    expect {
+                      "BOOTOK" { send_user "\n>>> sanity checks OK\n"; exit 0 }
+                      timeout { send_user "\n!!! TIMEOUT during sanity checks\n"; exit 1 }
+                    }
+                  EXPECT
+
+                  touch "$out"
+                '';
           }
         )
         // lib.optionalAttrs pkgs.stdenv.isDarwin (

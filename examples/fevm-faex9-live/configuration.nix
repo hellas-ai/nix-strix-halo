@@ -25,6 +25,13 @@
   # to the LTS line which lags behind.
   boot.kernelPackages = lib.mkDefault pkgs.linuxPackages_latest;
 
+  # Serial console for headless boots and the QEMU-based boot smoke test.
+  # `tty1` stays the primary console for users plugged into a monitor.
+  boot.kernelParams = [
+    "console=tty1"
+    "console=ttyS0,115200"
+  ];
+
   # Build the AXB35 EC kernel module into the image and load it at boot.
   # The driver no-ops on non-AXB35 boards, so the live image stays bootable
   # elsewhere while exposing fans/power controls on the target hardware.
