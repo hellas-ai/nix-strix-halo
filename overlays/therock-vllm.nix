@@ -16,6 +16,9 @@ let
     gpuTargets = vllmGpuTargets;
   };
   py = final.python312Packages;
+  vllmSrcWithTag = vllmSrc // {
+    tag = vllmSrc.tag or "v${vllmVersion}";
+  };
   opentelemetrySemanticConventionsAi =
     py.callPackage ../pkgs/opentelemetry-semantic-conventions-ai
       { };
@@ -225,7 +228,7 @@ let
     }).overridePythonAttrs
       (old: {
         version = vllmVersion;
-        src = vllmSrc;
+        src = vllmSrcWithTag;
 
         patches =
           builtins.filter (patch: !(lib.hasSuffix "0006-drop-rocm-extra-reqs.patch" (toString patch))) (

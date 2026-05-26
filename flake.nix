@@ -1331,6 +1331,7 @@
         pkgs:
         let
           system = pkgs.stdenv.hostPlatform.system;
+          isSourceCheckSystem = system == "x86_64-linux";
 
           mkAggregate =
             aggregateName: jobs:
@@ -1340,20 +1341,24 @@
               }) jobs
             );
 
-          prQuickJobs = self.checks.${system};
+          prQuickJobs = lib.optionalAttrs isSourceCheckSystem self.checks.${system};
           prQuick = mkAggregate "pr-quick" prQuickJobs;
 
           afterPrQuick =
             name: path:
-            pkgs.linkFarm "nix-strix-halo-pr-full-${name}" [
-              {
-                name = "pr-quick";
-                path = prQuick;
-              }
-              {
-                inherit name path;
-              }
-            ];
+            pkgs.linkFarm "nix-strix-halo-pr-full-${name}" (
+              lib.optionals isSourceCheckSystem [
+                {
+                  name = "pr-quick";
+                  path = prQuick;
+                }
+              ]
+              ++ [
+                {
+                  inherit name path;
+                }
+              ]
+            );
 
           prFullJobs = {
             default = afterPrQuick "default" self.packages.${system}.default;
@@ -1368,11 +1373,12 @@
                 self.benchmarks.${system}.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
           };
         in
-        {
+        lib.optionalAttrs isSourceCheckSystem {
           "pr-quick" = prQuickJobs // {
             all = prQuick;
           };
-
+        }
+        // {
           "pr-full" = prFullJobs // {
             all = mkAggregate "pr-full" prFullJobs;
           };
