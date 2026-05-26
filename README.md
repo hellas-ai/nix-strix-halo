@@ -20,7 +20,7 @@ It provides:
 - DS4-HIP packaging for DwarfStar 4 ROCm inference
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
 - cross-platform benchmark helpers and derivations for reproducible local model/tool runs
-- a minimal `fevm-faex9` NixOS example builder
+- a USB-bootable Strix Halo live ISO with the overlay tooling pre-installed
 
 ## Outputs
 
@@ -49,7 +49,7 @@ Main package outputs:
 - `packages.x86_64-linux.mlx-rocm`
 - `packages.x86_64-linux.mlx-rocm-gfx1151`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
-- `packages.x86_64-linux.fevm-faex9-live-iso`
+- `packages.x86_64-linux.live-iso`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
 - `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
 - `packages.x86_64-linux.xrt-amdxdna`
@@ -68,11 +68,11 @@ Main app outputs:
 - `apps.x86_64-linux.llama-cli-gfx1151`
 - `apps.x86_64-linux.llama-server-gfx1151`
 - `apps.x86_64-linux.flm`
+- `apps.x86_64-linux.live-iso-vm`
 
-Example configuration helpers:
+Example configuration helper:
 
-- `lib.mkFevmFaex9Configuration`
-- `lib.mkFevmFaex9LiveConfiguration`
+- `lib.mkLiveIsoConfiguration`
 
 ## Use The Overlay
 
@@ -230,47 +230,51 @@ The NixOS server module requires IOMMU passthrough for the AMD XDNA device:
 
 `disko-raid0` defines Disko options but does not import Disko itself. Callers must provide `disko.nixosModules.disko` before using it. It targets `/dev/nvme0n1` and `/dev/nvme1n1`; treat it as machine-specific.
 
-## Example Host
+## Live ISO
 
-The `fevm-faex9` example requires a caller-provided Disko module:
-
-```bash
-nix build --impure --file ./examples/fevm-faex9 \
-  --arg diskoModule '(builtins.getFlake "github:nix-community/disko").nixosModules.disko' \
-  config.system.build.toplevel
-```
-
-## Live USB
-
-`fevm-faex9-live` wraps the same modules in a USB-flashable ISO built from
-`installer/cd-dvd/installation-cd-base.nix`. It boots into a NixOS live system
-with the Strix Halo tuning, MES firmware, AXB35 EC driver, and the
-`llama-cpp-rocm-gfx1151`, `llama-cpp-vulkan`, `fastflowlm`, and
+`examples/configuration.nix` builds a USB-flashable Strix Halo NixOS ISO on
+top of nixpkgs' `installer/cd-dvd/installation-cd-base.nix`. It boots into a
+NixOS live system with the Strix Halo tuning, MES firmware, AXB35 EC driver,
+and the `llama-cpp-rocm-gfx1151`, `llama-cpp-vulkan`, `fastflowlm`, and
 `ec-su-axb35-monitor` packages already installed.
 
 ```bash
-nix build .#fevm-faex9-live-iso
+nix build .#live-iso
 sudo dd if=$(readlink -f result)/iso/*.iso of=/dev/sdX bs=4M conv=fsync status=progress
 ```
+
+The latest successful Hydra build of this job is also served as a Hydra
+build product. The redirector URL is stable, so it can be linked from docs
+or scripts:
+
+```
+https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.live-iso/latest-finished/download-by-type/file/iso
+```
+
+The squashfs inside the ISO is already zstd-compressed at level 19; the
+outer `.iso` wrapper is left uncompressed so it can be flashed with `dd`
+directly. Set `isoImage.compressImage = true;` for a `.iso.zst` if you want
+to trade a few percent of size for an extra `zstd -d` step on the consumer
+side.
 
 The installer profile creates a passwordless `nixos` user (sudo via `wheel`)
 and enables `sshd` and NetworkManager. Same as upstream NixOS installer
 images: set a password with `passwd` or drop a key in
 `~nixos/.ssh/authorized_keys` before exposing the box.
 
-`lib.mkFevmFaex9LiveConfiguration` is the reusable helper if you want to add
-extra modules or override defaults from a downstream flake.
+`lib.mkLiveIsoConfiguration` is the reusable helper if you want to add extra
+modules or override defaults from a downstream flake.
 
 To smoke-test the image without writing to a USB stick, boot it in QEMU. The
 wrapper enables KVM when `/dev/kvm` is writable and accepts pass-through
 `qemu-system-x86_64` arguments:
 
 ```bash
-nix run .#fevm-faex9-live-iso-vm
+nix run .#live-iso-vm
 # headless / VNC for remote hosts:
-nix run .#fevm-faex9-live-iso-vm -- -display none -vnc :0
+nix run .#live-iso-vm -- -display none -vnc :0
 # tune resources:
-FEVM_LIVE_VM_MEM=8G FEVM_LIVE_VM_CPUS=8 nix run .#fevm-faex9-live-iso-vm
+LIVE_ISO_MEM=8G LIVE_ISO_CPUS=8 nix run .#live-iso-vm
 ```
 
 ## Benchmarks
