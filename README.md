@@ -121,6 +121,17 @@ in
 
 To add another top-level target to this flake's default outputs, add a target record in `pkgs/therock/targets.nix`. The `llama-cpp-rocm-<target>` output appears from that record; TheRock binary/source/Python outputs appear as matching target-keyed JSON pins are added under `pkgs/therock/sources/`.
 
+The vLLM package exposes feature flags through normal derivation override arguments:
+
+```nix
+pkgs.vllm-rocm-therock-gfx1151.override {
+  benchSupport = true; # default
+  audioSupport = false;
+}
+```
+
+`benchSupport` is enabled by default. `audioSupport` is packaged but opt-in. Triton support is required and comes from the TheRock Python stack plus the pinned Triton kernels source. AITer and other unported upstream extras are exposed as disabled flags that fail with a clear unsupported-feature message if enabled before their packages are added.
+
 ## llama.cpp RPC Servers
 
 ```nix

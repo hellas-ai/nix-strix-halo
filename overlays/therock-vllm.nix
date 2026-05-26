@@ -15,6 +15,7 @@ let
     localGpuTargets = vllmGpuTargets;
     gpuTargets = vllmGpuTargets;
   };
+  py = final.python312Packages;
   tritonKernels = prev.fetchFromGitHub {
     owner = "triton-lang";
     repo = "triton";
@@ -84,13 +85,116 @@ let
       !(prev.lib.elem name names)
     ) deps;
 
-  vllmTherock =
-    (final.python312Packages.vllm.override {
+  unsupportedFeatureReasons = {
+    aiter = "AITer needs a separately packaged ROCm aiter build and upstream only enables it on MI300-class targets";
+    fastsafetensors = "fastsafetensors is not packaged in this nixpkgs input";
+    grpc = "smg-grpc-servicer is not packaged in this nixpkgs input";
+    helion = "helion is marked broken in this nixpkgs input";
+    instanttensor = "instanttensor is not packaged in this nixpkgs input";
+    otel = "opentelemetry-semantic-conventions-ai is not packaged in this nixpkgs input";
+    runai = "runai-model-streamer is not packaged in this nixpkgs input";
+    tensorizer = "tensorizer is not packaged in this nixpkgs input";
+    zen = "zentorch-weekly is not packaged and is a CPU optimization";
+  };
+
+  mkVllmTherock =
+    {
+      aiterSupport ? false,
+      audioSupport ? false,
+      benchSupport ? true,
+      fastsafetensorsSupport ? false,
+      flashinferSupport ? false,
+      grpcSupport ? false,
+      helionSupport ? false,
+      instanttensorSupport ? false,
+      otelSupport ? false,
+      runaiSupport ? false,
+      tensorizerSupport ? false,
+      tritonSupport ? true,
+      tritonKernelsSupport ? true,
+      videoSupport ? false,
+      zenSupport ? false,
+    }:
+    let
+      featureFlags = {
+        aiter = aiterSupport;
+        audio = audioSupport;
+        bench = benchSupport;
+        fastsafetensors = fastsafetensorsSupport;
+        flashinfer = flashinferSupport;
+        grpc = grpcSupport;
+        helion = helionSupport;
+        instanttensor = instanttensorSupport;
+        otel = otelSupport;
+        runai = runaiSupport;
+        tensorizer = tensorizerSupport;
+        triton = tritonSupport;
+        triton-kernels = tritonKernelsSupport;
+        video = videoSupport;
+        zen = zenSupport;
+      };
+      unsupportedEnabledFeatures = lib.attrNames (
+        lib.filterAttrs (
+          name: enabled: enabled && builtins.hasAttr name unsupportedFeatureReasons
+        ) featureFlags
+      );
+      unsupportedEnabledMessages = map (
+        name: "${name}: ${unsupportedFeatureReasons.${name}}"
+      ) unsupportedEnabledFeatures;
+      optionalDependencies = {
+        bench = [
+          py.pandas
+          py.matplotlib
+          py.seaborn
+          py.datasets
+          py.scipy
+          py.plotly
+        ];
+        audio = [
+          py.av
+          py.scipy
+          py.soundfile
+          py.mistral-common
+        ]
+        ++ (py.mistral-common.optional-dependencies.audio or [ ]);
+        flashinfer = [ ];
+        video = [ ];
+      };
+      featureDependencies =
+        lib.optionals benchSupport optionalDependencies.bench
+        ++ lib.optionals audioSupport optionalDependencies.audio
+        ++ lib.optionals flashinferSupport optionalDependencies.flashinfer
+        ++ lib.optionals videoSupport optionalDependencies.video;
+      baseExtraDependencies = [
+        py.amdsmi
+        py.cloudpickle
+        py.diskcache
+        py.lark
+        py.outlines-core
+        py.pillow
+        py.prometheus-client
+        py.protobuf
+        py.pyyaml
+        py.regex
+        py.requests
+        py.six
+        py.tqdm
+        py.watchfiles
+      ];
+      extraDependencies = lib.unique (baseExtraDependencies ++ featureDependencies);
+    in
+    assert lib.assertMsg tritonSupport "TheRock vLLM currently requires tritonSupport=true";
+    assert lib.assertMsg tritonKernelsSupport
+      "TheRock vLLM currently requires tritonKernelsSupport=true";
+    assert lib.assertMsg (
+      unsupportedEnabledFeatures == [ ]
+    ) "unsupported TheRock vLLM feature(s): ${lib.concatStringsSep "; " unsupportedEnabledMessages}";
+    (py.vllm.override {
       rocmSupport = true;
       cudaSupport = false;
       gpuTargets = vllmGpuTargets;
       rocmPackages = therockRocmPackages;
-      amdsmi = final.python312Packages.amdsmi;
+      amdsmi = py.amdsmi;
     }).overridePythonAttrs
       (old: {
         version = vllmVersion;
@@ -142,41 +246,20 @@ let
           final.pkg-config
         ];
         pythonRemoveDeps = (old.pythonRemoveDeps or [ ]) ++ dropVllmDependencyNames;
-        dependencies = dropNamedDeps dropVllmDependencyNames (old.dependencies or [ ]) ++ [
-          final.python312Packages.amdsmi
-          final.python312Packages.cloudpickle
-          final.python312Packages.diskcache
-          final.python312Packages.lark
-          final.python312Packages.outlines-core
-          final.python312Packages.pillow
-          final.python312Packages.prometheus-client
-          final.python312Packages.protobuf
-          final.python312Packages.pyyaml
-          final.python312Packages.regex
-          final.python312Packages.requests
-          final.python312Packages.six
-          final.python312Packages.tqdm
-          final.python312Packages.watchfiles
-        ];
-        propagatedBuildInputs =
-          dropNamedDeps dropVllmDependencyNames (old.propagatedBuildInputs or [ ])
-          ++ [
-            final.python312Packages.amdsmi
-            final.python312Packages.cloudpickle
-            final.python312Packages.diskcache
-            final.python312Packages.lark
-            final.python312Packages.outlines-core
-            final.python312Packages.pillow
-            final.python312Packages.prometheus-client
-            final.python312Packages.protobuf
-            final.python312Packages.pyyaml
-            final.python312Packages.regex
-            final.python312Packages.requests
-            final.python312Packages.six
-            final.python312Packages.tqdm
-            final.python312Packages.watchfiles
-          ];
+        dependencies = lib.unique (
+          dropNamedDeps dropVllmDependencyNames (old.dependencies or [ ]) ++ extraDependencies
+        );
+        propagatedBuildInputs = lib.unique (
+          dropNamedDeps dropVllmDependencyNames (old.propagatedBuildInputs or [ ]) ++ extraDependencies
+        );
+        optional-dependencies = optionalDependencies;
+        passthru = (old.passthru or { }) // {
+          vllmFeatureOptions = featureFlags;
+          vllmUnsupportedFeatures = unsupportedFeatureReasons;
+        };
       });
+
+  vllmTherock = lib.makeOverridable mkVllmTherock { };
 in
 {
   "vllm-rocm-therock-${s}" = vllmTherock;
