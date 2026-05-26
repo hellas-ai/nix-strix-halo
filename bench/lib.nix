@@ -131,12 +131,30 @@ let
       env = nonNullAttrs env;
       requirements = mergeRequirements [ requirements ];
     };
+
+  modelPath =
+    root: components:
+    let
+      cleanRoot = lib.removeSuffix "/" (toString root);
+      cleanComponents = map (
+        component: lib.removePrefix "/" (lib.removeSuffix "/" (toString component))
+      ) components;
+    in
+    lib.concatStringsSep "/" ([ cleanRoot ] ++ cleanComponents);
+
+  defaultModelsRootFor =
+    system: if lib.hasSuffix "-darwin" system then "/Users/Shared/models" else "/models";
+
+  defaultModelsRoot = pkgs: defaultModelsRootFor pkgs.stdenv.hostPlatform.system;
 in
 rec {
   inherit
+    defaultModelsRoot
+    defaultModelsRootFor
     emptyRequirements
     envExports
     mergeRequirements
+    modelPath
     normalizeRequirements
     normalizePackages
     normalizeTool

@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "ds4": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779778674,
+        "narHash": "sha256-ICjNBjLL/KvleDJZksTCgUVaHipeoOT752/BiE9SVeE=",
+        "owner": "antirez",
+        "repo": "ds4",
+        "rev": "ec6a82aaa9a3a98bee803801440b0e803aa48f09",
+        "type": "github"
+      },
+      "original": {
+        "owner": "antirez",
+        "repo": "ds4",
+        "type": "github"
+      }
+    },
     "ds4-hip": {
       "flake": false,
       "locked": {
@@ -83,6 +99,7 @@
     },
     "root": {
       "inputs": {
+        "ds4": "ds4",
         "ds4-hip": "ds4-hip",
         "ec-su-axb35": "ec-su-axb35",
         "fastflowlm": "fastflowlm",

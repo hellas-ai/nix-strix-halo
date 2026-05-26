@@ -30,14 +30,14 @@
 
       supportedOn =
         system: drv:
-        lib.all
-          (feature: lib.elem feature supportedFeatures.${system})
-          (drv.requiredSystemFeatures or [ ]);
+        lib.all (feature: lib.elem feature supportedFeatures.${system}) (drv.requiredSystemFeatures or [ ]);
     in
     {
-      hydraJobs = lib.genAttrs benchmarkSystems (system:
+      hydraJobs = lib.genAttrs benchmarkSystems (
+        system:
         lib.filterAttrs (_: supportedOn system) (
           lib.mapAttrs (_: addBenchmarkFeature) src.benchmarks.${system}
-        ));
+        )
+      );
     };
 }
