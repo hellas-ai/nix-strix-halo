@@ -383,10 +383,14 @@
           target = args.target or (builtins.head args.rocmTargets);
           rocmOverlay = mkTherockRocmOverlay args;
           pythonOverlay = mkTherockPythonOverlay { inherit target; };
+          vllmOverlay = import ./overlays/therock-vllm.nix {
+            inherit lib target;
+          };
         in
         {
           rocm = rocmOverlay;
           python = pythonOverlay;
+          vllm = vllmOverlay;
         };
 
       therockOverlays = mkTherockOverlays {
@@ -396,6 +400,7 @@
 
       therockRocmOverlay = therockOverlays.rocm;
       therockPythonOverlay = therockOverlays.python;
+      therockVllmOverlay = therockOverlays.vllm;
 
       pkgsFor =
         system:
@@ -678,11 +683,20 @@
             // llamaCppRocmTargetPackages
             // llamaCppMasterRocmTargetPackages
             // (therockRocmOverlay final prev)
+            // (therockPythonOverlay final prev)
+            // (therockVllmOverlay final prev)
           );
 
         therock-rocm = final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockRocmOverlay final prev);
         therock-python =
           final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockPythonOverlay final prev);
+        therock-vllm =
+          final: prev:
+          lib.optionalAttrs prev.stdenv.isLinux (
+            (therockRocmOverlay final prev)
+            // (therockPythonOverlay final prev)
+            // (therockVllmOverlay final prev)
+          );
       };
 
       # NixOS modules
@@ -743,6 +757,7 @@
                   "therock-python-wheels-${s}"
                   "therock-amdsmi-${s}"
                   "torch-rocm-${s}"
+                  "vllm-rocm-therock-${s}"
                 ];
               therockPackageNames = lib.concatMap therockPackageNamesFor rocmTargets;
               requiredTherockPackageNames = therockPackageNamesFor defaultRocmTarget;
@@ -1236,6 +1251,7 @@
 
             "package-llama-cpp-rocm-${s}" = pkgs."llama-cpp-rocm-${s}";
             "package-ds4-rocm-${s}" = pkgs."ds4-rocm-${s}";
+            "package-vllm-rocm-therock-${s}" = pkgs."vllm-rocm-therock-${s}";
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};

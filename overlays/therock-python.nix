@@ -4,6 +4,12 @@
 { lib, target }:
 let
   s = target.packageSuffix;
+  disablePythonChecks =
+    pkg:
+    pkg.overridePythonAttrs (_old: {
+      doCheck = false;
+      pythonImportsCheck = [ ];
+    });
 in
 final: prev: {
   pythonPackagesExtensions = (prev.pythonPackagesExtensions or [ ]) ++ [
@@ -23,6 +29,22 @@ final: prev: {
           "rocm-sdk-core" = wheels;
           "rocm-sdk-devel" = wheels;
           "rocm-sdk-libraries-${s}" = wheels;
+
+          "compressed-tensors" = pyprev."compressed-tensors".overridePythonAttrs (old: {
+            dependencies = (old.dependencies or [ ]) ++ [
+              _pyfinal.psutil
+            ];
+            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [
+              final.openssl
+            ];
+            propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [
+              _pyfinal.psutil
+            ];
+          });
+          depyf = disablePythonChecks pyprev.depyf;
+          llguidance = disablePythonChecks pyprev.llguidance;
+          pydevd = disablePythonChecks pyprev.pydevd;
+          "mistral-common" = disablePythonChecks pyprev."mistral-common";
         }
       else
         { }

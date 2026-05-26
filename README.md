@@ -7,6 +7,7 @@ It provides:
 - generic `llama-cpp` outputs for Linux and macOS
 - Linux-only ROCm outputs, including generic ROCm builds and Strix Halo `gfx1151` narrowed builds
 - TheRock ROCm/PyTorch packaging for configured Linux GPU targets
+- source-built vLLM ROCm packaging against the TheRock Python/ROCm stack
 - FastFlowLM packaging for AMD XDNA2 NPU inference
 - DS4-HIP packaging for DwarfStar 4 ROCm inference
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
@@ -35,6 +36,7 @@ Main package outputs:
 - `packages.x86_64-linux.llama-cpp-vulkan`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
+- `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
 - `packages.x86_64-linux.xrt-amdxdna`
 
 Main app outputs:
@@ -90,6 +92,7 @@ Target records are generic build descriptors, not a hardware inventory. Hostname
 - `packages.x86_64-linux.therock-rocm-gfx1151-env`
 - `packages.x86_64-linux.therock-python-gfx1151`
 - `packages.x86_64-linux.torch-rocm-gfx1151`
+- `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
 - `packages.x86_64-linux.ds4-rocm-gfx1151`
 
 The lower-level ROCm module overlay also exposes reusable narrowed package scopes:
