@@ -158,7 +158,7 @@ in
         };
         metadata = lib.recursiveUpdate {
           kind = "mlx-gpu-smoke";
-          smokeRevision = 2;
+          smokeRevision = 3;
           suite = "mlx";
           inherit
             accelerator

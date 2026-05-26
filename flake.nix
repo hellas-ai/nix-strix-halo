@@ -1178,6 +1178,15 @@
             sandboxPaths = benchmarkRunnerProfileConfig.nix.settings.extra-sandbox-paths;
             tmpfilesRules = benchmarkRunnerProfileConfig.systemd.tmpfiles.rules;
             udevRules = benchmarkRunnerProfileConfig.services.udev.extraRules;
+            devicePermissionService = {
+              wantedBy =
+                benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.wantedBy;
+              wants = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.wants;
+              after = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.after;
+              script = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.script;
+            };
+            devicePermissionActivation =
+              benchmarkRunnerProfileConfig.system.activationScripts.benchmark-runner-device-permissions.text;
           };
 
           benchmarkExecutorConfig =
@@ -1382,6 +1391,17 @@
                     and (.tmpfilesRules | index("z /dev/dri/renderD* 0660 root nixbld -") != null)
                     and (.udevRules | contains("KERNEL==\"kfd\", GROUP:=\"nixbld\", MODE:=\"0660\""))
                     and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP:=\"nixbld\", MODE:=\"0660\""))
+                    and (.devicePermissionService.wantedBy | index("multi-user.target") != null)
+                    and (.devicePermissionService.wants | index("systemd-udev-trigger.service") != null)
+                    and (.devicePermissionService.wants | index("systemd-udev-settle.service") != null)
+                    and (.devicePermissionService.after | index("systemd-tmpfiles-setup-dev.service") != null)
+                    and (.devicePermissionService.after | index("systemd-udev-settle.service") != null)
+                    and (.devicePermissionService.script | contains("/dev/kfd"))
+                    and (.devicePermissionService.script | contains("/dev/dri/renderD*"))
+                    and (.devicePermissionService.script | contains("chgrp nixbld"))
+                    and (.devicePermissionService.script | contains("chmod 0660"))
+                    and (.devicePermissionActivation | contains("/dev/kfd"))
+                    and (.devicePermissionActivation | contains("/dev/dri/renderD*"))
                   ' profile.json
 
                   touch "$out"
