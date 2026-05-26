@@ -573,7 +573,7 @@
         in
         flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks;
 
-      mkFevmFaex9Configuration =
+      mkLiveIsoConfiguration =
         {
           system ? "x86_64-linux",
           extraModules ? [ ],
@@ -586,25 +586,7 @@
           }
           // specialArgs;
           modules = [
-            ./examples/fevm-faex9/configuration.nix
-          ]
-          ++ extraModules;
-        };
-
-      mkFevmFaex9LiveConfiguration =
-        {
-          system ? "x86_64-linux",
-          extraModules ? [ ],
-          specialArgs ? { },
-        }:
-        nixpkgs.lib.nixosSystem {
-          inherit system;
-          specialArgs = {
-            inherit inputs self;
-          }
-          // specialArgs;
-          modules = [
-            ./examples/fevm-faex9-live/configuration.nix
+            ./examples/configuration.nix
           ]
           ++ extraModules;
         };
@@ -613,8 +595,7 @@
       lib = {
         inherit
           defaultTherockSources
-          mkFevmFaex9Configuration
-          mkFevmFaex9LiveConfiguration
+          mkLiveIsoConfiguration
           mkTherockOverlays
           mkTherockPythonOverlay
           mkTherockRocmOverlay
@@ -784,8 +765,7 @@
       };
 
       nixosConfigurations = {
-        fevm-faex9 = mkFevmFaex9Configuration { };
-        fevm-faex9-live = mkFevmFaex9LiveConfiguration { };
+        live-iso = mkLiveIsoConfiguration { };
       };
 
       darwinModules = {
@@ -896,7 +876,7 @@
                 xrt-amdxdna
                 ;
               inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
-              fevm-faex9-live-iso = self.nixosConfigurations.fevm-faex9-live.config.system.build.isoImage;
+              live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
               mlx = mlxRocm;
               mlx-rocm = mlxRocm;
             }
@@ -1037,18 +1017,18 @@
               description = "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
             };
 
-            fevm-faex9-live-iso-vm =
+            live-iso-vm =
               let
-                iso = self.packages.${system}.fevm-faex9-live-iso;
+                iso = self.packages.${system}.live-iso;
               in
               {
                 type = "app";
                 program = toString (
-                  pkgs.writeShellScript "fevm-faex9-live-iso-vm" ''
+                  pkgs.writeShellScript "live-iso-vm" ''
                     set -euo pipefail
                     iso_file=$(echo ${iso}/iso/*.iso)
                     if [ ! -f "$iso_file" ]; then
-                      echo "fevm-faex9-live ISO not found under ${iso}/iso" >&2
+                      echo "live ISO not found under ${iso}/iso" >&2
                       exit 1
                     fi
                     kvm_args=()
@@ -1057,14 +1037,14 @@
                     fi
                     exec ${pkgs.qemu}/bin/qemu-system-x86_64 \
                       "''${kvm_args[@]}" \
-                      -m ''${FEVM_LIVE_VM_MEM:-4G} \
-                      -smp ''${FEVM_LIVE_VM_CPUS:-4} \
+                      -m ''${LIVE_ISO_MEM:-4G} \
+                      -smp ''${LIVE_ISO_CPUS:-4} \
                       -cdrom "$iso_file" \
                       -boot d \
                       "$@"
                   ''
                 );
-                meta.description = "Boot the fevm-faex9 live ISO in QEMU (override FEVM_LIVE_VM_MEM, FEVM_LIVE_VM_CPUS)";
+                meta.description = "Boot the strix-halo live ISO in QEMU (override LIVE_ISO_MEM, LIVE_ISO_CPUS)";
               };
           }
           // (lib.foldl' lib.recursiveUpdate { } (map mkTargetLlamaApps rocmTargets))
@@ -1553,11 +1533,11 @@
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
 
-            fevm-faex9-live-iso-boot =
+            live-iso-boot =
               let
-                iso = self.packages.${system}.fevm-faex9-live-iso;
+                iso = self.packages.${system}.live-iso;
               in
-              pkgs.runCommand "ci-fevm-faex9-live-iso-boot"
+              pkgs.runCommand "ci-live-iso-boot"
                 {
                   nativeBuildInputs = [
                     pkgs.qemu_test
@@ -1591,14 +1571,14 @@
                       -nographic \
                       -no-reboot
                     expect {
-                      "fevm-faex9-live login: nixos (automatic login)" {
+                      "strix-halo-live login: nixos (automatic login)" {
                         send_user "\n>>> auto-login OK\n"
                       }
                       timeout { send_user "\n!!! TIMEOUT waiting for login prompt\n"; exit 1 }
                       eof { send_user "\n!!! VM exited before login prompt\n"; exit 1 }
                     }
                     expect {
-                      "fevm-faex9-live:" {
+                      "strix-halo-live:" {
                         send_user "\n>>> shell prompt OK\n"
                       }
                       timeout { send_user "\n!!! TIMEOUT waiting for shell prompt\n"; exit 1 }
@@ -1739,10 +1719,7 @@
             mlx-rocm-gemm-smoke =
               afterPrQuick "mlx-rocm-gemm-smoke"
                 self.benchmarks.${system}.bench-mlx-rocm-gfx1151-gemm-smoke;
-            system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
-            fevm-faex9-live-iso =
-              afterPrQuick "fevm-faex9-live-iso"
-                self.packages.${system}.fevm-faex9-live-iso;
+            live-iso = afterPrQuick "live-iso" self.packages.${system}.live-iso;
             vllm =
               afterPrQuick "vllm"
                 self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
@@ -1757,6 +1734,16 @@
           "pr-full" = prFullJobs // {
             all = mkAggregate "pr-full" prFullJobs;
           };
+        }
+        // lib.optionalAttrs (system == "x86_64-linux") {
+          # Re-export the raw ISO derivation alongside the linkFarm-wrapped
+          # `pr-full.live-iso`. The linkFarm wrapper gates the build on
+          # `pr-quick` but loses the underlying ISO's
+          # `nix-support/hydra-build-products` file, so Hydra's
+          # download-by-type/file/iso UI cannot find the iso through it.
+          # The raw job below preserves the build product so the latest
+          # successful build is directly downloadable.
+          live-iso = self.packages.${system}.live-iso;
         }
       );
     };

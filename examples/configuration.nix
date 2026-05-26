@@ -1,8 +1,10 @@
-# Live USB / installation image variant of the fevm-faex9 example.
-# Builds a USB-flashable ISO with the strix-halo overlay and tooling
-# pre-installed. Unlike `examples/fevm-faex9`, this configuration does not
-# include a host-specific disk layout or system bootloader; the installer
-# image module provides those for the live system itself.
+# Strix Halo live ISO example.
+#
+# Builds a USB-flashable NixOS image with the strix-halo overlay and
+# tooling pre-installed on top of nixpkgs' installer CD modules. The
+# configuration is intentionally generic across Strix Halo boards; the
+# AXB35 EC driver is built in and loaded by default but no-ops on other
+# hardware.
 {
   lib,
   modulesPath,
@@ -37,7 +39,7 @@
   # elsewhere while exposing fans/power controls on the target hardware.
   services.ec-su-axb35.enable = lib.mkDefault true;
 
-  networking.hostName = lib.mkForce "fevm-faex9-live";
+  networking.hostName = lib.mkForce "strix-halo-live";
 
   time.timeZone = lib.mkDefault "UTC";
   i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
@@ -54,5 +56,5 @@
     vim
   ];
 
-  isoImage.edition = lib.mkForce "fevm-faex9";
+  isoImage.edition = lib.mkForce "strix-halo";
 }
