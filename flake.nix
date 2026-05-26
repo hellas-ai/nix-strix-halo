@@ -572,12 +572,31 @@
           ]
           ++ extraModules;
         };
+
+      mkFevmFaex9LiveConfiguration =
+        {
+          system ? "x86_64-linux",
+          extraModules ? [ ],
+          specialArgs ? { },
+        }:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          specialArgs = {
+            inherit inputs self;
+          }
+          // specialArgs;
+          modules = [
+            ./examples/fevm-faex9-live/configuration.nix
+          ]
+          ++ extraModules;
+        };
     in
     {
       lib = {
         inherit
           defaultTherockSources
           mkFevmFaex9Configuration
+          mkFevmFaex9LiveConfiguration
           mkTherockOverlays
           mkTherockPythonOverlay
           mkTherockRocmOverlay
@@ -748,6 +767,7 @@
 
       nixosConfigurations = {
         fevm-faex9 = mkFevmFaex9Configuration { };
+        fevm-faex9-live = mkFevmFaex9LiveConfiguration { };
       };
 
       darwinModules = {
@@ -833,6 +853,7 @@
                 xrt-amdxdna
                 ;
               inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
+              fevm-faex9-live-iso = self.nixosConfigurations.fevm-faex9-live.config.system.build.isoImage;
             }
             // ds4RocmPackages
             // llamaCppTargetPackages
@@ -953,6 +974,36 @@
               binary = "flm";
               description = "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
             };
+
+            fevm-faex9-live-iso-vm =
+              let
+                iso = self.packages.${system}.fevm-faex9-live-iso;
+              in
+              {
+                type = "app";
+                program = toString (
+                  pkgs.writeShellScript "fevm-faex9-live-iso-vm" ''
+                    set -euo pipefail
+                    iso_file=$(echo ${iso}/iso/*.iso)
+                    if [ ! -f "$iso_file" ]; then
+                      echo "fevm-faex9-live ISO not found under ${iso}/iso" >&2
+                      exit 1
+                    fi
+                    kvm_args=()
+                    if [ -w /dev/kvm ]; then
+                      kvm_args+=(-enable-kvm -cpu host)
+                    fi
+                    exec ${pkgs.qemu}/bin/qemu-system-x86_64 \
+                      "''${kvm_args[@]}" \
+                      -m ''${FEVM_LIVE_VM_MEM:-4G} \
+                      -smp ''${FEVM_LIVE_VM_CPUS:-4} \
+                      -cdrom "$iso_file" \
+                      -boot d \
+                      "$@"
+                  ''
+                );
+                meta.description = "Boot the fevm-faex9 live ISO in QEMU (override FEVM_LIVE_VM_MEM, FEVM_LIVE_VM_CPUS)";
+              };
           }
           // (lib.foldl' lib.recursiveUpdate { } (map mkTargetLlamaApps rocmTargets))
           // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-env" pkgs) {
@@ -1371,6 +1422,66 @@
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
+
+            fevm-faex9-live-iso-boot =
+              let
+                iso = self.packages.${system}.fevm-faex9-live-iso;
+              in
+              pkgs.runCommand "ci-fevm-faex9-live-iso-boot"
+                {
+                  nativeBuildInputs = [
+                    pkgs.qemu_test
+                    pkgs.expect
+                  ];
+                  requiredSystemFeatures = [
+                    "kvm"
+                    "nixos-test"
+                  ];
+                  meta.timeout = 900;
+                }
+                ''
+                  set -euo pipefail
+                  iso_file=$(echo ${iso}/iso/*.iso)
+                  if [ ! -f "$iso_file" ]; then
+                    echo "ISO not found at $iso_file" >&2
+                    exit 1
+                  fi
+
+                  echo "Booting $iso_file in QEMU..."
+
+                  ISO_FILE=$iso_file expect <<'EXPECT'
+                    set timeout 300
+                    spawn qemu-system-x86_64 \
+                      -enable-kvm \
+                      -cpu host \
+                      -m 2G \
+                      -smp 2 \
+                      -cdrom $env(ISO_FILE) \
+                      -boot d \
+                      -nographic \
+                      -no-reboot
+                    expect {
+                      "fevm-faex9-live login: nixos (automatic login)" {
+                        send_user "\n>>> auto-login OK\n"
+                      }
+                      timeout { send_user "\n!!! TIMEOUT waiting for login prompt\n"; exit 1 }
+                      eof { send_user "\n!!! VM exited before login prompt\n"; exit 1 }
+                    }
+                    expect {
+                      "fevm-faex9-live:" {
+                        send_user "\n>>> shell prompt OK\n"
+                      }
+                      timeout { send_user "\n!!! TIMEOUT waiting for shell prompt\n"; exit 1 }
+                    }
+                    send "command -v llama-cli && command -v flm && grep -F amd_iommu=pt /proc/cmdline && echo BOOTOK\r"
+                    expect {
+                      "BOOTOK" { send_user "\n>>> sanity checks OK\n"; exit 0 }
+                      timeout { send_user "\n!!! TIMEOUT during sanity checks\n"; exit 1 }
+                    }
+                  EXPECT
+
+                  touch "$out"
+                '';
           }
         )
         // lib.optionalAttrs pkgs.stdenv.isDarwin (
@@ -1457,6 +1568,9 @@
           }
           // lib.optionalAttrs (system == "x86_64-linux") {
             system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
+            fevm-faex9-live-iso =
+              afterPrQuick "fevm-faex9-live-iso"
+                self.packages.${system}.fevm-faex9-live-iso;
             vllm =
               afterPrQuick "vllm"
                 self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";

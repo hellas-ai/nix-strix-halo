@@ -42,6 +42,7 @@ Main package outputs:
 - `packages.x86_64-linux.llama-cpp-rocm-gfx1151`
 - `packages.x86_64-linux.llama-cpp-vulkan`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
+- `packages.x86_64-linux.fevm-faex9-live-iso`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
 - `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
 - `packages.x86_64-linux.xrt-amdxdna`
@@ -61,9 +62,10 @@ Main app outputs:
 - `apps.x86_64-linux.llama-server-gfx1151`
 - `apps.x86_64-linux.flm`
 
-Example configuration helper:
+Example configuration helpers:
 
 - `lib.mkFevmFaex9Configuration`
+- `lib.mkFevmFaex9LiveConfiguration`
 
 ## Use The Overlay
 
@@ -219,6 +221,39 @@ The `fevm-faex9` example requires a caller-provided Disko module:
 nix build --impure --file ./examples/fevm-faex9 \
   --arg diskoModule '(builtins.getFlake "github:nix-community/disko").nixosModules.disko' \
   config.system.build.toplevel
+```
+
+## Live USB
+
+`fevm-faex9-live` wraps the same modules in a USB-flashable ISO built from
+`installer/cd-dvd/installation-cd-base.nix`. It boots into a NixOS live system
+with the Strix Halo tuning, MES firmware, AXB35 EC driver, and the
+`llama-cpp-rocm-gfx1151`, `llama-cpp-vulkan`, `fastflowlm`, and
+`ec-su-axb35-monitor` packages already installed.
+
+```bash
+nix build .#fevm-faex9-live-iso
+sudo dd if=$(readlink -f result)/iso/*.iso of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+The installer profile creates a passwordless `nixos` user (sudo via `wheel`)
+and enables `sshd` and NetworkManager. Same as upstream NixOS installer
+images: set a password with `passwd` or drop a key in
+`~nixos/.ssh/authorized_keys` before exposing the box.
+
+`lib.mkFevmFaex9LiveConfiguration` is the reusable helper if you want to add
+extra modules or override defaults from a downstream flake.
+
+To smoke-test the image without writing to a USB stick, boot it in QEMU. The
+wrapper enables KVM when `/dev/kvm` is writable and accepts pass-through
+`qemu-system-x86_64` arguments:
+
+```bash
+nix run .#fevm-faex9-live-iso-vm
+# headless / VNC for remote hosts:
+nix run .#fevm-faex9-live-iso-vm -- -display none -vnc :0
+# tune resources:
+FEVM_LIVE_VM_MEM=8G FEVM_LIVE_VM_CPUS=8 nix run .#fevm-faex9-live-iso-vm
 ```
 
 ## Benchmarks
