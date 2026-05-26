@@ -237,6 +237,15 @@ rec {
         ${builtins.toJSON normalizedEnv}
         JSON
 
+        mkdir -p "$out/nix-support"
+        cat > "$out/nix-support/hydra-build-products" <<EOF
+        file benchmark-stdout $out/stdout.txt
+        file benchmark-stderr $out/stderr.txt
+        file benchmark-metadata $out/metadata.json
+        file benchmark-command $out/command.json
+        file benchmark-env $out/env.json
+        EOF
+
         ${envExports normalizedEnv}
         set +e
         ${commandLine} > "$out/stdout.txt" 2> "$out/stderr.txt"
