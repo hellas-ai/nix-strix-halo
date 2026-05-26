@@ -10,7 +10,6 @@
     inputs.self.nixosModules.rpc-server
     inputs.self.nixosModules.benchmark-runner
     inputs.self.nixosModules.ec-su-axb35
-    inputs.self.nixosModules.disko-raid0
   ];
 
   # This value determines the NixOS release from which the default
@@ -41,6 +40,11 @@
   # Time zone and locale
   time.timeZone = "UTC";
   i18n.defaultLocale = "en_US.UTF-8";
+
+  fileSystems."/" = {
+    device = "none";
+    fsType = "tmpfs";
+  };
 
   services.benchmark-runner = {
     enable = true;
