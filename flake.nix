@@ -39,6 +39,11 @@
       flake = false;
     };
 
+    thunderbolt-ibverbs = {
+      url = "git+ssh://git@github.com/hellas-ai/thunderbolt-ibverbs.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     xrt-src = {
       url = "git+https://github.com/Xilinx/XRT?ref=XRT-2.21&submodules=1";
       flake = false;
@@ -419,6 +424,7 @@
       therockRocmOverlay = therockOverlays.rocm;
       therockPythonOverlay = therockOverlays.python;
       therockVllmOverlay = therockOverlays.vllm;
+      thunderboltIbverbsOverlay = inputs.thunderbolt-ibverbs.overlays.default;
 
       pkgsFor =
         system:
@@ -608,7 +614,15 @@
       overlays = {
         default =
           final: prev:
-          lib.optionalAttrs prev.stdenv.isLinux (
+          let
+            thunderboltPackages = inputs.thunderbolt-ibverbs.packages.${prev.stdenv.hostPlatform.system};
+            thunderboltCommonPackageAttrs = {
+              thunderbolt-ibverbs-bench-tools = thunderboltPackages.bench-tools;
+              thunderbolt-ibverbs-perftest = thunderboltPackages.perftest;
+            };
+          in
+          thunderboltCommonPackageAttrs
+          // lib.optionalAttrs prev.stdenv.isLinux (
             let
               ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
                 ec-su-axb35-src = inputs.ec-su-axb35;
@@ -694,8 +708,20 @@
                   }
                 ) ds4RocmTargets
               );
+              thunderboltLinuxPackageAttrs = thunderboltCommonPackageAttrs // {
+                inherit (thunderboltPackages)
+                  linux-thunderbolt
+                  linux-thunderbolt-dev
+                  linux-thunderbolt-modules
+                  rdma-core-usb4
+                  thunderbolt-ibverbs
+                  thunderbolt-ibverbs-linux-thunderbolt
+                  ;
+                rdma-core = thunderboltPackages.rdma-core-usb4;
+              };
             in
-            {
+            (thunderboltIbverbsOverlay final prev)
+            // {
               # EC-SU_AXB35 packages
               ec-su-axb35 = ecPackages.kernelModule;
               ec-su-axb35-monitor = ecPackages.monitor;
@@ -730,11 +756,13 @@
             // ds4RocmTargetPackages
             // llamaCppRocmTargetPackages
             // llamaCppMasterRocmTargetPackages
+            // thunderboltLinuxPackageAttrs
             // (therockRocmOverlay final prev)
             // (therockPythonOverlay final prev)
             // (therockVllmOverlay final prev)
           );
 
+        thunderbolt-ibverbs = thunderboltIbverbsOverlay;
         therock-rocm = final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockRocmOverlay final prev);
         therock-python =
           final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockPythonOverlay final prev);
@@ -750,6 +778,9 @@
       # NixOS modules
       nixosModules = {
         default = _: {
+          imports = [
+            inputs.thunderbolt-ibverbs.nixosModules.default
+          ];
           nixpkgs.overlays = [
             self.overlays.default
           ];
@@ -762,6 +793,7 @@
         ryzenadj = import ./modules/ryzenadj.nix;
         disko-raid0 = import ./modules/disko-raid0.nix;
         tuning = import ./modules/tuning.nix;
+        thunderbolt-ibverbs = inputs.thunderbolt-ibverbs.nixosModules.default;
       };
 
       nixosConfigurations = {
@@ -779,12 +811,21 @@
         pkgs:
         let
           s = defaultRocmTarget.packageSuffix;
-          jacclPackage = pkgs.callPackage ./pkgs/jaccl {
-            inherit (inputs) mlx-src;
-          };
+          jacclPackage = pkgs.callPackage ./pkgs/jaccl (
+            {
+              inherit (inputs) mlx-src;
+            }
+            // lib.optionalAttrs pkgs.stdenv.isLinux {
+              rdma-core = pkgs.rdma-core-usb4;
+            }
+          );
           genericPackages = {
             default = pkgs.llama-cpp;
-            inherit (pkgs) llama-cpp;
+            inherit (pkgs)
+              llama-cpp
+              thunderbolt-ibverbs-bench-tools
+              thunderbolt-ibverbs-perftest
+              ;
             jaccl = jacclPackage;
           };
 
@@ -839,6 +880,7 @@
                 in
                 pkgs.python3Packages.callPackage ./pkgs/mlx/rocm.nix {
                   pname = "mlx-rocm-${rocmTarget.packageSuffix}";
+                  rdma-core = pkgs.rdma-core-usb4;
                   rocmPackages = pkgs.therockRocmPackages.${buildTarget};
                   gfx = buildTarget;
                 };
@@ -870,7 +912,13 @@
                 llama-cpp-vulkan
                 llama-cpp-master-rocm
                 llama-cpp-master-vulkan
+                linux-thunderbolt
+                linux-thunderbolt-dev
+                linux-thunderbolt-modules
+                rdma-core-usb4
                 strix-halo-mes-firmware
+                thunderbolt-ibverbs
+                thunderbolt-ibverbs-linux-thunderbolt
                 tokenizers-cpp
                 xrt
                 xrt-amdxdna
@@ -1144,6 +1192,7 @@
                         arch = defaultRocmTarget.systemFeature;
                       }
                     ];
+                    rdma.enable = true;
                     systemFeatures = [
                       defaultRocmTarget.systemFeature
                       "caller-feature"
@@ -1356,6 +1405,7 @@
                   jq -e '
                     (.features | index("${defaultRocmTarget.systemFeature}") != null)
                     and (.features | index("caller-feature") != null)
+                    and (.features | index("rdma-usb4") != null)
                     and (.sandboxPaths | index("/models") != null)
                     and (.sandboxPaths | index("/dev/dri") != null)
                     and (.sandboxPaths | index("/dev/kfd") != null)
@@ -1363,14 +1413,17 @@
                     and (.sandboxPaths | index("/sys/class/net") != null)
                     and (.sandboxPaths | index("/sys/class/scsi_host") != null)
                     and (.sandboxPaths | index("/sys/bus/pci/devices") != null)
+                    and (.sandboxPaths | index("/dev/infiniband") != null)
                     and (.sandboxPaths | index("/dev/accel") == null)
                     and (.sandboxPaths | index("/caller/device") != null)
                     and (.tmpfilesRules | index("d /models 0755 root root -") != null)
                     and (.tmpfilesRules | index("z /dev/kfd 0660 root nixbld -") != null)
                     and (.tmpfilesRules | index("z /dev/dri/card* 0660 root nixbld -") != null)
                     and (.tmpfilesRules | index("z /dev/dri/renderD* 0660 root nixbld -") != null)
+                    and (.tmpfilesRules | index("z /dev/infiniband/* 0660 root nixbld -") != null)
                     and (.udevRules | contains("KERNEL==\"kfd\", GROUP:=\"nixbld\", MODE:=\"0660\""))
                     and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP:=\"nixbld\", MODE:=\"0660\""))
+                    and (.udevRules | contains("SUBSYSTEM==\"infiniband_verbs\", GROUP:=\"nixbld\", MODE:=\"0660\""))
                     and (.devicePermissionService.wantedBy | index("multi-user.target") != null)
                     and (.devicePermissionService.wants | index("systemd-udev-trigger.service") != null)
                     and (.devicePermissionService.wants | index("systemd-udev-settle.service") != null)
@@ -1378,10 +1431,12 @@
                     and (.devicePermissionService.after | index("systemd-udev-settle.service") != null)
                     and (.devicePermissionService.script | contains("/dev/kfd"))
                     and (.devicePermissionService.script | contains("/dev/dri/renderD*"))
+                    and (.devicePermissionService.script | contains("/dev/infiniband/*"))
                     and (.devicePermissionService.script | contains("chgrp nixbld"))
                     and (.devicePermissionService.script | contains("chmod 0660"))
                     and (.devicePermissionActivation | contains("/dev/kfd"))
                     and (.devicePermissionActivation | contains("/dev/dri/renderD*"))
+                    and (.devicePermissionActivation | contains("/dev/infiniband/*"))
                   ' profile.json
 
                   touch "$out"
