@@ -4,7 +4,7 @@
   rocmTargets,
   therockRocmSources,
   therockPythonWheelSources,
-  therockRocmSourceSources,
+  therockRocmSourcePins,
   therockRocmSourceTrees ? { },
   therockRocmThirdPartySources,
 }:
@@ -29,27 +29,23 @@ let
   hsaOverrideFor =
     rocmTarget: if (rocmTarget.hsaOverride or null) != null then rocmTarget.hsaOverride else "11.5.1";
 
-  sourceEntries = lib.mapAttrsToList (
-    key: source: source // { inherit key; }
-  ) therockRocmSourceSources;
+  sourceEntries = lib.mapAttrsToList (key: source: source // { inherit key; }) therockRocmSourcePins;
 
   sourceMatchesTarget = suffix: source: (source.target or null) == suffix;
 
-  sourceIsCompilerStage =
-    source: (source.stage or null) == "compiler-stage" || lib.hasSuffix "-compiler-stage" source.key;
-
   sourceFor =
-    suffix: predicate:
+    suffix:
     let
-      matches = builtins.filter (
-        source: sourceMatchesTarget suffix source && predicate source
-      ) sourceEntries;
+      matches = builtins.filter (source: sourceMatchesTarget suffix source) sourceEntries;
     in
-    if matches == [ ] then throw "missing TheRock source pin for ${suffix}" else builtins.head matches;
+    if matches == [ ] then
+      throw "missing TheRock source pin for ${suffix}"
+    else if builtins.length matches != 1 then
+      throw "multiple TheRock source pins for ${suffix}"
+    else
+      builtins.head matches;
 
-  sourceFullFor = suffix: sourceFor suffix (source: !sourceIsCompilerStage source);
-  sourceCompilerFor = suffix: sourceFor suffix sourceIsCompilerStage;
-  defaultSourceFull = sourceFullFor target.packageSuffix;
+  defaultSource = sourceFor target.packageSuffix;
 
   lockedSourceTreeFor =
     suffix:
@@ -217,8 +213,7 @@ let
     rocmTarget:
     let
       suffix = rocmTarget.packageSuffix;
-      sourceFull = sourceFullFor suffix;
-      sourceCompiler = sourceCompilerFor suffix;
+      source = sourceFor suffix;
       cmakeConfig = {
         target = suffix;
         amdgpuTargets = rocmTarget.buildTargets;
@@ -229,15 +224,14 @@ let
       };
 
       mkLockedSource =
-        nameSuffix: source:
+        source:
         let
           sourceTreeInputs = lockedSourceTreeFor suffix;
           installSubmodules = lib.concatMapStringsSep "\n" (submodule: ''
             install_source ${lib.escapeShellArg submodule.path} ${lib.escapeShellArg (toString submodule.source)}
           '') sourceTreeInputs.submodules;
         in
-        prev.runCommandLocal
-          "therock-rocm-source-${suffix}-${nameSuffix}-${builtins.substring 0 12 source.rev}"
+        prev.runCommandLocal "therock-rocm-source-${suffix}-full-${builtins.substring 0 12 source.rev}"
           {
             nativeBuildInputs = [ prev.patch ];
           }
@@ -280,13 +274,13 @@ let
             apply_project_patches rocm-libraries rocm-libraries
           '';
 
-      sourceTree = mkLockedSource "full" sourceFull;
+      sourceTree = mkLockedSource source;
       compilerTree = sourceTree;
 
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;
         inherit (cmakeConfig) target amdgpuTargets distBundleName;
-        inherit (sourceCompiler) version;
+        inherit (source) version;
         profile = "compiler";
         therockSource = compilerTree;
         thirdPartySources = { };
@@ -299,7 +293,7 @@ let
         {
           stdenv = prev.llvmPackages_21.stdenv;
           inherit (cmakeConfig) target amdgpuTargets distBundleName;
-          inherit (sourceFull) version;
+          inherit (source) version;
           profile = "full";
           therockSource = sourceTree;
           prebuiltStageTree = amdLlvm;
@@ -336,7 +330,7 @@ in
   therockRocmPackages = lib.recurseIntoAttrs (
     prev.callPackage ./rocm-modules {
       therockSource = final."therock-rocm-source-${target.packageSuffix}";
-      therockVersion = defaultSourceFull.rocmVersion or (normalizeRocmVersion defaultSourceFull.version);
+      therockVersion = defaultSource.rocmVersion or (normalizeRocmVersion defaultSource.version);
     }
   );
 }

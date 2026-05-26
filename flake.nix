@@ -346,7 +346,7 @@
           inherit lib rocmTargets target;
           therockRocmSources = sources.rocm;
           therockPythonWheelSources = sources.pythonWheels;
-          therockRocmSourceSources = sources.rocmSource;
+          therockRocmSourcePins = sources.rocmSource;
           therockRocmSourceTrees = sources.rocmSourceTrees or { };
           therockRocmThirdPartySources = sources.rocmThirdParty;
         };

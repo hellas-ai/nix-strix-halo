@@ -105,18 +105,16 @@ def load_sources(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def source_key(series: str, target: str, stage: str) -> str:
-    suffix = "" if stage == "full" else f"-{stage}"
-    return f"therock-{series}-{target}-full{suffix}"
+def source_key(series: str, target: str) -> str:
+    return f"therock-{series}-{target}-full"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="pkgs/therock/sources/rocm-source.json")
-    parser.add_argument("--key", help="JSON key to write; generated from --series, --target, and --stage by default")
+    parser.add_argument("--key", help="JSON key to write; generated from --series and --target by default")
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--series", default=DEFAULT_SERIES)
-    parser.add_argument("--stage", choices=["full", "compiler-stage"], default="full")
     parser.add_argument("--ref", help="Git ref to pin; defaults to refs/tags/therock-${series}")
     parser.add_argument("--rev", help="Exact TheRock commit; otherwise resolved with git ls-remote")
     parser.add_argument("--target", default=DEFAULT_TARGET)
@@ -138,10 +136,9 @@ def main() -> None:
 
     output = Path(args.output)
     sources = load_sources(output)
-    key = args.key or source_key(args.series, args.target, args.stage)
+    key = args.key or source_key(args.series, args.target)
     ref = args.ref or f"refs/tags/therock-{args.series}"
     version = args.version or args.series
-    old = sources.get(key, {})
     rev = args.rev or git_rev(args.url, ref)
     fetch_args = args.fetch_args if args.fetch_args is not None else DEFAULT_FETCH_ARGS
     deep_nested_submodules = (
@@ -155,7 +152,6 @@ def main() -> None:
         "ref": ref,
         "rev": rev,
         "target": args.target,
-        "stage": args.stage,
         "version": version,
         "fetchArgs": fetch_args,
         "deepNestedSubmodules": deep_nested_submodules,
