@@ -1363,6 +1363,9 @@
             vllm =
               afterPrQuick "vllm"
                 self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
+            vllm-throughput-smoke =
+              afterPrQuick "vllm-throughput-smoke"
+                self.benchmarks.${system}.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
           };
         in
         {
