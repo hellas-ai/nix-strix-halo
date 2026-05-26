@@ -59,8 +59,14 @@ mlx.overrideAttrs (old: {
   nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ zsh ];
   buildInputs = (old.buildInputs or [ ]) ++ [ darwinSdk ];
   __noChroot = true;
-  propagatedBuildInputs =
-    (old.propagatedBuildInputs or [ ]) ++ lib.optionals (buildStage == 1) [ backendPackage ];
+  propagatedBuildInputs = lib.optionals (buildStage == 1) (
+    (old.propagatedBuildInputs or [ ]) ++ [ backendPackage ]
+  );
+
+  postPatch = (old.postPatch or "") + ''
+    substituteInPlace mlx/backend/cpu/jit_compiler.cpp \
+      --replace-fail "${stdenv.cc}/bin/c++" "/usr/bin/c++"
+  '';
 
   env = {
     PYPI_RELEASE = "1";
@@ -154,6 +160,15 @@ mlx.overrideAttrs (old: {
       find "$out/${sitePackages}/mlx" -maxdepth 1 -type f \
         \( -name '*.py' -o -name '*.pyc' -o -name 'py.typed' \) -delete
       rm -rf "$out/${sitePackages}/mlx/__pycache__"
+
+      cmake_targets="$out/${sitePackages}/mlx/share/cmake/MLX/MLXTargets.cmake"
+      if [ -f "$cmake_targets" ]; then
+        substituteInPlace "$cmake_targets" \
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Metal.framework" "-framework;Metal" \
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Foundation.framework" "-framework;Foundation" \
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/QuartzCore.framework" "-framework;QuartzCore" \
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Accelerate.framework" "-framework;Accelerate"
+      fi
     '';
 
   nativeCheckInputs = [ ];
