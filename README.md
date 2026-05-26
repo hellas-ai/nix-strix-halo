@@ -24,8 +24,6 @@ Main package outputs:
 
 - `packages.aarch64-darwin.default`
 - `packages.aarch64-darwin.llama-cpp`
-- `packages.x86_64-darwin.default`
-- `packages.x86_64-darwin.llama-cpp`
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.ds4-rocm`
 - `packages.x86_64-linux.ds4-rocm-gfx1151`
@@ -43,8 +41,6 @@ Main app outputs:
 
 - `apps.aarch64-darwin.llama-cli`
 - `apps.aarch64-darwin.llama-server`
-- `apps.x86_64-darwin.llama-cli`
-- `apps.x86_64-darwin.llama-server`
 - `apps.x86_64-linux.llama-cli`
 - `apps.x86_64-linux.llama-server`
 - `apps.x86_64-linux.llama-cli-rocm`

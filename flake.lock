@@ -143,6 +143,7 @@
         "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf",
         "therock-src-7-13-gfx1151-root": "therock-src-7-13-gfx1151-root",
         "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c",
+        "vllm-src": "vllm-src",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"
       }
@@ -1079,6 +1080,23 @@
         "owner": "ROCm",
         "repo": "mesa-fork",
         "rev": "9a0d5b03fd540cb2448c64bbda17dbf17ccb12bf",
+        "type": "github"
+      }
+    },
+    "vllm-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778819314,
+        "narHash": "sha256-lVgzo6R+l86IH5yxCtfJckVCP86jlgN7ufF5i0Pn2/A=",
+        "owner": "vllm-project",
+        "repo": "vllm",
+        "rev": "ad7125a431e176d4161099480a66f0169609a690",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vllm-project",
+        "ref": "v0.21.0",
+        "repo": "vllm",
         "type": "github"
       }
     },

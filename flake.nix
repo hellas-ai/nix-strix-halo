@@ -24,6 +24,11 @@
       flake = false;
     };
 
+    vllm-src = {
+      url = "github:vllm-project/vllm/v0.21.0";
+      flake = false;
+    };
+
     xrt-src = {
       url = "git+https://github.com/Xilinx/XRT?ref=XRT-2.21&submodules=1";
       flake = false;
@@ -332,10 +337,7 @@
     let
       inherit (nixpkgs) lib;
       linuxSystems = [ "x86_64-linux" ];
-      darwinSystems = [
-        "aarch64-darwin"
-        "x86_64-darwin"
-      ];
+      darwinSystems = [ "aarch64-darwin" ];
       systems = linuxSystems ++ darwinSystems;
       forAllSystems = lib.genAttrs systems;
 
@@ -385,6 +387,8 @@
           pythonOverlay = mkTherockPythonOverlay { inherit target; };
           vllmOverlay = import ./overlays/therock-vllm.nix {
             inherit lib target;
+            vllmSrc = inputs.vllm-src;
+            vllmVersion = "0.21.0";
           };
         in
         {
