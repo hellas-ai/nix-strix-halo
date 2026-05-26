@@ -1,12 +1,15 @@
 {
   pkgs,
   tools,
-  modelRoot ? "/models",
+  modelsRoot ? null,
+  modelRoot ? null,
   matrixMetadata ? { },
 }:
 let
   inherit (pkgs) lib;
   benchLib = import ../lib.nix { inherit lib; };
+  resolvedModelsRoot = if modelsRoot != null then modelsRoot else benchLib.defaultModelsRoot pkgs;
+  resolvedModelRoot = if modelRoot != null then modelRoot else resolvedModelsRoot;
 
   benchmarkTools = map benchLib.normalizeTool tools;
 
@@ -14,7 +17,10 @@ let
     llama2-7b =
       benchLib.mkModel {
         name = "llama2-7b";
-        path = "${modelRoot}/llama-2-7b/llama-2-7b.Q4_K_M.gguf";
+        path = benchLib.modelPath resolvedModelRoot [
+          "llama-2-7b"
+          "llama-2-7b.Q4_K_M.gguf"
+        ];
       }
       // {
         benchmarks = {
@@ -56,7 +62,10 @@ let
     qwen25-32b =
       benchLib.mkModel {
         name = "qwen25-32b";
-        path = "${modelRoot}/qwen2.5-32b-instruct/qwen2.5-32b-instruct-q8_0-00001-of-00009.gguf";
+        path = benchLib.modelPath resolvedModelRoot [
+          "qwen2.5-32b-instruct"
+          "qwen2.5-32b-instruct-q8_0-00001-of-00009.gguf"
+        ];
       }
       // {
         benchmarks = {
@@ -78,7 +87,11 @@ let
     qwen3-coder-30b =
       benchLib.mkModel {
         name = "qwen3-coder-30b";
-        path = "${modelRoot}/qwen3-coder-30b-a3b/BF16/Qwen3-Coder-30B-A3B-Instruct-BF16-00001-of-00002.gguf";
+        path = benchLib.modelPath resolvedModelRoot [
+          "qwen3-coder-30b-a3b"
+          "BF16"
+          "Qwen3-Coder-30B-A3B-Instruct-BF16-00001-of-00002.gguf"
+        ];
       }
       // {
         benchmarks = {

@@ -223,7 +223,7 @@ nix build --impure --file ./examples/fevm-faex9 \
 
 ## Benchmarks
 
-Benchmark derivations are generated from structured tool/model/scenario records and exposed under `benchmarks.<system>`. The default cross-platform matrix runs CPU `llama-bench` against local GGUF files under `/models`. Linux also exposes this flake's ROCm and Vulkan llama.cpp tool variants.
+Benchmark derivations are generated from structured tool/model/scenario records and exposed under `benchmarks.<system>`. The default cross-platform matrix runs CPU `llama-bench` against local GGUF files under the platform model root. Linux uses `/models`; Darwin uses `/Users/Shared/models`. Linux also exposes this flake's ROCm and Vulkan llama.cpp tool variants.
 
 ```bash
 nix build .#benchmarks.x86_64-linux.bench-llama2-7b-llama-cpp-cpu-b512-fa1

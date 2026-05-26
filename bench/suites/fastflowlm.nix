@@ -1,7 +1,8 @@
 {
   pkgs,
   package,
-  modelRoot ? "/models/flm",
+  modelsRoot ? null,
+  modelRoot ? null,
   npuSystemFeature ? "xdna2",
   hostProfile ? "linux-amd-xdna",
   matrixMetadata ? { },
@@ -10,6 +11,10 @@
 let
   inherit (pkgs) lib;
   benchLib = import ../lib.nix { inherit lib; };
+
+  resolvedModelsRoot = if modelsRoot != null then modelsRoot else benchLib.defaultModelsRoot pkgs;
+  resolvedModelRoot =
+    if modelRoot != null then modelRoot else benchLib.modelPath resolvedModelsRoot [ "flm" ];
 
   prompts = {
     short = "Explain in one sentence what an NPU is.";
@@ -152,7 +157,7 @@ let
         ;
       command = [ runner ];
       env = {
-        FLM_MODEL_PATH = modelRoot;
+        FLM_MODEL_PATH = resolvedModelRoot;
         FLM_DISABLE_UPDATE_CHECK = "1";
       };
       requirements = {
@@ -172,7 +177,7 @@ let
         model = {
           name = modelName;
           inherit (model) tag description;
-          path = modelRoot;
+          path = resolvedModelRoot;
         };
         tool = {
           backend = "npu";

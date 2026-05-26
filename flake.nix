@@ -449,6 +449,8 @@
         pkgs:
         let
           system = pkgs.stdenv.hostPlatform.system;
+          benchLib = import ./bench/lib.nix { inherit lib; };
+          modelsRoot = benchLib.defaultModelsRoot pkgs;
           defaultTargetMetadata = {
             inherit (defaultRocmTarget)
               packageSuffix
@@ -462,7 +464,7 @@
           };
 
           genericBenchmarks = import ./bench/default.nix {
-            inherit pkgs;
+            inherit pkgs modelsRoot;
             tools = [
               {
                 name = "cpu";
@@ -477,7 +479,7 @@
           };
 
           acceleratedBenchmarks = import ./bench/default.nix {
-            inherit pkgs;
+            inherit pkgs modelsRoot;
             tools = [
               {
                 name = "rocm";
@@ -517,18 +519,18 @@
             let
               fastflowlmBenchmarks =
                 (import ./bench/suites/fastflowlm.nix {
-                  inherit pkgs;
+                  inherit pkgs modelsRoot;
                   package = pkgs.fastflowlm;
                 }).benchmarks;
               ds4Benchmarks =
                 (import ./bench/suites/ds4.nix {
-                  inherit pkgs;
+                  inherit pkgs modelsRoot;
                   package = pkgs.${"ds4-rocm-${defaultRocmTarget.packageSuffix}"};
                   target = defaultTargetMetadata;
                 }).benchmarks;
               vllmBenchmarks =
                 (import ./bench/suites/vllm.nix {
-                  inherit pkgs;
+                  inherit pkgs modelsRoot;
                   package = pkgs.${"vllm-rocm-therock-${defaultRocmTarget.packageSuffix}"};
                   target = defaultTargetMetadata;
                 }).benchmarks;
@@ -543,7 +545,7 @@
             let
               ds4MetalBenchmarks =
                 (import ./bench/suites/ds4.nix {
-                  inherit pkgs;
+                  inherit pkgs modelsRoot;
                   package = self.packages.${system}.ds4;
                   accelerator = "metal";
                 }).benchmarks;

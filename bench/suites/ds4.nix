@@ -1,8 +1,9 @@
 {
   pkgs,
   package,
-  modelRoot ? if pkgs.stdenv.isDarwin then "/Users/Shared/models/ds4" else "/models/ds4",
-  modelPath ? "${modelRoot}/ds4flash.gguf",
+  modelsRoot ? null,
+  modelRoot ? null,
+  modelPath ? null,
   target ? null,
   accelerator ? if pkgs.stdenv.isDarwin then "metal" else "rocm",
   hostProfile ? if accelerator == "metal" then "darwin-metal" else "linux-amd-kfd",
@@ -25,6 +26,12 @@ let
 
   clean = lib.replaceStrings [ ":" "." "/" "_" ] [ "-" "-" "-" "-" ];
 
+  resolvedModelsRoot = if modelsRoot != null then modelsRoot else benchLib.defaultModelsRoot pkgs;
+  resolvedModelRoot =
+    if modelRoot != null then modelRoot else benchLib.modelPath resolvedModelsRoot [ "ds4" ];
+  resolvedModelPath =
+    if modelPath != null then modelPath else benchLib.modelPath resolvedModelRoot [ "ds4flash.gguf" ];
+
   isMetal = accelerator == "metal";
   backend = if isMetal then "metal" else "hip";
   packageRole = if isMetal then "ds4" else "ds4-rocm";
@@ -46,14 +53,14 @@ let
   sandboxPaths =
     (
       if isMetal then
-        [ modelRoot ]
+        [ resolvedModelRoot ]
       else
         [
           "/dev/dri"
           "/dev/kfd"
           "/sys/class/drm"
           "/sys/class/kfd"
-          modelRoot
+          resolvedModelRoot
         ]
     )
     ++ extraSandboxPaths;
@@ -95,7 +102,7 @@ let
 
   modelConfigs = {
     deepseek-v4-flash = {
-      path = modelPath;
+      path = resolvedModelPath;
       repo = "antirez/deepseek-v4-gguf";
       description = "DeepSeek V4 Flash GGUF for DwarfStar 4";
       cases = if cases == null then [ smokeCase ] ++ lib.optionals (!isMetal) [ fastFullCase ] else cases;

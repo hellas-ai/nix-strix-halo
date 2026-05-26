@@ -1,8 +1,9 @@
 {
   pkgs,
   package,
-  modelRoot ? "/models",
-  hfCacheHome ? "${modelRoot}/.cache/huggingface",
+  modelsRoot ? null,
+  modelRoot ? null,
+  hfCacheHome ? null,
   target,
   hostProfile ? "linux-amd-kfd",
   matrixMetadata ? { },
@@ -11,6 +12,17 @@
 let
   inherit (pkgs) lib;
   benchLib = import ../lib.nix { inherit lib; };
+
+  resolvedModelsRoot = if modelsRoot != null then modelsRoot else benchLib.defaultModelsRoot pkgs;
+  resolvedModelRoot = if modelRoot != null then modelRoot else resolvedModelsRoot;
+  resolvedHfCacheHome =
+    if hfCacheHome != null then
+      hfCacheHome
+    else
+      benchLib.modelPath resolvedModelRoot [
+        ".cache"
+        "huggingface"
+      ];
 
   clean = lib.replaceStrings [ ":" "." "/" "_" ] [ "-" "-" "-" "-" ];
 
@@ -254,7 +266,7 @@ let
         ;
       command = [ (mkRunner model case) ];
       env = {
-        HF_HOME = hfCacheHome;
+        HF_HOME = resolvedHfCacheHome;
         HF_HUB_OFFLINE = "1";
         TRANSFORMERS_OFFLINE = "1";
         VLLM_NO_USAGE_STATS = "1";
@@ -272,7 +284,7 @@ let
           "/dev/kfd"
           "/sys/class/drm"
           "/sys/class/kfd"
-          modelRoot
+          resolvedModelRoot
         ];
       };
       metadata = lib.recursiveUpdate {
@@ -294,7 +306,7 @@ let
         };
         model = {
           name = modelName;
-          cacheRoot = hfCacheHome;
+          cacheRoot = resolvedHfCacheHome;
           inherit (model)
             description
             id
