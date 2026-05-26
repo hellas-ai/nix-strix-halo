@@ -220,7 +220,27 @@ rec {
         JSON
 
         ${envExports normalizedEnv}
+        set +e
         ${commandLine} > "$out/stdout.txt" 2> "$out/stderr.txt"
+        status=$?
+        set -e
+
+        if [ "$status" -ne 0 ]; then
+          echo "benchmark command failed with exit status $status" >&2
+          echo "command: ${commandLine}" >&2
+
+          if [ -s "$out/stdout.txt" ]; then
+            echo "--- benchmark stdout ---" >&2
+            sed -n '1,200p' "$out/stdout.txt" >&2
+          fi
+
+          if [ -s "$out/stderr.txt" ]; then
+            echo "--- benchmark stderr ---" >&2
+            sed -n '1,200p' "$out/stderr.txt" >&2
+          fi
+
+          exit "$status"
+        fi
       '';
 
   mkLlamaCppArgs =

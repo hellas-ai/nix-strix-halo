@@ -24,6 +24,11 @@
       flake = false;
     };
 
+    vllm-src = {
+      url = "github:vllm-project/vllm/v0.21.0";
+      flake = false;
+    };
+
     xrt-src = {
       url = "git+https://github.com/Xilinx/XRT?ref=XRT-2.21&submodules=1";
       flake = false;
@@ -332,10 +337,7 @@
     let
       inherit (nixpkgs) lib;
       linuxSystems = [ "x86_64-linux" ];
-      darwinSystems = [
-        "aarch64-darwin"
-        "x86_64-darwin"
-      ];
+      darwinSystems = [ "aarch64-darwin" ];
       systems = linuxSystems ++ darwinSystems;
       forAllSystems = lib.genAttrs systems;
 
@@ -383,10 +385,16 @@
           target = args.target or (builtins.head args.rocmTargets);
           rocmOverlay = mkTherockRocmOverlay args;
           pythonOverlay = mkTherockPythonOverlay { inherit target; };
+          vllmOverlay = import ./overlays/therock-vllm.nix {
+            inherit lib target;
+            vllmSrc = inputs.vllm-src;
+            vllmVersion = "0.21.0";
+          };
         in
         {
           rocm = rocmOverlay;
           python = pythonOverlay;
+          vllm = vllmOverlay;
         };
 
       therockOverlays = mkTherockOverlays {
@@ -396,6 +404,7 @@
 
       therockRocmOverlay = therockOverlays.rocm;
       therockPythonOverlay = therockOverlays.python;
+      therockVllmOverlay = therockOverlays.vllm;
 
       pkgsFor =
         system:
@@ -507,10 +516,17 @@
                   package = pkgs.${"ds4-rocm-${defaultRocmTarget.packageSuffix}"};
                   target = defaultTargetMetadata;
                 }).benchmarks;
+              vllmBenchmarks =
+                (import ./bench/suites/vllm.nix {
+                  inherit pkgs;
+                  package = pkgs.${"vllm-rocm-therock-${defaultRocmTarget.packageSuffix}"};
+                  target = defaultTargetMetadata;
+                }).benchmarks;
             in
             flattenBenchmarks acceleratedBenchmarks
             // flattenBenchmarks fastflowlmBenchmarks
             // flattenBenchmarks ds4Benchmarks
+            // flattenBenchmarks vllmBenchmarks
           );
         in
         flattenBenchmarks genericBenchmarks // linuxBenchmarks;
@@ -678,11 +694,20 @@
             // llamaCppRocmTargetPackages
             // llamaCppMasterRocmTargetPackages
             // (therockRocmOverlay final prev)
+            // (therockPythonOverlay final prev)
+            // (therockVllmOverlay final prev)
           );
 
         therock-rocm = final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockRocmOverlay final prev);
         therock-python =
           final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockPythonOverlay final prev);
+        therock-vllm =
+          final: prev:
+          lib.optionalAttrs prev.stdenv.isLinux (
+            (therockRocmOverlay final prev)
+            // (therockPythonOverlay final prev)
+            // (therockVllmOverlay final prev)
+          );
       };
 
       # NixOS modules
@@ -743,6 +768,7 @@
                   "therock-python-wheels-${s}"
                   "therock-amdsmi-${s}"
                   "torch-rocm-${s}"
+                  "vllm-rocm-therock-${s}"
                 ];
               therockPackageNames = lib.concatMap therockPackageNamesFor rocmTargets;
               requiredTherockPackageNames = therockPackageNamesFor defaultRocmTarget;
@@ -1154,6 +1180,14 @@
             fastflowlmBenchmarkMetadata = builtins.toJSON fastflowlmBenchmark.passthru.benchmark;
             ds4Benchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
             ds4BenchmarkMetadata = builtins.toJSON ds4Benchmark.passthru.benchmark;
+            vllmThroughputBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
+            vllmThroughputBenchmarkMetadata = builtins.toJSON (
+              removeAttrs vllmThroughputBenchmark.passthru.benchmark [ "command" ]
+            );
+            vllmLatencyBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-latency-smoke;
+            vllmLatencyBenchmarkMetadata = builtins.toJSON (
+              removeAttrs vllmLatencyBenchmark.passthru.benchmark [ "command" ]
+            );
           in
           {
             benchmark-runner-profiles =
@@ -1234,8 +1268,58 @@
                   touch "$out"
                 '';
 
+            vllm-benchmark-metadata =
+              pkgs.runCommandLocal "ci-vllm-benchmark-metadata"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > throughput.json <<'JSON'
+                  ${vllmThroughputBenchmarkMetadata}
+                  JSON
+
+                  cat > latency.json <<'JSON'
+                  ${vllmLatencyBenchmarkMetadata}
+                  JSON
+
+                  jq -e '
+                    .kind == "vllm"
+                    and .mode == "throughput"
+                    and .accelerator == "rocm"
+                    and .requirements.systemFeatures == [ "gfx1151" ]
+                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
+                    and (.requirements.sandboxPaths | index("/dev/kfd") != null)
+                    and (.requirements.sandboxPaths | index("/models") != null)
+                    and .model.id == "Qwen/Qwen3-0.6B"
+                    and .env.HF_HOME == "/models/.cache/huggingface"
+                    and .env.HF_HUB_OFFLINE == "1"
+                    and .packages == [ "vllm" ]
+                    and .params.inputLen == 128
+                    and .params.outputLen == 32
+                    and .params.numPrompts == 8
+                    and .tool.executable == "vllm bench throughput"
+                  ' throughput.json
+
+                  jq -e '
+                    .kind == "vllm"
+                    and .mode == "latency"
+                    and .accelerator == "rocm"
+                    and .requirements.systemFeatures == [ "gfx1151" ]
+                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
+                    and .model.id == "Qwen/Qwen3-0.6B"
+                    and .packages == [ "vllm" ]
+                    and .params.batchSize == 1
+                    and .params.numItersWarmup == 1
+                    and .params.numIters == 3
+                    and .tool.executable == "vllm bench latency"
+                  ' latency.json
+
+                  touch "$out"
+                '';
+
             "package-llama-cpp-rocm-${s}" = pkgs."llama-cpp-rocm-${s}";
             "package-ds4-rocm-${s}" = pkgs."ds4-rocm-${s}";
+            "package-vllm-rocm-therock-${s}" = pkgs."vllm-rocm-therock-${s}";
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
@@ -1276,6 +1360,12 @@
           }
           // lib.optionalAttrs (system == "x86_64-linux") {
             system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
+            vllm =
+              afterPrQuick "vllm"
+                self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
+            vllm-throughput-smoke =
+              afterPrQuick "vllm-throughput-smoke"
+                self.benchmarks.${system}.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
           };
         in
         {

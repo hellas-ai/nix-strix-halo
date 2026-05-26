@@ -7,6 +7,7 @@ It provides:
 - generic `llama-cpp` outputs for Linux and macOS
 - Linux-only ROCm outputs, including generic ROCm builds and Strix Halo `gfx1151` narrowed builds
 - TheRock ROCm/PyTorch packaging for configured Linux GPU targets
+- source-built vLLM ROCm packaging against the TheRock Python/ROCm stack
 - FastFlowLM packaging for AMD XDNA2 NPU inference
 - DS4-HIP packaging for DwarfStar 4 ROCm inference
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
@@ -23,8 +24,6 @@ Main package outputs:
 
 - `packages.aarch64-darwin.default`
 - `packages.aarch64-darwin.llama-cpp`
-- `packages.x86_64-darwin.default`
-- `packages.x86_64-darwin.llama-cpp`
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.ds4-rocm`
 - `packages.x86_64-linux.ds4-rocm-gfx1151`
@@ -35,14 +34,13 @@ Main package outputs:
 - `packages.x86_64-linux.llama-cpp-vulkan`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
+- `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
 - `packages.x86_64-linux.xrt-amdxdna`
 
 Main app outputs:
 
 - `apps.aarch64-darwin.llama-cli`
 - `apps.aarch64-darwin.llama-server`
-- `apps.x86_64-darwin.llama-cli`
-- `apps.x86_64-darwin.llama-server`
 - `apps.x86_64-linux.llama-cli`
 - `apps.x86_64-linux.llama-server`
 - `apps.x86_64-linux.llama-cli-rocm`
@@ -90,6 +88,7 @@ Target records are generic build descriptors, not a hardware inventory. Hostname
 - `packages.x86_64-linux.therock-rocm-gfx1151-env`
 - `packages.x86_64-linux.therock-python-gfx1151`
 - `packages.x86_64-linux.torch-rocm-gfx1151`
+- `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
 - `packages.x86_64-linux.ds4-rocm-gfx1151`
 
 The lower-level ROCm module overlay also exposes reusable narrowed package scopes:
@@ -121,6 +120,18 @@ in
 ```
 
 To add another top-level target to this flake's default outputs, add a target record in `pkgs/therock/targets.nix`. The `llama-cpp-rocm-<target>` output appears from that record; TheRock binary/source/Python outputs appear as matching target-keyed JSON pins are added under `pkgs/therock/sources/`.
+
+The vLLM package exposes feature flags through normal derivation override arguments:
+
+```nix
+pkgs.vllm-rocm-therock-gfx1151.override {
+  benchSupport = true; # default
+  audioSupport = true; # default
+  otelSupport = true; # default, required by upstream vLLM
+}
+```
+
+`benchSupport`, `audioSupport`, and `otelSupport` are enabled by default. Triton support is required and comes from the TheRock Python stack plus the pinned Triton kernels source. AITer, RIXL, and other unported upstream extras are exposed as disabled flags that fail with a clear unsupported-feature message if enabled before their packages are added.
 
 ## llama.cpp RPC Servers
 
@@ -211,6 +222,18 @@ the Nix sandbox:
 ```bash
 nix build .#benchmarks.x86_64-linux.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke
 cat result/results.csv
+```
+
+vLLM benchmarks use the upstream offline benchmark CLI in throughput and
+latency modes. They expect the Hugging Face model cache under
+`/models/.cache/huggingface` and run offline against `Qwen/Qwen3-0.6B`:
+
+```bash
+nix build .#benchmarks.x86_64-linux.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke
+cat result/results.json
+
+nix build .#benchmarks.x86_64-linux.bench-qwen3-0-6b-vllm-rocm-gfx1151-latency-smoke
+cat result/results.json
 ```
 
 External flakes can reuse `lib.benchmarks` while injecting their own packages, model paths, required system features, environment variables, and host profile names. For example, with a caller-provided CUDA-enabled `myCudaLlamaCpp` package:
