@@ -1296,6 +1296,9 @@
           }
           // lib.optionalAttrs (system == "x86_64-linux") {
             system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
+            vllm =
+              afterPrQuick "vllm"
+                self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
           };
         in
         {
