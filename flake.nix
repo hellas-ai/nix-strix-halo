@@ -347,7 +347,7 @@
           therockRocmSources = sources.rocm;
           therockPythonWheelSources = sources.pythonWheels;
           therockRocmSourcePins = sources.rocmSource;
-          therockRocmSourceTrees = sources.rocmSourceTrees or { };
+          therockRocmSourceTrees = sources.rocmSourceTrees;
           therockRocmThirdPartySources = sources.rocmThirdParty;
         };
 
@@ -653,7 +653,6 @@
                   "therock-rocm-from-source-${s}"
                   "therock-rocm-from-source-${s}-configure"
                   "therock-rocm-source-${s}"
-                  "therock-rocm-source-${s}-compiler-stage"
                   "therock-rocm-third-party-mirror-${s}"
                   "therock-python-${s}"
                   "therock-python-wheels-${s}"

@@ -5,7 +5,7 @@
   therockRocmSources,
   therockPythonWheelSources,
   therockRocmSourcePins,
-  therockRocmSourceTrees ? { },
+  therockRocmSourceTrees,
   therockRocmThirdPartySources,
 }:
 final: prev:
@@ -19,15 +19,12 @@ let
 
   targetFor =
     suffix:
-    targetBySuffix.${suffix} or {
-      packageSuffix = suffix;
-      runtimeArch = suffix;
-      buildTargets = [ suffix ];
-      hsaOverride = null;
-    };
+    if builtins.hasAttr suffix targetBySuffix then
+      targetBySuffix.${suffix}
+    else
+      throw "missing TheRock target config for ${suffix}";
 
-  hsaOverrideFor =
-    rocmTarget: if (rocmTarget.hsaOverride or null) != null then rocmTarget.hsaOverride else "11.5.1";
+  hsaOverrideFor = rocmTarget: rocmTarget.hsaOverride or null;
 
   sourceEntries = lib.mapAttrsToList (key: source: source // { inherit key; }) therockRocmSourcePins;
 
@@ -59,15 +56,7 @@ let
     else
       sourceTree;
 
-  pythonWheelSourcesByTarget =
-    therockPythonWheelSources.targets or (
-      if therockPythonWheelSources ? target then
-        {
-          ${therockPythonWheelSources.target} = therockPythonWheelSources;
-        }
-      else
-        therockPythonWheelSources
-    );
+  pythonWheelSourcesByTarget = therockPythonWheelSources.targets;
 
   pythonWheelSourcesFor =
     rocmTarget:
@@ -275,14 +264,13 @@ let
           '';
 
       sourceTree = mkLockedSource source;
-      compilerTree = sourceTree;
 
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;
         inherit (cmakeConfig) target amdgpuTargets distBundleName;
         inherit (source) version;
         profile = "compiler";
-        therockSource = compilerTree;
+        therockSource = sourceTree;
         thirdPartySources = { };
         buildTargets = [ "artifact-amd-llvm" ];
         installMode = "prebuilt-stages";
@@ -305,7 +293,6 @@ let
     in
     {
       "therock-rocm-source-${suffix}" = sourceTree;
-      "therock-rocm-source-${suffix}-compiler-stage" = compilerTree;
       "therock-amd-llvm-${suffix}" = amdLlvm;
       "therock-rocm-from-source-${suffix}" = fromSource;
       "therock-rocm-from-source-${suffix}-configure" = fromSource.override {

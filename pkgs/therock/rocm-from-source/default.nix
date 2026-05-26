@@ -69,7 +69,7 @@
   ],
   nameSuffix ? "",
   prebuiltStageTree ? null,
-  target ? "gfx1151",
+  target,
   amdgpuTargets ? [ target ],
   distAmdgpuTargets ? amdgpuTargets,
   testAmdgpuTargets ? amdgpuTargets,

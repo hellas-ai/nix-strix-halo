@@ -6,7 +6,7 @@
   python3,
   therockRocmSdk,
   therockRocmEnv,
-  packageSuffix ? "gfx1151",
+  packageSuffix,
 }:
 
 writeShellApplication {

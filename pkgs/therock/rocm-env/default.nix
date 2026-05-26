@@ -10,8 +10,8 @@
   numactl,
   therockRocmSdk,
   rdmaCore,
-  hsaOverrideGfxVersion ? "11.5.1",
-  packageSuffix ? "gfx1151",
+  hsaOverrideGfxVersion ? null,
+  packageSuffix,
 }:
 
 writeShellApplication {
@@ -23,7 +23,9 @@ writeShellApplication {
     export ROCM_PATH="$rocm"
     export HIP_PATH="$rocm"
     export HIP_PLATFORM=amd
-    export HSA_OVERRIDE_GFX_VERSION="${hsaOverrideGfxVersion}"
+    ${lib.optionalString (hsaOverrideGfxVersion != null) ''
+      export HSA_OVERRIDE_GFX_VERSION="${hsaOverrideGfxVersion}"
+    ''}
 
     export PATH="$rocm/bin:$rocm/llvm/bin''${PATH:+:$PATH}"
 

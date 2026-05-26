@@ -7,7 +7,7 @@
   libdrm,
   numactl,
   rdma-core,
-  target ? "gfx1151",
+  target,
   version,
   url ? "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-${target}-${version}.tar.gz",
   hash,
