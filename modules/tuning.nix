@@ -95,6 +95,8 @@ let
         fi
       }
 
+      # May be unused when hosts deliberately disable IOMMU.
+      # shellcheck disable=SC2329
       assert_iommu_enabled() {
         local group_count iommu_count
 
