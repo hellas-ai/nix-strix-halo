@@ -237,14 +237,15 @@ rec {
         ${builtins.toJSON normalizedEnv}
         JSON
 
-        mkdir -p "$out/nix-support"
-        cat > "$out/nix-support/hydra-build-products" <<EOF
-        file benchmark-stdout $out/stdout.txt
-        file benchmark-stderr $out/stderr.txt
-        file benchmark-metadata $out/metadata.json
-        file benchmark-command $out/command.json
-        file benchmark-env $out/env.json
-        EOF
+        add_hydra_product() {
+          local type="$1"
+          local subtype="$2"
+          local path="$3"
+
+          if [ -s "$path" ]; then
+            printf '%s %s %s\n' "$type" "$subtype" "$path" >> "$out/nix-support/hydra-build-products"
+          fi
+        }
 
         ${envExports normalizedEnv}
         set +e
@@ -268,6 +269,14 @@ rec {
 
           exit "$status"
         fi
+
+        mkdir -p "$out/nix-support"
+        : > "$out/nix-support/hydra-build-products"
+        add_hydra_product file benchmark-stdout "$out/stdout.txt"
+        add_hydra_product file benchmark-stderr "$out/stderr.txt"
+        add_hydra_product file benchmark-metadata "$out/metadata.json"
+        add_hydra_product file benchmark-command "$out/command.json"
+        add_hydra_product file benchmark-env "$out/env.json"
       '';
 
   mkLlamaCppArgs =
