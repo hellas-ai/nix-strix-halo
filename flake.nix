@@ -516,10 +516,17 @@
                   package = pkgs.${"ds4-rocm-${defaultRocmTarget.packageSuffix}"};
                   target = defaultTargetMetadata;
                 }).benchmarks;
+              vllmBenchmarks =
+                (import ./bench/suites/vllm.nix {
+                  inherit pkgs;
+                  package = pkgs.${"vllm-rocm-therock-${defaultRocmTarget.packageSuffix}"};
+                  target = defaultTargetMetadata;
+                }).benchmarks;
             in
             flattenBenchmarks acceleratedBenchmarks
             // flattenBenchmarks fastflowlmBenchmarks
             // flattenBenchmarks ds4Benchmarks
+            // flattenBenchmarks vllmBenchmarks
           );
         in
         flattenBenchmarks genericBenchmarks // linuxBenchmarks;
@@ -1173,6 +1180,14 @@
             fastflowlmBenchmarkMetadata = builtins.toJSON fastflowlmBenchmark.passthru.benchmark;
             ds4Benchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
             ds4BenchmarkMetadata = builtins.toJSON ds4Benchmark.passthru.benchmark;
+            vllmThroughputBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
+            vllmThroughputBenchmarkMetadata = builtins.toJSON (
+              removeAttrs vllmThroughputBenchmark.passthru.benchmark [ "command" ]
+            );
+            vllmLatencyBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-latency-smoke;
+            vllmLatencyBenchmarkMetadata = builtins.toJSON (
+              removeAttrs vllmLatencyBenchmark.passthru.benchmark [ "command" ]
+            );
           in
           {
             benchmark-runner-profiles =
@@ -1249,6 +1264,55 @@
                     and .params.ctxMax == 256
                     and .params.genTokens == 8
                   ' metadata.json
+
+                  touch "$out"
+                '';
+
+            vllm-benchmark-metadata =
+              pkgs.runCommandLocal "ci-vllm-benchmark-metadata"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > throughput.json <<'JSON'
+                  ${vllmThroughputBenchmarkMetadata}
+                  JSON
+
+                  cat > latency.json <<'JSON'
+                  ${vllmLatencyBenchmarkMetadata}
+                  JSON
+
+                  jq -e '
+                    .kind == "vllm"
+                    and .mode == "throughput"
+                    and .accelerator == "rocm"
+                    and .requirements.systemFeatures == [ "gfx1151" ]
+                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
+                    and (.requirements.sandboxPaths | index("/dev/kfd") != null)
+                    and (.requirements.sandboxPaths | index("/models") != null)
+                    and .model.id == "Qwen/Qwen3-0.6B"
+                    and .env.HF_HOME == "/models/.cache/huggingface"
+                    and .env.HF_HUB_OFFLINE == "1"
+                    and .packages == [ "vllm" ]
+                    and .params.inputLen == 128
+                    and .params.outputLen == 32
+                    and .params.numPrompts == 8
+                    and .tool.executable == "vllm bench throughput"
+                  ' throughput.json
+
+                  jq -e '
+                    .kind == "vllm"
+                    and .mode == "latency"
+                    and .accelerator == "rocm"
+                    and .requirements.systemFeatures == [ "gfx1151" ]
+                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
+                    and .model.id == "Qwen/Qwen3-0.6B"
+                    and .packages == [ "vllm" ]
+                    and .params.batchSize == 1
+                    and .params.numItersWarmup == 1
+                    and .params.numIters == 3
+                    and .tool.executable == "vllm bench latency"
+                  ' latency.json
 
                   touch "$out"
                 '';

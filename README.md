@@ -223,6 +223,18 @@ nix build .#benchmarks.x86_64-linux.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smo
 cat result/results.csv
 ```
 
+vLLM benchmarks use the upstream offline benchmark CLI in throughput and
+latency modes. They expect the Hugging Face model cache under
+`/models/.cache/huggingface` and run offline against `Qwen/Qwen3-0.6B`:
+
+```bash
+nix build .#benchmarks.x86_64-linux.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke
+cat result/results.json
+
+nix build .#benchmarks.x86_64-linux.bench-qwen3-0-6b-vllm-rocm-gfx1151-latency-smoke
+cat result/results.json
+```
+
 External flakes can reuse `lib.benchmarks` while injecting their own packages, model paths, required system features, environment variables, and host profile names. For example, with a caller-provided CUDA-enabled `myCudaLlamaCpp` package:
 
 ```nix

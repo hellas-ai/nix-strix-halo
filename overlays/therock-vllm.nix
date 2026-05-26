@@ -197,7 +197,7 @@ let
       cudaSupport = false;
       gpuTargets = vllmGpuTargets;
       rocmPackages = therockRocmPackages;
-      amdsmi = py.amdsmi;
+      inherit (py) amdsmi;
     }).overridePythonAttrs
       (old: {
         version = vllmVersion;
