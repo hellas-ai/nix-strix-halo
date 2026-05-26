@@ -1,5 +1,13 @@
 # nix-strix-halo
 
+[![Hydra quick][hydra-quick-badge]][hydra-quick]
+[![Hydra full][hydra-full-badge]][hydra-full]
+
+[hydra-quick]: https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.pr-quick.all
+[hydra-quick-badge]: https://img.shields.io/endpoint?label=hydra%20quick&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fnix-strix-halo%2Fx86_64-linux.pr-quick.all%2Fshield
+[hydra-full]: https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.pr-full.all
+[hydra-full-badge]: https://img.shields.io/endpoint?label=hydra%20full&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fnix-strix-halo%2Fx86_64-linux.pr-full.all%2Fshield
+
 Small Nix flake for Strix Halo / Sixunited AXB35 systems.
 
 It provides:
