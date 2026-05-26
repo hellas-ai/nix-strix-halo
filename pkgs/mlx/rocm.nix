@@ -398,6 +398,7 @@ mlx.overrideAttrs (old: {
 
   meta = old.meta // {
     description = "MLX with ROCm backend and portable JACCL support";
+    changelog = "https://github.com/NripeshN/mlx/commit/39fac95d901c72175fce4baf973e375d4a054ba7";
     platforms = [ "x86_64-linux" ];
     broken = false;
   };
