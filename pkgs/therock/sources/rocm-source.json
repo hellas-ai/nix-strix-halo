@@ -1,26 +1,27 @@
 {
-  "therock-7.13-gfx1151-full": {
-    "url": "https://github.com/ROCm/TheRock.git",
-    "ref": "refs/tags/therock-7.13",
-    "rev": "6d2136cd12be28c6251eb38c700e980c8c2f8cf6",
-    "target": "gfx1151",
-    "version": "7.13",
-    "fetchArgs": [
-      "--nested-submodules",
-      "iree:third_party/flatcc,third_party/benchmark,third_party/llvm-project,third_party/torch-mlir",
-      "rocm-systems:experimental/python/perfxpert/opencode,projects/rocprofiler/perfetto,projects/rocprofiler-sdk/external/googletest,projects/rocprofiler-register/external/glog,projects/rocprofiler-sdk/external/fmt,projects/rocprofiler-register/external/fmt,projects/rocprofiler-sdk/source/docs/doxygen-awesome-css,projects/rocprofiler-sdk/external/ptl,projects/rocprofiler-sdk/external/cereal,projects/rocprofiler-sdk/external/filesystem,projects/rocprofiler-sdk/external/perfetto,projects/rocprofiler-sdk/external/elfio,projects/rocprofiler-sdk/external/yaml-cpp,projects/rocprofiler-sdk/external/json,projects/rocprofiler-sdk/external/sqlite,projects/rocprofiler-sdk/external/pybind11,projects/rocprofiler-sdk/external/gotcha,projects/rocprofiler-systems/external/timemory,projects/rocprofiler-systems/external/perfetto,projects/rocprofiler-systems/external/elfio,projects/rocprofiler-systems/external/dyninst,projects/rocprofiler-systems/external/kokkos,projects/rocprofiler-systems/external/papi,projects/rocprofiler-systems/external/pybind11,projects/rocprofiler-systems/external/sqlite,projects/rocprofiler-systems/examples/openmp/external/ompvv,projects/rocprofiler-systems/external/googletest,projects/rocprofiler-systems/external/filesystem,projects/rocprofiler-systems/external/spdlog,projects/rocprofiler-systems/external/json,projects/rocprofiler-compute/src/vendored/pyyaml,projects/rocprofiler-systems/external/onetbb,projects/rocprofiler-sdk/external/abseil-cpp",
-      "rocm-libraries:fin,HostLibraryTests/googletest"
-    ],
-    "deepNestedSubmodules": [
-      {
-        "parent": "rocm-systems/projects/rocprofiler-systems/external/timemory",
-        "paths": [
-          "external/yaml-cpp",
-          "external/libunwind",
-          "external/gotcha"
-        ]
-      }
-    ],
-    "updated": "2026-05-21T19:30:46.386399+00:00"
+  "targets": {
+    "gfx1151": {
+      "url": "https://github.com/ROCm/TheRock.git",
+      "ref": "refs/tags/therock-7.13",
+      "rev": "6d2136cd12be28c6251eb38c700e980c8c2f8cf6",
+      "version": "7.13",
+      "fetchArgs": [
+        "--nested-submodules",
+        "iree:third_party/flatcc,third_party/benchmark,third_party/llvm-project,third_party/torch-mlir",
+        "rocm-systems:experimental/python/perfxpert/opencode,projects/rocprofiler/perfetto,projects/rocprofiler-sdk/external/googletest,projects/rocprofiler-register/external/glog,projects/rocprofiler-sdk/external/fmt,projects/rocprofiler-register/external/fmt,projects/rocprofiler-sdk/source/docs/doxygen-awesome-css,projects/rocprofiler-sdk/external/ptl,projects/rocprofiler-sdk/external/cereal,projects/rocprofiler-sdk/external/filesystem,projects/rocprofiler-sdk/external/perfetto,projects/rocprofiler-sdk/external/elfio,projects/rocprofiler-sdk/external/yaml-cpp,projects/rocprofiler-sdk/external/json,projects/rocprofiler-sdk/external/sqlite,projects/rocprofiler-sdk/external/pybind11,projects/rocprofiler-sdk/external/gotcha,projects/rocprofiler-systems/external/timemory,projects/rocprofiler-systems/external/perfetto,projects/rocprofiler-systems/external/elfio,projects/rocprofiler-systems/external/dyninst,projects/rocprofiler-systems/external/kokkos,projects/rocprofiler-systems/external/papi,projects/rocprofiler-systems/external/pybind11,projects/rocprofiler-systems/external/sqlite,projects/rocprofiler-systems/examples/openmp/external/ompvv,projects/rocprofiler-systems/external/googletest,projects/rocprofiler-systems/external/filesystem,projects/rocprofiler-systems/external/spdlog,projects/rocprofiler-systems/external/json,projects/rocprofiler-compute/src/vendored/pyyaml,projects/rocprofiler-systems/external/onetbb,projects/rocprofiler-sdk/external/abseil-cpp",
+        "rocm-libraries:fin,HostLibraryTests/googletest"
+      ],
+      "deepNestedSubmodules": [
+        {
+          "parent": "rocm-systems/projects/rocprofiler-systems/external/timemory",
+          "paths": [
+            "external/yaml-cpp",
+            "external/libunwind",
+            "external/gotcha"
+          ]
+        }
+      ],
+      "updated": "2026-05-21T19:30:46.386399+00:00"
+    }
   }
 }

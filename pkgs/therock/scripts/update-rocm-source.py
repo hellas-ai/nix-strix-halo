@@ -105,14 +105,9 @@ def load_sources(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def source_key(series: str, target: str) -> str:
-    return f"therock-{series}-{target}-full"
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="pkgs/therock/sources/rocm-source.json")
-    parser.add_argument("--key", help="JSON key to write; generated from --series and --target by default")
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--series", default=DEFAULT_SERIES)
     parser.add_argument("--ref", help="Git ref to pin; defaults to refs/tags/therock-${series}")
@@ -136,7 +131,6 @@ def main() -> None:
 
     output = Path(args.output)
     sources = load_sources(output)
-    key = args.key or source_key(args.series, args.target)
     ref = args.ref or f"refs/tags/therock-{args.series}"
     version = args.version or args.series
     rev = args.rev or git_rev(args.url, ref)
@@ -147,11 +141,11 @@ def main() -> None:
         else DEFAULT_DEEP_NESTED_SUBMODULES
     )
 
-    sources[key] = {
+    targets = sources.setdefault("targets", {})
+    targets[args.target] = {
         "url": args.url,
         "ref": ref,
         "rev": rev,
-        "target": args.target,
         "version": version,
         "fetchArgs": fetch_args,
         "deepNestedSubmodules": deep_nested_submodules,

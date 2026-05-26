@@ -331,7 +331,7 @@
       defaultTherockSources = {
         rocm = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm.json);
         pythonWheels = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/python-wheels.json);
-        rocmSource = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm-source.json);
+        rocmSourcePins = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm-source.json);
         rocmSourceTrees = import ./pkgs/therock/sources/source-tree.nix { inherit inputs; };
         rocmThirdParty = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm-third-party.json);
       };
@@ -346,7 +346,7 @@
           inherit lib rocmTargets target;
           therockRocmSources = sources.rocm;
           therockPythonWheelSources = sources.pythonWheels;
-          therockRocmSourcePins = sources.rocmSource;
+          therockRocmSourcePins = sources.rocmSourcePins;
           therockRocmSourceTrees = sources.rocmSourceTrees;
           therockRocmThirdPartySources = sources.rocmThirdParty;
         };

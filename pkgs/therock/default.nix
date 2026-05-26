@@ -26,30 +26,23 @@ let
 
   hsaOverrideFor = rocmTarget: rocmTarget.hsaOverride or null;
 
-  sourceEntries = lib.mapAttrsToList (key: source: source // { inherit key; }) therockRocmSourcePins;
-
-  sourceMatchesTarget = suffix: source: (source.target or null) == suffix;
+  sourcePinsByTarget = therockRocmSourcePins.targets;
 
   sourceFor =
     suffix:
-    let
-      matches = builtins.filter (source: sourceMatchesTarget suffix source) sourceEntries;
-    in
-    if matches == [ ] then
-      throw "missing TheRock source pin for ${suffix}"
-    else if builtins.length matches != 1 then
-      throw "multiple TheRock source pins for ${suffix}"
+    if builtins.hasAttr suffix sourcePinsByTarget then
+      sourcePinsByTarget.${suffix}
     else
-      builtins.head matches;
+      throw "missing TheRock source pin for ${suffix}";
 
   defaultSource = sourceFor target.packageSuffix;
 
   lockedSourceTreeFor =
     suffix:
     let
-      sourceTree = therockRocmSourceTrees.${suffix} or null;
+      sourceTree = therockRocmSourceTrees.${suffix};
     in
-    if sourceTree == null then
+    if !(builtins.hasAttr suffix therockRocmSourceTrees) then
       throw "missing locked TheRock source tree inputs for ${suffix}"
     else if !(builtins.isAttrs sourceTree && sourceTree ? root && sourceTree ? submodules) then
       throw "invalid locked TheRock source tree inputs for ${suffix}"
@@ -306,7 +299,7 @@ let
     };
 
   therockFromSourceTargets = builtins.filter (
-    rocmTarget: builtins.any (source: sourceMatchesTarget rocmTarget.packageSuffix source) sourceEntries
+    rocmTarget: builtins.hasAttr rocmTarget.packageSuffix sourcePinsByTarget
   ) rocmTargets;
 
   therockFromSourcePerArch = lib.foldl' lib.recursiveUpdate { } (

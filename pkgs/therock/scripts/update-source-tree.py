@@ -207,13 +207,8 @@ def resolve_submodule(
     raise RuntimeError(f"could not resolve submodule {selector!r} in {repo_dir}")
 
 
-def source_key(series: str, target: str) -> str:
-    return f"therock-{series}-{target}-full"
-
-
-def build_graph(root_dir: Path, source: dict[str, object]) -> tuple[SourceEntry, list[SourceEntry]]:
+def build_graph(root_dir: Path, target: str, source: dict[str, object]) -> tuple[SourceEntry, list[SourceEntry]]:
     series = str(source["version"])
-    target = str(source["target"])
     root_source = GitSource(url=str(source["url"]), rev=str(source["rev"]))
     root_entry = SourceEntry(
         path="",
@@ -342,14 +337,13 @@ def write_tree(path: Path, target: str, version: str, root: SourceEntry, submodu
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sources", type=Path, default=DEFAULT_SOURCES)
-    parser.add_argument("--series", default="7.13")
     parser.add_argument("--target", default="gfx1151")
     parser.add_argument("--flake", type=Path, default=DEFAULT_FLAKE)
     parser.add_argument("--tree-output", type=Path, default=DEFAULT_TREE_OUTPUT)
     args = parser.parse_args()
 
     sources = json.loads(args.sources.read_text())
-    source = sources[source_key(args.series, args.target)]
+    source = sources["targets"][args.target]
 
     with tempfile.TemporaryDirectory(prefix="therock-source-tree-") as temp:
         root_dir = Path(temp) / "root"
@@ -358,7 +352,7 @@ def main() -> None:
             GitSource(url=str(source["url"]), rev=str(source["rev"])),
             checkout=True,
         )
-        root, submodules = build_graph(root_dir, source)
+        root, submodules = build_graph(root_dir, args.target, source)
 
     update_flake_inputs(args.flake, root, submodules)
     write_tree(args.tree_output, args.target, str(source["version"]), root, submodules)
