@@ -16,6 +16,22 @@
         "type": "github"
       }
     },
+    "fastflowlm": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778687531,
+        "narHash": "sha256-hJNZntx0GjHHmKNRCmJ3VLz7C68Y+XjrnLPHplnJJJM=",
+        "owner": "FastFlowLM",
+        "repo": "FastFlowLM",
+        "rev": "c99e5ae21b1e72d3e32fca1eb379b49d50d33756",
+        "type": "github"
+      },
+      "original": {
+        "owner": "FastFlowLM",
+        "repo": "FastFlowLM",
+        "type": "github"
+      }
+    },
     "llama-cpp-master": {
       "flake": false,
       "locked": {
@@ -51,6 +67,7 @@
     "root": {
       "inputs": {
         "ec-su-axb35": "ec-su-axb35",
+        "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",
         "nixpkgs": "nixpkgs",
         "therock-src-7-13-gfx1151-base-half-011b45bd": "therock-src-7-13-gfx1151-base-half-011b45bd",
@@ -107,7 +124,9 @@
         "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531": "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531",
         "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf",
         "therock-src-7-13-gfx1151-root": "therock-src-7-13-gfx1151-root",
-        "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c"
+        "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c",
+        "xdna-driver-src": "xdna-driver-src",
+        "xrt-src": "xrt-src"
       }
     },
     "therock-src-7-13-gfx1151-base-half-011b45bd": {
@@ -1043,6 +1062,44 @@
         "repo": "mesa-fork",
         "rev": "9a0d5b03fd540cb2448c64bbda17dbf17ccb12bf",
         "type": "github"
+      }
+    },
+    "xdna-driver-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779227778,
+        "narHash": "sha256-srpsvE7Np9gev0K/vXtlc8WownzX+oZVwLMLxU89qQ0=",
+        "ref": "1.7",
+        "rev": "944ca35a395b7dfa37ac3f437f1da48feca7bffc",
+        "revCount": 871,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/amd/xdna-driver"
+      },
+      "original": {
+        "ref": "1.7",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/amd/xdna-driver"
+      }
+    },
+    "xrt-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779224521,
+        "narHash": "sha256-xErKqZFOFiY+k0o1L8bki6kPwahba66hOxvuj4czXh4=",
+        "ref": "XRT-2.21",
+        "rev": "c14df528b9e98ef1ecaf05f5720ef05d9158dc22",
+        "revCount": 8683,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/Xilinx/XRT"
+      },
+      "original": {
+        "ref": "XRT-2.21",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/Xilinx/XRT"
       }
     }
   },
