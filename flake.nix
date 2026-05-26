@@ -570,8 +570,62 @@
             in
             flattenBenchmarks ds4MetalBenchmarks // flattenBenchmarks mlxMetalBenchmarks
           );
+
+          cudaSmokeBenchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
+            let
+              cudaPkgs = cudaPackagesFor system;
+              nvidiaSmi = cudaPkgs.linuxPackages.nvidia_x11.bin;
+            in
+            {
+              bench-cuda-rtx4090-llama-cpp-master-device-smoke = benchLib.mkBenchmark {
+                pkgs = cudaPkgs;
+                name = "cuda-rtx4090-llama-cpp-master-device-smoke";
+                package = cudaPkgs.llama-cpp-master-cuda;
+                packages = [ nvidiaSmi ];
+                command = [
+                  (cudaPkgs.writeShellScript "cuda-rtx4090-llama-cpp-master-device-smoke" ''
+                    set -euo pipefail
+                    ${nvidiaSmi}/bin/nvidia-smi -L
+                    ${cudaPkgs.llama-cpp-master-cuda}/bin/llama-bench --list-devices
+                  '')
+                ];
+                requirements = {
+                  systemFeatures = [ "cuda-smoke" ];
+                  hostProfiles = [ "linux-nvidia-cuda" ];
+                  sandboxPaths = [
+                    "/dev/nvidia0"
+                    "/dev/nvidiactl"
+                    "/dev/nvidia-uvm"
+                    "/dev/nvidia-uvm-tools"
+                    "/dev/nvidia-caps"
+                    "/proc/driver/nvidia"
+                    "/run/opengl-driver"
+                  ];
+                };
+                metadata = {
+                  kind = "cuda-smoke";
+                  suite = "cuda";
+                  accelerator = "cuda";
+                  scenario = "device-smoke";
+                  target = {
+                    vendor = "nvidia";
+                    arch = "sm_89";
+                    deviceClass = "rtx4090";
+                    systemFeature = "cuda-smoke";
+                  };
+                  tool = {
+                    backend = "cuda";
+                    executable = "llama-bench --list-devices";
+                    packageRole = "llama-cpp-master-cuda";
+                  };
+                };
+                meta.platforms = [ "x86_64-linux" ];
+                description = "Run CUDA llama.cpp device smoke test";
+              };
+            }
+          );
         in
-        flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks;
+        flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaSmokeBenchmarks;
 
       mkLiveIsoConfiguration =
         {
@@ -1181,6 +1235,7 @@
                       hostName = "gpu-builder.example";
                       sshUser = "builder";
                       systemFeatures = [ "rocm" ];
+                      mandatoryFeatures = [ "benchmark" ];
                       gpus = [
                         {
                           type = "amd";
@@ -1294,6 +1349,7 @@
                   and .buildMachines[0].sshUser == "builder"
                   and (.buildMachines[0].supportedFeatures | index("rocm") != null)
                   and (.buildMachines[0].supportedFeatures | index("gfx1151") != null)
+                  and .buildMachines[0].mandatoryFeatures == [ "benchmark" ]
                   and .knownHosts."gpu-builder.example".publicKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBenchmarkExecutorCheck"
                 ' executor.json
 
@@ -1340,6 +1396,10 @@
             vllmLatencyBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-latency-smoke;
             vllmLatencyBenchmarkMetadata = builtins.toJSON (
               removeAttrs vllmLatencyBenchmark.passthru.benchmark [ "command" ]
+            );
+            cudaSmokeBenchmark = benchmarkSet.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+            cudaSmokeBenchmarkMetadata = builtins.toJSON (
+              removeAttrs cudaSmokeBenchmark.passthru.benchmark [ "command" ]
             );
           in
           {
@@ -1466,6 +1526,33 @@
                     and .target.packageSuffix == "gfx1151"
                     and .tool.packageRole == "mlx-rocm-gfx1151"
                     and .tool.executable == "python"
+                  ' metadata.json
+
+                  touch "$out"
+                '';
+
+            cuda-smoke-benchmark-metadata =
+              pkgs.runCommandLocal "ci-cuda-smoke-benchmark-metadata"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > metadata.json <<'JSON'
+                  ${cudaSmokeBenchmarkMetadata}
+                  JSON
+
+                  jq -e '
+                    .kind == "cuda-smoke"
+                    and .accelerator == "cuda"
+                    and .scenario == "device-smoke"
+                    and .requirements.systemFeatures == [ "cuda-smoke" ]
+                    and .requirements.hostProfiles == [ "linux-nvidia-cuda" ]
+                    and (.requirements.sandboxPaths | index("/dev/nvidia0") != null)
+                    and (.requirements.sandboxPaths | index("/run/opengl-driver") != null)
+                    and .target.deviceClass == "rtx4090"
+                    and .target.arch == "sm_89"
+                    and .packages == [ "llama-cpp-master-cuda", "nvidia-x11" ]
+                    and .tool.executable == "llama-bench --list-devices"
                   ' metadata.json
 
                   touch "$out"
@@ -1723,6 +1810,12 @@
             vllm =
               afterPrQuick "vllm"
                 self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
+            vllm-throughput-smoke =
+              afterPrQuick "vllm-throughput-smoke"
+                self.benchmarks.${system}.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
+            cuda-smoke =
+              afterPrQuick "cuda-smoke"
+                self.benchmarks.${system}.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
           };
         in
         lib.optionalAttrs isSourceCheckSystem {
