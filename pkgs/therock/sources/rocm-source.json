@@ -2,7 +2,7 @@
   "targets": {
     "gfx1151": {
       "url": "https://github.com/ROCm/TheRock.git",
-      "ref": "refs/tags/therock-7.13",
+      "ref": "refs/heads/release/therock-7.13",
       "rev": "6d2136cd12be28c6251eb38c700e980c8c2f8cf6",
       "version": "7.13",
       "fetchArgs": [

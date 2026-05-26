@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -81,6 +82,48 @@ def fetch_repo(repo_dir: Path, source: GitSource, *, checkout: bool = False) -> 
 
     if checkout:
         run(["git", "checkout", "-q", "--detach", "source"], cwd=repo_dir)
+
+
+def git_rev(url: str, ref: str) -> str:
+    result = run(["git", "ls-remote", url, ref, f"{ref}^{{}}"])
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError(f"no revision found for {url} {ref}")
+
+    peeled_ref = f"{ref}^{{}}"
+    for line in lines:
+        rev, resolved_ref = line.split()[:2]
+        if resolved_ref == peeled_ref:
+            return rev
+    for line in lines:
+        rev, resolved_ref = line.split()[:2]
+        if resolved_ref == ref:
+            return rev
+    raise RuntimeError(f"no exact revision found for {url} {ref}:\n{result.stdout}")
+
+
+def resolve_source(source: dict[str, object]) -> dict[str, object]:
+    resolved = dict(source)
+    ref = resolved.get("ref")
+    if ref is None:
+        return resolved
+
+    rev = git_rev(str(resolved["url"]), str(ref))
+    if resolved.get("rev") != rev:
+        resolved["rev"] = rev
+        resolved["updated"] = datetime.now(timezone.utc).isoformat()
+    return resolved
+
+
+def update_sources_file(path: Path, sources: dict[str, object], target: str, source: dict[str, object]) -> None:
+    targets = sources["targets"]
+    if not isinstance(targets, dict):
+        raise RuntimeError(f"invalid targets in {path}")
+    if targets[target] == source:
+        return
+
+    targets[target] = source
+    path.write_text(json.dumps(sources, indent=2) + "\n")
 
 
 def git_config_blob(repo_dir: Path, key_regex: str) -> dict[str, str]:
@@ -343,7 +386,8 @@ def main() -> None:
     args = parser.parse_args()
 
     sources = json.loads(args.sources.read_text())
-    source = sources["targets"][args.target]
+    source = resolve_source(sources["targets"][args.target])
+    update_sources_file(args.sources, sources, args.target, source)
 
     with tempfile.TemporaryDirectory(prefix="therock-source-tree-") as temp:
         root_dir = Path(temp) / "root"

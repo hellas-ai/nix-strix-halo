@@ -110,7 +110,7 @@ def main() -> None:
     parser.add_argument("--output", default="pkgs/therock/sources/rocm-source.json")
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--series", default=DEFAULT_SERIES)
-    parser.add_argument("--ref", help="Git ref to pin; defaults to refs/tags/therock-${series}")
+    parser.add_argument("--ref", help="Git ref to pin; defaults to refs/heads/release/therock-${series}")
     parser.add_argument("--rev", help="Exact TheRock commit; otherwise resolved with git ls-remote")
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--version", help="Package version to record; defaults to --series")
@@ -131,7 +131,7 @@ def main() -> None:
 
     output = Path(args.output)
     sources = load_sources(output)
-    ref = args.ref or f"refs/tags/therock-{args.series}"
+    ref = args.ref or f"refs/heads/release/therock-{args.series}"
     version = args.version or args.series
     rev = args.rev or git_rev(args.url, ref)
     fetch_args = args.fetch_args if args.fetch_args is not None else DEFAULT_FETCH_ARGS
