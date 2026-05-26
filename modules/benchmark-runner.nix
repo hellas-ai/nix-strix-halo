@@ -65,7 +65,11 @@ let
     ]
     ++ optionals hasAmdGpu [
       "/dev/kfd"
+      "/sys/bus/pci/devices"
+      "/sys/class/hwmon"
       "/sys/class/kfd"
+      "/sys/class/net"
+      "/sys/class/scsi_host"
     ]
     ++ optionals hasAmdNpu [
       "/dev/accel"

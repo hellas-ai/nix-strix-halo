@@ -282,8 +282,12 @@ let
         sandboxPaths = [
           "/dev/dri"
           "/dev/kfd"
+          "/sys/bus/pci/devices"
           "/sys/class/drm"
+          "/sys/class/hwmon"
           "/sys/class/kfd"
+          "/sys/class/net"
+          "/sys/class/scsi_host"
           resolvedModelRoot
         ];
       };
