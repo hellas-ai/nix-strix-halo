@@ -1,11 +1,23 @@
 {
   pkgs,
   package,
-  modelRoot ? "/models/ds4",
-  target,
-  hostProfile ? "linux-amd-kfd",
+  modelRoot ? if pkgs.stdenv.isDarwin then "/Users/Shared/models/ds4" else "/models/ds4",
+  modelPath ? "${modelRoot}/ds4flash.gguf",
+  target ? null,
+  accelerator ? if pkgs.stdenv.isDarwin then "metal" else "rocm",
+  hostProfile ? if accelerator == "metal" then "darwin-metal" else "linux-amd-kfd",
   matrixMetadata ? { },
+  extraSystemFeatures ? [ ],
+  extraSandboxPaths ? [ ],
+  cases ? null,
 }:
+
+assert pkgs.lib.assertMsg (
+  accelerator == "metal" || accelerator == "rocm"
+) "unsupported DS4 benchmark accelerator: ${accelerator}";
+assert pkgs.lib.assertMsg (
+  accelerator == "metal" || target != null
+) "DS4 ROCm benchmarks require a target record";
 
 let
   inherit (pkgs) lib;
@@ -13,31 +25,80 @@ let
 
   clean = lib.replaceStrings [ ":" "." "/" "_" ] [ "-" "-" "-" "-" ];
 
+  isMetal = accelerator == "metal";
+  backend = if isMetal then "metal" else "hip";
+  packageRole = if isMetal then "ds4" else "ds4-rocm";
+  backendFlag = if isMetal then "--metal" else "--cuda";
+  namePrefix = if isMetal then "ds4-metal" else "ds4-rocm-${target.packageSuffix}";
+  promptBackend = if isMetal then "Metal" else "ROCm";
+  metaPlatforms = if isMetal then [ "aarch64-darwin" ] else [ "x86_64-linux" ];
+  systemFeatures =
+    (
+      if isMetal then
+        [
+          "metal"
+          "benchmark"
+        ]
+      else
+        [ target.systemFeature ]
+    )
+    ++ extraSystemFeatures;
+  sandboxPaths =
+    (
+      if isMetal then
+        [ modelRoot ]
+      else
+        [
+          "/dev/dri"
+          "/dev/kfd"
+          "/sys/class/drm"
+          "/sys/class/kfd"
+          modelRoot
+        ]
+    )
+    ++ extraSandboxPaths;
+  targetMetadata =
+    if isMetal then
+      {
+        packageSuffix = "metal";
+        runtimeArch = "metal";
+        systemFeature = "metal";
+      }
+    else
+      {
+        inherit (target)
+          packageSuffix
+          runtimeArch
+          systemFeature
+          ;
+      };
+
+  smokeCase = {
+    scenario = "smoke";
+    ctxStart = 128;
+    ctxMax = 256;
+    stepIncr = 128;
+    genTokens = 8;
+    promptRepeats = 1024;
+    fastFull = false;
+  };
+
+  fastFullCase = {
+    scenario = "fast-full";
+    ctxStart = 2048;
+    ctxMax = 16384;
+    stepIncr = 2048;
+    genTokens = 32;
+    promptRepeats = 32768;
+    fastFull = true;
+  };
+
   modelConfigs = {
     deepseek-v4-flash = {
-      path = "${modelRoot}/ds4flash.gguf";
+      path = modelPath;
       repo = "antirez/deepseek-v4-gguf";
       description = "DeepSeek V4 Flash GGUF for DwarfStar 4";
-      cases = [
-        {
-          scenario = "smoke";
-          ctxStart = 128;
-          ctxMax = 256;
-          stepIncr = 128;
-          genTokens = 8;
-          promptRepeats = 1024;
-          fastFull = false;
-        }
-        {
-          scenario = "fast-full";
-          ctxStart = 2048;
-          ctxMax = 16384;
-          stepIncr = 2048;
-          genTokens = 32;
-          promptRepeats = 32768;
-          fastFull = true;
-        }
-      ];
+      cases = if cases == null then [ smokeCase ] ++ lib.optionals (!isMetal) [ fastFullCase ] else cases;
     };
   };
 
@@ -46,7 +107,7 @@ let
       scenario,
       ...
     }:
-    "ds4-rocm-${target.packageSuffix}-${clean scenario}";
+    "${namePrefix}-${clean scenario}";
 
   mkRunner =
     model:
@@ -62,17 +123,17 @@ let
     let
       executable = if fastFull then "ds4-bench-fast-full" else "ds4-bench";
     in
-    pkgs.writeShellScript "ds4-rocm-${target.packageSuffix}-benchmark-runner" ''
+    pkgs.writeShellScript "${namePrefix}-benchmark-runner" ''
       set -euo pipefail
 
       prompt="$TMPDIR/ds4-prompt.txt"
       for i in $(seq 1 ${toString promptRepeats}); do
-        printf 'DwarfStar 4 ROCm benchmark prompt paragraph %05d. This text is intentionally repetitive and deterministic so the fixed token sequence is long enough for context frontier measurement. It discusses GPU memory bandwidth, attention prefill, routed experts, and decode throughput on AMD Strix Halo. ' "$i"
+        printf 'DwarfStar 4 ${promptBackend} benchmark prompt paragraph %05d. This text is intentionally repetitive and deterministic so the fixed token sequence is long enough for context frontier measurement. It discusses GPU memory bandwidth, attention prefill, routed experts, and decode throughput. ' "$i"
       done > "$prompt"
 
       ${package}/bin/${executable} \
         -m ${lib.escapeShellArg model.path} \
-        --cuda \
+        ${backendFlag} \
         --prompt-file "$prompt" \
         --ctx-start ${toString ctxStart} \
         --ctx-max ${toString ctxMax} \
@@ -117,34 +178,28 @@ let
         DS4_MODEL = model.path;
         DS4_SERVER_PERFLEVEL = "skip";
         DS4_SERVER_FAST_FULL = if fastFull then "1" else null;
+        DS4_METAL_NO_RESIDENCY = if isMetal then "1" else null;
+        DS4_METAL_NO_MODEL_WARMUP = if isMetal then "1" else null;
       };
       requirements = {
-        systemFeatures = [ target.systemFeature ];
+        inherit
+          systemFeatures
+          sandboxPaths
+          ;
         hostProfiles = [ hostProfile ];
-        sandboxPaths = [
-          "/dev/dri"
-          "/dev/kfd"
-          "/sys/class/drm"
-          "/sys/class/kfd"
-          modelRoot
-        ];
       };
       metadata = lib.recursiveUpdate {
         kind = "ds4";
         suite = "ds4";
-        accelerator = "rocm";
-        backend = "hip";
+        inherit
+          accelerator
+          backend
+          ;
         inherit
           params
           scenario
           ;
-        target = {
-          inherit (target)
-            packageSuffix
-            runtimeArch
-            systemFeature
-            ;
-        };
+        target = targetMetadata;
         model = {
           name = modelName;
           inherit (model)
@@ -154,12 +209,14 @@ let
             ;
         };
         tool = {
-          backend = "rocm";
-          packageRole = "ds4-rocm";
+          inherit
+            backend
+            packageRole
+            ;
         };
       } matrixMetadata;
-      meta.platforms = [ "x86_64-linux" ];
-      description = "Run DS4 ROCm benchmark ${modelName}/${name}";
+      meta.platforms = metaPlatforms;
+      description = "Run DS4 ${promptBackend} benchmark ${modelName}/${name}";
     };
 
   generateModelBenchmarks =

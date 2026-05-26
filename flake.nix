@@ -19,6 +19,11 @@
       flake = false;
     };
 
+    ds4 = {
+      url = "github:antirez/ds4";
+      flake = false;
+    };
+
     ds4-hip = {
       url = "github:ejpir/ds4-hip/rocm-upstream-shape-cyberneurova";
       flake = false;
@@ -340,6 +345,10 @@
       darwinSystems = [ "aarch64-darwin" ];
       systems = linuxSystems ++ darwinSystems;
       forAllSystems = lib.genAttrs systems;
+      inputShortRev =
+        input: input.shortRev or (if input ? rev then builtins.substring 0 7 input.rev else "unknown");
+      inputVersion = prefix: input: "${prefix}-unstable-${inputShortRev input}";
+      unstableInputVersion = input: "unstable-${inputShortRev input}";
 
       rocmTargetLib = import ./lib/rocm-targets.nix;
       therockTargetConfig = import ./pkgs/therock/targets.nix {
@@ -439,6 +448,7 @@
       mkBenchmarkSuites =
         pkgs:
         let
+          system = pkgs.stdenv.hostPlatform.system;
           defaultTargetMetadata = {
             inherit (defaultRocmTarget)
               packageSuffix
@@ -528,8 +538,20 @@
             // flattenBenchmarks ds4Benchmarks
             // flattenBenchmarks vllmBenchmarks
           );
+
+          darwinBenchmarks = lib.optionalAttrs pkgs.stdenv.isDarwin (
+            let
+              ds4MetalBenchmarks =
+                (import ./bench/suites/ds4.nix {
+                  inherit pkgs;
+                  package = self.packages.${system}.ds4;
+                  accelerator = "metal";
+                }).benchmarks;
+            in
+            flattenBenchmarks ds4MetalBenchmarks
+          );
         in
-        flattenBenchmarks genericBenchmarks // linuxBenchmarks;
+        flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks;
 
       mkFevmFaex9Configuration =
         {
@@ -630,11 +652,6 @@
                 cudaSupport = true;
                 rpcSupport = true;
               };
-              inputVersion =
-                prefix: input:
-                "${prefix}-unstable-${
-                  input.shortRev or (if input ? rev then builtins.substring 0 7 input.rev else "unknown")
-                }";
               ds4RocmTargets = builtins.filter (
                 rocmTarget: builtins.hasAttr rocmTarget.packageSuffix defaultTherockSources.rocm.linux
               ) rocmTargets;
@@ -818,13 +835,22 @@
             // ds4RocmPackages
             // llamaCppTargetPackages
             // therockPackages;
+          darwinPackages = {
+            ds4 = pkgs.callPackage ./pkgs/ds4 {
+              src = inputs.ds4;
+              version = unstableInputVersion inputs.ds4;
+            };
+          };
         in
-        genericPackages // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
+        genericPackages
+        // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
+        // lib.optionalAttrs pkgs.stdenv.isDarwin darwinPackages
       );
 
       apps = perSystem (
         pkgs:
         let
+          system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
           mkApp =
             {
@@ -952,8 +978,28 @@
               description = "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
             };
           };
+
+          darwinApps =
+            let
+              ds4Package = self.packages.${system}.ds4;
+              mkDs4App = binary: description: {
+                type = "app";
+                program = "${ds4Package}/bin/${binary}";
+                meta.description = description;
+              };
+            in
+            {
+              ds4 = mkDs4App "ds4" "Run DwarfStar 4 with Metal";
+              ds4-server = mkDs4App "ds4-server" "Run the DwarfStar 4 HTTP server with Metal";
+              ds4-bench = mkDs4App "ds4-bench" "Run the DwarfStar 4 benchmark with Metal";
+              ds4-eval = mkDs4App "ds4-eval" "Run DwarfStar 4 eval with Metal";
+              ds4-agent = mkDs4App "ds4-agent" "Run the DwarfStar 4 agent with Metal";
+              ds4-download-model = mkDs4App "ds4-download-model" "Download DS4 DeepSeek V4 Flash GGUF weights";
+            };
         in
-        genericApps // lib.optionalAttrs pkgs.stdenv.isLinux linuxApps
+        genericApps
+        // lib.optionalAttrs pkgs.stdenv.isLinux linuxApps
+        // lib.optionalAttrs pkgs.stdenv.isDarwin darwinApps
       );
 
       devShells = perSystem (pkgs: {
@@ -1325,6 +1371,44 @@
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
           }
         )
+        // lib.optionalAttrs pkgs.stdenv.isDarwin (
+          let
+            ds4MetalBenchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-metal-smoke;
+            ds4MetalBenchmarkMetadata = builtins.toJSON ds4MetalBenchmark.passthru.benchmark;
+          in
+          {
+            ds4-metal-benchmark-metadata =
+              pkgs.runCommandLocal "ci-ds4-metal-benchmark-metadata"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > metadata.json <<'JSON'
+                  ${ds4MetalBenchmarkMetadata}
+                  JSON
+
+                  jq -e '
+                    .kind == "ds4"
+                    and .accelerator == "metal"
+                    and .backend == "metal"
+                    and .requirements.systemFeatures == [ "metal", "benchmark" ]
+                    and .requirements.hostProfiles == [ "darwin-metal" ]
+                    and (.requirements.sandboxPaths | index("/Users/Shared/models/ds4") != null)
+                    and .model.path == "/Users/Shared/models/ds4/ds4flash.gguf"
+                    and .packages == [ "ds4" ]
+                    and .env.DS4_METAL_NO_RESIDENCY == "1"
+                    and .env.DS4_METAL_NO_MODEL_WARMUP == "1"
+                    and .target.packageSuffix == "metal"
+                    and .tool.packageRole == "ds4"
+                    and .params.ctxStart == 128
+                    and .params.ctxMax == 256
+                    and .params.genTokens == 8
+                  ' metadata.json
+
+                  touch "$out"
+                '';
+          }
+        )
       );
 
       hydraJobs = perSystem (
@@ -1362,6 +1446,12 @@
 
           prFullJobs = {
             default = afterPrQuick "default" self.packages.${system}.default;
+          }
+          // lib.optionalAttrs (system == "aarch64-darwin") {
+            ds4 = afterPrQuick "ds4" self.packages.${system}.ds4;
+            ds4-metal-smoke =
+              afterPrQuick "ds4-metal-smoke"
+                self.benchmarks.${system}.bench-deepseek-v4-flash-ds4-metal-smoke;
           }
           // lib.optionalAttrs (system == "x86_64-linux") {
             system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;

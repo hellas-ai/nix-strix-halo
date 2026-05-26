@@ -31,6 +31,7 @@ nix flake show
 Main package outputs:
 
 - `packages.aarch64-darwin.default`
+- `packages.aarch64-darwin.ds4`
 - `packages.aarch64-darwin.llama-cpp`
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.ds4-rocm`
@@ -49,6 +50,9 @@ Main app outputs:
 
 - `apps.aarch64-darwin.llama-cli`
 - `apps.aarch64-darwin.llama-server`
+- `apps.aarch64-darwin.ds4`
+- `apps.aarch64-darwin.ds4-server`
+- `apps.aarch64-darwin.ds4-bench`
 - `apps.x86_64-linux.llama-cli`
 - `apps.x86_64-linux.llama-server`
 - `apps.x86_64-linux.llama-cli-rocm`
@@ -85,7 +89,11 @@ Example configuration helper:
 }
 ```
 
-On macOS, the overlay intentionally exposes only generic non-ROCm outputs such as `llama-cpp`, CPU `llama-cli`/`llama-server` apps, and CPU benchmark derivations. ROCm, TheRock, EC, and firmware outputs are Linux-only.
+On macOS, the overlay intentionally exposes only generic non-ROCm outputs such as `llama-cpp`, CPU `llama-cli`/`llama-server` apps, DS4 Metal outputs, and CPU benchmark derivations. ROCm, TheRock, EC, and firmware outputs are Linux-only.
+
+The DS4 Metal package builds against nixpkgs' `apple-sdk_26` by default because
+it uses newer Metal APIs than the default Darwin SDK. Override `darwinSdk`,
+`darwinSdkRoot`, or `darwinDeploymentTarget` for a different SDK policy.
 
 ## TheRock ROCm Targets
 
@@ -229,6 +237,15 @@ the Nix sandbox:
 
 ```bash
 nix build .#benchmarks.x86_64-linux.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke
+cat result/results.csv
+```
+
+DS4 Metal benchmarks use the same benchmark shape on macOS. They expect the
+GGUF model at `/Users/Shared/models/ds4/ds4flash.gguf` and a Darwin runner
+advertising the `metal` and `benchmark` system features:
+
+```bash
+nix build .#benchmarks.aarch64-darwin.bench-deepseek-v4-flash-ds4-metal-smoke
 cat result/results.csv
 ```
 
