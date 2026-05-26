@@ -5,6 +5,7 @@
   therockRocmSources,
   therockPythonWheelSources,
   therockRocmSourceSources,
+  therockRocmSourceTrees ? { },
   therockRocmThirdPartySources,
 }:
 final: prev:
@@ -49,6 +50,18 @@ let
   sourceFullFor = suffix: sourceFor suffix (source: !sourceIsCompilerStage source);
   sourceCompilerFor = suffix: sourceFor suffix sourceIsCompilerStage;
   defaultSourceFull = sourceFullFor target.packageSuffix;
+
+  lockedSourceTreeFor =
+    suffix:
+    let
+      sourceTree = therockRocmSourceTrees.${suffix} or null;
+    in
+    if sourceTree == null then
+      throw "missing locked TheRock source tree inputs for ${suffix}"
+    else if !(builtins.isAttrs sourceTree && sourceTree ? root && sourceTree ? submodules) then
+      throw "invalid locked TheRock source tree inputs for ${suffix}"
+    else
+      sourceTree;
 
   pythonWheelSourcesByTarget =
     therockPythonWheelSources.targets or (
@@ -215,22 +228,60 @@ let
         rocprofiler-compute = [ suffix ];
       };
 
-      mkSource =
+      mkLockedSource =
         nameSuffix: source:
-        prev.callPackage ./rocm-source {
-          name = "therock-rocm-source-${suffix}-${nameSuffix}";
-          inherit (source)
-            url
-            ref
-            rev
-            hash
-            fetchArgs
-            ;
-          deepNestedSubmodules = source.deepNestedSubmodules or [ ];
-        };
+        let
+          sourceTreeInputs = lockedSourceTreeFor suffix;
+          installSubmodules = lib.concatMapStringsSep "\n" (submodule: ''
+            install_source ${lib.escapeShellArg submodule.path} ${lib.escapeShellArg (toString submodule.source)}
+          '') sourceTreeInputs.submodules;
+        in
+        prev.runCommandLocal
+          "therock-rocm-source-${suffix}-${nameSuffix}-${builtins.substring 0 12 source.rev}"
+          {
+            nativeBuildInputs = [ prev.patch ];
+          }
+          ''
+            install_source() {
+              destination="$1"
+              source_path="$2"
 
-      sourceTree = mkSource "full" sourceFull;
-      compilerTree = mkSource "compiler-stage" sourceCompiler;
+              mkdir -p "$out/$(dirname "$destination")"
+              rm -rf "$out/$destination"
+              mkdir -p "$out/$destination"
+              cp -a --reflink=auto "$source_path"/. "$out/$destination"/
+              chmod -R u+w "$out/$destination"
+            }
+
+            apply_project_patches() {
+              patch_project="$1"
+              source_path="$2"
+              patch_dir="$out/patches/amd-mainline/$patch_project"
+
+              if [ ! -d "$patch_dir" ]; then
+                return 0
+              fi
+
+              for patch_file in "$patch_dir"/*.patch; do
+                if [ -e "$patch_file" ]; then
+                  patch -d "$out/$source_path" -p1 --forward --batch < "$patch_file"
+                fi
+              done
+            }
+
+            mkdir -p "$out"
+            cp -a --reflink=auto ${sourceTreeInputs.root}/. "$out/"
+            chmod -R u+w "$out"
+
+            ${installSubmodules}
+
+            apply_project_patches rocm-systems rocm-systems
+            apply_project_patches llvm-project compiler/amd-llvm
+            apply_project_patches rocm-libraries rocm-libraries
+          '';
+
+      sourceTree = mkLockedSource "full" sourceFull;
+      compilerTree = sourceTree;
 
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;

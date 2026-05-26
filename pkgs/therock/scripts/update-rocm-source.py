@@ -3,9 +3,8 @@
 Refresh TheRock ROCm source pins used by this flake.
 
 This intentionally does not fetch the full source graph. It records the TheRock
-revision and source-fetch policy in JSON. The fixed-output Nix source package
-then fetches the complete staged source tree and reports the recursive hash to
-pin.
+revision and source-fetch policy in JSON. update-source-tree.py turns that
+policy into explicit flake inputs for the root checkout and enabled submodules.
 """
 
 import argparse
@@ -19,7 +18,6 @@ from typing import Any
 DEFAULT_URL = "https://github.com/ROCm/TheRock.git"
 DEFAULT_TARGET = "gfx1151"
 DEFAULT_SERIES = "7.13"
-FAKE_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 DEFAULT_FETCH_ARGS: list[str] = [
     "--nested-submodules",
     "iree:third_party/flatcc,third_party/benchmark,third_party/llvm-project,third_party/torch-mlir",
@@ -136,10 +134,6 @@ def main() -> None:
         type=parse_deep_nested_submodule,
         help="second-level submodule fetch in parent:path1,path2 form; repeat to replace the default policy",
     )
-    parser.add_argument(
-        "--hash",
-        help="Pinned recursive source hash. Omit to preserve the old hash when rev is unchanged, otherwise reset.",
-    )
     args = parser.parse_args()
 
     output = Path(args.output)
@@ -156,22 +150,10 @@ def main() -> None:
         else DEFAULT_DEEP_NESTED_SUBMODULES
     )
 
-    if args.hash:
-        source_hash = args.hash
-    elif (
-        old.get("rev") == rev
-        and old.get("fetchArgs") == fetch_args
-        and old.get("deepNestedSubmodules", []) == deep_nested_submodules
-    ):
-        source_hash = old.get("hash", FAKE_HASH)
-    else:
-        source_hash = FAKE_HASH
-
     sources[key] = {
         "url": args.url,
         "ref": ref,
         "rev": rev,
-        "hash": source_hash,
         "target": args.target,
         "stage": args.stage,
         "version": version,
