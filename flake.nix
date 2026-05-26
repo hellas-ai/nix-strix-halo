@@ -572,12 +572,31 @@
           ]
           ++ extraModules;
         };
+
+      mkFevmFaex9LiveConfiguration =
+        {
+          system ? "x86_64-linux",
+          extraModules ? [ ],
+          specialArgs ? { },
+        }:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          specialArgs = {
+            inherit inputs self;
+          }
+          // specialArgs;
+          modules = [
+            ./examples/fevm-faex9-live/configuration.nix
+          ]
+          ++ extraModules;
+        };
     in
     {
       lib = {
         inherit
           defaultTherockSources
           mkFevmFaex9Configuration
+          mkFevmFaex9LiveConfiguration
           mkTherockOverlays
           mkTherockPythonOverlay
           mkTherockRocmOverlay
@@ -748,6 +767,7 @@
 
       nixosConfigurations = {
         fevm-faex9 = mkFevmFaex9Configuration { };
+        fevm-faex9-live = mkFevmFaex9LiveConfiguration { };
       };
 
       darwinModules = {
@@ -833,6 +853,7 @@
                 xrt-amdxdna
                 ;
               inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
+              fevm-faex9-live-iso = self.nixosConfigurations.fevm-faex9-live.config.system.build.isoImage;
             }
             // ds4RocmPackages
             // llamaCppTargetPackages
@@ -1457,6 +1478,9 @@
           }
           // lib.optionalAttrs (system == "x86_64-linux") {
             system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
+            fevm-faex9-live-iso =
+              afterPrQuick "fevm-faex9-live-iso"
+                self.packages.${system}.fevm-faex9-live-iso;
             vllm =
               afterPrQuick "vllm"
                 self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
