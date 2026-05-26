@@ -39,7 +39,6 @@
 
       mkFevmFaex9Configuration =
         {
-          diskoModule,
           system ? "x86_64-linux",
           extraModules ? [ ],
           specialArgs ? { },
@@ -51,7 +50,6 @@
           }
           // specialArgs;
           modules = [
-            diskoModule
             ./examples/fevm-faex9/configuration.nix
           ]
           ++ extraModules;
@@ -105,6 +103,10 @@
         ryzenadj = import ./modules/ryzenadj.nix;
         disko-raid0 = import ./modules/disko-raid0.nix;
         tuning = import ./modules/tuning.nix;
+      };
+
+      nixosConfigurations = {
+        fevm-faex9 = mkFevmFaex9Configuration { };
       };
     }
     // {
@@ -200,7 +202,7 @@
         in
         {
           format = mkSourceCheck "format" [ pkgs.nixfmt-tree ] ''
-            treefmt --fail-on-change
+            treefmt --tree-root . --walk filesystem --fail-on-change
           '';
 
           deadnix = mkSourceCheck "deadnix" [ pkgs.deadnix ] ''
@@ -210,6 +212,52 @@
           statix = mkSourceCheck "statix" [ pkgs.statix ] ''
             statix check .
           '';
+        }
+      );
+
+      hydraJobs = perSystem (
+        pkgs:
+        let
+          system = pkgs.stdenv.hostPlatform.system;
+
+          mkAggregate =
+            aggregateName: jobs:
+            pkgs.linkFarm "nix-strix-halo-${aggregateName}" (
+              lib.mapAttrsToList (name: path: {
+                inherit name path;
+              }) jobs
+            );
+
+          prQuickJobs = self.checks.${system};
+          prQuick = mkAggregate "pr-quick" prQuickJobs;
+
+          afterPrQuick =
+            name: path:
+            pkgs.linkFarm "nix-strix-halo-pr-full-${name}" [
+              {
+                name = "pr-quick";
+                path = prQuick;
+              }
+              {
+                inherit name path;
+              }
+            ];
+
+          prFullJobs = {
+            default = afterPrQuick "default" self.packages.${system}.default;
+          }
+          // lib.optionalAttrs (system == "x86_64-linux") {
+            system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
+          };
+        in
+        {
+          "pr-quick" = prQuickJobs // {
+            all = prQuick;
+          };
+
+          "pr-full" = prFullJobs // {
+            all = mkAggregate "pr-full" prFullJobs;
+          };
         }
       );
     };
