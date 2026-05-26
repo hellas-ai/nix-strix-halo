@@ -1305,6 +1305,10 @@
                     and (.sandboxPaths | index("/models") != null)
                     and (.sandboxPaths | index("/dev/dri") != null)
                     and (.sandboxPaths | index("/dev/kfd") != null)
+                    and (.sandboxPaths | index("/sys/class/hwmon") != null)
+                    and (.sandboxPaths | index("/sys/class/net") != null)
+                    and (.sandboxPaths | index("/sys/class/scsi_host") != null)
+                    and (.sandboxPaths | index("/sys/bus/pci/devices") != null)
                     and (.sandboxPaths | index("/dev/accel") == null)
                     and (.sandboxPaths | index("/caller/device") != null)
                     and (.tmpfilesRules | index("d /models 0755 root root -") != null)
@@ -1388,6 +1392,10 @@
                     and .requirements.systemFeatures == [ "gfx1151" ]
                     and .requirements.hostProfiles == [ "linux-amd-kfd" ]
                     and (.requirements.sandboxPaths | index("/dev/kfd") != null)
+                    and (.requirements.sandboxPaths | index("/sys/class/hwmon") != null)
+                    and (.requirements.sandboxPaths | index("/sys/class/net") != null)
+                    and (.requirements.sandboxPaths | index("/sys/class/scsi_host") != null)
+                    and (.requirements.sandboxPaths | index("/sys/bus/pci/devices") != null)
                     and (.requirements.sandboxPaths | index("/models") != null)
                     and .model.id == "Qwen/Qwen3-0.6B"
                     and .env.HF_HOME == "/models/.cache/huggingface"
