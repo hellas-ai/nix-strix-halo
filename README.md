@@ -244,6 +244,18 @@ images: set a password with `passwd` or drop a key in
 `lib.mkFevmFaex9LiveConfiguration` is the reusable helper if you want to add
 extra modules or override defaults from a downstream flake.
 
+To smoke-test the image without writing to a USB stick, boot it in QEMU. The
+wrapper enables KVM when `/dev/kvm` is writable and accepts pass-through
+`qemu-system-x86_64` arguments:
+
+```bash
+nix run .#fevm-faex9-live-iso-vm
+# headless / VNC for remote hosts:
+nix run .#fevm-faex9-live-iso-vm -- -display none -vnc :0
+# tune resources:
+FEVM_LIVE_VM_MEM=8G FEVM_LIVE_VM_CPUS=8 nix run .#fevm-faex9-live-iso-vm
+```
+
 ## Benchmarks
 
 Benchmark derivations are generated from structured tool/model/scenario records and exposed under `benchmarks.<system>`. The default cross-platform matrix runs CPU `llama-bench` against local GGUF files under the platform model root. Linux uses `/models`; Darwin uses `/Users/Shared/models`. Linux also exposes this flake's ROCm and Vulkan llama.cpp tool variants.

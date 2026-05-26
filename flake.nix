@@ -974,6 +974,36 @@
               binary = "flm";
               description = "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
             };
+
+            fevm-faex9-live-iso-vm =
+              let
+                iso = self.packages.${system}.fevm-faex9-live-iso;
+              in
+              {
+                type = "app";
+                program = toString (
+                  pkgs.writeShellScript "fevm-faex9-live-iso-vm" ''
+                    set -euo pipefail
+                    iso_file=$(echo ${iso}/iso/*.iso)
+                    if [ ! -f "$iso_file" ]; then
+                      echo "fevm-faex9-live ISO not found under ${iso}/iso" >&2
+                      exit 1
+                    fi
+                    kvm_args=()
+                    if [ -w /dev/kvm ]; then
+                      kvm_args+=(-enable-kvm -cpu host)
+                    fi
+                    exec ${pkgs.qemu}/bin/qemu-system-x86_64 \
+                      "''${kvm_args[@]}" \
+                      -m ''${FEVM_LIVE_VM_MEM:-4G} \
+                      -smp ''${FEVM_LIVE_VM_CPUS:-4} \
+                      -cdrom "$iso_file" \
+                      -boot d \
+                      "$@"
+                  ''
+                );
+                meta.description = "Boot the fevm-faex9 live ISO in QEMU (override FEVM_LIVE_VM_MEM, FEVM_LIVE_VM_CPUS)";
+              };
           }
           // (lib.foldl' lib.recursiveUpdate { } (map mkTargetLlamaApps rocmTargets))
           // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-env" pkgs) {
