@@ -19,6 +19,10 @@
 
   # Boot configuration
   boot = {
+    kernelParams = [
+      "iommu=off"
+    ];
+
     loader = {
       systemd-boot.enable = true;
       efi.canTouchEfiVariables = true;
@@ -46,10 +50,12 @@
     fsType = "tmpfs";
   };
 
-  services.benchmark-runner = {
-    enable = true;
-    gpuTarget = "gfx1151";
-    cpuTarget = "aimax395";
-    modelsPath = "/models";
+  benchmark.runners.strix-gpu = {
+    gpus = [
+      {
+        type = "amd";
+        arch = "1151";
+      }
+    ];
   };
 }

@@ -9,6 +9,8 @@
     tmp.useTmpfs = true;
   };
 
+  hardware.firmware = [ pkgs.strix-halo-mes-firmware ];
+
   services.tuned = {
     enable = true;
     profiles = {

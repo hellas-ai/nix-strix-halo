@@ -1,0 +1,35 @@
+CMake 4.x strips the "file://" prefix from URLs *before* validating an
+ExternalProject_Add URL list, which means a file:// entry becomes a bare
+path and the list validation rejects it with "At least one entry of URL
+is a path (invalid in a list)". When DYNINST_BINUTILS_DOWNLOAD_URL is a
+file:// URL (the offline case in this nix package), restrict the URL list
+to that single entry so ExternalProject_Add treats it as a path and
+accepts it. Otherwise keep the original mirror list for online builds.
+
+--- a/rocm-systems/projects/rocprofiler-systems/cmake/DyninstLibIberty.cmake
++++ b/rocm-systems/projects/rocprofiler-systems/cmake/DyninstLibIberty.cmake
+@@ -89,14 +89,20 @@
+         set(_ROCPROFSYS_LIBIBERTY_MAKEINFO_NOOP /usr/bin/true)
+     endif()
+
++    if(DYNINST_BINUTILS_DOWNLOAD_URL)
++        set(_li_binutils_urls "${DYNINST_BINUTILS_DOWNLOAD_URL}")
++    else()
++        set(_li_binutils_urls
++            https://ftpmirror.gnu.org/gnu/binutils/binutils-2.46.0.tar.gz
++            https://mirrors.kernel.org/sourceware/binutils/releases/binutils-2.46.0.tar.gz
++        )
++    endif()
++
+     include(ExternalProject)
+     ExternalProject_Add(
+         ${_li_project_name}
+         PREFIX ${_li_root}
+-        URL
+-            ${DYNINST_BINUTILS_DOWNLOAD_URL}
+-            https://ftpmirror.gnu.org/gnu/binutils/binutils-2.46.0.tar.gz
+-            https://mirrors.kernel.org/sourceware/binutils/releases/binutils-2.46.0.tar.gz
++        URL ${_li_binutils_urls}
+         BUILD_IN_SOURCE 1
+         CONFIGURE_COMMAND
+             ${CMAKE_COMMAND} -E env CC=${CMAKE_C_COMPILER} CFLAGS=-fPIC\ -O3\ -Wno-error
