@@ -92,6 +92,7 @@ let
     helion = "helion is marked broken in this nixpkgs input";
     instanttensor = "instanttensor is not packaged in this nixpkgs input";
     otel = "opentelemetry-semantic-conventions-ai is not packaged in this nixpkgs input";
+    rixl = "RIXL needs separate ROCm RIXL/UCX/RDMA packaging and is only used by KV-transfer/disaggregated serving paths";
     runai = "runai-model-streamer is not packaged in this nixpkgs input";
     tensorizer = "tensorizer is not packaged in this nixpkgs input";
     zen = "zentorch-weekly is not packaged and is a CPU optimization";
@@ -100,7 +101,7 @@ let
   mkVllmTherock =
     {
       aiterSupport ? false,
-      audioSupport ? false,
+      audioSupport ? true,
       benchSupport ? true,
       fastsafetensorsSupport ? false,
       flashinferSupport ? false,
@@ -108,6 +109,7 @@ let
       helionSupport ? false,
       instanttensorSupport ? false,
       otelSupport ? false,
+      rixlSupport ? false,
       runaiSupport ? false,
       tensorizerSupport ? false,
       tritonSupport ? true,
@@ -126,6 +128,7 @@ let
         helion = helionSupport;
         instanttensor = instanttensorSupport;
         otel = otelSupport;
+        rixl = rixlSupport;
         runai = runaiSupport;
         tensorizer = tensorizerSupport;
         triton = tritonSupport;
