@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "ds4-hip": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779749771,
+        "narHash": "sha256-fpND5xv3ceafMg26JDeGatm5yNDpM8CBcZlAQ1iG+f8=",
+        "owner": "ejpir",
+        "repo": "ds4-hip",
+        "rev": "aa09fdca6cef1b73d2664f6c114260c4c3c31643",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ejpir",
+        "ref": "rocm-upstream-shape-cyberneurova",
+        "repo": "ds4-hip",
+        "type": "github"
+      }
+    },
     "ec-su-axb35": {
       "flake": false,
       "locked": {
@@ -66,6 +83,7 @@
     },
     "root": {
       "inputs": {
+        "ds4-hip": "ds4-hip",
         "ec-su-axb35": "ec-su-axb35",
         "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",

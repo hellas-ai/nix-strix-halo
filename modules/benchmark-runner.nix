@@ -36,6 +36,8 @@ let
     runner:
     runner.systemFeatures ++ map common.gpuFeature runner.gpus ++ map common.npuFeature runner.npus;
 
+  modelsPath = toString cfg.modelsPath;
+
   gpus = concatMap (runner: runner.gpus) enabledRunners;
   npus = concatMap (runner: runner.npus) enabledRunners;
 
@@ -47,7 +49,10 @@ let
 
   systemFeatures = unique (concatMap runnerFeatures enabledRunners);
   extraSandboxPaths = unique (
-    concatMap (runner: runner.extraSandboxPaths) enabledRunners
+    [
+      modelsPath
+    ]
+    ++ concatMap (runner: runner.extraSandboxPaths) enabledRunners
     ++ optionals (hasGpu || hasNpu) [
       "/dev/shm"
       "/proc"
@@ -169,10 +174,23 @@ in
     ./benchmark-executor.nix
   ];
 
-  options.benchmark.runners = mkOption {
-    type = types.attrsOf runnerModule;
-    default = { };
-    description = "Named local benchmark runner capabilities.";
+  options.benchmark = {
+    modelsPath = mkOption {
+      type = types.path;
+      default = "/models";
+      description = ''
+        Host path containing benchmark model files. Benchmark runners create
+        this directory if needed and bind it read-only into Nix build
+        sandboxes. Individual benchmark derivations still define the model
+        files they expect beneath this root.
+      '';
+    };
+
+    runners = mkOption {
+      type = types.attrsOf runnerModule;
+      default = { };
+      description = "Named local benchmark runner capabilities.";
+    };
   };
 
   config = mkIf hasEnabledRunner {
@@ -197,6 +215,10 @@ in
       "extra-sandbox-paths" = extraSandboxPaths;
       sandbox = mkIf relaxSandbox "relaxed";
     };
+
+    systemd.tmpfiles.rules = [
+      "d ${modelsPath} 0755 root root -"
+    ];
 
     services.udev.extraRules = concatStringsSep "\n" (
       optionals hasAmdGpu [
