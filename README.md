@@ -205,7 +205,7 @@ cat result/metadata.json
 ```
 
 DS4-HIP benchmarks expect a caller-provided GGUF model at `/models/ds4/ds4flash.gguf`
-and a benchmark runner advertising `gfx1151` with `/models/ds4` mounted into
+and a benchmark runner advertising `gfx1151` with `/models` mounted into
 the Nix sandbox:
 
 ```bash
@@ -245,6 +245,8 @@ boot.kernelParams = [
   "iommu=off"
 ];
 
+benchmark.modelsPath = "/models";
+
 benchmark.runners.my-strix-gpu = {
   gpus = [
     {
@@ -254,6 +256,10 @@ benchmark.runners.my-strix-gpu = {
   ];
 };
 ```
+
+Benchmark runners create `benchmark.modelsPath` if needed and add it to Nix
+build sandboxes. They do not manage the model files themselves; benchmark
+derivations define the expected model paths under that root.
 
 For FastFlowLM NPU benchmarks, advertise a separate runner with IOMMU passthrough rather than reusing an IOMMU-off GPU runner:
 
@@ -271,7 +277,7 @@ benchmark.runners.my-strix-npu = {
 };
 ```
 
-The runner module does not manage model files; benchmark derivations define their own workload inputs. By default, benchmark runners assert `iommu=off`; NPU hosts should use a separate runner profile with IOMMU passthrough.
+By default, benchmark runners assert `iommu=off`; NPU hosts should use a separate runner profile with IOMMU passthrough.
 
 Use `benchmark.executor` on machines that submit benchmark builds to register runner hosts as Nix remotes:
 

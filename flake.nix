@@ -989,6 +989,7 @@
           benchmarkRunnerProfileMetadata = builtins.toJSON {
             features = benchmarkRunnerProfileConfig.nix.settings.system-features;
             sandboxPaths = benchmarkRunnerProfileConfig.nix.settings.extra-sandbox-paths;
+            tmpfilesRules = benchmarkRunnerProfileConfig.systemd.tmpfiles.rules;
             udevRules = benchmarkRunnerProfileConfig.services.udev.extraRules;
           };
 
@@ -1168,10 +1169,12 @@
                   jq -e '
                     (.features | index("${defaultRocmTarget.systemFeature}") != null)
                     and (.features | index("caller-feature") != null)
+                    and (.sandboxPaths | index("/models") != null)
                     and (.sandboxPaths | index("/dev/dri") != null)
                     and (.sandboxPaths | index("/dev/kfd") != null)
                     and (.sandboxPaths | index("/dev/accel") == null)
                     and (.sandboxPaths | index("/caller/device") != null)
+                    and (.tmpfilesRules | index("d /models 0755 root root -") != null)
                     and (.udevRules | contains("KERNEL==\"kfd\""))
                   ' profile.json
 
