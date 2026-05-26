@@ -52,46 +52,62 @@ let
   hasAmdNpu = any (npu: npu.type == "amd") npus;
   hasRdma = any (runner: runner.rdma.enable) enabledRunners;
 
+  optionalSandboxPaths = paths: map (path: "${path}?") paths;
+
   systemFeatures = unique (concatMap runnerFeatures enabledRunners);
   extraSandboxPaths = unique (
     [
       modelsPath
     ]
     ++ concatMap (runner: runner.extraSandboxPaths) enabledRunners
-    ++ optionals (hasGpu || hasNpu || hasRdma) [
-      "/dev/shm"
-      "/proc"
-      "/sys/dev"
-      "/sys/devices"
-    ]
-    ++ optionals hasGpu [
-      "/dev/dri"
-      "/sys/class/drm"
-    ]
-    ++ optionals hasAmdGpu [
-      "/dev/kfd"
-      "/sys/bus/pci/devices"
-      "/sys/class/hwmon"
-      "/sys/class/kfd"
-      "/sys/class/net"
-      "/sys/class/scsi_host"
-    ]
-    ++ optionals hasAmdNpu [
-      "/dev/accel"
-      "/sys/class/accel"
-    ]
-    ++ optionals hasRdma [
-      "/dev/infiniband"
-      "/sys/class/infiniband"
-      "/sys/class/infiniband_verbs"
-      "/sys/class/net"
-    ]
+    ++ optionalSandboxPaths (
+      optionals (hasGpu || hasNpu || hasRdma) [
+        "/dev/shm"
+        "/proc"
+        "/sys/dev"
+        "/sys/devices"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasGpu [
+        "/dev/dri"
+        "/sys/class/drm"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasAmdGpu [
+        "/dev/kfd"
+        "/sys/bus/pci/devices"
+        "/sys/class/hwmon"
+        "/sys/class/kfd"
+        "/sys/class/net"
+        "/sys/class/scsi_host"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasAmdNpu [
+        "/dev/accel"
+        "/sys/class/accel"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasRdma [
+        "/dev/infiniband"
+        "/sys/class/infiniband"
+        "/sys/class/infiniband_verbs"
+        "/sys/class/net"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasNvidiaGpu [
+        "/dev/nvidia0"
+        "/dev/nvidiactl"
+        "/dev/nvidia-uvm"
+        "/dev/nvidia-uvm-tools"
+        "/dev/nvidia-caps"
+      ]
+    )
     ++ optionals hasNvidiaGpu [
-      "/dev/nvidia0"
-      "/dev/nvidiactl"
-      "/dev/nvidia-uvm"
-      "/dev/nvidia-uvm-tools"
-      "/dev/nvidia-caps"
       # autoAddDriverRunpath points binaries at /run/opengl-driver.
       # Mount the symlink target too, otherwise the sandbox sees a
       # dangling link instead of the NVIDIA userspace driver package.
