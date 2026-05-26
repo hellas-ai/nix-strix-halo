@@ -81,10 +81,9 @@
   };
 
   outputs =
-    {
-      self,
-      nixpkgs,
-      ...
+    { self
+    , nixpkgs
+    , ...
     }@inputs:
     let
       inherit (nixpkgs) lib;
@@ -137,10 +136,12 @@
 
       mkRocmNarrowOverlay = import ./overlays/rocm-narrow.nix;
 
-      rocmNarrowOverlays = lib.mapAttrs' (_: target: {
-        name = "rocm-narrow-${target.packageSuffix}";
-        value = mkRocmNarrowOverlay target;
-      }) hardwareTargets.rocm;
+      rocmNarrowOverlays = lib.mapAttrs'
+        (_: target: {
+          name = "rocm-narrow-${target.packageSuffix}";
+          value = mkRocmNarrowOverlay target;
+        })
+        hardwareTargets.rocm;
 
       # ---------------------------------------------------------------
       # Flake outputs
@@ -209,35 +210,35 @@
         rocm-narrow-deep = _final: prev: {
           rocmPackages = prev.rocmPackages.overrideScope (
             _: rocmPrev:
-            let
-              narrow = drv: drv.override { gpuTargets = rocmTargets; };
-            in
-            {
-              clr = rocmPrev.clr.override { localGpuTargets = rocmTargets; };
+              let
+                narrow = drv: drv.override { gpuTargets = rocmTargets; };
+              in
+              {
+                clr = rocmPrev.clr.override { localGpuTargets = rocmTargets; };
 
-              rccl = narrow rocmPrev.rccl;
-              hipblaslt = narrow rocmPrev.hipblaslt;
-              hipfft = narrow rocmPrev.hipfft;
-              hiprand = narrow rocmPrev.hiprand;
-              hipsparse = narrow rocmPrev.hipsparse;
-              miopen = narrow rocmPrev.miopen;
-              rocblas = narrow rocmPrev.rocblas;
-              rocfft = narrow rocmPrev.rocfft;
-              rocrand = narrow rocmPrev.rocrand;
-              rocsolver = narrow rocmPrev.rocsolver;
-              rocsparse = narrow rocmPrev.rocsparse;
+                rccl = narrow rocmPrev.rccl;
+                hipblaslt = narrow rocmPrev.hipblaslt;
+                hipfft = narrow rocmPrev.hipfft;
+                hiprand = narrow rocmPrev.hiprand;
+                hipsparse = narrow rocmPrev.hipsparse;
+                miopen = narrow rocmPrev.miopen;
+                rocblas = narrow rocmPrev.rocblas;
+                rocfft = narrow rocmPrev.rocfft;
+                rocrand = narrow rocmPrev.rocrand;
+                rocsolver = narrow rocmPrev.rocsolver;
+                rocsparse = narrow rocmPrev.rocsparse;
 
-              composable_kernel_base = rocmPrev.composable_kernel_base.override {
-                gpuTargets = [
-                  "gfx90a"
-                  "gfx11-generic"
-                ];
-              };
+                composable_kernel_base = rocmPrev.composable_kernel_base.override {
+                  gpuTargets = [
+                    "gfx90a"
+                    "gfx11-generic"
+                  ];
+                };
 
-              aotriton = rocmPrev.aotriton.override {
-                gpuTargets = rocmTargets;
-              };
-            }
+                aotriton = rocmPrev.aotriton.override {
+                  gpuTargets = rocmTargets;
+                };
+              }
           );
         };
       }
@@ -327,17 +328,22 @@
                 gpuTarget = target.systemFeature;
                 inherit (target) hsaOverride;
               };
-              targetPrefix = lib.optionalString (
-                target.packageSuffix != defaultRocmTarget.packageSuffix
-              ) "${target.packageSuffix}-";
+              targetPrefix = lib.optionalString
+                (
+                  target.packageSuffix != defaultRocmTarget.packageSuffix
+                ) "${target.packageSuffix}-";
             in
-            pkgs.lib.concatMapAttrs (
-              model: benchs:
-              pkgs.lib.mapAttrs' (name: drv: {
-                name = "bench-${targetPrefix}${model}-${name}";
-                value = drv;
-              }) benchs
-            ) benchmarks;
+            pkgs.lib.concatMapAttrs
+              (
+                model: benchs:
+                pkgs.lib.mapAttrs'
+                  (name: drv: {
+                    name = "bench-${targetPrefix}${model}-${name}";
+                    value = drv;
+                  })
+                  benchs
+              )
+              benchmarks;
         in
         lib.foldl' (acc: target: acc // mkForTarget target) { } hardwareTargets.rocmTargets;
 
@@ -364,14 +370,16 @@
             touch "$out"
           '';
 
-      rocmNarrowNixosModules = lib.mapAttrs' (_: target: {
-        name = "rocm-narrow-${target.packageSuffix}";
-        value = _: {
-          nixpkgs.overlays = [
-            self.overlays."rocm-narrow-${target.packageSuffix}"
-          ];
-        };
-      }) hardwareTargets.rocm;
+      rocmNarrowNixosModules = lib.mapAttrs'
+        (_: target: {
+          name = "rocm-narrow-${target.packageSuffix}";
+          value = _: {
+            nixpkgs.overlays = [
+              self.overlays."rocm-narrow-${target.packageSuffix}"
+            ];
+          };
+        })
+        hardwareTargets.rocm;
     in
     {
       inherit overlays;
@@ -398,14 +406,20 @@
           ];
         };
         rpc-server = import ./modules/rpc-server.nix;
+        benchmark-executor = import ./modules/benchmark-executor.nix;
         benchmark-runner = import ./modules/benchmark-runner.nix;
         fastflowlm-server = import ./modules/fastflowlm-server.nix;
         ec-su-axb35 = import ./modules/ec-su-axb35.nix;
         ryzenadj = import ./modules/ryzenadj.nix;
         disko-raid0 = import ./modules/disko-raid0.nix;
         tuning = import ./modules/tuning.nix;
+        watchdog = import ./modules/watchdog.nix;
       }
       // rocmNarrowNixosModules;
+
+      darwinModules = {
+        benchmark-executor = import ./modules/benchmark-executor.nix;
+      };
 
       nixosConfigurations = {
         fevm-faex9 = nixpkgs.lib.nixosSystem {
@@ -428,84 +442,83 @@
       );
 
       packages =
-        perSystem (
-          { pkgs, system, ... }:
-          let
-            # Per-target package attr names to expose. `lib.optional`
-            # filters out arches whose package isn't actually defined
-            # (most lemonade/therock bundles only exist for gfx1151).
-            perTargetPackageNames =
-              target:
-              let
-                s = target.packageSuffix;
-                wanted = [
-                  "rocm-xio-${s}"
-                  "therock-amd-llvm-${s}"
-                  "therock-rocm-${s}"
-                  "therock-rocm-${s}-env"
-                  "therock-rocm-${s}-rocshmem-env"
-                  "therock-rocm-7_13-${s}-core"
-                  "therock-rocm-7_13-${s}-cmake"
-                  "therock-rocm-from-source-${s}"
-                  "therock-rocm-from-source-${s}-configure"
-                  "therock-rocm-source-${s}"
-                  "therock-rocm-third-party-mirror-${s}"
-                  "therock-python-${s}"
-                  "therock-python-overlay-smoke-${s}"
-                  "therock-python-wheels-${s}"
-                  "ds4-rocm-${s}"
-                  "torch-rocm-7_13-${s}"
-                  "llama-cpp-rocm-${s}"
-                  "llama-cpp-master-rocm-${s}"
-                  "vllm-rocm-lemonade-${s}"
-                  "vllm-env-lemonade-${s}"
-                  "vllm-lemonade-prime-cache-${s}"
-                  "vllm-lemonade-qwen36-27b-cache-${s}"
-                  "vllm-lemonade-qwen36-27b-${s}"
-                  "vllm-lemonade-gemma4-31b-q8-kernel-cache-${s}"
-                  "vllm-lemonade-gemma4-31b-q8-${s}"
-                  "vllm-lemonade-gemma4-31b-q8-prime-${s}"
-                  "strix-halo-finetune-env-${s}"
-                  "strix-halo-finetune-bench-${s}"
-                  "strix-halo-gemma3-27b-lora-fsdp-bench-${s}"
-                  "strix-halo-vllm-pair-bench-${s}"
-                  "vllm-rocm-therock-${s}"
-                  "vllm-env-therock-${s}"
-                  "vllm-env-therock-aiter-${s}"
-                  "vllm-aiter-jit-therock-${s}"
-                  "vllm-aiter-therock-${s}"
-                ];
-              in
-              builtins.filter (n: pkgs ? ${n}) wanted;
-            allPerTargetPackageNames = lib.concatMap perTargetPackageNames hardwareTargets.rocmTargets;
-            # Separate pkgs instance with cudaSupport=true so the CUDA
-            # variants below build against the cuda toolchain instead of
-            # the default ROCm-flavoured pkgs.
-            cudaPkgs = cudaPackagesFor system;
-          in
-          {
-            default = pkgs.llama-cpp-rocm;
-            inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
-            inherit (pkgs)
-              ec-su-axb35-monitor
-              fastflowlm
-              tokenizers-cpp
-              xrt
-              xrt-amdxdna
-              llama-cpp-rocm
-              llama-cpp-rocm-therock
-              llama-cpp-vulkan
-              llama-cpp-master-rocm
-              llama-cpp-master-rocm-therock
-              llama-cpp-master-vulkan
-              rdma-core-usb4
-              gemma4-31b-it-text-config
-              ;
-          }
-          // lib.genAttrs allPerTargetPackageNames (n: pkgs.${n})
-          // mkBenchmarkPackages pkgs
-          // mkFastflowlmBenchmarks pkgs
-        )
+        perSystem
+          (
+            { pkgs, system, ... }:
+            let
+              # Per-target package attr names to expose. `lib.optional`
+              # filters out arches whose package isn't actually defined
+              # (most lemonade/therock bundles only exist for gfx1151).
+              perTargetPackageNames =
+                target:
+                let
+                  s = target.packageSuffix;
+                  wanted = [
+                    "rocm-xio-${s}"
+                    "therock-amd-llvm-${s}"
+                    "therock-rocm-${s}"
+                    "therock-rocm-${s}-env"
+                    "therock-rocm-${s}-rocshmem-env"
+                    "therock-rocm-7_13-${s}-core"
+                    "therock-rocm-7_13-${s}-cmake"
+                    "therock-rocm-from-source-${s}"
+                    "therock-rocm-from-source-${s}-configure"
+                    "therock-rocm-source-${s}"
+                    "therock-rocm-third-party-mirror-${s}"
+                    "therock-python-${s}"
+                    "therock-python-overlay-smoke-${s}"
+                    "therock-python-wheels-${s}"
+                    "ds4-rocm-${s}"
+                    "torch-rocm-7_13-${s}"
+                    "llama-cpp-rocm-${s}"
+                    "llama-cpp-master-rocm-${s}"
+                    "vllm-rocm-lemonade-${s}"
+                    "vllm-env-lemonade-${s}"
+                    "vllm-lemonade-prime-cache-${s}"
+                    "vllm-lemonade-qwen36-27b-cache-${s}"
+                    "vllm-lemonade-qwen36-27b-${s}"
+                    "vllm-lemonade-gemma4-31b-q8-kernel-cache-${s}"
+                    "vllm-lemonade-gemma4-31b-q8-${s}"
+                    "vllm-lemonade-gemma4-31b-q8-prime-${s}"
+                    "strix-halo-finetune-env-${s}"
+                    "strix-halo-finetune-bench-${s}"
+                    "strix-halo-gemma3-27b-lora-fsdp-bench-${s}"
+                    "strix-halo-vllm-pair-bench-${s}"
+                    "vllm-rocm-therock-${s}"
+                    "vllm-env-therock-${s}"
+                    "vllm-env-therock-aiter-${s}"
+                    "vllm-aiter-jit-therock-${s}"
+                    "vllm-aiter-therock-${s}"
+                  ];
+                in
+                builtins.filter (n: pkgs ? ${n}) wanted;
+              allPerTargetPackageNames = lib.concatMap perTargetPackageNames hardwareTargets.rocmTargets;
+              # Separate pkgs instance with cudaSupport=true so the CUDA
+              # variants below build against the cuda toolchain instead of
+              # the default ROCm-flavoured pkgs.
+              cudaPkgs = cudaPackagesFor system;
+            in
+            {
+              default = pkgs.llama-cpp-rocm;
+              inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
+              inherit (pkgs)
+                ec-su-axb35-monitor
+                fastflowlm
+                tokenizers-cpp
+                xrt
+                xrt-amdxdna
+                llama-cpp-rocm
+                llama-cpp-rocm-therock
+                llama-cpp-vulkan
+                llama-cpp-master-rocm
+                llama-cpp-master-rocm-therock
+                llama-cpp-master-vulkan
+                rdma-core-usb4
+                gemma4-31b-it-text-config
+                ;
+            }
+            // lib.genAttrs allPerTargetPackageNames (n: pkgs.${n})
+          )
         // forAllDarwinSystems (
           system:
           let
@@ -518,268 +531,280 @@
           }
         );
 
+      benchmarks = perSystem ({ pkgs, ... }: mkBenchmarkPackages pkgs // mkFastflowlmBenchmarks pkgs);
+
       apps =
-        perSystem (
-          { pkgs, ... }:
-          let
-            # `pkg`'s default binary is named after the package; specify
-            # `binary` to point at a different one.
-            mkApp =
-              {
-                pkg,
-                binary ? pkg.pname or pkg.name,
-                description,
-              }:
-              {
-                type = "app";
-                program = "${pkg}/bin/${binary}";
-                meta = { inherit description; };
-              };
-
-            mkHsaOverrideExport =
-              target:
-              lib.optionalString (
-                target.hsaOverride != null
-              ) ''export HSA_OVERRIDE_GFX_VERSION="${target.hsaOverride}"'';
-
-            mkLlamaApp =
-              {
-                name,
-                package,
-                binary,
-                target,
-                description,
-              }:
-              {
-                type = "app";
-                program = toString (
-                  pkgs.writeShellScript name ''
-                    ${mkHsaOverrideExport target}
-                    ${package}/bin/${binary} "$@"
-                  ''
-                );
-                meta.description = description;
-              };
-
-            llamaAppAxes = {
-              cli = {
-                appPrefix = "llama-cli";
-                packagePrefix = "llama-cpp-rocm";
-                binary = "llama-cli";
-                descriptionPrefix = "Run llama-cli with ROCm for";
-              };
-              server = {
-                appPrefix = "llama-server";
-                packagePrefix = "llama-cpp-rocm";
-                binary = "llama-server";
-                descriptionPrefix = "Run llama-server with ROCm for";
-              };
-              cliMaster = {
-                appPrefix = "llama-cli-master";
-                packagePrefix = "llama-cpp-master-rocm";
-                binary = "llama-cli";
-                descriptionPrefix = "Run llama-cli from ggml-org master with ROCm for";
-              };
-              serverMaster = {
-                appPrefix = "llama-server-master";
-                packagePrefix = "llama-cpp-master-rocm";
-                binary = "llama-server";
-                descriptionPrefix = "Run llama-server from ggml-org master with ROCm for";
-              };
-            };
-
-            mkLlamaAppSet =
-              {
-                target,
-                appSuffix ? "",
-                packageSuffix ? "",
-                packageNameFor ? null,
-                descriptionFor ? null,
-              }:
-              let
-                packageName =
-                  spec:
-                  if packageNameFor == null then "${spec.packagePrefix}${packageSuffix}" else packageNameFor spec;
-                description =
-                  spec:
-                  if descriptionFor == null then
-                    "${spec.descriptionPrefix} ${target.marketingName}"
-                  else
-                    descriptionFor spec;
-              in
-              lib.mapAttrs' (
-                _: spec:
-                let
-                  name = "${spec.appPrefix}${appSuffix}";
-                in
+        perSystem
+          (
+            { pkgs, ... }:
+            let
+              # `pkg`'s default binary is named after the package; specify
+              # `binary` to point at a different one.
+              mkApp =
+                { pkg
+                , binary ? pkg.pname or pkg.name
+                , description
+                ,
+                }:
                 {
-                  inherit name;
-                  value = mkLlamaApp {
-                    inherit name target;
-                    package = pkgs.${packageName spec};
-                    inherit (spec) binary;
-                    description = description spec;
-                  };
-                }
-              ) llamaAppAxes;
+                  type = "app";
+                  program = "${pkg}/bin/${binary}";
+                  meta = { inherit description; };
+                };
 
-            targetLlamaApps = lib.foldl' (
-              acc: target:
-              acc
-              // mkLlamaAppSet {
-                inherit target;
-                appSuffix = "-${target.packageSuffix}";
-                packageSuffix = "-${target.packageSuffix}";
-              }
-            ) { } hardwareTargets.rocmTargets;
+              mkHsaOverrideExport =
+                target:
+                lib.optionalString
+                  (
+                    target.hsaOverride != null
+                  ) ''export HSA_OVERRIDE_GFX_VERSION="${target.hsaOverride}"'';
 
-            defaultLlamaApps = mkLlamaAppSet { target = defaultRocmTarget; };
-            defaultTherockLlamaApps = mkLlamaAppSet {
-              target = defaultRocmTarget;
-              appSuffix = "-therock";
-              packageNameFor = spec: "${spec.packagePrefix}-therock";
-              descriptionFor =
-                spec: "${spec.descriptionPrefix} ${defaultRocmTarget.marketingName} with TheRock ROCm";
-            };
+              mkLlamaApp =
+                { name
+                , package
+                , binary
+                , target
+                , description
+                ,
+                }:
+                {
+                  type = "app";
+                  program = toString (
+                    pkgs.writeShellScript name ''
+                      ${mkHsaOverrideExport target}
+                      ${package}/bin/${binary} "$@"
+                    ''
+                  );
+                  meta.description = description;
+                };
 
-            # Per-target apps for the strix-halo SDK / lemonade / therock
-            # bundles. Adding a new arch auto-generates these apps as
-            # soon as the matching packages exist in `pkgs`; entries
-            # whose backing package isn't present are silently dropped.
-            mkPerTargetApps =
-              target:
-              let
-                s = target.packageSuffix;
-                m = target.marketingName;
-                # appName, package attr name, binary, description.
-                specs = [
-                  [
-                    "therock-rocm-${s}-env"
-                    "therock-rocm-${s}-env"
-                    null
-                    "Run a command in the opt-in TheRock ROCm 7.13 ${s} environment"
-                  ]
-                  [
-                    "therock-rocm-${s}-rocshmem-env"
-                    "therock-rocm-${s}-rocshmem-env"
-                    null
-                    "Run a command in the TheRock ROCm 7.13 ${s} rocSHMEM test environment"
-                  ]
-                  [
-                    "ds4-rocm-${s}"
-                    "ds4-rocm-${s}"
-                    "ds4"
-                    "Run experimental ds4 ROCm/HIP on ${m}"
-                  ]
-                  [
-                    "ds4-bench-rocm-${s}"
-                    "ds4-rocm-${s}"
-                    "ds4-bench"
-                    "Run experimental ds4 ROCm/HIP benchmark on ${m}"
-                  ]
-                  [
-                    "ds4-bench-fast-full-${s}"
-                    "ds4-rocm-${s}"
-                    "ds4-bench-fast-full"
-                    "Run experimental ds4 ROCm/HIP fast-full benchmark preset on ${m}"
-                  ]
-                  [
-                    "therock-python-${s}"
-                    "therock-python-${s}"
-                    "therock-python"
-                    "Run Python in the pinned TheRock ROCm/PyTorch wheel environment"
-                  ]
-                  [
-                    "therock-python-${s}-env"
-                    "therock-python-${s}"
-                    "therock-python-env"
-                    "Run a command in the pinned TheRock ROCm/PyTorch wheel environment"
-                  ]
-                  [
-                    "vllm-therock-${s}"
-                    "vllm-env-therock-${s}"
-                    "vllm"
-                    "Run vLLM built against the TheRock ROCm/PyTorch/Triton overlay"
-                  ]
-                  [
-                    "vllm-therock-aiter-${s}"
-                    "vllm-aiter-therock-${s}"
-                    "vllm-aiter-therock-${s}"
-                    "Run vLLM with TheRock ROCm and a preseeded AITER JIT cache"
-                  ]
-                  [
-                    "vllm-lemonade-${s}"
-                    "vllm-rocm-lemonade-${s}"
-                    "vllm"
-                    "Run Lemonade's vLLM ROCm binary bundle for ${m}"
-                  ]
-                  [
-                    "vllm-env-lemonade-${s}"
-                    "vllm-env-lemonade-${s}"
-                    "vllm"
-                    "Run Lemonade's vLLM ROCm bundle with Ray available for distributed serving"
-                  ]
-                  [
-                    "vllm-lemonade-prime-cache-${s}"
-                    "vllm-lemonade-prime-cache-${s}"
-                    null
-                    "Prime Lemonade vLLM ROCm Triton/autotune caches on a ${s} host"
-                  ]
-                  [
-                    "vllm-lemonade-qwen36-27b-${s}"
-                    "vllm-lemonade-qwen36-27b-${s}"
-                    null
-                    "Run Lemonade vLLM with the prebuilt Qwen3.6-27B Triton cache"
-                  ]
-                  [
-                    "vllm-lemonade-gemma4-31b-q8-${s}"
-                    "vllm-lemonade-gemma4-31b-q8-${s}"
-                    null
-                    "Run Lemonade vLLM with the prebuilt Gemma4-31B Q8 kernel cache"
-                  ]
-                  [
-                    "vllm-lemonade-gemma4-31b-q8-prime-${s}"
-                    "vllm-lemonade-gemma4-31b-q8-prime-${s}"
-                    null
-                    "Prime Gemma4-31B Q8 vLLM caches before measured benchmark runs"
-                  ]
-                ];
-                toAttr =
-                  spec:
-                  let
-                    appName = builtins.elemAt spec 0;
-                    pkgName = builtins.elemAt spec 1;
-                    binary = builtins.elemAt spec 2;
-                    description = builtins.elemAt spec 3;
-                  in
-                  lib.optionalAttrs (pkgs ? ${pkgName}) {
-                    ${appName} = mkApp (
-                      {
-                        pkg = pkgs.${pkgName};
-                        inherit description;
-                      }
-                      // lib.optionalAttrs (binary != null) { inherit binary; }
-                    );
-                  };
-              in
-              lib.foldl' (a: b: a // b) { } (map toAttr specs);
+              llamaAppAxes = {
+                cli = {
+                  appPrefix = "llama-cli";
+                  packagePrefix = "llama-cpp-rocm";
+                  binary = "llama-cli";
+                  descriptionPrefix = "Run llama-cli with ROCm for";
+                };
+                server = {
+                  appPrefix = "llama-server";
+                  packagePrefix = "llama-cpp-rocm";
+                  binary = "llama-server";
+                  descriptionPrefix = "Run llama-server with ROCm for";
+                };
+                cliMaster = {
+                  appPrefix = "llama-cli-master";
+                  packagePrefix = "llama-cpp-master-rocm";
+                  binary = "llama-cli";
+                  descriptionPrefix = "Run llama-cli from ggml-org master with ROCm for";
+                };
+                serverMaster = {
+                  appPrefix = "llama-server-master";
+                  packagePrefix = "llama-cpp-master-rocm";
+                  binary = "llama-server";
+                  descriptionPrefix = "Run llama-server from ggml-org master with ROCm for";
+                };
+              };
 
-            perTargetApps = lib.foldl' (
-              acc: target: acc // mkPerTargetApps target
-            ) { } hardwareTargets.rocmTargets;
-          in
-          {
-            flm = mkApp {
-              pkg = pkgs.fastflowlm;
-              binary = "flm";
-              description = "FastFlowLM CLI on the AMD Ryzen AI NPU (Strix Halo XDNA2)";
-            };
-          }
-          // perTargetApps
-          // defaultLlamaApps
-          // defaultTherockLlamaApps
-          // targetLlamaApps
-        )
+              mkLlamaAppSet =
+                { target
+                , appSuffix ? ""
+                , packageSuffix ? ""
+                , packageNameFor ? null
+                , descriptionFor ? null
+                ,
+                }:
+                let
+                  packageName =
+                    spec:
+                    if packageNameFor == null then "${spec.packagePrefix}${packageSuffix}" else packageNameFor spec;
+                  description =
+                    spec:
+                    if descriptionFor == null then
+                      "${spec.descriptionPrefix} ${target.marketingName}"
+                    else
+                      descriptionFor spec;
+                in
+                lib.mapAttrs'
+                  (
+                    _: spec:
+                    let
+                      name = "${spec.appPrefix}${appSuffix}";
+                    in
+                    {
+                      inherit name;
+                      value = mkLlamaApp {
+                        inherit name target;
+                        package = pkgs.${packageName spec};
+                        inherit (spec) binary;
+                        description = description spec;
+                      };
+                    }
+                  )
+                  llamaAppAxes;
+
+              targetLlamaApps = lib.foldl'
+                (
+                  acc: target:
+                    acc
+                    // mkLlamaAppSet {
+                      inherit target;
+                      appSuffix = "-${target.packageSuffix}";
+                      packageSuffix = "-${target.packageSuffix}";
+                    }
+                )
+                { }
+                hardwareTargets.rocmTargets;
+
+              defaultLlamaApps = mkLlamaAppSet { target = defaultRocmTarget; };
+              defaultTherockLlamaApps = mkLlamaAppSet {
+                target = defaultRocmTarget;
+                appSuffix = "-therock";
+                packageNameFor = spec: "${spec.packagePrefix}-therock";
+                descriptionFor =
+                  spec: "${spec.descriptionPrefix} ${defaultRocmTarget.marketingName} with TheRock ROCm";
+              };
+
+              # Per-target apps for the strix-halo SDK / lemonade / therock
+              # bundles. Adding a new arch auto-generates these apps as
+              # soon as the matching packages exist in `pkgs`; entries
+              # whose backing package isn't present are silently dropped.
+              mkPerTargetApps =
+                target:
+                let
+                  s = target.packageSuffix;
+                  m = target.marketingName;
+                  # appName, package attr name, binary, description.
+                  specs = [
+                    [
+                      "therock-rocm-${s}-env"
+                      "therock-rocm-${s}-env"
+                      null
+                      "Run a command in the opt-in TheRock ROCm 7.13 ${s} environment"
+                    ]
+                    [
+                      "therock-rocm-${s}-rocshmem-env"
+                      "therock-rocm-${s}-rocshmem-env"
+                      null
+                      "Run a command in the TheRock ROCm 7.13 ${s} rocSHMEM test environment"
+                    ]
+                    [
+                      "ds4-rocm-${s}"
+                      "ds4-rocm-${s}"
+                      "ds4"
+                      "Run experimental ds4 ROCm/HIP on ${m}"
+                    ]
+                    [
+                      "ds4-bench-rocm-${s}"
+                      "ds4-rocm-${s}"
+                      "ds4-bench"
+                      "Run experimental ds4 ROCm/HIP benchmark on ${m}"
+                    ]
+                    [
+                      "ds4-bench-fast-full-${s}"
+                      "ds4-rocm-${s}"
+                      "ds4-bench-fast-full"
+                      "Run experimental ds4 ROCm/HIP fast-full benchmark preset on ${m}"
+                    ]
+                    [
+                      "therock-python-${s}"
+                      "therock-python-${s}"
+                      "therock-python"
+                      "Run Python in the pinned TheRock ROCm/PyTorch wheel environment"
+                    ]
+                    [
+                      "therock-python-${s}-env"
+                      "therock-python-${s}"
+                      "therock-python-env"
+                      "Run a command in the pinned TheRock ROCm/PyTorch wheel environment"
+                    ]
+                    [
+                      "vllm-therock-${s}"
+                      "vllm-env-therock-${s}"
+                      "vllm"
+                      "Run vLLM built against the TheRock ROCm/PyTorch/Triton overlay"
+                    ]
+                    [
+                      "vllm-therock-aiter-${s}"
+                      "vllm-aiter-therock-${s}"
+                      "vllm-aiter-therock-${s}"
+                      "Run vLLM with TheRock ROCm and a preseeded AITER JIT cache"
+                    ]
+                    [
+                      "vllm-lemonade-${s}"
+                      "vllm-rocm-lemonade-${s}"
+                      "vllm"
+                      "Run Lemonade's vLLM ROCm binary bundle for ${m}"
+                    ]
+                    [
+                      "vllm-env-lemonade-${s}"
+                      "vllm-env-lemonade-${s}"
+                      "vllm"
+                      "Run Lemonade's vLLM ROCm bundle with Ray available for distributed serving"
+                    ]
+                    [
+                      "vllm-lemonade-prime-cache-${s}"
+                      "vllm-lemonade-prime-cache-${s}"
+                      null
+                      "Prime Lemonade vLLM ROCm Triton/autotune caches on a ${s} host"
+                    ]
+                    [
+                      "vllm-lemonade-qwen36-27b-${s}"
+                      "vllm-lemonade-qwen36-27b-${s}"
+                      null
+                      "Run Lemonade vLLM with the prebuilt Qwen3.6-27B Triton cache"
+                    ]
+                    [
+                      "vllm-lemonade-gemma4-31b-q8-${s}"
+                      "vllm-lemonade-gemma4-31b-q8-${s}"
+                      null
+                      "Run Lemonade vLLM with the prebuilt Gemma4-31B Q8 kernel cache"
+                    ]
+                    [
+                      "vllm-lemonade-gemma4-31b-q8-prime-${s}"
+                      "vllm-lemonade-gemma4-31b-q8-prime-${s}"
+                      null
+                      "Prime Gemma4-31B Q8 vLLM caches before measured benchmark runs"
+                    ]
+                  ];
+                  toAttr =
+                    spec:
+                    let
+                      appName = builtins.elemAt spec 0;
+                      pkgName = builtins.elemAt spec 1;
+                      binary = builtins.elemAt spec 2;
+                      description = builtins.elemAt spec 3;
+                    in
+                    lib.optionalAttrs (pkgs ? ${pkgName}) {
+                      ${appName} = mkApp (
+                        {
+                          pkg = pkgs.${pkgName};
+                          inherit description;
+                        }
+                        // lib.optionalAttrs (binary != null) { inherit binary; }
+                      );
+                    };
+                in
+                lib.foldl' (a: b: a // b) { } (map toAttr specs);
+
+              perTargetApps = lib.foldl'
+                (
+                  acc: target: acc // mkPerTargetApps target
+                )
+                { }
+                hardwareTargets.rocmTargets;
+            in
+            {
+              flm = mkApp {
+                pkg = pkgs.fastflowlm;
+                binary = "flm";
+                description = "FastFlowLM CLI on the AMD Ryzen AI NPU (Strix Halo XDNA2)";
+              };
+            }
+            // perTargetApps
+            // defaultLlamaApps
+            // defaultTherockLlamaApps
+            // targetLlamaApps
+          )
         // forAllDarwinSystems (
           system:
           let
@@ -836,6 +861,58 @@
           statix = mkSourceCheck pkgs "statix" [ pkgs.statix ] ''
             statix check .
           '';
+        }
+      );
+
+      hydraJobs = perSystem (
+        { pkgs, system, ... }:
+        let
+          mkAggregate =
+            aggregateName: jobs:
+            pkgs.linkFarm "nix-strix-halo-${aggregateName}" (
+              lib.mapAttrsToList
+                (name: path: {
+                  inherit name path;
+                })
+                jobs
+            );
+
+          prQuickJobs = self.checks.${system};
+          prQuick = mkAggregate "pr-quick" prQuickJobs;
+
+          afterPrQuick =
+            name: path:
+            pkgs.linkFarm "nix-strix-halo-pr-full-${name}" [
+              {
+                name = "pr-quick";
+                path = prQuick;
+              }
+              {
+                inherit name path;
+              }
+            ];
+
+          prFullJobs = {
+            default = afterPrQuick "default" self.packages.${system}.default;
+          }
+          // lib.optionalAttrs (system == "x86_64-linux") {
+            system = afterPrQuick "system" self.nixosConfigurations.fevm-faex9.config.system.build.toplevel;
+          };
+        in
+        {
+          "pr-quick" = lib.recurseIntoAttrs (
+            prQuickJobs
+            // {
+              all = prQuick;
+            }
+          );
+
+          "pr-full" = lib.recurseIntoAttrs (
+            prFullJobs
+            // {
+              all = mkAggregate "pr-full" prFullJobs;
+            }
+          );
         }
       );
     };
