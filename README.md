@@ -35,6 +35,7 @@ Main package outputs:
 - `packages.x86_64-linux.llama-cpp-vulkan`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
+- `packages.x86_64-linux.vllm-rocm-lemonade-gfx1151`
 - `packages.x86_64-linux.xrt-amdxdna`
 
 Main app outputs:
@@ -91,6 +92,7 @@ Target records are generic build descriptors, not a hardware inventory. Hostname
 - `packages.x86_64-linux.therock-python-gfx1151`
 - `packages.x86_64-linux.torch-rocm-gfx1151`
 - `packages.x86_64-linux.ds4-rocm-gfx1151`
+- `packages.x86_64-linux.vllm-rocm-lemonade-gfx1151`
 
 The lower-level ROCm module overlay also exposes reusable narrowed package scopes:
 

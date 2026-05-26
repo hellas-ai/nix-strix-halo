@@ -641,6 +641,24 @@
                   }
                 ) ds4RocmTargets
               );
+              lemonadeVllmRocmTargets = builtins.filter (
+                rocmTarget: rocmTarget.packageSuffix == "gfx1151"
+              ) rocmTargets;
+              lemonadeVllmRocmTargetPackages = lib.listToAttrs (
+                map (
+                  rocmTarget:
+                  let
+                    s = rocmTarget.packageSuffix;
+                  in
+                  {
+                    name = "vllm-rocm-lemonade-${s}";
+                    value = prev.callPackage ./pkgs/lemonade-vllm-rocm {
+                      target = s;
+                      releaseTag = "vllm0.21.0-rocm7.13.0-${s}";
+                    };
+                  }
+                ) lemonadeVllmRocmTargets
+              );
             in
             {
               # EC-SU_AXB35 packages
@@ -675,6 +693,7 @@
               llama-cpp-master-cuda = applyMasterSrc "llama-cpp-master-cuda" llamaCppCudaBase;
             }
             // ds4RocmTargetPackages
+            // lemonadeVllmRocmTargetPackages
             // llamaCppRocmTargetPackages
             // llamaCppMasterRocmTargetPackages
             // (therockRocmOverlay final prev)
@@ -763,6 +782,12 @@
               ds4RocmPackages = lib.genAttrs (builtins.filter (
                 name: builtins.hasAttr name pkgs
               ) ds4RocmPackageNames) (name: pkgs.${name});
+              vllmRocmLemonadePackageNames = map (
+                rocmTarget: "vllm-rocm-lemonade-${rocmTarget.packageSuffix}"
+              ) rocmTargets;
+              vllmRocmLemonadePackages = lib.genAttrs (builtins.filter (
+                name: builtins.hasAttr name pkgs
+              ) vllmRocmLemonadePackageNames) (name: pkgs.${name});
               cudaPkgs = cudaPackagesFor pkgs.stdenv.hostPlatform.system;
 
               therockPackages =
@@ -790,6 +815,7 @@
               inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
             }
             // ds4RocmPackages
+            // vllmRocmLemonadePackages
             // llamaCppTargetPackages
             // therockPackages;
         in
@@ -959,6 +985,7 @@
           system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
           therockPytorchPackage = "torch-rocm-${s}";
+          vllmRocmLemonadePackage = "vllm-rocm-lemonade-${s}";
           benchmarkSet = self.benchmarks.${system};
           cpuBenchmark = benchmarkSet.bench-llama2-7b-llama-cpp-cpu-b512-fa1;
           cpuBenchmarkMetadata = builtins.toJSON cpuBenchmark.passthru.benchmark;
@@ -1239,6 +1266,9 @@
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
+          }
+          // lib.optionalAttrs (builtins.hasAttr vllmRocmLemonadePackage pkgs) {
+            "package-${vllmRocmLemonadePackage}" = pkgs.${vllmRocmLemonadePackage};
           }
         )
       );
