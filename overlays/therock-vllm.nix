@@ -16,6 +16,9 @@ let
     gpuTargets = vllmGpuTargets;
   };
   py = final.python312Packages;
+  opentelemetrySemanticConventionsAi =
+    py.callPackage ../pkgs/opentelemetry-semantic-conventions-ai
+      { };
   tritonKernels = prev.fetchFromGitHub {
     owner = "triton-lang";
     repo = "triton";
@@ -91,7 +94,6 @@ let
     grpc = "smg-grpc-servicer is not packaged in this nixpkgs input";
     helion = "helion is marked broken in this nixpkgs input";
     instanttensor = "instanttensor is not packaged in this nixpkgs input";
-    otel = "opentelemetry-semantic-conventions-ai is not packaged in this nixpkgs input";
     rixl = "RIXL needs separate ROCm RIXL/UCX/RDMA packaging and is only used by KV-transfer/disaggregated serving paths";
     runai = "runai-model-streamer is not packaged in this nixpkgs input";
     tensorizer = "tensorizer is not packaged in this nixpkgs input";
@@ -108,7 +110,7 @@ let
       grpcSupport ? false,
       helionSupport ? false,
       instanttensorSupport ? false,
-      otelSupport ? false,
+      otelSupport ? true,
       rixlSupport ? false,
       runaiSupport ? false,
       tensorizerSupport ? false,
@@ -161,12 +163,19 @@ let
         ]
         ++ (py.mistral-common.optional-dependencies.audio or [ ]);
         flashinfer = [ ];
+        otel = [
+          py.opentelemetry-api
+          py.opentelemetry-exporter-otlp
+          py.opentelemetry-sdk
+          opentelemetrySemanticConventionsAi
+        ];
         video = [ ];
       };
       featureDependencies =
         lib.optionals benchSupport optionalDependencies.bench
         ++ lib.optionals audioSupport optionalDependencies.audio
         ++ lib.optionals flashinferSupport optionalDependencies.flashinfer
+        ++ lib.optionals otelSupport optionalDependencies.otel
         ++ lib.optionals videoSupport optionalDependencies.video;
       baseExtraDependencies = [
         py.amdsmi
@@ -189,6 +198,8 @@ let
     assert lib.assertMsg tritonSupport "TheRock vLLM currently requires tritonSupport=true";
     assert lib.assertMsg tritonKernelsSupport
       "TheRock vLLM currently requires tritonKernelsSupport=true";
+    assert lib.assertMsg otelSupport
+      "TheRock vLLM currently requires otelSupport=true because upstream vLLM lists OpenTelemetry in common requirements";
     assert lib.assertMsg (
       unsupportedEnabledFeatures == [ ]
     ) "unsupported TheRock vLLM feature(s): ${lib.concatStringsSep "; " unsupportedEnabledMessages}";

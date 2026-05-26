@@ -127,10 +127,11 @@ The vLLM package exposes feature flags through normal derivation override argume
 pkgs.vllm-rocm-therock-gfx1151.override {
   benchSupport = true; # default
   audioSupport = true; # default
+  otelSupport = true; # default, required by upstream vLLM
 }
 ```
 
-`benchSupport` and `audioSupport` are enabled by default. Triton support is required and comes from the TheRock Python stack plus the pinned Triton kernels source. AITer, RIXL, and other unported upstream extras are exposed as disabled flags that fail with a clear unsupported-feature message if enabled before their packages are added.
+`benchSupport`, `audioSupport`, and `otelSupport` are enabled by default. Triton support is required and comes from the TheRock Python stack plus the pinned Triton kernels source. AITer, RIXL, and other unported upstream extras are exposed as disabled flags that fail with a clear unsupported-feature message if enabled before their packages are added.
 
 ## llama.cpp RPC Servers
 
