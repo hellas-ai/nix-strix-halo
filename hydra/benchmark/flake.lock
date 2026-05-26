@@ -83,6 +83,10 @@
     },
     "root": {
       "inputs": {
+        "nixpkgs": [
+          "src",
+          "nixpkgs"
+        ],
         "src": "src"
       }
     },
