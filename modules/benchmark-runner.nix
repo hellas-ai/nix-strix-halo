@@ -2,10 +2,11 @@
 #
 # Benchmarks define their workload inputs. This module only advertises
 # host capabilities to Nix and exposes the matching devices in the sandbox.
-{ config
-, lib
-, pkgs
-, ...
+{
+  config,
+  lib,
+  pkgs,
+  ...
 }:
 
 let
@@ -37,6 +38,8 @@ let
     runner:
     runner.systemFeatures ++ map common.gpuFeature runner.gpus ++ map common.npuFeature runner.npus;
 
+  modelsPath = toString cfg.modelsPath;
+
   gpus = concatMap (runner: runner.gpus) enabledRunners;
   npus = concatMap (runner: runner.npus) enabledRunners;
 
@@ -48,7 +51,10 @@ let
 
   systemFeatures = unique (concatMap runnerFeatures enabledRunners);
   extraSandboxPaths = unique (
-    concatMap (runner: runner.extraSandboxPaths) enabledRunners
+    [
+      modelsPath
+    ]
+    ++ concatMap (runner: runner.extraSandboxPaths) enabledRunners
     ++ optionals (hasGpu || hasNpu) [
       "/dev/shm"
       "/proc"
@@ -170,38 +176,51 @@ in
     ./benchmark-executor.nix
   ];
 
-  options.benchmark.runners = mkOption {
-    type = types.attrsOf runnerModule;
-    default = { };
-    description = "Named local benchmark runner capabilities.";
+  options.benchmark = {
+    modelsPath = mkOption {
+      type = types.path;
+      default = "/models";
+      description = ''
+        Host path containing benchmark model files. Benchmark runners create
+        this directory if needed and bind it read-only into Nix build
+        sandboxes. Individual benchmark derivations still define the model
+        files they expect beneath this root.
+      '';
+    };
+
+    runners = mkOption {
+      type = types.attrsOf runnerModule;
+      default = { };
+      description = "Named local benchmark runner capabilities.";
+    };
   };
 
   config = mkIf hasEnabledRunner {
     assertions =
-      map
-        (entry: {
-          assertion = !entry.value.requireIommuOff || iommuOff;
-          message = ''
-            benchmark.runners.${entry.name} requires IOMMU disabled, but boot.kernelParams has IOMMU settings: ${concatStringsSep " " iommuParams}
-            Use boot.kernelParams = [ "iommu=off" ] for Strix Halo benchmark runners, or set benchmark.runners.${entry.name}.requireIommuOff = false for an IOMMU-dependent runner.
-          '';
-        })
-        enabledRunnerEntries
-      ++ map
-        (entry: {
-          assertion = !entry.value.requireIommuOff || entry.value.npus == [ ];
-          message = ''
-            benchmark.runners.${entry.name} declares NPUs while requireIommuOff=true.
-            AMD NPU support requires IOMMU passthrough; do not advertise NPUs from an IOMMU-off benchmark runner.
-          '';
-        })
-        enabledRunnerEntries;
+      map (entry: {
+        assertion = !entry.value.requireIommuOff || iommuOff;
+        message = ''
+          benchmark.runners.${entry.name} requires IOMMU disabled, but boot.kernelParams has IOMMU settings: ${concatStringsSep " " iommuParams}
+          Use boot.kernelParams = [ "iommu=off" ] for Strix Halo benchmark runners, or set benchmark.runners.${entry.name}.requireIommuOff = false for an IOMMU-dependent runner.
+        '';
+      }) enabledRunnerEntries
+      ++ map (entry: {
+        assertion = !entry.value.requireIommuOff || entry.value.npus == [ ];
+        message = ''
+          benchmark.runners.${entry.name} declares NPUs while requireIommuOff=true.
+          AMD NPU support requires IOMMU passthrough; do not advertise NPUs from an IOMMU-off benchmark runner.
+        '';
+      }) enabledRunnerEntries;
 
     nix.settings = {
       "system-features" = systemFeatures;
       "extra-sandbox-paths" = extraSandboxPaths;
       sandbox = mkIf relaxSandbox "relaxed";
     };
+
+    systemd.tmpfiles.rules = [
+      "d ${modelsPath} 0755 root root -"
+    ];
 
     services.udev.extraRules = concatStringsSep "\n" (
       optionals hasAmdGpu [
