@@ -1,0 +1,82 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 27b772c..805de09 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -315,13 +315,8 @@ else()
+   set(MLX_BUILD_ACCELERATE OFF)
+ endif()
+
+-message(STATUS "Downloading json")
+-FetchContent_Declare(
+-  json
+-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+-FetchContent_MakeAvailable(json)
+-target_include_directories(
+-  mlx PRIVATE $<BUILD_INTERFACE:${json_SOURCE_DIR}/single_include/nlohmann>)
++find_package(nlohmann_json REQUIRED)
++target_link_libraries(mlx PRIVATE nlohmann_json::nlohmann_json)
+
+ # Add standalone JACCL library (RDMA over Thunderbolt distributed backend)
+ if(MLX_BUILD_CPU
+diff --git a/mlx/distributed/jaccl/lib/CMakeLists.txt b/mlx/distributed/jaccl/lib/CMakeLists.txt
+index aaeed81..0aed1d5 100644
+--- a/mlx/distributed/jaccl/lib/CMakeLists.txt
++++ b/mlx/distributed/jaccl/lib/CMakeLists.txt
+@@ -14,11 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ include(FetchContent)
+
+ # nlohmann/json for device file parsing
+-message(STATUS "Downloading json for JACCL")
+-FetchContent_Declare(
+-  json
+-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+-FetchContent_MakeAvailable(json)
++find_package(nlohmann_json REQUIRED)
+
+ # Check platform and SDK version requirements
+ if(NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+@@ -55,8 +50,7 @@ target_include_directories(
+   jaccl PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+                $<INSTALL_INTERFACE:include>)
+
+-target_include_directories(
+-  jaccl PRIVATE $<BUILD_INTERFACE:${json_SOURCE_DIR}/single_include/nlohmann>)
++target_link_libraries(jaccl PRIVATE nlohmann_json::nlohmann_json)
+
+ target_compile_features(jaccl PUBLIC cxx_std_20)
+
+diff --git a/mlx/distributed/jaccl/lib/jaccl/jaccl.cpp b/mlx/distributed/jaccl/lib/jaccl/jaccl.cpp
+index 1e9f2ff..c615e8c 100644
+--- a/mlx/distributed/jaccl/lib/jaccl/jaccl.cpp
++++ b/mlx/distributed/jaccl/lib/jaccl/jaccl.cpp
+@@ -3,6 +3,6 @@
+ #include <fstream>
+ #include <sstream>
+
+-#include <json.hpp>
++#include <nlohmann/json.hpp>
+
+ #include "jaccl/jaccl.h"
+diff --git a/mlx/distributed/ring/ring.cpp b/mlx/distributed/ring/ring.cpp
+index 687d6e6..35d97c5 100644
+--- a/mlx/distributed/ring/ring.cpp
++++ b/mlx/distributed/ring/ring.cpp
+@@ -17,6 +17,6 @@
+ #include <thread>
+ #include <unordered_map>
+
+-#include <json.hpp>
++#include <nlohmann/json.hpp>
+
+ #include "mlx/backend/cpu/encoder.h"
+diff --git a/mlx/io/safetensors.cpp b/mlx/io/safetensors.cpp
+index 8035c3c..f59b13e 100644
+--- a/mlx/io/safetensors.cpp
++++ b/mlx/io/safetensors.cpp
+@@ -1,5 +1,5 @@
+ // Copyright © 2025 Apple Inc.
+
+-#include <json.hpp>
++#include <nlohmann/json.hpp>
+
+ #include <memory>

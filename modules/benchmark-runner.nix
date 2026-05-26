@@ -222,24 +222,40 @@ in
 
     systemd.tmpfiles.rules = [
       "d ${modelsPath} 0755 root root -"
+    ]
+    ++ optionals hasAmdGpu [
+      "z /dev/kfd 0660 root nixbld -"
+    ]
+    ++ optionals hasGpu [
+      "z /dev/dri/card* 0660 root nixbld -"
+      "z /dev/dri/renderD* 0660 root nixbld -"
+    ]
+    ++ optionals hasAmdNpu [
+      "z /dev/accel/accel* 0660 root nixbld -"
+    ]
+    ++ optionals hasNvidiaGpu [
+      "z /dev/nvidia[0-9]* 0660 root nixbld -"
+      "z /dev/nvidiactl 0660 root nixbld -"
+      "z /dev/nvidia-uvm 0660 root nixbld -"
+      "z /dev/nvidia-uvm-tools 0660 root nixbld -"
     ];
 
     services.udev.extraRules = concatStringsSep "\n" (
       optionals hasAmdGpu [
-        ''KERNEL=="kfd", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="kfd", GROUP:="nixbld", MODE:="0660"''
       ]
       ++ optionals hasAmdNpu [
-        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="nixbld", MODE="0660"''
+        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP:="nixbld", MODE:="0660"''
       ]
       ++ optionals hasGpu [
-        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP="nixbld", MODE="0660"''
-        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="nixbld", MODE="0660"''
+        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP:="nixbld", MODE:="0660"''
+        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP:="nixbld", MODE:="0660"''
       ]
       ++ optionals hasNvidiaGpu [
-        ''KERNEL=="nvidia[0-9]*", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidiactl", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidia-uvm", GROUP="nixbld", MODE="0660"''
-        ''KERNEL=="nvidia-uvm-tools", GROUP="nixbld", MODE="0660"''
+        ''KERNEL=="nvidia[0-9]*", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="nvidiactl", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="nvidia-uvm", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="nvidia-uvm-tools", GROUP:="nixbld", MODE:="0660"''
       ]
     );
   };

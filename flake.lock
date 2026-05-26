@@ -81,6 +81,23 @@
         "type": "github"
       }
     },
+    "mlx-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1777394396,
+        "narHash": "sha256-3OOYc2MlBAMVZGwulp25X0VOVKS/vYTIWQjSz16DmFg=",
+        "owner": "ml-explore",
+        "repo": "mlx",
+        "rev": "e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ml-explore",
+        "repo": "mlx",
+        "rev": "e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1779560665,
@@ -104,6 +121,7 @@
         "ec-su-axb35": "ec-su-axb35",
         "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",
+        "mlx-src": "mlx-src",
         "nixpkgs": "nixpkgs",
         "therock-src-7-13-gfx1151-base-half-011b45bd": "therock-src-7-13-gfx1151-base-half-011b45bd",
         "therock-src-7-13-gfx1151-base-rocm-cmake-ec512d84": "therock-src-7-13-gfx1151-base-rocm-cmake-ec512d84",

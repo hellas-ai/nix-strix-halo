@@ -32,15 +32,22 @@ Main package outputs:
 
 - `packages.aarch64-darwin.default`
 - `packages.aarch64-darwin.ds4`
+- `packages.aarch64-darwin.jaccl`
 - `packages.aarch64-darwin.llama-cpp`
+- `packages.aarch64-darwin.mlx`
+- `packages.aarch64-darwin.mlx-metal`
 - `packages.x86_64-linux.default`
 - `packages.x86_64-linux.ds4-rocm`
 - `packages.x86_64-linux.ds4-rocm-gfx1151`
 - `packages.x86_64-linux.fastflowlm`
+- `packages.x86_64-linux.jaccl`
 - `packages.x86_64-linux.llama-cpp`
 - `packages.x86_64-linux.llama-cpp-rocm`
 - `packages.x86_64-linux.llama-cpp-rocm-gfx1151`
 - `packages.x86_64-linux.llama-cpp-vulkan`
+- `packages.x86_64-linux.mlx`
+- `packages.x86_64-linux.mlx-rocm`
+- `packages.x86_64-linux.mlx-rocm-gfx1151`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.fevm-faex9-live-iso`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
@@ -91,11 +98,21 @@ Example configuration helpers:
 }
 ```
 
-On macOS, the overlay intentionally exposes only generic non-ROCm outputs such as `llama-cpp`, CPU `llama-cli`/`llama-server` apps, DS4 Metal outputs, and CPU benchmark derivations. ROCm, TheRock, EC, and firmware outputs are Linux-only.
+On macOS, the overlay intentionally exposes only generic non-ROCm outputs such as `llama-cpp`, CPU `llama-cli`/`llama-server` apps, DS4 Metal outputs, MLX/JACCL library outputs, and CPU benchmark derivations. ROCm, TheRock, EC, and firmware outputs are Linux-only.
 
 The DS4 Metal package builds against nixpkgs' `apple-sdk_26` by default because
 it uses newer Metal APIs than the default Darwin SDK. Override `darwinSdk`,
 `darwinSdkRoot`, or `darwinDeploymentTarget` for a different SDK policy.
+
+## MLX And JACCL Libraries
+
+The flake exposes library packages for shared MLX/JACCL development across Linux and macOS:
+
+- `packages.x86_64-linux.jaccl`: standalone JACCL library from the pinned MLX source, built against `rdma-core`
+- `packages.x86_64-linux.mlx` / `mlx-rocm`: compatibility aliases for the default MLX ROCm target
+- `packages.x86_64-linux.mlx-rocm-gfx1151`: MLX with the ROCm backend and portable JACCL support, narrowed for Strix Halo
+- `packages.aarch64-darwin.jaccl`: standalone JACCL library from the same pinned MLX source, built against Apple's RDMA library
+- `packages.aarch64-darwin.mlx` / `mlx-metal`: MLX and its Metal backend built from the pinned upstream MLX source
 
 ## TheRock ROCm Targets
 
@@ -284,6 +301,17 @@ nix build .#benchmarks.aarch64-darwin.bench-deepseek-v4-flash-ds4-metal-smoke
 cat result/results.csv
 ```
 
+MLX GPU smoke benchmarks run a small float32 GEMM and verify the result on
+the GPU backend. They do not require model files:
+
+```bash
+nix build .#benchmarks.x86_64-linux.bench-mlx-rocm-gfx1151-gemm-smoke
+cat result/stdout.txt
+
+nix build .#benchmarks.aarch64-darwin.bench-mlx-metal-gemm-smoke
+cat result/stdout.txt
+```
+
 vLLM benchmarks use the upstream offline benchmark CLI in throughput and
 latency modes. They expect the Hugging Face model cache under
 `/models/.cache/huggingface` and run offline against `Qwen/Qwen3-0.6B`:
@@ -397,4 +425,4 @@ nix flake check --no-build
 
 CI is driven by the flake's `checks` output. The buildbot should build `.#checks.<system>.*` for the systems it owns.
 
-The checks include source formatting/linting, representative package builds, benchmark metadata validation, executor builder translation, and Linux benchmark-runner module composition. Hardware/model-dependent benchmark derivations remain under `benchmarks` because they require local models and host-specific device access.
+The checks include source formatting/linting, representative package builds, benchmark metadata validation, executor builder translation, Linux benchmark-runner module composition, and model-free GPU smoke benchmarks for MLX. Model-dependent benchmark derivations remain under `benchmarks` because they require local models and host-specific device access.
