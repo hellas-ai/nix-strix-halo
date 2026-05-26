@@ -8,6 +8,7 @@ It provides:
 - Linux-only ROCm outputs, including generic ROCm builds and Strix Halo `gfx1151` narrowed builds
 - TheRock ROCm/PyTorch packaging for configured Linux GPU targets
 - FastFlowLM packaging for AMD XDNA2 NPU inference
+- DS4-HIP packaging for DwarfStar 4 ROCm inference
 - NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
 - cross-platform benchmark helpers and derivations for reproducible local model/tool runs
 - a minimal `fevm-faex9` NixOS example builder
@@ -25,6 +26,8 @@ Main package outputs:
 - `packages.x86_64-darwin.default`
 - `packages.x86_64-darwin.llama-cpp`
 - `packages.x86_64-linux.default`
+- `packages.x86_64-linux.ds4-rocm`
+- `packages.x86_64-linux.ds4-rocm-gfx1151`
 - `packages.x86_64-linux.fastflowlm`
 - `packages.x86_64-linux.llama-cpp`
 - `packages.x86_64-linux.llama-cpp-rocm`
@@ -87,6 +90,7 @@ Target records are generic build descriptors, not a hardware inventory. Hostname
 - `packages.x86_64-linux.therock-rocm-gfx1151-env`
 - `packages.x86_64-linux.therock-python-gfx1151`
 - `packages.x86_64-linux.torch-rocm-gfx1151`
+- `packages.x86_64-linux.ds4-rocm-gfx1151`
 
 The lower-level ROCm module overlay also exposes reusable narrowed package scopes:
 
@@ -198,6 +202,15 @@ Benchmark derivations are generated from structured tool/model/scenario records 
 nix build .#benchmarks.x86_64-linux.bench-llama2-7b-llama-cpp-cpu-b512-fa1
 cat result/stdout.txt
 cat result/metadata.json
+```
+
+DS4-HIP benchmarks expect a caller-provided GGUF model at `/models/ds4/ds4flash.gguf`
+and a benchmark runner advertising `gfx1151` with `/models/ds4` mounted into
+the Nix sandbox:
+
+```bash
+nix build .#benchmarks.x86_64-linux.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke
+cat result/results.csv
 ```
 
 External flakes can reuse `lib.benchmarks` while injecting their own packages, model paths, required system features, environment variables, and host profile names. For example, with a caller-provided CUDA-enabled `myCudaLlamaCpp` package:

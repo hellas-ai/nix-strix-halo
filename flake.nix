@@ -19,6 +19,11 @@
       flake = false;
     };
 
+    ds4-hip = {
+      url = "github:ejpir/ds4-hip/rocm-upstream-shape-cyberneurova";
+      flake = false;
+    };
+
     xrt-src = {
       url = "git+https://github.com/Xilinx/XRT?ref=XRT-2.21&submodules=1";
       flake = false;
@@ -496,8 +501,16 @@
                   inherit pkgs;
                   package = pkgs.fastflowlm;
                 }).benchmarks;
+              ds4Benchmarks =
+                (import ./bench/suites/ds4.nix {
+                  inherit pkgs;
+                  package = pkgs.${"ds4-rocm-${defaultRocmTarget.packageSuffix}"};
+                  target = defaultTargetMetadata;
+                }).benchmarks;
             in
-            flattenBenchmarks acceleratedBenchmarks // flattenBenchmarks fastflowlmBenchmarks
+            flattenBenchmarks acceleratedBenchmarks
+            // flattenBenchmarks fastflowlmBenchmarks
+            // flattenBenchmarks ds4Benchmarks
           );
         in
         flattenBenchmarks genericBenchmarks // linuxBenchmarks;
@@ -606,6 +619,28 @@
                 "${prefix}-unstable-${
                   input.shortRev or (if input ? rev then builtins.substring 0 7 input.rev else "unknown")
                 }";
+              ds4RocmTargets = builtins.filter (
+                rocmTarget: builtins.hasAttr rocmTarget.packageSuffix defaultTherockSources.rocm.linux
+              ) rocmTargets;
+              ds4RocmTargetPackages = lib.listToAttrs (
+                map (
+                  rocmTarget:
+                  let
+                    s = rocmTarget.packageSuffix;
+                  in
+                  {
+                    name = "ds4-rocm-${s}";
+                    value = prev.callPackage ./pkgs/ds4-rocm {
+                      src = inputs.ds4-hip;
+                      rocmSdk = final."therock-rocm-${s}";
+                      version = inputVersion "experimental" inputs.ds4-hip;
+                      packageSuffix = s;
+                      offloadArch = builtins.head rocmTarget.buildTargets;
+                      hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+                    };
+                  }
+                ) ds4RocmTargets
+              );
             in
             {
               # EC-SU_AXB35 packages
@@ -629,6 +664,8 @@
                 src = inputs.fastflowlm;
               };
 
+              ds4-rocm = ds4RocmTargetPackages."ds4-rocm-${defaultRocmTarget.packageSuffix}";
+
               # Generic ROCm llama.cpp build; target narrowing is explicit below.
               llama-cpp-rocm = llamaCppRocmBase;
               llama-cpp-vulkan = llamaCppVulkanBase;
@@ -637,6 +674,7 @@
               llama-cpp-master-vulkan = applyMasterSrc "llama-cpp-master-vulkan" llamaCppVulkanBase;
               llama-cpp-master-cuda = applyMasterSrc "llama-cpp-master-cuda" llamaCppCudaBase;
             }
+            // ds4RocmTargetPackages
             // llamaCppRocmTargetPackages
             // llamaCppMasterRocmTargetPackages
             // (therockRocmOverlay final prev)
@@ -721,6 +759,10 @@
               llamaCppTargetPackages = lib.genAttrs (
                 llamaCppTargetPackageNames ++ llamaCppMasterTargetPackageNames
               ) (name: pkgs.${name});
+              ds4RocmPackageNames = map (rocmTarget: "ds4-rocm-${rocmTarget.packageSuffix}") rocmTargets;
+              ds4RocmPackages = lib.genAttrs (builtins.filter (
+                name: builtins.hasAttr name pkgs
+              ) ds4RocmPackageNames) (name: pkgs.${name});
               cudaPkgs = cudaPackagesFor pkgs.stdenv.hostPlatform.system;
 
               therockPackages =
@@ -733,6 +775,7 @@
             in
             {
               inherit (pkgs)
+                ds4-rocm
                 ec-su-axb35-monitor
                 fastflowlm
                 llama-cpp-rocm
@@ -746,6 +789,7 @@
                 ;
               inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
             }
+            // ds4RocmPackages
             // llamaCppTargetPackages
             // therockPackages;
         in
@@ -1107,6 +1151,8 @@
           let
             fastflowlmBenchmark = benchmarkSet.bench-llama3-2-1b-fastflowlm-medium;
             fastflowlmBenchmarkMetadata = builtins.toJSON fastflowlmBenchmark.passthru.benchmark;
+            ds4Benchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
+            ds4BenchmarkMetadata = builtins.toJSON ds4Benchmark.passthru.benchmark;
           in
           {
             benchmark-runner-profiles =
@@ -1156,7 +1202,37 @@
                   touch "$out"
                 '';
 
+            ds4-benchmark-metadata =
+              pkgs.runCommandLocal "ci-ds4-benchmark-metadata"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > metadata.json <<'JSON'
+                  ${ds4BenchmarkMetadata}
+                  JSON
+
+                  jq -e '
+                    .kind == "ds4"
+                    and .accelerator == "rocm"
+                    and .backend == "hip"
+                    and .requirements.systemFeatures == [ "gfx1151" ]
+                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
+                    and (.requirements.sandboxPaths | index("/dev/kfd") != null)
+                    and (.requirements.sandboxPaths | index("/dev/dri") != null)
+                    and (.requirements.sandboxPaths | index("/models/ds4") != null)
+                    and .model.path == "/models/ds4/ds4flash.gguf"
+                    and .packages == [ "ds4-rocm-gfx1151" ]
+                    and .params.ctxStart == 128
+                    and .params.ctxMax == 256
+                    and .params.genTokens == 8
+                  ' metadata.json
+
+                  touch "$out"
+                '';
+
             "package-llama-cpp-rocm-${s}" = pkgs."llama-cpp-rocm-${s}";
+            "package-ds4-rocm-${s}" = pkgs."ds4-rocm-${s}";
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
