@@ -1251,7 +1251,6 @@
                 self.nixosModules.benchmark-runner
                 (_: {
                   boot.kernelParams = [ "iommu=off" ];
-                  benchmark.extraUsers = [ "ciuser" ];
                   benchmark.runners.ci = {
                     gpus = [
                       {
@@ -1274,15 +1273,8 @@
             sandboxPaths = benchmarkRunnerProfileConfig.nix.settings.extra-sandbox-paths;
             tmpfilesRules = benchmarkRunnerProfileConfig.systemd.tmpfiles.rules;
             udevRules = benchmarkRunnerProfileConfig.services.udev.extraRules;
-            devicePermissionService = {
-              wantedBy =
-                benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.wantedBy;
-              wants = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.wants;
-              after = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.after;
-              script = benchmarkRunnerProfileConfig.systemd.services.benchmark-runner-device-permissions.script;
-            };
-            devicePermissionActivation =
-              benchmarkRunnerProfileConfig.system.activationScripts.benchmark-runner-device-permissions.text;
+            deviceAclActivation =
+              benchmarkRunnerProfileConfig.system.activationScripts.benchmark-runner-device-acls.text;
           };
 
           benchmarkExecutorConfig =
@@ -1490,31 +1482,23 @@
                     and (.sandboxPaths | index("/dev/accel?") == null)
                     and (.sandboxPaths | index("/caller/device") != null)
                     and (.tmpfilesRules | index("d /models 0755 root root -") != null)
-                    and (.tmpfilesRules | index("z /dev/kfd 0660 root nixbld -") != null)
-                    and (.tmpfilesRules | index("z /dev/dri/card* 0660 root nixbld -") != null)
-                    and (.tmpfilesRules | index("z /dev/dri/renderD* 0660 root nixbld -") != null)
-                    and (.tmpfilesRules | index("z /dev/infiniband/* 0660 root nixbld -") != null)
-                    and (.udevRules | contains("KERNEL==\"kfd\", GROUP:=\"nixbld\", MODE:=\"0660\""))
-                    and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP:=\"nixbld\", MODE:=\"0660\""))
-                    and (.udevRules | contains("SUBSYSTEM==\"infiniband_verbs\", GROUP:=\"nixbld\", MODE:=\"0660\""))
-                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/$kernel"))
-                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/dri/$kernel"))
-                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/infiniband/$kernel"))
-                    and (.devicePermissionService.wantedBy | index("multi-user.target") != null)
-                    and (.devicePermissionService.wants | index("systemd-udev-trigger.service") != null)
-                    and (.devicePermissionService.wants | index("systemd-udev-settle.service") != null)
-                    and (.devicePermissionService.after | index("systemd-tmpfiles-setup-dev.service") != null)
-                    and (.devicePermissionService.after | index("systemd-udev-settle.service") != null)
-                    and (.devicePermissionService.script | contains("/dev/kfd"))
-                    and (.devicePermissionService.script | contains("/dev/dri/renderD*"))
-                    and (.devicePermissionService.script | contains("/dev/infiniband/*"))
-                    and (.devicePermissionService.script | contains("chgrp nixbld"))
-                    and (.devicePermissionService.script | contains("chmod 0660"))
-                    and (.devicePermissionService.script | contains("setfacl -m u:ciuser:rw"))
-                    and (.devicePermissionActivation | contains("/dev/kfd"))
-                    and (.devicePermissionActivation | contains("/dev/dri/renderD*"))
-                    and (.devicePermissionActivation | contains("/dev/infiniband/*"))
-                    and (.devicePermissionActivation | contains("setfacl -m u:ciuser:rw"))
+                    and (.tmpfilesRules | map(test("^z /dev/")) | any | not)
+                    and (.udevRules | contains("GROUP:=\"nixbld\"") | not)
+                    and (.udevRules | contains("MODE:=\"0660\"") | not)
+                    and (.udevRules | contains("KERNEL==\"kfd\", RUN+="))
+                    and (.udevRules | contains("setfacl -m g:nixbld:rw /dev/$kernel"))
+                    and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"card*\", RUN+="))
+                    and (.udevRules | contains("setfacl -m g:nixbld:rw /dev/dri/$kernel"))
+                    and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", RUN+="))
+                    and (.udevRules | contains("SUBSYSTEM==\"infiniband_verbs\", RUN+="))
+                    and (.udevRules | contains("setfacl -m g:nixbld:rw /dev/infiniband/$kernel"))
+                    and (.deviceAclActivation | contains("/dev/kfd"))
+                    and (.deviceAclActivation | contains("/dev/dri/card*"))
+                    and (.deviceAclActivation | contains("/dev/dri/renderD*"))
+                    and (.deviceAclActivation | contains("/dev/infiniband/*"))
+                    and (.deviceAclActivation | contains("setfacl -m g:nixbld:rw"))
+                    and (.deviceAclActivation | contains("chgrp") | not)
+                    and (.deviceAclActivation | contains("chmod") | not)
                   ' profile.json
 
                   touch "$out"
