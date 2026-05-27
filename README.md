@@ -242,12 +242,9 @@ The NixOS server module requires IOMMU passthrough for the AMD XDNA device:
 - `nixosModules.ec-su-axb35`: kernel module and optional monitor script for the Sixunited AXB35 EC
 - `nixosModules.ryzenadj`: power and curve optimizer settings through `ryzenadj`
 - `nixosModules.tuning`: high-performance kernel defaults, pinned Strix Halo MES firmware, and TuneD defaults
-- `nixosModules.disko-raid0`: dual-NVMe RAID0 Disko layout
 - `nixosModules.fastflowlm-server`: FastFlowLM OpenAI-compatible server for AMD XDNA NPUs
 - `nixosModules.benchmark-runner`: local benchmark runner capabilities and sandbox device access
 - `nixosModules.benchmark-executor` / `darwinModules.benchmark-executor`: remote builder setup for machines that submit benchmark builds
-
-`disko-raid0` defines Disko options but does not import Disko itself. Callers must provide `disko.nixosModules.disko` before using it. It targets `/dev/nvme0n1` and `/dev/nvme1n1`; treat it as machine-specific.
 
 ## Live ISO
 

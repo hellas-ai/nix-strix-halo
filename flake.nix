@@ -857,7 +857,6 @@
         ec-su-axb35 = import ./modules/ec-su-axb35.nix;
         fastflowlm-server = import ./modules/fastflowlm-server.nix;
         ryzenadj = import ./modules/ryzenadj.nix;
-        disko-raid0 = import ./modules/disko-raid0.nix;
         tuning = import ./modules/tuning.nix;
         thunderbolt-ibverbs = inputs.thunderbolt-ibverbs.nixosModules.default;
       };
