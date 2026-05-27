@@ -35,7 +35,10 @@ let
 
   runnerFeatures =
     runner:
-    runner.systemFeatures ++ map common.gpuFeature runner.gpus ++ map common.npuFeature runner.npus;
+    runner.systemFeatures
+    ++ map common.gpuFeature runner.gpus
+    ++ map common.npuFeature runner.npus
+    ++ optionals runner.rdma.enable runner.rdma.systemFeatures;
 
   modelsPath = toString cfg.modelsPath;
 
@@ -47,6 +50,9 @@ let
   hasNvidiaGpu = any (gpu: gpu.type == "nvidia") gpus;
   hasNpu = npus != [ ];
   hasAmdNpu = any (npu: npu.type == "amd") npus;
+  hasRdma = any (runner: runner.rdma.enable) enabledRunners;
+
+  optionalSandboxPaths = paths: map (path: "${path}?") paths;
 
   systemFeatures = unique (concatMap runnerFeatures enabledRunners);
   extraSandboxPaths = unique (
@@ -54,34 +60,54 @@ let
       modelsPath
     ]
     ++ concatMap (runner: runner.extraSandboxPaths) enabledRunners
-    ++ optionals (hasGpu || hasNpu) [
-      "/dev/shm"
-      "/proc"
-      "/sys/dev"
-      "/sys/devices"
-    ]
-    ++ optionals hasGpu [
-      "/dev/dri"
-      "/sys/class/drm"
-    ]
-    ++ optionals hasAmdGpu [
-      "/dev/kfd"
-      "/sys/bus/pci/devices"
-      "/sys/class/hwmon"
-      "/sys/class/kfd"
-      "/sys/class/net"
-      "/sys/class/scsi_host"
-    ]
-    ++ optionals hasAmdNpu [
-      "/dev/accel"
-      "/sys/class/accel"
-    ]
+    ++ optionalSandboxPaths (
+      optionals (hasGpu || hasNpu || hasRdma) [
+        "/dev/shm"
+        "/proc"
+        "/sys/dev"
+        "/sys/devices"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasGpu [
+        "/dev/dri"
+        "/sys/class/drm"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasAmdGpu [
+        "/dev/kfd"
+        "/sys/bus/pci/devices"
+        "/sys/class/hwmon"
+        "/sys/class/kfd"
+        "/sys/class/net"
+        "/sys/class/scsi_host"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasAmdNpu [
+        "/dev/accel"
+        "/sys/class/accel"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasRdma [
+        "/dev/infiniband"
+        "/sys/class/infiniband"
+        "/sys/class/infiniband_verbs"
+        "/sys/class/net"
+      ]
+    )
+    ++ optionalSandboxPaths (
+      optionals hasNvidiaGpu [
+        "/dev/nvidia0"
+        "/dev/nvidiactl"
+        "/dev/nvidia-uvm"
+        "/dev/nvidia-uvm-tools"
+        "/dev/nvidia-caps"
+      ]
+    )
     ++ optionals hasNvidiaGpu [
-      "/dev/nvidia0"
-      "/dev/nvidiactl"
-      "/dev/nvidia-uvm"
-      "/dev/nvidia-uvm-tools"
-      "/dev/nvidia-caps"
       # autoAddDriverRunpath points binaries at /run/opengl-driver.
       # Mount the symlink target too, otherwise the sandbox sees a
       # dangling link instead of the NVIDIA userspace driver package.
@@ -100,6 +126,9 @@ let
     ]
     ++ optionals hasAmdNpu [
       "/dev/accel/accel*"
+    ]
+    ++ optionals hasRdma [
+      "/dev/infiniband/*"
     ]
     ++ optionals hasNvidiaGpu [
       "/dev/nvidia[0-9]*"
@@ -165,6 +194,23 @@ let
           default = [ ];
           example = [ "big-memory" ];
           description = "Additional Nix system features advertised by this runner.";
+        };
+
+        rdma = {
+          enable = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Whether this runner exposes RDMA devices to benchmark derivations.";
+          };
+
+          systemFeatures = mkOption {
+            type = types.listOf types.str;
+            default = [
+              "rdma"
+              "rdma-usb4"
+            ];
+            description = "Nix system features advertised when RDMA support is enabled.";
+          };
         };
 
         extraSandboxPaths = mkOption {
@@ -260,6 +306,9 @@ in
     ++ optionals hasAmdNpu [
       "z /dev/accel/accel* 0660 root nixbld -"
     ]
+    ++ optionals hasRdma [
+      "z /dev/infiniband/* 0660 root nixbld -"
+    ]
     ++ optionals hasNvidiaGpu [
       "z /dev/nvidia[0-9]* 0660 root nixbld -"
       "z /dev/nvidiactl 0660 root nixbld -"
@@ -302,6 +351,11 @@ in
       ++ optionals hasGpu [
         ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP:="nixbld", MODE:="0660"''
         ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP:="nixbld", MODE:="0660"''
+      ]
+      ++ optionals hasRdma [
+        ''SUBSYSTEM=="infiniband", GROUP:="nixbld", MODE:="0660"''
+        ''SUBSYSTEM=="infiniband_verbs", GROUP:="nixbld", MODE:="0660"''
+        ''SUBSYSTEM=="infiniband_cm", GROUP:="nixbld", MODE:="0660"''
       ]
       ++ optionals hasNvidiaGpu [
         ''KERNEL=="nvidia[0-9]*", GROUP:="nixbld", MODE:="0660"''
