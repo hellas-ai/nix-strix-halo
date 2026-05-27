@@ -18,7 +18,7 @@
   meta ? { },
 }:
 let
-  benchLib = import ./lib.nix { inherit (pkgs) lib; };
+  benchLib = import ../lib/bench.nix { inherit (pkgs) lib; };
   normalizedRequirements = benchLib.normalizeRequirements requirements;
 in
 benchLib.mkLlamaCppBenchmark {

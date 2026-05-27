@@ -466,7 +466,7 @@
           mkTherockPythonOverlay
           mkTherockRocmOverlay
           ;
-        benchmarks = import ./bench/lib.nix { inherit lib; };
+        benchmarks = import ./lib/bench.nix { inherit lib; };
         inherit (rocmTargetLib) mkRocmTarget;
         therockTargets = therockTargetConfig;
       };

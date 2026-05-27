@@ -28,7 +28,7 @@ in
     }:
     let
       system = pkgs.stdenv.hostPlatform.system;
-      benchLib = import ../bench/lib.nix { inherit lib; };
+      benchLib = import ./bench.nix { inherit lib; };
       modelsRoot = benchLib.defaultModelsRoot pkgs;
       defaultTargetMetadata = {
         inherit (defaultRocmTarget)
