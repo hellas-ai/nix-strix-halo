@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "nix"
+    directories:
+      - "/"
+      - "/hydra/benchmark"
+    schedule:
+      interval: "daily"
+    groups:
+      nix-inputs:
+        patterns:
+          - "*"
+        group-by: "dependency-name"
+    ignore:
+      # TheRock source inputs are generated from pkgs/therock/sources/rocm-source.json
+      # and must be bumped atomically by pkgs/therock/scripts/update-source-tree.py.
+      - dependency-name: "therock-src-*"
+      # GitHub Dependabot's Nix updater does not currently support private inputs.
+      - dependency-name: "thunderbolt-ibverbs"
