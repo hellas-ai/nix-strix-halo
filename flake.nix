@@ -435,6 +435,27 @@
           ]
           ++ extraModules;
         };
+
+      strixHaloOverlays = {
+        ec-su-axb35 = import ./overlays/ec-su-axb35.nix { inherit inputs; };
+        strix-halo-mes-firmware = import ./overlays/strix-halo-mes-firmware.nix;
+        tokenizers-cpp = import ./overlays/tokenizers-cpp.nix;
+        xrt = import ./overlays/xrt.nix { inherit inputs inputVersion; };
+        fastflowlm = import ./overlays/fastflowlm.nix { inherit inputs; };
+        llama-cpp = import ./overlays/llama-cpp.nix {
+          inherit inputs lib rocmTargets defaultRocmTarget;
+        };
+        ds4-rocm = import ./overlays/ds4-rocm.nix {
+          inherit
+            inputs
+            lib
+            inputVersion
+            rocmTargets
+            defaultRocmTarget
+            defaultTherockSources
+            ;
+        };
+      };
     in
     {
       lib = {
@@ -459,142 +480,28 @@
               thunderbolt-ibverbs-bench-tools = thunderboltPackages.bench-tools;
               thunderbolt-ibverbs-perftest = thunderboltPackages.perftest;
             };
+            thunderboltLinuxPackageAttrs = thunderboltCommonPackageAttrs // {
+              inherit (thunderboltPackages)
+                linux-thunderbolt
+                linux-thunderbolt-dev
+                linux-thunderbolt-modules
+                rdma-core-usb4
+                thunderbolt-ibverbs
+                thunderbolt-ibverbs-linux-thunderbolt
+                ;
+              rdma-core = thunderboltPackages.rdma-core-usb4;
+            };
           in
           thunderboltCommonPackageAttrs
           // lib.optionalAttrs prev.stdenv.isLinux (
-            let
-              ecPackages = prev.callPackage ./pkgs/ec-su-axb35.nix {
-                ec-su-axb35-src = inputs.ec-su-axb35;
-              };
-              applyMasterSrc =
-                attrName: pkg:
-                pkg.overrideAttrs (old: {
-                  pname = attrName;
-                  version =
-                    "master-" + (inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown");
-                  src = inputs.llama-cpp-master;
-                  npmDeps = null;
-                  nativeBuildInputs = prev.lib.filter (x: x.pname or "" != "npm-config-hook") (
-                    old.nativeBuildInputs or [ ]
-                  );
-                  preConfigure = ''
-                    prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${
-                      inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "master"
-                    }"
-                  '';
-                  cmakeFlags = (old.cmakeFlags or [ ]) ++ [
-                    (prev.lib.cmakeBool "LLAMA_BUILD_UI" false)
-                    (prev.lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
-                  ];
-                });
-              mkTargetedPackage =
-                pname: pkg:
-                pkg.overrideAttrs (_old: {
-                  inherit pname;
-                });
-              mkLlamaCppRocmBase =
-                rocmTarget:
-                prev.llama-cpp.override {
-                  rocmSupport = true;
-                  rpcSupport = true;
-                  inherit (final) rocmPackages;
-                  inherit (rocmTarget) rocmGpuTargets;
-                };
-              llamaCppRocmTargetPackages = lib.listToAttrs (
-                map (rocmTarget: {
-                  name = "llama-cpp-rocm-${rocmTarget.packageSuffix}";
-                  value = mkTargetedPackage "llama-cpp-rocm-${rocmTarget.packageSuffix}" (
-                    mkLlamaCppRocmBase rocmTarget
-                  );
-                }) rocmTargets
-              );
-              llamaCppMasterRocmTargetPackages = lib.listToAttrs (
-                map (rocmTarget: {
-                  name = "llama-cpp-master-rocm-${rocmTarget.packageSuffix}";
-                  value = applyMasterSrc "llama-cpp-master-rocm-${rocmTarget.packageSuffix}" (
-                    mkLlamaCppRocmBase rocmTarget
-                  );
-                }) rocmTargets
-              );
-              llamaCppRocmBase = mkLlamaCppRocmBase defaultRocmTarget;
-              llamaCppVulkanBase = prev.llama-cpp.override {
-                vulkanSupport = true;
-                rpcSupport = true;
-              };
-              llamaCppCudaBase = prev.llama-cpp.override {
-                cudaSupport = true;
-                rpcSupport = true;
-              };
-              ds4RocmTargets = builtins.filter (
-                rocmTarget: builtins.hasAttr rocmTarget.packageSuffix defaultTherockSources.rocm.linux
-              ) rocmTargets;
-              ds4RocmTargetPackages = lib.listToAttrs (
-                map (
-                  rocmTarget:
-                  let
-                    s = rocmTarget.packageSuffix;
-                  in
-                  {
-                    name = "ds4-rocm-${s}";
-                    value = prev.callPackage ./pkgs/ds4-rocm {
-                      src = inputs.ds4-hip;
-                      rocmSdk = final."therock-rocm-${s}";
-                      version = inputVersion "experimental" inputs.ds4-hip;
-                      packageSuffix = s;
-                      offloadArch = builtins.head rocmTarget.buildTargets;
-                      hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
-                    };
-                  }
-                ) ds4RocmTargets
-              );
-              thunderboltLinuxPackageAttrs = thunderboltCommonPackageAttrs // {
-                inherit (thunderboltPackages)
-                  linux-thunderbolt
-                  linux-thunderbolt-dev
-                  linux-thunderbolt-modules
-                  rdma-core-usb4
-                  thunderbolt-ibverbs
-                  thunderbolt-ibverbs-linux-thunderbolt
-                  ;
-                rdma-core = thunderboltPackages.rdma-core-usb4;
-              };
-            in
             (thunderboltIbverbsOverlay final prev)
-            // {
-              # EC-SU_AXB35 packages
-              ec-su-axb35 = ecPackages.kernelModule;
-              ec-su-axb35-monitor = ecPackages.monitor;
-              strix-halo-mes-firmware = prev.callPackage ./pkgs/strix-halo-mes-firmware.nix { };
-
-              tokenizers-cpp = prev.callPackage ./pkgs/tokenizers-cpp { };
-
-              xrt = prev.callPackage ./pkgs/xrt {
-                src = inputs.xrt-src;
-                version = inputVersion "2.21" inputs.xrt-src;
-                xdnaSrc = inputs.xdna-driver-src;
-                xdnaVersion = inputVersion "1.7" inputs.xdna-driver-src;
-              };
-
-              xrt-amdxdna = final.xrt.xdna;
-
-              fastflowlm = prev.callPackage ./pkgs/fastflowlm {
-                inherit (final) tokenizers-cpp xrt;
-                src = inputs.fastflowlm;
-              };
-
-              ds4-rocm = ds4RocmTargetPackages."ds4-rocm-${defaultRocmTarget.packageSuffix}";
-
-              # Generic ROCm llama.cpp build; target narrowing is explicit below.
-              llama-cpp-rocm = llamaCppRocmBase;
-              llama-cpp-vulkan = llamaCppVulkanBase;
-              llama-cpp-cuda = llamaCppCudaBase;
-              llama-cpp-master-rocm = applyMasterSrc "llama-cpp-master-rocm" llamaCppRocmBase;
-              llama-cpp-master-vulkan = applyMasterSrc "llama-cpp-master-vulkan" llamaCppVulkanBase;
-              llama-cpp-master-cuda = applyMasterSrc "llama-cpp-master-cuda" llamaCppCudaBase;
-            }
-            // ds4RocmTargetPackages
-            // llamaCppRocmTargetPackages
-            // llamaCppMasterRocmTargetPackages
+            // (strixHaloOverlays.ec-su-axb35 final prev)
+            // (strixHaloOverlays.strix-halo-mes-firmware final prev)
+            // (strixHaloOverlays.tokenizers-cpp final prev)
+            // (strixHaloOverlays.xrt final prev)
+            // (strixHaloOverlays.fastflowlm final prev)
+            // (strixHaloOverlays.llama-cpp final prev)
+            // (strixHaloOverlays.ds4-rocm final prev)
             // thunderboltLinuxPackageAttrs
             // (therockRocmOverlay final prev)
             // (therockPythonOverlay final prev)
