@@ -107,12 +107,6 @@ let
         "/dev/nvidia-caps"
       ]
     )
-    ++ optionals hasNvidiaGpu [
-      # autoAddDriverRunpath points binaries at /run/opengl-driver.
-      # Mount the symlink target too, otherwise the sandbox sees a
-      # dangling link instead of the NVIDIA userspace driver package.
-      "/run/opengl-driver=${config.hardware.nvidia.package}"
-    ]
   );
 
   relaxSandbox = any (runner: runner.relaxSandbox) enabledRunners;
