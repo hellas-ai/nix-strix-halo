@@ -12,6 +12,9 @@
   inputs,
   ...
 }:
+let
+  selfPackages = inputs.self.packages.${pkgs.stdenv.hostPlatform.system};
+in
 {
   imports = [
     "${modulesPath}/installer/cd-dvd/installation-cd-base.nix"
@@ -23,21 +26,36 @@
     inputs.self.nixosModules.fastflowlm-server
   ];
 
-  # Strix Halo gfx1151 needs a recent kernel; the installer base defaults
-  # to the LTS line which lags behind.
-  boot.kernelPackages = lib.mkDefault pkgs.linuxPackages_latest;
+  boot = {
+    # Strix Halo gfx1151 needs a recent kernel; the installer base defaults
+    # to the LTS line which lags behind.
+    kernelPackages = lib.mkDefault pkgs.linuxPackages_latest;
 
-  # Serial console for headless boots and the QEMU-based boot smoke test.
-  # `tty1` stays the primary console for users plugged into a monitor.
-  boot.kernelParams = [
-    "console=tty1"
-    "console=ttyS0,115200"
-  ];
+    # The Thunderbolt project kernel can outrun ZFS compatibility in nixpkgs.
+    # This live image is a benchmark/bring-up image, not a ZFS installer.
+    supportedFilesystems.zfs = lib.mkForce false;
+
+    # Serial console for headless boots and the QEMU-based boot smoke test.
+    # `tty1` stays the primary console for users plugged into a monitor.
+    kernelParams = [
+      "console=tty1"
+      "console=ttyS0,115200"
+    ];
+  };
 
   # Build the AXB35 EC kernel module into the image and load it at boot.
   # The driver no-ops on non-AXB35 boards, so the live image stays bootable
   # elsewhere while exposing fans/power controls on the target hardware.
   services.ec-su-axb35.enable = lib.mkDefault true;
+
+  # Build Thunderbolt/USB4 RDMA support into the image without claiming
+  # Thunderbolt services during a generic live boot.
+  hardware.thunderbolt-ibverbs = {
+    enable = lib.mkDefault true;
+    kernel.useProjectKernel = lib.mkDefault true;
+    loadOnBoot = lib.mkDefault false;
+    userspaceTools.package = pkgs.rdma-core-usb4;
+  };
 
   networking.hostName = lib.mkForce "strix-halo-live";
 
@@ -47,8 +65,11 @@
   environment.systemPackages = with pkgs; [
     llama-cpp-rocm-gfx1151
     llama-cpp-vulkan
+    selfPackages.mlx-rocm-gfx1151
     fastflowlm
     ec-su-axb35-monitor
+    thunderbolt-ibverbs-bench-tools
+    thunderbolt-ibverbs-perftest
     pciutils
     usbutils
     htop

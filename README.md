@@ -48,6 +48,10 @@ Main package outputs:
 - `packages.x86_64-linux.mlx`
 - `packages.x86_64-linux.mlx-rocm`
 - `packages.x86_64-linux.mlx-rocm-gfx1151`
+- `packages.x86_64-linux.rdma-core-usb4`
+- `packages.x86_64-linux.thunderbolt-ibverbs`
+- `packages.x86_64-linux.thunderbolt-ibverbs-bench-tools`
+- `packages.x86_64-linux.thunderbolt-ibverbs-perftest`
 - `packages.x86_64-linux.ec-su-axb35-monitor`
 - `packages.x86_64-linux.live-iso`
 - `packages.x86_64-linux.strix-halo-mes-firmware`
@@ -113,6 +117,20 @@ The flake exposes library packages for shared MLX/JACCL development across Linux
 - `packages.x86_64-linux.mlx-rocm-gfx1151`: MLX with the ROCm backend and portable JACCL support, narrowed for Strix Halo
 - `packages.aarch64-darwin.jaccl`: standalone JACCL library from the same pinned MLX source, built against Apple's RDMA library
 - `packages.aarch64-darwin.mlx` / `mlx-metal`: MLX and its Metal backend built from the pinned upstream MLX source
+
+On Linux, this flake composes the `thunderbolt-ibverbs` overlay and routes
+`rdma-core` to `rdma-core-usb4`, so ROCm/RCCL, JACCL, and MLX ROCm builds see
+the USB4 libibverbs provider.
+
+## Thunderbolt RDMA
+
+This flake composes the clean `thunderbolt-ibverbs` package set through a flake
+input and exposes the patched kernel, kernel module, `rdma-core-usb4`, perftest,
+and bench tools as package outputs. The live ISO boots the
+patched kernel and installs the module/userspace tools, but leaves
+`thunderbolt_ibverbs` unloaded at boot; use
+`sudo thunderbolt-ibverbs-reload-system` on the live system when you want to
+claim the Thunderbolt services for an RDMA run.
 
 ## TheRock ROCm Targets
 

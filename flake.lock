@@ -65,6 +65,24 @@
         "type": "github"
       }
     },
+    "linux-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779802034,
+        "narHash": "sha256-AtgoTQnF7yPt7dyYJjQIy8zt1JGdebkHSmVcoUxu7Xo=",
+        "ref": "refs/heads/next",
+        "rev": "d73a08958e66849ea713d2f458b2fcf7b183f987",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
+      },
+      "original": {
+        "ref": "refs/heads/next",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
+      }
+    },
     "llama-cpp-master": {
       "flake": false,
       "locked": {
@@ -178,6 +196,7 @@
         "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf",
         "therock-src-7-13-gfx1151-root": "therock-src-7-13-gfx1151-root",
         "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c",
+        "thunderbolt-ibverbs": "thunderbolt-ibverbs",
         "vllm-src": "vllm-src",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"
@@ -1116,6 +1135,27 @@
         "repo": "mesa-fork",
         "rev": "9a0d5b03fd540cb2448c64bbda17dbf17ccb12bf",
         "type": "github"
+      }
+    },
+    "thunderbolt-ibverbs": {
+      "inputs": {
+        "linux-src": "linux-src",
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1779825632,
+        "narHash": "sha256-E9C8XDbRWzUjQ3S/Q7DaKaCL5UVdA275knCO+xum8+w=",
+        "ref": "refs/heads/main",
+        "rev": "72133d6ab61c121fcbf8feeebd052bc905c3ae66",
+        "revCount": 226,
+        "type": "git",
+        "url": "ssh://git@github.com/hellas-ai/thunderbolt-ibverbs.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@github.com/hellas-ai/thunderbolt-ibverbs.git"
       }
     },
     "vllm-src": {
