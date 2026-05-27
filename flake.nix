@@ -1251,6 +1251,7 @@
                 self.nixosModules.benchmark-runner
                 (_: {
                   boot.kernelParams = [ "iommu=off" ];
+                  benchmark.extraUsers = [ "ciuser" ];
                   benchmark.runners.ci = {
                     gpus = [
                       {
@@ -1496,6 +1497,9 @@
                     and (.udevRules | contains("KERNEL==\"kfd\", GROUP:=\"nixbld\", MODE:=\"0660\""))
                     and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP:=\"nixbld\", MODE:=\"0660\""))
                     and (.udevRules | contains("SUBSYSTEM==\"infiniband_verbs\", GROUP:=\"nixbld\", MODE:=\"0660\""))
+                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/$kernel"))
+                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/dri/$kernel"))
+                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/infiniband/$kernel"))
                     and (.devicePermissionService.wantedBy | index("multi-user.target") != null)
                     and (.devicePermissionService.wants | index("systemd-udev-trigger.service") != null)
                     and (.devicePermissionService.wants | index("systemd-udev-settle.service") != null)
@@ -1506,9 +1510,11 @@
                     and (.devicePermissionService.script | contains("/dev/infiniband/*"))
                     and (.devicePermissionService.script | contains("chgrp nixbld"))
                     and (.devicePermissionService.script | contains("chmod 0660"))
+                    and (.devicePermissionService.script | contains("setfacl -m u:ciuser:rw"))
                     and (.devicePermissionActivation | contains("/dev/kfd"))
                     and (.devicePermissionActivation | contains("/dev/dri/renderD*"))
                     and (.devicePermissionActivation | contains("/dev/infiniband/*"))
+                    and (.devicePermissionActivation | contains("setfacl -m u:ciuser:rw"))
                   ' profile.json
 
                   touch "$out"
