@@ -95,5 +95,23 @@ lib.optionalAttrs prev.stdenv.isLinux (
       offloadArch = builtins.head rocmTarget.buildTargets;
       hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
     };
+
+    mlx-rocm = final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
+      pname = "mlx-rocm";
+      rdma-core = final.rdma-core-usb4;
+      rocmPackages = final.therockRocmPackages.${builtins.head rocmTarget.buildTargets};
+      gfx = builtins.head rocmTarget.buildTargets;
+    };
+
+    # Unsuffixed aliases for the active rocmTarget. Lets consumers write
+    # `pkgs.therock-rocm` instead of `pkgs.therock-rocm-gfx1151` once the
+    # package set's target is fixed (which it is per pkgsFor invocation).
+    therock-rocm = final."therock-rocm-${rocmTarget.packageSuffix}";
+    therock-rocm-env = final."therock-rocm-${rocmTarget.packageSuffix}-env";
+    therock-python = final."therock-python-${rocmTarget.packageSuffix}";
+    therock-python-wheels = final."therock-python-wheels-${rocmTarget.packageSuffix}";
+    therock-amdsmi = final."therock-amdsmi-${rocmTarget.packageSuffix}";
+    torch-rocm = final."torch-rocm-${rocmTarget.packageSuffix}";
+    vllm-rocm = final."vllm-rocm-therock-${rocmTarget.packageSuffix}";
   }
 )

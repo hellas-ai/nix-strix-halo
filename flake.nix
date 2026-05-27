@@ -369,54 +369,127 @@
         rocmTargets
         ;
 
-      therockLib = import ./lib/therock.nix { inherit lib inputs; };
-      inherit (therockLib)
-        defaultTherockSources
-        mkTherockRocmOverlay
-        mkTherockPythonOverlay
-        mkTherockOverlays
-        ;
+      providers = import ./lib/providers.nix { inherit lib; };
+      benchLib = import ./lib/bench.nix { inherit lib; };
 
-      therockOverlays = mkTherockOverlays {
-        inherit rocmTargets;
-        target = defaultRocmTarget;
+      defaultTherockSources = {
+        rocm = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm.json);
+        pythonWheels = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/python-wheels.json);
+        rocmSourcePins = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm-source.json);
+        rocmSourceTrees = import ./pkgs/therock/sources/source-tree.nix { inherit inputs; };
+        rocmThirdParty = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm-third-party.json);
       };
 
-      therockRocmOverlay = therockOverlays.rocm;
-      therockPythonOverlay = therockOverlays.python;
-      therockVllmOverlay = therockOverlays.vllm;
       thunderboltIbverbsOverlay = inputs.thunderbolt-ibverbs.overlays.default;
 
-      pkgsFor =
-        system:
-        import nixpkgs {
-          inherit system;
-          overlays = [ self.overlays.default ];
+      # Re-export thunderbolt-ibverbs flake packages under the names
+      # downstream callers expect. The upstream package set uses
+      # unprefixed names (`bench-tools`, `perftest`); we prefix them so
+      # the global package namespace doesn't collide. Also alias
+      # `rdma-core` to the USB4-enabled build on Linux.
+      thunderboltRenamesOverlay =
+        _: prev:
+        let
+          tbPkgs = inputs.thunderbolt-ibverbs.packages.${prev.stdenv.hostPlatform.system};
+        in
+        {
+          thunderbolt-ibverbs-bench-tools = tbPkgs.bench-tools;
+          thunderbolt-ibverbs-perftest = tbPkgs.perftest;
+        }
+        // lib.optionalAttrs prev.stdenv.isLinux {
+          inherit (tbPkgs)
+            linux-thunderbolt
+            linux-thunderbolt-dev
+            linux-thunderbolt-modules
+            rdma-core-usb4
+            thunderbolt-ibverbs
+            thunderbolt-ibverbs-linux-thunderbolt
+            ;
+          rdma-core = tbPkgs.rdma-core-usb4;
         };
 
-      cudaPackagesFor =
-        system:
+      # Compose the overlay list for a given (rocmTarget, providers, cpu).
+      # The active rocm/python providers feed the locally-defined-packages
+      # overlay through `final.rocmPackages` / `final.python3Packages`.
+      mkOverlays =
+        {
+          rocmTarget,
+          rocmProvider ? "therock-bin",
+          pythonProvider ? "therock-wheels",
+          cpu ? null,
+        }:
+        [
+          thunderboltIbverbsOverlay
+          thunderboltRenamesOverlay
+          (import ./overlays/rocm.nix {
+            inherit lib;
+            provider = rocmProvider;
+            inherit rocmTarget rocmTargets;
+            sources = defaultTherockSources;
+          })
+          (import ./overlays/python.nix {
+            inherit lib;
+            provider = pythonProvider;
+            inherit rocmTarget;
+          })
+          (import ./overlays/therock-vllm.nix {
+            inherit lib;
+            target = rocmTarget;
+            vllmSrc = inputs.vllm-src;
+            vllmVersion = "0.21.0";
+          })
+          (import ./overlays/pkgs.nix {
+            inherit
+              inputs
+              lib
+              inputVersion
+              rocmTarget
+              ;
+          })
+        ]
+        ++ lib.optional (cpu != null) (import ./overlays/mtune.nix { inherit lib cpu; });
+
+      # The parameterised package set. Different `rocmTarget` /
+      # `rocmProvider` / `pythonProvider` produce different package sets;
+      # the flake's default outputs commit to one combination, the
+      # legacyPackages tree exposes the rest per rocmTarget.
+      pkgsFor =
+        {
+          system,
+          rocmTarget ? defaultRocmTarget,
+          rocmProvider ? "therock-bin",
+          pythonProvider ? "therock-wheels",
+          cpu ? null,
+          cudaSupport ? false,
+        }:
         import nixpkgs {
           inherit system;
-          overlays = [ self.overlays.default ];
           config = {
             allowUnfree = true;
+          }
+          // lib.optionalAttrs cudaSupport {
             cudaSupport = true;
             cudaCapabilities = [ "8.9" ];
           };
+          overlays = mkOverlays {
+            inherit
+              rocmTarget
+              rocmProvider
+              pythonProvider
+              cpu
+              ;
+          };
         };
 
-      perSystem = f: forAllSystems (system: f (pkgsFor system));
-
-      benchmarkSuitesLib = import ./lib/benchmark-suites.nix { inherit lib; };
-
-      mkBenchmarkSuites =
-        pkgs:
-        benchmarkSuitesLib.mkBenchmarkSuites {
-          inherit pkgs self defaultRocmTarget;
-          cudaPkgs =
-            if pkgs.stdenv.isLinux then cudaPackagesFor pkgs.stdenv.hostPlatform.system else null;
+      defaultPkgsFor = system: pkgsFor { inherit system; };
+      cudaPkgsFor =
+        system:
+        pkgsFor {
+          inherit system;
+          cudaSupport = true;
         };
+
+      perSystem = f: forAllSystems (system: f (defaultPkgsFor system));
 
       mkLiveIsoConfiguration =
         {
@@ -435,90 +508,48 @@
           ]
           ++ extraModules;
         };
-
-      strixHaloOverlays = {
-        ec-su-axb35 = import ./overlays/ec-su-axb35.nix { inherit inputs; };
-        strix-halo-mes-firmware = import ./overlays/strix-halo-mes-firmware.nix;
-        tokenizers-cpp = import ./overlays/tokenizers-cpp.nix;
-        xrt = import ./overlays/xrt.nix { inherit inputs inputVersion; };
-        fastflowlm = import ./overlays/fastflowlm.nix { inherit inputs; };
-        llama-cpp = import ./overlays/llama-cpp.nix {
-          inherit inputs lib rocmTargets defaultRocmTarget;
-        };
-        ds4-rocm = import ./overlays/ds4-rocm.nix {
-          inherit
-            inputs
-            lib
-            inputVersion
-            rocmTargets
-            defaultRocmTarget
-            defaultTherockSources
-            ;
-        };
-      };
     in
     {
       lib = {
         inherit
           defaultTherockSources
           mkLiveIsoConfiguration
-          mkTherockOverlays
-          mkTherockPythonOverlay
-          mkTherockRocmOverlay
           ;
-        benchmarks = import ./lib/bench.nix { inherit lib; };
         inherit (rocmTargetLib) mkRocmTarget;
+        inherit (providers) rocmProviders pythonProviders;
         therockTargets = therockTargetConfig;
+        bench = benchLib;
+
+        # Parameterised overlay builders. Power users compose these to
+        # build their own package sets; see lib.mkRocmOverlay etc. The
+        # flake's `overlays.default` is the composition of all of these
+        # against the default rocmTarget + providers.
+        mkRocmOverlay =
+          args:
+          import ./overlays/rocm.nix (
+            {
+              inherit lib rocmTargets;
+              sources = defaultTherockSources;
+            }
+            // args
+          );
+        mkPythonOverlay = args: import ./overlays/python.nix ({ inherit lib; } // args);
+        mkPkgsOverlay =
+          args:
+          import ./overlays/pkgs.nix (
+            {
+              inherit lib inputVersion;
+              inherit (inputs) ec-su-axb35;
+            }
+            // args
+          );
+        mkMtuneOverlay = args: import ./overlays/mtune.nix ({ inherit lib; } // args);
       };
 
       overlays = {
-        default =
-          final: prev:
-          let
-            thunderboltPackages = inputs.thunderbolt-ibverbs.packages.${prev.stdenv.hostPlatform.system};
-            thunderboltCommonPackageAttrs = {
-              thunderbolt-ibverbs-bench-tools = thunderboltPackages.bench-tools;
-              thunderbolt-ibverbs-perftest = thunderboltPackages.perftest;
-            };
-            thunderboltLinuxPackageAttrs = thunderboltCommonPackageAttrs // {
-              inherit (thunderboltPackages)
-                linux-thunderbolt
-                linux-thunderbolt-dev
-                linux-thunderbolt-modules
-                rdma-core-usb4
-                thunderbolt-ibverbs
-                thunderbolt-ibverbs-linux-thunderbolt
-                ;
-              rdma-core = thunderboltPackages.rdma-core-usb4;
-            };
-          in
-          thunderboltCommonPackageAttrs
-          // lib.optionalAttrs prev.stdenv.isLinux (
-            (thunderboltIbverbsOverlay final prev)
-            // (strixHaloOverlays.ec-su-axb35 final prev)
-            // (strixHaloOverlays.strix-halo-mes-firmware final prev)
-            // (strixHaloOverlays.tokenizers-cpp final prev)
-            // (strixHaloOverlays.xrt final prev)
-            // (strixHaloOverlays.fastflowlm final prev)
-            // (strixHaloOverlays.llama-cpp final prev)
-            // (strixHaloOverlays.ds4-rocm final prev)
-            // thunderboltLinuxPackageAttrs
-            // (therockRocmOverlay final prev)
-            // (therockPythonOverlay final prev)
-            // (therockVllmOverlay final prev)
-          );
-
-        thunderbolt-ibverbs = thunderboltIbverbsOverlay;
-        therock-rocm = final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockRocmOverlay final prev);
-        therock-python =
-          final: prev: lib.optionalAttrs prev.stdenv.isLinux (therockPythonOverlay final prev);
-        therock-vllm =
-          final: prev:
-          lib.optionalAttrs prev.stdenv.isLinux (
-            (therockRocmOverlay final prev)
-            // (therockPythonOverlay final prev)
-            // (therockVllmOverlay final prev)
-          );
+        default = lib.composeManyExtensions (mkOverlays {
+          rocmTarget = defaultRocmTarget;
+        });
       };
 
       # NixOS modules
@@ -550,12 +581,22 @@
       };
     }
     // {
-      benchmarks = perSystem mkBenchmarkSuites;
+      # Per-target pkgs sets. Use to escape-hatch to a non-default rocm
+      # target: `nix build .#legacyPackages.x86_64-linux.gfx1100.llama-cpp-rocm`.
+      legacyPackages = forAllSystems (
+        system:
+        lib.listToAttrs (
+          map (rocmTarget: {
+            name = rocmTarget.packageSuffix;
+            value = pkgsFor { inherit system rocmTarget; };
+          }) rocmTargets
+        )
+      );
 
       packages = perSystem (
         pkgs:
         let
-          s = defaultRocmTarget.packageSuffix;
+          cudaPkgs = cudaPkgsFor pkgs.stdenv.hostPlatform.system;
           jacclPackage = pkgs.callPackage ./pkgs/jaccl (
             {
               inherit (inputs) mlx-src;
@@ -574,109 +615,38 @@
             jaccl = jacclPackage;
           };
 
-          linuxPackages =
-            let
-              therockPackageNamesFor =
-                rocmTarget:
-                let
-                  s = rocmTarget.packageSuffix;
-                in
-                [
-                  "therock-amd-llvm-${s}"
-                  "therock-rocm-${s}"
-                  "therock-rocm-${s}-env"
-                  "therock-rocm-${s}-rocshmem-env"
-                  "therock-rocm-${s}-core"
-                  "therock-rocm-${s}-cmake"
-                  "therock-rocm-from-source-${s}"
-                  "therock-rocm-from-source-${s}-configure"
-                  "therock-rocm-source-${s}"
-                  "therock-rocm-third-party-mirror-${s}"
-                  "therock-python-${s}"
-                  "therock-python-wheels-${s}"
-                  "therock-amdsmi-${s}"
-                  "torch-rocm-${s}"
-                  "vllm-rocm-therock-${s}"
-                ];
-              therockPackageNames = lib.concatMap therockPackageNamesFor rocmTargets;
-              requiredTherockPackageNames = therockPackageNamesFor defaultRocmTarget;
-              missingRequiredTherockPackages = builtins.filter (
-                name: !(builtins.hasAttr name pkgs)
-              ) requiredTherockPackageNames;
+          linuxPackages = {
+            inherit (pkgs)
+              ds4-rocm
+              ec-su-axb35-monitor
+              fastflowlm
+              llama-cpp-rocm
+              llama-cpp-vulkan
+              llama-cpp-master-rocm
+              llama-cpp-master-vulkan
+              linux-thunderbolt
+              linux-thunderbolt-dev
+              linux-thunderbolt-modules
+              mlx-rocm
+              rdma-core-usb4
+              strix-halo-mes-firmware
+              therock-rocm
+              therock-rocm-env
+              therock-python
+              therock-amdsmi
+              torch-rocm
+              vllm-rocm
+              thunderbolt-ibverbs
+              thunderbolt-ibverbs-linux-thunderbolt
+              tokenizers-cpp
+              xrt
+              xrt-amdxdna
+              ;
+            inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
+            live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
+            mlx = pkgs.mlx-rocm;
+          };
 
-              llamaCppTargetPackageNames = map (
-                rocmTarget: "llama-cpp-rocm-${rocmTarget.packageSuffix}"
-              ) rocmTargets;
-              llamaCppMasterTargetPackageNames = map (
-                rocmTarget: "llama-cpp-master-rocm-${rocmTarget.packageSuffix}"
-              ) rocmTargets;
-              llamaCppTargetPackages = lib.genAttrs (
-                llamaCppTargetPackageNames ++ llamaCppMasterTargetPackageNames
-              ) (name: pkgs.${name});
-              ds4RocmPackageNames = map (rocmTarget: "ds4-rocm-${rocmTarget.packageSuffix}") rocmTargets;
-              ds4RocmPackages = lib.genAttrs (builtins.filter (
-                name: builtins.hasAttr name pkgs
-              ) ds4RocmPackageNames) (name: pkgs.${name});
-              cudaPkgs = cudaPackagesFor pkgs.stdenv.hostPlatform.system;
-              mkMlxRocm =
-                rocmTarget:
-                let
-                  buildTarget = builtins.head rocmTarget.buildTargets;
-                in
-                pkgs.python3Packages.callPackage ./pkgs/mlx/rocm.nix {
-                  pname = "mlx-rocm-${rocmTarget.packageSuffix}";
-                  rdma-core = pkgs.rdma-core-usb4;
-                  rocmPackages = pkgs.therockRocmPackages.${buildTarget};
-                  gfx = buildTarget;
-                };
-              mlxRocmTargets = builtins.filter (
-                rocmTarget: builtins.hasAttr (builtins.head rocmTarget.buildTargets) pkgs.therockRocmPackages
-              ) rocmTargets;
-              mlxRocmTargetPackages = lib.listToAttrs (
-                map (rocmTarget: {
-                  name = "mlx-rocm-${rocmTarget.packageSuffix}";
-                  value = mkMlxRocm rocmTarget;
-                }) mlxRocmTargets
-              );
-              mlxRocm = mlxRocmTargetPackages."mlx-rocm-${s}";
-
-              therockPackages =
-                assert lib.assertMsg (missingRequiredTherockPackages == [ ])
-                  "missing expected default TheRock package(s): ${lib.concatStringsSep ", " missingRequiredTherockPackages}";
-                lib.genAttrs (builtins.filter (name: builtins.hasAttr name pkgs) therockPackageNames) (
-                  name: pkgs.${name}
-                );
-
-            in
-            {
-              inherit (pkgs)
-                ds4-rocm
-                ec-su-axb35-monitor
-                fastflowlm
-                llama-cpp-rocm
-                llama-cpp-vulkan
-                llama-cpp-master-rocm
-                llama-cpp-master-vulkan
-                linux-thunderbolt
-                linux-thunderbolt-dev
-                linux-thunderbolt-modules
-                rdma-core-usb4
-                strix-halo-mes-firmware
-                thunderbolt-ibverbs
-                thunderbolt-ibverbs-linux-thunderbolt
-                tokenizers-cpp
-                xrt
-                xrt-amdxdna
-                ;
-              inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
-              live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
-              mlx = mlxRocm;
-              mlx-rocm = mlxRocm;
-            }
-            // ds4RocmPackages
-            // mlxRocmTargetPackages
-            // llamaCppTargetPackages
-            // therockPackages;
           darwinPackages =
             let
               mlxMetalBackend = pkgs.python3Packages.callPackage ./pkgs/mlx/metal.nix {
@@ -713,32 +683,17 @@
           runtimeEnv = import ./lib/runtime-env.nix { inherit lib; };
           inherit (runtimeEnv) mkApp wrapRuntimeEnv;
 
-          mkTargetLlamaApps =
-            rocmTarget:
-            let
-              suffix = rocmTarget.packageSuffix;
-              wrapped = wrapRuntimeEnv {
-                inherit pkgs;
-                package = pkgs."llama-cpp-rocm-${suffix}";
-                name = "llama-cpp-rocm-${suffix}-runtime";
-                env = lib.optionalAttrs (rocmTarget.hsaOverride != null) {
-                  HSA_OVERRIDE_GFX_VERSION = rocmTarget.hsaOverride;
-                };
-              };
-            in
-            {
-              "llama-cli-${suffix}" = mkApp {
-                package = wrapped;
-                binary = "llama-cli";
-                description = "Run llama-cli with ROCm narrowed for ${rocmTarget.description}";
-              };
-
-              "llama-server-${suffix}" = mkApp {
-                package = wrapped;
-                binary = "llama-server";
-                description = "Run llama-server with ROCm narrowed for ${rocmTarget.description}";
-              };
+          # Wrap the default-target llama-cpp-rocm with the target's HSA
+          # env once; the -rocm apps point at that wrapped package. For
+          # non-default targets, consumers use legacyPackages directly.
+          llamaRocmRuntime = wrapRuntimeEnv {
+            inherit pkgs;
+            package = pkgs.llama-cpp-rocm;
+            name = "llama-cpp-rocm-${s}-runtime";
+            env = lib.optionalAttrs (defaultRocmTarget.hsaOverride != null) {
+              HSA_OVERRIDE_GFX_VERSION = defaultRocmTarget.hsaOverride;
             };
+          };
 
           genericApps = {
             llama-cli = mkApp {
@@ -746,7 +701,6 @@
               binary = "llama-cli";
               description = "Run llama-cli";
             };
-
             llama-server = mkApp {
               package = pkgs.llama-cpp;
               binary = "llama-server";
@@ -756,21 +710,38 @@
 
           linuxApps = {
             llama-cli-rocm = mkApp {
-              package = pkgs.llama-cpp-rocm;
+              package = llamaRocmRuntime;
               binary = "llama-cli";
-              description = "Run llama-cli with generic ROCm support";
+              description = "Run llama-cli with ROCm (default target ${defaultRocmTarget.description})";
             };
-
             llama-server-rocm = mkApp {
-              package = pkgs.llama-cpp-rocm;
+              package = llamaRocmRuntime;
               binary = "llama-server";
-              description = "Run llama-server with generic ROCm support";
+              description = "Run llama-server with ROCm (default target ${defaultRocmTarget.description})";
             };
 
             flm = mkApp {
               package = pkgs.fastflowlm;
               binary = "flm";
               description = "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
+            };
+
+            therock-rocm-env = mkApp {
+              package = pkgs.therock-rocm-env;
+              binary = "therock-rocm-${s}-env";
+              description = "Run a command in the pinned TheRock ROCm ${s} environment";
+            };
+
+            therock-python = mkApp {
+              package = pkgs.therock-python;
+              binary = "therock-python";
+              description = "Run Python in the pinned TheRock ROCm/PyTorch wheel environment";
+            };
+
+            therock-python-env = mkApp {
+              package = pkgs.therock-python;
+              binary = "therock-python-env";
+              description = "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
             };
 
             live-iso-vm =
@@ -802,42 +773,17 @@
                 );
                 meta.description = "Boot the strix-halo live ISO in QEMU (override LIVE_ISO_MEM, LIVE_ISO_CPUS)";
               };
-          }
-          // (lib.foldl' lib.recursiveUpdate { } (map mkTargetLlamaApps rocmTargets))
-          // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-env" pkgs) {
-            "therock-rocm-${s}-env" = mkApp {
-              package = pkgs."therock-rocm-${s}-env";
-              binary = "therock-rocm-${s}-env";
-              description = "Run a command in the pinned TheRock ROCm ${s} environment";
-            };
-          }
-          // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-rocshmem-env" pkgs) {
-            "therock-rocm-${s}-rocshmem-env" = mkApp {
-              package = pkgs."therock-rocm-${s}-rocshmem-env";
-              binary = "therock-rocm-${s}-rocshmem-env";
-              description = "Run a command in the pinned TheRock ROCm ${s} rocSHMEM environment";
-            };
-          }
-          // lib.optionalAttrs (builtins.hasAttr "therock-python-${s}" pkgs) {
-            "therock-python-${s}" = mkApp {
-              package = pkgs."therock-python-${s}";
-              binary = "therock-python";
-              description = "Run Python in the pinned TheRock ROCm/PyTorch wheel environment";
-            };
-            "therock-python-${s}-env" = mkApp {
-              package = pkgs."therock-python-${s}";
-              binary = "therock-python-env";
-              description = "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
-            };
           };
 
           darwinApps =
             let
               ds4Package = self.packages.${system}.ds4;
-              mkDs4App = binary: description: mkApp {
-                package = ds4Package;
-                inherit binary description;
-              };
+              mkDs4App =
+                binary: description:
+                mkApp {
+                  package = ds4Package;
+                  inherit binary description;
+                };
             in
             {
               ds4 = mkDs4App "ds4" "Run DwarfStar 4 with Metal";
@@ -876,692 +822,5 @@
 
       formatter = perSystem (pkgs: pkgs.nixfmt-tree);
 
-      checks = perSystem (
-        pkgs:
-        let
-          system = pkgs.stdenv.hostPlatform.system;
-          s = defaultRocmTarget.packageSuffix;
-          therockPytorchPackage = "torch-rocm-${s}";
-          benchmarkSet = self.benchmarks.${system};
-          cpuBenchmark = benchmarkSet.bench-llama2-7b-llama-cpp-cpu-b512-fa1;
-          cpuBenchmarkMetadata = builtins.toJSON cpuBenchmark.passthru.benchmark;
-
-          benchmarkRunnerProfileConfig =
-            (nixpkgs.lib.nixosSystem {
-              system = "x86_64-linux";
-              modules = [
-                self.nixosModules.benchmark-runner
-                (_: {
-                  boot.kernelParams = [ "iommu=off" ];
-                  benchmark.runners.ci = {
-                    gpus = [
-                      {
-                        type = "amd";
-                        arch = defaultRocmTarget.systemFeature;
-                      }
-                    ];
-                    rdma.enable = true;
-                    systemFeatures = [
-                      defaultRocmTarget.systemFeature
-                      "caller-feature"
-                    ];
-                    extraSandboxPaths = [ "/caller/device" ];
-                  };
-                })
-              ];
-            }).config;
-          benchmarkRunnerProfileMetadata = builtins.toJSON {
-            features = benchmarkRunnerProfileConfig.nix.settings.system-features;
-            sandboxPaths = benchmarkRunnerProfileConfig.nix.settings.extra-sandbox-paths;
-            tmpfilesRules = benchmarkRunnerProfileConfig.systemd.tmpfiles.rules;
-            udevRules = benchmarkRunnerProfileConfig.services.udev.extraRules;
-            deviceAclActivation =
-              benchmarkRunnerProfileConfig.system.activationScripts.benchmark-runner-device-acls.text;
-          };
-
-          benchmarkExecutorConfig =
-            (nixpkgs.lib.nixosSystem {
-              system = "x86_64-linux";
-              modules = [
-                self.nixosModules.benchmark-executor
-                (_: {
-                  benchmark.executor = {
-                    enable = true;
-                    builders.gpu-builder = {
-                      hostName = "gpu-builder.example";
-                      sshUser = "builder";
-                      systemFeatures = [ "rocm" ];
-                      mandatoryFeatures = [ "benchmark" ];
-                      gpus = [
-                        {
-                          type = "amd";
-                          arch = "1151";
-                        }
-                      ];
-                      publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBenchmarkExecutorCheck";
-                    };
-                  };
-                })
-              ];
-            }).config;
-          benchmarkExecutorMetadata = builtins.toJSON {
-            buildMachines = benchmarkExecutorConfig.nix.buildMachines;
-            knownHosts = benchmarkExecutorConfig.programs.ssh.knownHosts;
-          };
-
-          fastflowlmServerConfig =
-            (nixpkgs.lib.nixosSystem {
-              system = "x86_64-linux";
-              modules = [
-                self.nixosModules.default
-                self.nixosModules.fastflowlm-server
-                (_: {
-                  boot.kernelParams = [ "iommu=pt" ];
-                  services.fastflowlm-server = {
-                    enable = true;
-                    model = "llama3.2:1b";
-                    host = "127.0.0.1";
-                    port = 52625;
-                    openFirewall = true;
-                  };
-                })
-              ];
-            }).config;
-          fastflowlmServerMetadata = builtins.toJSON {
-            execStart = fastflowlmServerConfig.systemd.services.fastflowlm-server.serviceConfig.ExecStart;
-            udevRules = fastflowlmServerConfig.services.udev.extraRules;
-            firewallPorts = fastflowlmServerConfig.networking.firewall.allowedTCPPorts;
-          };
-
-          mkSourceCheck =
-            name: nativeBuildInputs: command:
-            pkgs.runCommandLocal "ci-${name}"
-              {
-                inherit nativeBuildInputs;
-                src = lib.cleanSource ./.;
-              }
-              ''
-                export HOME="$TMPDIR"
-                export XDG_CACHE_HOME="$TMPDIR/cache"
-                cp -R "$src" source
-                chmod -R u+w source
-                cd source
-                ${command}
-                touch "$out"
-              '';
-        in
-        {
-          format = mkSourceCheck "format" [ pkgs.nixfmt-tree ] ''
-            treefmt --tree-root . --walk filesystem --fail-on-change
-          '';
-
-          deadnix = mkSourceCheck "deadnix" [ pkgs.deadnix ] ''
-            deadnix --fail .
-          '';
-
-          statix = mkSourceCheck "statix" [ pkgs.statix ] ''
-            statix check .
-          '';
-
-          benchmark-metadata =
-            pkgs.runCommandLocal "ci-benchmark-metadata"
-              {
-                nativeBuildInputs = [ pkgs.jq ];
-              }
-              ''
-                cat > metadata.json <<'JSON'
-                ${cpuBenchmarkMetadata}
-                JSON
-
-                jq -e '
-                  .kind == "llama-cpp"
-                  and .accelerator == "cpu"
-                  and .requirements.systemFeatures == []
-                  and .requirements.hostProfiles == []
-                  and .requirements.sandboxPaths == []
-                  and .model.path == "/models/llama-2-7b/llama-2-7b.Q4_K_M.gguf"
-                  and .packages == [ "llama-cpp" ]
-                  and .params.batch == 512
-                  and .params.fa == 1
-                  and (.command | length) >= 6
-                ' metadata.json
-
-                touch "$out"
-              '';
-
-          benchmark-executor =
-            pkgs.runCommandLocal "ci-benchmark-executor"
-              {
-                nativeBuildInputs = [ pkgs.jq ];
-              }
-              ''
-                cat > executor.json <<'JSON'
-                ${benchmarkExecutorMetadata}
-                JSON
-
-                jq -e '
-                  (.buildMachines | length) == 1
-                  and .buildMachines[0].hostName == "gpu-builder.example"
-                  and .buildMachines[0].sshUser == "builder"
-                  and (.buildMachines[0].supportedFeatures | index("rocm") != null)
-                  and (.buildMachines[0].supportedFeatures | index("gfx1151") != null)
-                  and .buildMachines[0].mandatoryFeatures == [ "benchmark" ]
-                  and .knownHosts."gpu-builder.example".publicKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBenchmarkExecutorCheck"
-                ' executor.json
-
-                touch "$out"
-              '';
-
-          fastflowlm-server =
-            pkgs.runCommandLocal "ci-fastflowlm-server"
-              {
-                nativeBuildInputs = [ pkgs.jq ];
-              }
-              ''
-                cat > server.json <<'JSON'
-                ${fastflowlmServerMetadata}
-                JSON
-
-                jq -e '
-                  (.execStart | contains("flm serve"))
-                  and (.execStart | contains("--host 127.0.0.1"))
-                  and (.execStart | contains("--port 52625"))
-                  and (.execStart | contains("llama3.2:1b"))
-                  and (.udevRules | contains("SUBSYSTEM==\"accel\""))
-                  and (.firewallPorts | index(52625) != null)
-                ' server.json
-
-                touch "$out"
-              '';
-
-          package-llama-cpp = pkgs.llama-cpp;
-          package-jaccl = self.packages.${system}.jaccl;
-        }
-        // lib.optionalAttrs pkgs.stdenv.isLinux (
-          let
-            fastflowlmBenchmark = benchmarkSet.bench-llama3-2-1b-fastflowlm-medium;
-            fastflowlmBenchmarkMetadata = builtins.toJSON fastflowlmBenchmark.passthru.benchmark;
-            ds4Benchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
-            ds4BenchmarkMetadata = builtins.toJSON ds4Benchmark.passthru.benchmark;
-            mlxRocmSmokeBenchmark = benchmarkSet.bench-mlx-rocm-gfx1151-gemm-smoke;
-            mlxRocmSmokeBenchmarkMetadata = builtins.toJSON mlxRocmSmokeBenchmark.passthru.benchmark;
-            vllmThroughputBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
-            vllmThroughputBenchmarkMetadata = builtins.toJSON (
-              removeAttrs vllmThroughputBenchmark.passthru.benchmark [ "command" ]
-            );
-            vllmLatencyBenchmark = benchmarkSet.bench-qwen3-0-6b-vllm-rocm-gfx1151-latency-smoke;
-            vllmLatencyBenchmarkMetadata = builtins.toJSON (
-              removeAttrs vllmLatencyBenchmark.passthru.benchmark [ "command" ]
-            );
-            cudaSmokeBenchmark = benchmarkSet.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
-            cudaSmokeBenchmarkMetadata = builtins.toJSON (
-              removeAttrs cudaSmokeBenchmark.passthru.benchmark [ "command" ]
-            );
-          in
-          {
-            benchmark-runner-profiles =
-              pkgs.runCommandLocal "ci-benchmark-runner-profiles"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > profile.json <<'JSON'
-                  ${benchmarkRunnerProfileMetadata}
-                  JSON
-
-                  jq -e '
-                    (.features | index("${defaultRocmTarget.systemFeature}") != null)
-                    and (.features | index("caller-feature") != null)
-                    and (.features | index("rdma-usb4") != null)
-                    and (.sandboxPaths | index("/models") != null)
-                    and (.sandboxPaths | index("/dev/dri?") != null)
-                    and (.sandboxPaths | index("/dev/kfd?") != null)
-                    and (.sandboxPaths | index("/sys/class/hwmon?") != null)
-                    and (.sandboxPaths | index("/sys/class/net?") != null)
-                    and (.sandboxPaths | index("/sys/class/scsi_host?") != null)
-                    and (.sandboxPaths | index("/sys/bus/pci/devices?") != null)
-                    and (.sandboxPaths | index("/dev/infiniband?") != null)
-                    and (.sandboxPaths | index("/dev/accel?") == null)
-                    and (.sandboxPaths | index("/caller/device") != null)
-                    and (.tmpfilesRules | index("d /models 0755 root root -") != null)
-                    and (.tmpfilesRules | map(test("^z /dev/")) | any | not)
-                    and (.udevRules | contains("GROUP:=\"nixbld\"") | not)
-                    and (.udevRules | contains("MODE:=\"0660\"") | not)
-                    and (.udevRules | contains("KERNEL==\"kfd\", RUN+="))
-                    and (.udevRules | contains("setfacl -m g:nixbld:rw /dev/$kernel"))
-                    and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"card*\", RUN+="))
-                    and (.udevRules | contains("setfacl -m g:nixbld:rw /dev/dri/$kernel"))
-                    and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", RUN+="))
-                    and (.udevRules | contains("SUBSYSTEM==\"infiniband_verbs\", RUN+="))
-                    and (.udevRules | contains("setfacl -m g:nixbld:rw /dev/infiniband/$kernel"))
-                    and (.deviceAclActivation | contains("/dev/kfd"))
-                    and (.deviceAclActivation | contains("/dev/dri/card*"))
-                    and (.deviceAclActivation | contains("/dev/dri/renderD*"))
-                    and (.deviceAclActivation | contains("/dev/infiniband/*"))
-                    and (.deviceAclActivation | contains("setfacl -m g:nixbld:rw"))
-                    and (.deviceAclActivation | contains("chgrp") | not)
-                    and (.deviceAclActivation | contains("chmod") | not)
-                  ' profile.json
-
-                  touch "$out"
-                '';
-
-            fastflowlm-benchmark-metadata =
-              pkgs.runCommandLocal "ci-fastflowlm-benchmark-metadata"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > metadata.json <<'JSON'
-                  ${fastflowlmBenchmarkMetadata}
-                  JSON
-
-                  jq -e '
-                    .kind == "fastflowlm"
-                    and .accelerator == "npu"
-                    and .requirements.systemFeatures == [ "xdna2" ]
-                    and .requirements.hostProfiles == [ "linux-amd-xdna" ]
-                    and (.requirements.sandboxPaths | index("/dev/accel") != null)
-                    and .model.tag == "llama3.2:1b"
-                    and .env.FLM_MODEL_PATH == "/models/flm"
-                    and .packages == [ "fastflowlm" ]
-                  ' metadata.json
-
-                  touch "$out"
-                '';
-
-            ds4-benchmark-metadata =
-              pkgs.runCommandLocal "ci-ds4-benchmark-metadata"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > metadata.json <<'JSON'
-                  ${ds4BenchmarkMetadata}
-                  JSON
-
-                  jq -e '
-                    .kind == "ds4"
-                    and .accelerator == "rocm"
-                    and .backend == "hip"
-                    and .requirements.systemFeatures == [ "gfx1151" ]
-                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
-                    and (.requirements.sandboxPaths | index("/dev/kfd") != null)
-                    and (.requirements.sandboxPaths | index("/dev/dri") != null)
-                    and (.requirements.sandboxPaths | index("/models/ds4") != null)
-                    and .model.path == "/models/ds4/ds4flash.gguf"
-                    and .packages == [ "ds4-rocm-gfx1151" ]
-                    and .params.ctxStart == 128
-                    and .params.ctxMax == 256
-                    and .params.genTokens == 8
-                  ' metadata.json
-
-                  touch "$out"
-                '';
-
-            mlx-rocm-gemm-smoke-metadata =
-              pkgs.runCommandLocal "ci-mlx-rocm-gemm-smoke-metadata"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > metadata.json <<'JSON'
-                  ${mlxRocmSmokeBenchmarkMetadata}
-                  JSON
-
-                  jq -e '
-                    .kind == "mlx-gpu-smoke"
-                    and .suite == "mlx"
-                    and .accelerator == "rocm"
-                    and .backend == "rocm"
-                    and .scenario == "gemm-smoke"
-                    and .requirements.systemFeatures == [ "gfx1151" ]
-                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
-                    and (.requirements.sandboxPaths | index("/dev/kfd") != null)
-                    and (.requirements.sandboxPaths | index("/dev/dri") != null)
-                    and .packages == [ "mlx-rocm-gfx1151" ]
-                    and .params.op == "matmul"
-                    and .params.n == 256
-                    and .target.packageSuffix == "gfx1151"
-                    and .tool.packageRole == "mlx-rocm-gfx1151"
-                    and .tool.executable == "python"
-                  ' metadata.json
-
-                  touch "$out"
-                '';
-
-            cuda-smoke-benchmark-metadata =
-              pkgs.runCommandLocal "ci-cuda-smoke-benchmark-metadata"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > metadata.json <<'JSON'
-                  ${cudaSmokeBenchmarkMetadata}
-                  JSON
-
-                  jq -e '
-                    .kind == "cuda-smoke"
-                    and .accelerator == "cuda"
-                    and .scenario == "device-smoke"
-                    and .requirements.systemFeatures == [ "cuda-smoke" ]
-                    and .requirements.hostProfiles == [ "linux-nvidia-cuda" ]
-                    and (.requirements.sandboxPaths | index("/dev/nvidia0") != null)
-                    and (.requirements.sandboxPaths | index("/run/opengl-driver") == null)
-                    and (.env.LD_LIBRARY_PATH | test("nvidia-x11-[^/]+/lib$"))
-                    and .target.deviceClass == "rtx4090"
-                    and .target.arch == "sm_89"
-                    and .packages == [ "llama-cpp-master-cuda", "nvidia-x11" ]
-                    and .tool.executable == "llama-bench --list-devices"
-                  ' metadata.json
-
-                  touch "$out"
-                '';
-
-            vllm-benchmark-metadata =
-              pkgs.runCommandLocal "ci-vllm-benchmark-metadata"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > throughput.json <<'JSON'
-                  ${vllmThroughputBenchmarkMetadata}
-                  JSON
-
-                  cat > latency.json <<'JSON'
-                  ${vllmLatencyBenchmarkMetadata}
-                  JSON
-
-                  jq -e '
-                    .kind == "vllm"
-                    and .mode == "throughput"
-                    and .accelerator == "rocm"
-                    and .requirements.systemFeatures == [ "gfx1151" ]
-                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
-                    and (.requirements.sandboxPaths | index("/dev/kfd") != null)
-                    and (.requirements.sandboxPaths | index("/sys/class/hwmon") != null)
-                    and (.requirements.sandboxPaths | index("/sys/class/net") != null)
-                    and (.requirements.sandboxPaths | index("/sys/class/scsi_host") != null)
-                    and (.requirements.sandboxPaths | index("/sys/bus/pci/devices") != null)
-                    and (.requirements.sandboxPaths | index("/models") != null)
-                    and .model.id == "Qwen/Qwen3-0.6B"
-                    and .env.HF_HOME == "/models/.cache/huggingface"
-                    and .env.HF_HUB_OFFLINE == "1"
-                    and .env.VK_DRIVER_FILES == ""
-                    and .env.VK_ICD_FILENAMES == ""
-                    and .env.OCL_ICD_VENDORS == "/var/empty"
-                    and .packages == [ "vllm" ]
-                    and .params.inputLen == 128
-                    and .params.outputLen == 32
-                    and .params.numPrompts == 8
-                    and .tool.executable == "vllm bench throughput"
-                  ' throughput.json
-
-                  jq -e '
-                    .kind == "vllm"
-                    and .mode == "latency"
-                    and .accelerator == "rocm"
-                    and .requirements.systemFeatures == [ "gfx1151" ]
-                    and .requirements.hostProfiles == [ "linux-amd-kfd" ]
-                    and .model.id == "Qwen/Qwen3-0.6B"
-                    and .packages == [ "vllm" ]
-                    and .params.batchSize == 1
-                    and .params.numItersWarmup == 1
-                    and .params.numIters == 3
-                    and .tool.executable == "vllm bench latency"
-                  ' latency.json
-
-                  touch "$out"
-                '';
-
-            "package-llama-cpp-rocm-${s}" = pkgs."llama-cpp-rocm-${s}";
-            "package-ds4-rocm-${s}" = pkgs."ds4-rocm-${s}";
-            package-mlx-rocm = self.packages.${system}.mlx-rocm;
-            package-mlx-rocm-gfx1151 = self.packages.${system}.mlx-rocm-gfx1151;
-            "package-vllm-rocm-therock-${s}" = pkgs."vllm-rocm-therock-${s}";
-            package-fastflowlm = pkgs.fastflowlm;
-            package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
-            "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
-
-            llama-cpp-vulkan-benchmark-icd-pin =
-              let
-                vulkanBench = benchmarkSet.bench-llama2-7b-llama-cpp-vulkan-b1-fa1;
-                vulkanMetadata = builtins.toJSON vulkanBench.passthru.benchmark;
-              in
-              pkgs.runCommandLocal "ci-llama-cpp-vulkan-benchmark-icd-pin"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > metadata.json <<'JSON'
-                  ${vulkanMetadata}
-                  JSON
-
-                  jq -e '
-                    (.env.VK_DRIVER_FILES | test("/share/vulkan/icd.d/radeon_icd\\.x86_64\\.json$"))
-                  ' metadata.json
-
-                  touch "$out"
-                '';
-
-            live-iso-boot =
-              let
-                iso = self.packages.${system}.live-iso;
-              in
-              pkgs.runCommand "ci-live-iso-boot"
-                {
-                  nativeBuildInputs = [
-                    pkgs.qemu_test
-                    pkgs.expect
-                  ];
-                  requiredSystemFeatures = [
-                    "kvm"
-                    "nixos-test"
-                  ];
-                  meta.timeout = 900;
-                }
-                ''
-                  set -euo pipefail
-                  iso_file=$(echo ${iso}/iso/*.iso)
-                  if [ ! -f "$iso_file" ]; then
-                    echo "ISO not found at $iso_file" >&2
-                    exit 1
-                  fi
-
-                  echo "Booting $iso_file in QEMU..."
-
-                  ISO_FILE=$iso_file expect <<'EXPECT'
-                    set timeout 300
-                    spawn qemu-system-x86_64 \
-                      -enable-kvm \
-                      -cpu host \
-                      -m 2G \
-                      -smp 2 \
-                      -cdrom $env(ISO_FILE) \
-                      -boot d \
-                      -nographic \
-                      -no-reboot
-                    expect {
-                      "strix-halo-live login: nixos (automatic login)" {
-                        send_user "\n>>> auto-login OK\n"
-                      }
-                      timeout { send_user "\n!!! TIMEOUT waiting for login prompt\n"; exit 1 }
-                      eof { send_user "\n!!! VM exited before login prompt\n"; exit 1 }
-                    }
-                    expect {
-                      "strix-halo-live:" {
-                        send_user "\n>>> shell prompt OK\n"
-                      }
-                      timeout { send_user "\n!!! TIMEOUT waiting for shell prompt\n"; exit 1 }
-                    }
-                    send "command -v llama-cli && command -v flm && grep -F amd_iommu=pt /proc/cmdline && echo BOOTOK\r"
-                    expect {
-                      "BOOTOK" { send_user "\n>>> sanity checks OK\n"; exit 0 }
-                      timeout { send_user "\n!!! TIMEOUT during sanity checks\n"; exit 1 }
-                    }
-                  EXPECT
-
-                  touch "$out"
-                '';
-          }
-        )
-        // lib.optionalAttrs pkgs.stdenv.isDarwin (
-          let
-            ds4MetalBenchmark = benchmarkSet.bench-deepseek-v4-flash-ds4-metal-smoke;
-            ds4MetalBenchmarkMetadata = builtins.toJSON ds4MetalBenchmark.passthru.benchmark;
-            mlxMetalSmokeBenchmark = benchmarkSet.bench-mlx-metal-gemm-smoke;
-            mlxMetalSmokeBenchmarkMetadata = builtins.toJSON mlxMetalSmokeBenchmark.passthru.benchmark;
-          in
-          {
-            package-mlx = self.packages.${system}.mlx;
-            package-mlx-metal = self.packages.${system}.mlx-metal;
-            ds4-metal-benchmark-metadata =
-              pkgs.runCommandLocal "ci-ds4-metal-benchmark-metadata"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > metadata.json <<'JSON'
-                  ${ds4MetalBenchmarkMetadata}
-                  JSON
-
-                  jq -e '
-                    .kind == "ds4"
-                    and .accelerator == "metal"
-                    and .backend == "metal"
-                    and .requirements.systemFeatures == [ "metal", "benchmark" ]
-                    and .requirements.hostProfiles == [ "darwin-metal" ]
-                    and (.requirements.sandboxPaths | index("/Users/Shared/models/ds4") != null)
-                    and .model.path == "/Users/Shared/models/ds4/ds4flash.gguf"
-                    and .packages == [ "ds4" ]
-                    and .env.DS4_METAL_NO_RESIDENCY == "1"
-                    and .env.DS4_METAL_NO_MODEL_WARMUP == "1"
-                    and .target.packageSuffix == "metal"
-                    and .tool.packageRole == "ds4"
-                    and .params.ctxStart == 128
-                    and .params.ctxMax == 256
-                    and .params.genTokens == 8
-                  ' metadata.json
-
-                  touch "$out"
-                '';
-
-            mlx-metal-gemm-smoke-metadata =
-              pkgs.runCommandLocal "ci-mlx-metal-gemm-smoke-metadata"
-                {
-                  nativeBuildInputs = [ pkgs.jq ];
-                }
-                ''
-                  cat > metadata.json <<'JSON'
-                  ${mlxMetalSmokeBenchmarkMetadata}
-                  JSON
-
-                  jq -e '
-                    .kind == "mlx-gpu-smoke"
-                    and .suite == "mlx"
-                    and .accelerator == "metal"
-                    and .backend == "metal"
-                    and .scenario == "gemm-smoke"
-                    and .requirements.systemFeatures == [ "metal", "benchmark" ]
-                    and .requirements.hostProfiles == [ "darwin-metal" ]
-                    and .requirements.sandboxPaths == []
-                    and .packages == [ "mlx" ]
-                    and .params.op == "matmul"
-                    and .params.n == 256
-                    and .target.packageSuffix == "metal"
-                    and .tool.packageRole == "mlx"
-                    and .tool.executable == "python"
-                  ' metadata.json
-
-                  touch "$out"
-                '';
-          }
-        )
-      );
-
-      hydraJobs = perSystem (
-        pkgs:
-        let
-          system = pkgs.stdenv.hostPlatform.system;
-          isSourceCheckSystem = system == "x86_64-linux";
-
-          mkAggregate =
-            aggregateName: jobs:
-            pkgs.linkFarm "nix-strix-halo-${aggregateName}" (
-              lib.mapAttrsToList (name: path: {
-                inherit name path;
-              }) jobs
-            );
-
-          prQuickJobs = lib.optionalAttrs isSourceCheckSystem self.checks.${system};
-          prQuick = mkAggregate "pr-quick" prQuickJobs;
-
-          afterPrQuick =
-            name: path:
-            pkgs.linkFarm "nix-strix-halo-pr-full-${name}" (
-              lib.optionals isSourceCheckSystem [
-                {
-                  name = "pr-quick";
-                  path = prQuick;
-                }
-              ]
-              ++ [
-                {
-                  inherit name path;
-                }
-              ]
-            );
-
-          prFullJobs = {
-            default = afterPrQuick "default" self.packages.${system}.default;
-            jaccl = afterPrQuick "jaccl" self.packages.${system}.jaccl;
-          }
-          // lib.optionalAttrs (system == "aarch64-darwin") {
-            ds4 = afterPrQuick "ds4" self.packages.${system}.ds4;
-            mlx = afterPrQuick "mlx" self.packages.${system}.mlx;
-            mlx-metal = afterPrQuick "mlx-metal" self.packages.${system}.mlx-metal;
-            mlx-metal-gemm-smoke =
-              afterPrQuick "mlx-metal-gemm-smoke"
-                self.benchmarks.${system}.bench-mlx-metal-gemm-smoke;
-          }
-          // lib.optionalAttrs (system == "x86_64-linux") {
-            mlx-rocm = afterPrQuick "mlx-rocm" self.packages.${system}.mlx-rocm;
-            mlx-rocm-gfx1151 = afterPrQuick "mlx-rocm-gfx1151" self.packages.${system}.mlx-rocm-gfx1151;
-            mlx-rocm-gemm-smoke =
-              afterPrQuick "mlx-rocm-gemm-smoke"
-                self.benchmarks.${system}.bench-mlx-rocm-gfx1151-gemm-smoke;
-            live-iso = afterPrQuick "live-iso" self.packages.${system}.live-iso;
-            vllm =
-              afterPrQuick "vllm"
-                self.packages.${system}."vllm-rocm-therock-${defaultRocmTarget.packageSuffix}";
-            vllm-throughput-smoke =
-              afterPrQuick "vllm-throughput-smoke"
-                self.benchmarks.${system}.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
-            cuda-smoke =
-              afterPrQuick "cuda-smoke"
-                self.benchmarks.${system}.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
-          };
-        in
-        lib.optionalAttrs isSourceCheckSystem {
-          "pr-quick" = prQuickJobs // {
-            all = prQuick;
-          };
-        }
-        // {
-          "pr-full" = prFullJobs // {
-            all = mkAggregate "pr-full" prFullJobs;
-          };
-        }
-        // lib.optionalAttrs (system == "x86_64-linux") {
-          # Re-export the raw ISO derivation alongside the linkFarm-wrapped
-          # `pr-full.live-iso`. The linkFarm wrapper gates the build on
-          # `pr-quick` but loses the underlying ISO's
-          # `nix-support/hydra-build-products` file, so Hydra's
-          # download-by-type/file/iso UI cannot find the iso through it.
-          # The raw job below preserves the build product so the latest
-          # successful build is directly downloadable.
-          live-iso = self.packages.${system}.live-iso;
-        }
-      );
     };
 }

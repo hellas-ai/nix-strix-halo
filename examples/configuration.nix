@@ -63,9 +63,9 @@ in
   i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
 
   environment.systemPackages = with pkgs; [
-    llama-cpp-rocm-gfx1151
+    llama-cpp-rocm
     llama-cpp-vulkan
-    selfPackages.mlx-rocm-gfx1151
+    selfPackages.mlx-rocm
     fastflowlm
     ec-su-axb35-monitor
     thunderbolt-ibverbs-bench-tools

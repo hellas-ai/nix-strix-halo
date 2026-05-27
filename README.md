@@ -25,59 +25,45 @@ It provides:
 
 ## Outputs
 
+`packages.<system>.*` carries the default-target package set. The set of
+attributes is unsuffixed — there is one `llama-cpp-rocm`, one `vllm-rocm`,
+etc., narrowed to the configured default target (`gfx1151`).
+
 ```bash
 nix flake show
 ```
 
-Main package outputs:
+Non-default rocm targets live under `legacyPackages.<system>.<targetSuffix>.<pkg>`:
 
-- `packages.aarch64-darwin.default`
-- `packages.aarch64-darwin.ds4`
-- `packages.aarch64-darwin.jaccl`
-- `packages.aarch64-darwin.llama-cpp`
-- `packages.aarch64-darwin.mlx`
-- `packages.aarch64-darwin.mlx-metal`
-- `packages.x86_64-linux.default`
-- `packages.x86_64-linux.ds4-rocm`
-- `packages.x86_64-linux.ds4-rocm-gfx1151`
-- `packages.x86_64-linux.fastflowlm`
-- `packages.x86_64-linux.jaccl`
-- `packages.x86_64-linux.llama-cpp`
-- `packages.x86_64-linux.llama-cpp-rocm`
-- `packages.x86_64-linux.llama-cpp-rocm-gfx1151`
-- `packages.x86_64-linux.llama-cpp-vulkan`
-- `packages.x86_64-linux.mlx`
-- `packages.x86_64-linux.mlx-rocm`
-- `packages.x86_64-linux.mlx-rocm-gfx1151`
-- `packages.x86_64-linux.rdma-core-usb4`
-- `packages.x86_64-linux.thunderbolt-ibverbs`
-- `packages.x86_64-linux.thunderbolt-ibverbs-bench-tools`
-- `packages.x86_64-linux.thunderbolt-ibverbs-perftest`
-- `packages.x86_64-linux.ec-su-axb35-monitor`
-- `packages.x86_64-linux.live-iso`
-- `packages.x86_64-linux.strix-halo-mes-firmware`
-- `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
-- `packages.x86_64-linux.xrt-amdxdna`
+```bash
+nix build .#legacyPackages.x86_64-linux.gfx1100.llama-cpp-rocm
+```
 
-Main app outputs:
+App outputs follow the same shape — one `llama-cli`, `llama-cli-rocm`,
+`flm`, `therock-python`, etc., all wired to the default target. For a
+non-default target, build the binary out of `legacyPackages.<system>.<target>`
+and invoke directly.
 
-- `apps.aarch64-darwin.llama-cli`
-- `apps.aarch64-darwin.llama-server`
-- `apps.aarch64-darwin.ds4`
-- `apps.aarch64-darwin.ds4-server`
-- `apps.aarch64-darwin.ds4-bench`
-- `apps.x86_64-linux.llama-cli`
-- `apps.x86_64-linux.llama-server`
-- `apps.x86_64-linux.llama-cli-rocm`
-- `apps.x86_64-linux.llama-server-rocm`
-- `apps.x86_64-linux.llama-cli-gfx1151`
-- `apps.x86_64-linux.llama-server-gfx1151`
-- `apps.x86_64-linux.flm`
-- `apps.x86_64-linux.live-iso-vm`
+Notable lib outputs:
 
-Example configuration helper:
+- `lib.mkRocmTarget` — build a custom target record
+- `lib.mkRocmOverlay { provider, rocmTarget, … }` — choose the rocm provider
+- `lib.mkPythonOverlay { provider, rocmTarget }` — choose the python provider
+- `lib.mkPkgsOverlay { rocmTarget, … }` — the locally-defined packages
+- `lib.mkMtuneOverlay { cpu }` — `-march`/`-mtune` tuning (stub)
+- `lib.bench` — the benchmark helper library (see `lib/bench.nix`)
+- `lib.rocmProviders`, `lib.pythonProviders` — valid provider tags
+- `lib.therockTargets` — the project's target catalogue
+- `lib.defaultTherockSources` — JSON-pinned TheRock source bundles
+- `lib.mkLiveIsoConfiguration` — build the live ISO with extra modules
 
-- `lib.mkLiveIsoConfiguration`
+`hydra.nix` (project root, not a flake output) composes the matrix of
+benchmarks and aggregates Hydra reads. Build it directly:
+
+```bash
+nix-build hydra.nix --argstr system x86_64-linux -A pr-full.all
+nix-build hydra.nix --argstr system x86_64-linux -A benchmarks.bench-qwen3-0-6b-vllm-rocm-throughput-smoke
+```
 
 ## Use The Overlay
 
@@ -94,7 +80,7 @@ Example configuration helper:
         ({ pkgs, ... }: {
           environment.systemPackages = [
             pkgs.llama-cpp
-            pkgs.llama-cpp-rocm-gfx1151
+            pkgs.llama-cpp-rocm
           ];
         })
       ];
@@ -114,8 +100,7 @@ it uses newer Metal APIs than the default Darwin SDK. Override `darwinSdk`,
 The flake exposes library packages for shared MLX/JACCL development across Linux and macOS:
 
 - `packages.x86_64-linux.jaccl`: standalone JACCL library from the pinned MLX source, built against `rdma-core`
-- `packages.x86_64-linux.mlx` / `mlx-rocm`: compatibility aliases for the default MLX ROCm target
-- `packages.x86_64-linux.mlx-rocm-gfx1151`: MLX with the ROCm backend and portable JACCL support, narrowed for Strix Halo
+- `packages.x86_64-linux.mlx` / `mlx-rocm`: MLX with the ROCm backend, narrowed for the default target. For other targets, `legacyPackages.x86_64-linux.<targetSuffix>.mlx-rocm`.
 - `packages.aarch64-darwin.jaccl`: standalone JACCL library from the same pinned MLX source, built against Apple's RDMA library
 - `packages.aarch64-darwin.mlx` / `mlx-metal`: MLX and its Metal backend built from the pinned upstream MLX source
 
@@ -133,27 +118,19 @@ patched kernel and installs the module/userspace tools, but leaves
 `sudo thunderbolt-ibverbs-reload-system` on the live system when you want to
 claim the Thunderbolt services for an RDMA run.
 
-## TheRock ROCm Targets
+## ROCm + Python providers
 
-Target records are generic build descriptors, not a hardware inventory. Hostnames, PCI IDs, and machine-specific policy belong in the caller's own configuration. This branch configures `gfx1151` by default:
+The package set is built from three orthogonal axes:
 
-- `packages.x86_64-linux.llama-cpp-rocm-gfx1151`
-- `packages.x86_64-linux.therock-rocm-gfx1151`
-- `packages.x86_64-linux.therock-rocm-gfx1151-env`
-- `packages.x86_64-linux.therock-python-gfx1151`
-- `packages.x86_64-linux.torch-rocm-gfx1151`
-- `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
-- `packages.x86_64-linux.ds4-rocm-gfx1151`
+| axis | overlay | tags |
+|---|---|---|
+| rocm provider | `lib.mkRocmOverlay` | `therock-bin` (default), `nixpkgs`, `therock-source` |
+| python provider | `lib.mkPythonOverlay` | `therock-wheels` (default), `nixpkgs`, `therock-source` |
+| gpu narrowing | (carried by `rocmTarget`) | gfx1151 (default), gfx1100, … |
 
-The lower-level ROCm module overlay also exposes reusable narrowed package scopes:
-
-- `pkgs.therockRocmPackages.gfx1151`
-- `pkgs.therockRocmPackages.gfx11`
-- `pkgs.therockRocmPackages.gfx9`, `gfx10`, and `gfx12`
-
-Consumers can build their own target lists with the exported helpers.
-`mkTherockRocmOverlay` consumes the target's `rocmGpuTargets` to narrow
-TheRock's ROCm builds; no separate narrowing helper is needed.
+Each axis can be set independently. The flake's `packages.<system>` /
+`legacyPackages.<system>.<targetSuffix>` are built with the default
+providers; for a non-default rocm provider, compose your own overlay set:
 
 ```nix
 let
@@ -161,23 +138,27 @@ let
     packageSuffix = "gfx1100";
     hsaOverride = "11.0.0";
   };
+  myPkgs = import nixpkgs {
+    system = "x86_64-linux";
+    overlays = [
+      (nix-strix-halo.lib.mkRocmOverlay { provider = "therock-bin"; rocmTarget = myTarget; })
+      (nix-strix-halo.lib.mkPythonOverlay { provider = "therock-wheels"; rocmTarget = myTarget; })
+      (nix-strix-halo.lib.mkPkgsOverlay { rocmTarget = myTarget; inherit (nix-strix-halo.inputs) ec-su-axb35; })
+    ];
+  };
 in
-{
-  nixpkgs.overlays = [
-    (nix-strix-halo.lib.mkTherockRocmOverlay {
-      rocmTargets = [ myTarget ];
-      target = myTarget;
-    })
-  ];
-}
+  myPkgs.llama-cpp-rocm
 ```
 
-To add another top-level target to this flake's default outputs, add a target record in `pkgs/therock/targets.nix`. The `llama-cpp-rocm-<target>` output appears from that record; TheRock binary/source/Python outputs appear as matching target-keyed JSON pins are added under `pkgs/therock/sources/`.
+Adding a new target to the default flake outputs: add a record to
+`pkgs/therock/targets.nix`. Adding a new provider implementation: extend
+the dispatch in `overlays/rocm.nix` / `overlays/python.nix` and register
+the tag in `lib/providers.nix`.
 
 The vLLM package exposes feature flags through normal derivation override arguments:
 
 ```nix
-pkgs.vllm-rocm-therock-gfx1151.override {
+pkgs.vllm-rocm.override {
   benchSupport = true; # default
   audioSupport = true; # default
   otelSupport = true; # default, required by upstream vLLM

@@ -42,8 +42,7 @@ let
 
   assertProvider =
     kind: providers: tag:
-    lib.assertMsg (lib.elem tag providers)
-      "unknown ${kind} provider \"${tag}\"; valid: ${lib.concatStringsSep ", " providers}";
+    lib.assertMsg (lib.elem tag providers) "unknown ${kind} provider \"${tag}\"; valid: ${lib.concatStringsSep ", " providers}";
 in
 {
   inherit rocmProviders pythonProviders;
