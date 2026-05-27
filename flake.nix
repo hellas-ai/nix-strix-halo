@@ -622,6 +622,7 @@
               fastflowlm
               llama-cpp-rocm
               llama-cpp-vulkan
+              llama-cpp-master
               llama-cpp-master-rocm
               llama-cpp-master-vulkan
               linux-thunderbolt
@@ -683,6 +684,13 @@
           runtimeEnv = import ./lib/runtime-env.nix { inherit lib; };
           inherit (runtimeEnv) mkApp wrapRuntimeEnv;
 
+          # Positional helper. `mkApp` is the structured form; this is
+          # the inline version for entries where the structure adds no
+          # information.
+          ap =
+            package: binary: description:
+            mkApp { inherit package binary description; };
+
           # Wrap the default-target llama-cpp-rocm with the target's HSA
           # env once; the -rocm apps point at that wrapped package. For
           # non-default targets, consumers use legacyPackages directly.
@@ -696,53 +704,27 @@
           };
 
           genericApps = {
-            llama-cli = mkApp {
-              package = pkgs.llama-cpp;
-              binary = "llama-cli";
-              description = "Run llama-cli";
-            };
-            llama-server = mkApp {
-              package = pkgs.llama-cpp;
-              binary = "llama-server";
-              description = "Run llama-server";
-            };
+            llama-cli = ap pkgs.llama-cpp "llama-cli" "Run llama-cli";
+            llama-server = ap pkgs.llama-cpp "llama-server" "Run llama-server";
           };
 
           linuxApps = {
-            llama-cli-rocm = mkApp {
-              package = llamaRocmRuntime;
-              binary = "llama-cli";
-              description = "Run llama-cli with ROCm (default target ${defaultRocmTarget.description})";
-            };
-            llama-server-rocm = mkApp {
-              package = llamaRocmRuntime;
-              binary = "llama-server";
-              description = "Run llama-server with ROCm (default target ${defaultRocmTarget.description})";
-            };
-
-            flm = mkApp {
-              package = pkgs.fastflowlm;
-              binary = "flm";
-              description = "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
-            };
-
-            therock-rocm-env = mkApp {
-              package = pkgs.therock-rocm-env;
-              binary = "therock-rocm-${s}-env";
-              description = "Run a command in the pinned TheRock ROCm ${s} environment";
-            };
-
-            therock-python = mkApp {
-              package = pkgs.therock-python;
-              binary = "therock-python";
-              description = "Run Python in the pinned TheRock ROCm/PyTorch wheel environment";
-            };
-
-            therock-python-env = mkApp {
-              package = pkgs.therock-python;
-              binary = "therock-python-env";
-              description = "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
-            };
+            llama-cli-rocm =
+              ap llamaRocmRuntime "llama-cli"
+                "Run llama-cli with ROCm (default target ${defaultRocmTarget.description})";
+            llama-server-rocm =
+              ap llamaRocmRuntime "llama-server"
+                "Run llama-server with ROCm (default target ${defaultRocmTarget.description})";
+            flm = ap pkgs.fastflowlm "flm" "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
+            therock-rocm-env =
+              ap pkgs.therock-rocm-env "therock-rocm-${s}-env"
+                "Run a command in the pinned TheRock ROCm ${s} environment";
+            therock-python =
+              ap pkgs.therock-python "therock-python"
+                "Run Python in the pinned TheRock ROCm/PyTorch wheel environment";
+            therock-python-env =
+              ap pkgs.therock-python "therock-python-env"
+                "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
 
             live-iso-vm =
               let
@@ -777,21 +759,15 @@
 
           darwinApps =
             let
-              ds4Package = self.packages.${system}.ds4;
-              mkDs4App =
-                binary: description:
-                mkApp {
-                  package = ds4Package;
-                  inherit binary description;
-                };
+              ds4 = ap self.packages.${system}.ds4;
             in
             {
-              ds4 = mkDs4App "ds4" "Run DwarfStar 4 with Metal";
-              ds4-server = mkDs4App "ds4-server" "Run the DwarfStar 4 HTTP server with Metal";
-              ds4-bench = mkDs4App "ds4-bench" "Run the DwarfStar 4 benchmark with Metal";
-              ds4-eval = mkDs4App "ds4-eval" "Run DwarfStar 4 eval with Metal";
-              ds4-agent = mkDs4App "ds4-agent" "Run the DwarfStar 4 agent with Metal";
-              ds4-download-model = mkDs4App "ds4-download-model" "Download DS4 DeepSeek V4 Flash GGUF weights";
+              ds4 = ds4 "ds4" "Run DwarfStar 4 with Metal";
+              ds4-server = ds4 "ds4-server" "Run the DwarfStar 4 HTTP server with Metal";
+              ds4-bench = ds4 "ds4-bench" "Run the DwarfStar 4 benchmark with Metal";
+              ds4-eval = ds4 "ds4-eval" "Run DwarfStar 4 eval with Metal";
+              ds4-agent = ds4 "ds4-agent" "Run the DwarfStar 4 agent with Metal";
+              ds4-download-model = ds4 "ds4-download-model" "Download DS4 DeepSeek V4 Flash GGUF weights";
             };
         in
         genericApps

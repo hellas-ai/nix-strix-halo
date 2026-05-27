@@ -24,42 +24,44 @@ lib.optionalAttrs prev.stdenv.isLinux (
       ec-su-axb35-src = inputs.ec-su-axb35;
     };
 
-    applyMasterSrc =
-      attrName: pkg:
-      pkg.overrideAttrs (old: {
-        pname = attrName;
-        version =
-          "master-" + (inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown");
-        src = inputs.llama-cpp-master;
-        npmDeps = null;
-        nativeBuildInputs = prev.lib.filter (x: x.pname or "" != "npm-config-hook") (
-          old.nativeBuildInputs or [ ]
-        );
-        preConfigure = ''
-          prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${
-            inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "master"
-          }"
-        '';
-        cmakeFlags = (old.cmakeFlags or [ ]) ++ [
-          (prev.lib.cmakeBool "LLAMA_BUILD_UI" false)
-          (prev.lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
-        ];
-      });
-
-    llamaCppRocm = prev.llama-cpp.override {
+    rocmOverride = {
       rocmSupport = true;
       rpcSupport = true;
       inherit (final) rocmPackages;
       inherit (rocmTarget) rocmGpuTargets;
     };
-    llamaCppVulkan = prev.llama-cpp.override {
+    vulkanOverride = {
       vulkanSupport = true;
       rpcSupport = true;
     };
-    llamaCppCuda = prev.llama-cpp.override {
+    cudaOverride = {
       cudaSupport = true;
       rpcSupport = true;
     };
+
+    masterRev = inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown";
+    # llama-cpp-master is the upstream HEAD variant. Override is via
+    # `.overrideAttrs` (the package doesn't expose `src` through .override),
+    # but `.override` composes through it — `llamaCppMaster.override
+    # { rocmSupport = true; ... }` re-runs nixpkgs' llama-cpp with new
+    # args and re-applies these attrs on top, so the rocm/vulkan/cuda
+    # variants of master fall out of one master-src definition.
+    llamaCppMaster = prev.llama-cpp.overrideAttrs (old: {
+      pname = "llama-cpp-master";
+      version = "master-${masterRev}";
+      src = inputs.llama-cpp-master;
+      npmDeps = null;
+      nativeBuildInputs = lib.filter (x: x.pname or "" != "npm-config-hook") (
+        old.nativeBuildInputs or [ ]
+      );
+      preConfigure = ''
+        prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${masterRev}"
+      '';
+      cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+        (lib.cmakeBool "LLAMA_BUILD_UI" false)
+        (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
+      ];
+    });
   in
   {
     ec-su-axb35 = ecPackages.kernelModule;
@@ -80,12 +82,13 @@ lib.optionalAttrs prev.stdenv.isLinux (
       src = inputs.fastflowlm;
     };
 
-    llama-cpp-rocm = llamaCppRocm;
-    llama-cpp-vulkan = llamaCppVulkan;
-    llama-cpp-cuda = llamaCppCuda;
-    llama-cpp-master-rocm = applyMasterSrc "llama-cpp-master-rocm" llamaCppRocm;
-    llama-cpp-master-vulkan = applyMasterSrc "llama-cpp-master-vulkan" llamaCppVulkan;
-    llama-cpp-master-cuda = applyMasterSrc "llama-cpp-master-cuda" llamaCppCuda;
+    llama-cpp-rocm = prev.llama-cpp.override rocmOverride;
+    llama-cpp-vulkan = prev.llama-cpp.override vulkanOverride;
+    llama-cpp-cuda = prev.llama-cpp.override cudaOverride;
+    llama-cpp-master = llamaCppMaster;
+    llama-cpp-master-rocm = llamaCppMaster.override rocmOverride;
+    llama-cpp-master-vulkan = llamaCppMaster.override vulkanOverride;
+    llama-cpp-master-cuda = llamaCppMaster.override cudaOverride;
 
     ds4-rocm = prev.callPackage ../pkgs/ds4-rocm {
       src = inputs.ds4-hip;
