@@ -514,6 +514,12 @@
                 package = pkgs.llama-cpp-vulkan;
                 executable = "llama-bench";
                 backend = "vulkan";
+                env = {
+                  # Pin the AMD Vulkan ICD for benchmark reproducibility.
+                  # Outside benchmarks the package keeps the stock nixpkgs
+                  # behaviour of resolving an ICD via /run/opengl-driver.
+                  VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json";
+                };
                 requirements = {
                   systemFeatures = [ defaultRocmTarget.systemFeature ];
                   hostProfiles = [ "linux-drm-render" ];
@@ -581,6 +587,7 @@
             let
               cudaPkgs = cudaPackagesFor system;
               nvidiaSmi = cudaPkgs.linuxPackages.nvidia_x11.bin;
+              nvidiaDriver = cudaPkgs.linuxPackages.nvidia_x11;
             in
             {
               bench-cuda-rtx4090-llama-cpp-master-device-smoke = benchLib.mkBenchmark {
@@ -595,6 +602,12 @@
                     ${cudaPkgs.llama-cpp-master-cuda}/bin/llama-bench --list-devices
                   '')
                 ];
+                env = {
+                  # Pin the NVIDIA userspace driver for benchmark
+                  # reproducibility. The runner host's kernel module must
+                  # match this nvidia_x11 version.
+                  LD_LIBRARY_PATH = "${nvidiaDriver}/lib";
+                };
                 requirements = {
                   systemFeatures = [ "cuda-smoke" ];
                   hostProfiles = [ "linux-nvidia-cuda" ];
@@ -605,7 +618,6 @@
                     "/dev/nvidia-uvm-tools"
                     "/dev/nvidia-caps"
                     "/proc/driver/nvidia"
-                    "/run/opengl-driver"
                   ];
                 };
                 metadata = {
@@ -1239,6 +1251,7 @@
                 self.nixosModules.benchmark-runner
                 (_: {
                   boot.kernelParams = [ "iommu=off" ];
+                  benchmark.extraUsers = [ "ciuser" ];
                   benchmark.runners.ci = {
                     gpus = [
                       {
@@ -1484,6 +1497,9 @@
                     and (.udevRules | contains("KERNEL==\"kfd\", GROUP:=\"nixbld\", MODE:=\"0660\""))
                     and (.udevRules | contains("SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP:=\"nixbld\", MODE:=\"0660\""))
                     and (.udevRules | contains("SUBSYSTEM==\"infiniband_verbs\", GROUP:=\"nixbld\", MODE:=\"0660\""))
+                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/$kernel"))
+                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/dri/$kernel"))
+                    and (.udevRules | contains("setfacl -m u:ciuser:rw /dev/infiniband/$kernel"))
                     and (.devicePermissionService.wantedBy | index("multi-user.target") != null)
                     and (.devicePermissionService.wants | index("systemd-udev-trigger.service") != null)
                     and (.devicePermissionService.wants | index("systemd-udev-settle.service") != null)
@@ -1494,9 +1510,11 @@
                     and (.devicePermissionService.script | contains("/dev/infiniband/*"))
                     and (.devicePermissionService.script | contains("chgrp nixbld"))
                     and (.devicePermissionService.script | contains("chmod 0660"))
+                    and (.devicePermissionService.script | contains("setfacl -m u:ciuser:rw"))
                     and (.devicePermissionActivation | contains("/dev/kfd"))
                     and (.devicePermissionActivation | contains("/dev/dri/renderD*"))
                     and (.devicePermissionActivation | contains("/dev/infiniband/*"))
+                    and (.devicePermissionActivation | contains("setfacl -m u:ciuser:rw"))
                   ' profile.json
 
                   touch "$out"
@@ -1603,7 +1621,8 @@
                     and .requirements.systemFeatures == [ "cuda-smoke" ]
                     and .requirements.hostProfiles == [ "linux-nvidia-cuda" ]
                     and (.requirements.sandboxPaths | index("/dev/nvidia0") != null)
-                    and (.requirements.sandboxPaths | index("/run/opengl-driver") != null)
+                    and (.requirements.sandboxPaths | index("/run/opengl-driver") == null)
+                    and (.env.LD_LIBRARY_PATH | test("nvidia-x11-[^/]+/lib$"))
                     and .target.deviceClass == "rtx4090"
                     and .target.arch == "sm_89"
                     and .packages == [ "llama-cpp-master-cuda", "nvidia-x11" ]
@@ -1642,6 +1661,9 @@
                     and .model.id == "Qwen/Qwen3-0.6B"
                     and .env.HF_HOME == "/models/.cache/huggingface"
                     and .env.HF_HUB_OFFLINE == "1"
+                    and .env.VK_DRIVER_FILES == ""
+                    and .env.VK_ICD_FILENAMES == ""
+                    and .env.OCL_ICD_VENDORS == "/var/empty"
                     and .packages == [ "vllm" ]
                     and .params.inputLen == 128
                     and .params.outputLen == 32
@@ -1674,6 +1696,27 @@
             package-fastflowlm = pkgs.fastflowlm;
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
+
+            llama-cpp-vulkan-benchmark-icd-pin =
+              let
+                vulkanBench = benchmarkSet.bench-llama2-7b-llama-cpp-vulkan-b1-fa1;
+                vulkanMetadata = builtins.toJSON vulkanBench.passthru.benchmark;
+              in
+              pkgs.runCommandLocal "ci-llama-cpp-vulkan-benchmark-icd-pin"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > metadata.json <<'JSON'
+                  ${vulkanMetadata}
+                  JSON
+
+                  jq -e '
+                    (.env.VK_DRIVER_FILES | test("/share/vulkan/icd.d/radeon_icd\\.x86_64\\.json$"))
+                  ' metadata.json
+
+                  touch "$out"
+                '';
 
             live-iso-boot =
               let

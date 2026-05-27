@@ -13,13 +13,16 @@ let
   inherit (lib)
     any
     concatMap
+    concatMapStringsSep
     concatStringsSep
     filter
+    getBin
     hasPrefix
     mapAttrsToList
     mkIf
     mkOption
     optionals
+    optionalString
     stringAfter
     types
     unique
@@ -27,6 +30,27 @@ let
 
   common = import ./benchmark-common.nix { inherit lib pkgs; };
   cfg = config.benchmark;
+
+  setfacl = "${getBin pkgs.acl}/bin/setfacl";
+
+  # ACL rw entries for cfg.extraUsers. Devices keep group=nixbld so Nix
+  # build sandboxes (whose user namespace only maps the primary nixbld
+  # group) retain access; ACLs grant interactive users a separate rw
+  # entry without competing for the device's group ownership.
+  mkUdevAclSuffix =
+    devicePath:
+    optionalString (cfg.extraUsers != [ ]) (
+      ", "
+      + concatMapStringsSep ", " (
+        user: ''RUN+="${setfacl} -m u:${user}:rw ${devicePath}"''
+      ) cfg.extraUsers
+    );
+
+  mkShellAclLines =
+    pathVar:
+    concatMapStringsSep "\n        " (
+      user: ''${setfacl} -m u:${user}:rw -- "${pathVar}" 2>/dev/null || true''
+    ) cfg.extraUsers;
   enabledRunnerEntries = filter (entry: entry.value.enable) (
     mapAttrsToList (name: value: { inherit name value; }) cfg.runners
   );
@@ -107,12 +131,6 @@ let
         "/dev/nvidia-caps"
       ]
     )
-    ++ optionals hasNvidiaGpu [
-      # autoAddDriverRunpath points binaries at /run/opengl-driver.
-      # Mount the symlink target too, otherwise the sandbox sees a
-      # dangling link instead of the NVIDIA userspace driver package.
-      "/run/opengl-driver=${config.hardware.nvidia.package}"
-    ]
   );
 
   relaxSandbox = any (runner: runner.relaxSandbox) enabledRunners;
@@ -142,6 +160,7 @@ let
         [ -e "$path" ] || continue
         ${pkgs.coreutils}/bin/chgrp nixbld -- "$path" 2>/dev/null || true
         ${pkgs.coreutils}/bin/chmod 0660 -- "$path" 2>/dev/null || true
+        ${mkShellAclLines "$path"}
       done
     '') devicePermissionGlobs
   );
@@ -263,6 +282,27 @@ in
       '';
     };
 
+    extraUsers = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "grw" ];
+      description = ''
+        Users granted rw access to benchmark accelerator devices via POSIX
+        ACLs, in addition to the `nixbld` group. Lets a host's interactive
+        users share `/dev/kfd`, `/dev/dri/*`, `/dev/accel/*`,
+        `/dev/infiniband/*`, and `/dev/nvidia*` with Nix build sandboxes
+        on the same host without changing the devices' group ownership.
+
+        Sandbox builds must use group=nixbld because Nix runs each build
+        in a user namespace where only the primary group is mapped;
+        supplementary group memberships set on nixbld users on the host
+        are dropped inside the sandbox. ACLs work because the kernel
+        evaluates them against the real host UID regardless of the
+        namespace, so an entry like `u:grw:rw` reaches grw directly
+        without touching the device group.
+      '';
+    };
+
     runners = mkOption {
       type = types.attrsOf runnerModule;
       default = { };
@@ -343,25 +383,25 @@ in
 
     services.udev.extraRules = concatStringsSep "\n" (
       optionals hasAmdGpu [
-        ''KERNEL=="kfd", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="kfd", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/$kernel"}''
       ]
       ++ optionals hasAmdNpu [
-        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP:="nixbld", MODE:="0660"''
+        ''SUBSYSTEM=="accel", KERNEL=="accel*", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/accel/$kernel"}''
       ]
       ++ optionals hasGpu [
-        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP:="nixbld", MODE:="0660"''
-        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP:="nixbld", MODE:="0660"''
+        ''SUBSYSTEM=="drm", KERNEL=="card*", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/dri/$kernel"}''
+        ''SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/dri/$kernel"}''
       ]
       ++ optionals hasRdma [
-        ''SUBSYSTEM=="infiniband", GROUP:="nixbld", MODE:="0660"''
-        ''SUBSYSTEM=="infiniband_verbs", GROUP:="nixbld", MODE:="0660"''
-        ''SUBSYSTEM=="infiniband_cm", GROUP:="nixbld", MODE:="0660"''
+        ''SUBSYSTEM=="infiniband", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/infiniband/$kernel"}''
+        ''SUBSYSTEM=="infiniband_verbs", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/infiniband/$kernel"}''
+        ''SUBSYSTEM=="infiniband_cm", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/infiniband/$kernel"}''
       ]
       ++ optionals hasNvidiaGpu [
-        ''KERNEL=="nvidia[0-9]*", GROUP:="nixbld", MODE:="0660"''
-        ''KERNEL=="nvidiactl", GROUP:="nixbld", MODE:="0660"''
-        ''KERNEL=="nvidia-uvm", GROUP:="nixbld", MODE:="0660"''
-        ''KERNEL=="nvidia-uvm-tools", GROUP:="nixbld", MODE:="0660"''
+        ''KERNEL=="nvidia[0-9]*", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/$kernel"}''
+        ''KERNEL=="nvidiactl", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/$kernel"}''
+        ''KERNEL=="nvidia-uvm", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/$kernel"}''
+        ''KERNEL=="nvidia-uvm-tools", GROUP:="nixbld", MODE:="0660"${mkUdevAclSuffix "/dev/$kernel"}''
       ]
     );
   };

@@ -272,6 +272,14 @@ let
         VLLM_NO_USAGE_STATS = "1";
         VLLM_DO_NOT_TRACK = "1";
         RAY_USAGE_STATS_ENABLED = "0";
+
+        # vLLM's closure carries vulkan-loader and ocl-icd but ships no AMD
+        # ICDs. Empty these so an accidental enumeration fails fast instead
+        # of silently picking up whatever ICDs the runner host happens to
+        # advertise under /run/opengl-driver or /etc/OpenCL/vendors.
+        VK_DRIVER_FILES = "";
+        VK_ICD_FILENAMES = "";
+        OCL_ICD_VENDORS = "/var/empty";
       }
       // lib.optionalAttrs ((target.hsaOverride or null) != null) {
         HSA_OVERRIDE_GFX_VERSION = target.hsaOverride;
