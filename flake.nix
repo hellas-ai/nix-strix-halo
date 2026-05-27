@@ -803,81 +803,44 @@
         let
           system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
-          mkApp =
-            {
-              name,
-              packageName ? name,
-              binary ? name,
-              description,
-            }:
-            {
-              type = "app";
-              program = "${builtins.getAttr packageName pkgs}/bin/${binary}";
-              meta.description = description;
-            };
-          mkDirectApp =
-            {
-              package,
-              binary,
-              description,
-            }:
-            {
-              type = "app";
-              program = "${package}/bin/${binary}";
-              meta.description = description;
-            };
-          mkTargetLlamaApp =
-            {
-              name,
-              package,
-              hsaOverride ? null,
-              binary,
-              description,
-            }:
-            {
-              type = "app";
-              program = toString (
-                pkgs.writeShellScript name ''
-                  ${lib.optionalString (
-                    hsaOverride != null
-                  ) "export HSA_OVERRIDE_GFX_VERSION=${lib.escapeShellArg hsaOverride}"}
-                  ${package}/bin/${binary} "$@"
-                ''
-              );
-              meta.description = description;
-            };
+          runtimeEnv = import ./lib/runtime-env.nix { inherit lib; };
+          inherit (runtimeEnv) mkApp wrapRuntimeEnv;
 
           mkTargetLlamaApps =
             rocmTarget:
             let
               suffix = rocmTarget.packageSuffix;
-              package = builtins.getAttr "llama-cpp-rocm-${suffix}" pkgs;
-              hsaOverride = rocmTarget.hsaOverride or null;
+              wrapped = wrapRuntimeEnv {
+                inherit pkgs;
+                package = pkgs."llama-cpp-rocm-${suffix}";
+                name = "llama-cpp-rocm-${suffix}-runtime";
+                env = lib.optionalAttrs (rocmTarget.hsaOverride != null) {
+                  HSA_OVERRIDE_GFX_VERSION = rocmTarget.hsaOverride;
+                };
+              };
             in
             {
-              "llama-cli-${suffix}" = mkTargetLlamaApp {
-                name = "llama-cli-${suffix}";
-                inherit package hsaOverride;
+              "llama-cli-${suffix}" = mkApp {
+                package = wrapped;
                 binary = "llama-cli";
                 description = "Run llama-cli with ROCm narrowed for ${rocmTarget.description}";
               };
 
-              "llama-server-${suffix}" = mkTargetLlamaApp {
-                name = "llama-server-${suffix}";
-                inherit package hsaOverride;
+              "llama-server-${suffix}" = mkApp {
+                package = wrapped;
                 binary = "llama-server";
                 description = "Run llama-server with ROCm narrowed for ${rocmTarget.description}";
               };
             };
 
           genericApps = {
-            llama-cli = mkDirectApp {
+            llama-cli = mkApp {
               package = pkgs.llama-cpp;
               binary = "llama-cli";
               description = "Run llama-cli";
             };
 
-            llama-server = mkDirectApp {
+            llama-server = mkApp {
               package = pkgs.llama-cpp;
               binary = "llama-server";
               description = "Run llama-server";
@@ -885,19 +848,19 @@
           };
 
           linuxApps = {
-            llama-cli-rocm = mkDirectApp {
+            llama-cli-rocm = mkApp {
               package = pkgs.llama-cpp-rocm;
               binary = "llama-cli";
               description = "Run llama-cli with generic ROCm support";
             };
 
-            llama-server-rocm = mkDirectApp {
+            llama-server-rocm = mkApp {
               package = pkgs.llama-cpp-rocm;
               binary = "llama-server";
               description = "Run llama-server with generic ROCm support";
             };
 
-            flm = mkDirectApp {
+            flm = mkApp {
               package = pkgs.fastflowlm;
               binary = "flm";
               description = "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
@@ -936,25 +899,26 @@
           // (lib.foldl' lib.recursiveUpdate { } (map mkTargetLlamaApps rocmTargets))
           // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-env" pkgs) {
             "therock-rocm-${s}-env" = mkApp {
-              name = "therock-rocm-${s}-env";
+              package = pkgs."therock-rocm-${s}-env";
+              binary = "therock-rocm-${s}-env";
               description = "Run a command in the pinned TheRock ROCm ${s} environment";
             };
           }
           // lib.optionalAttrs (builtins.hasAttr "therock-rocm-${s}-rocshmem-env" pkgs) {
             "therock-rocm-${s}-rocshmem-env" = mkApp {
-              name = "therock-rocm-${s}-rocshmem-env";
+              package = pkgs."therock-rocm-${s}-rocshmem-env";
+              binary = "therock-rocm-${s}-rocshmem-env";
               description = "Run a command in the pinned TheRock ROCm ${s} rocSHMEM environment";
             };
           }
           // lib.optionalAttrs (builtins.hasAttr "therock-python-${s}" pkgs) {
             "therock-python-${s}" = mkApp {
-              name = "therock-python-${s}";
+              package = pkgs."therock-python-${s}";
               binary = "therock-python";
               description = "Run Python in the pinned TheRock ROCm/PyTorch wheel environment";
             };
             "therock-python-${s}-env" = mkApp {
-              name = "therock-python-${s}-env";
-              packageName = "therock-python-${s}";
+              package = pkgs."therock-python-${s}";
               binary = "therock-python-env";
               description = "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
             };
@@ -963,10 +927,9 @@
           darwinApps =
             let
               ds4Package = self.packages.${system}.ds4;
-              mkDs4App = binary: description: {
-                type = "app";
-                program = "${ds4Package}/bin/${binary}";
-                meta.description = description;
+              mkDs4App = binary: description: mkApp {
+                package = ds4Package;
+                inherit binary description;
               };
             in
             {
