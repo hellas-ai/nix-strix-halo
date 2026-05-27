@@ -200,6 +200,17 @@ let
             features are derived from systemFeatures, gpus, and npus.
           '';
         };
+
+        mandatoryFeatures = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          example = [ "benchmark" ];
+          description = ''
+            Nix system features that must be required by a derivation before
+            this builder is eligible. Use this for scarce or interactive
+            machines that should not accept generic builds.
+          '';
+        };
       };
     }
   );
@@ -226,6 +237,9 @@ let
     }
     // optionalAttrs (builder.sshKey != null) {
       inherit (builder) sshKey;
+    }
+    // optionalAttrs (builder.mandatoryFeatures != [ ]) {
+      inherit (builder) mandatoryFeatures;
     };
 in
 {
