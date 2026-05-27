@@ -514,6 +514,12 @@
                 package = pkgs.llama-cpp-vulkan;
                 executable = "llama-bench";
                 backend = "vulkan";
+                env = {
+                  # Pin the AMD Vulkan ICD for benchmark reproducibility.
+                  # Outside benchmarks the package keeps the stock nixpkgs
+                  # behaviour of resolving an ICD via /run/opengl-driver.
+                  VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json";
+                };
                 requirements = {
                   systemFeatures = [ defaultRocmTarget.systemFeature ];
                   hostProfiles = [ "linux-drm-render" ];
@@ -581,6 +587,7 @@
             let
               cudaPkgs = cudaPackagesFor system;
               nvidiaSmi = cudaPkgs.linuxPackages.nvidia_x11.bin;
+              nvidiaDriver = cudaPkgs.linuxPackages.nvidia_x11;
             in
             {
               bench-cuda-rtx4090-llama-cpp-master-device-smoke = benchLib.mkBenchmark {
@@ -595,6 +602,12 @@
                     ${cudaPkgs.llama-cpp-master-cuda}/bin/llama-bench --list-devices
                   '')
                 ];
+                env = {
+                  # Pin the NVIDIA userspace driver for benchmark
+                  # reproducibility. The runner host's kernel module must
+                  # match this nvidia_x11 version.
+                  LD_LIBRARY_PATH = "${nvidiaDriver}/lib";
+                };
                 requirements = {
                   systemFeatures = [ "cuda-smoke" ];
                   hostProfiles = [ "linux-nvidia-cuda" ];
@@ -731,67 +744,14 @@
                 }) rocmTargets
               );
               llamaCppRocmBase = mkLlamaCppRocmBase defaultRocmTarget;
-
-              # Pin the AMD Vulkan ICD into Vulkan llama.cpp builds. Without
-              # this, the binary relies on /run/opengl-driver/share/vulkan/icd.d
-              # at runtime, which resolves to whatever Mesa the runner host
-              # happens to ship and is invisible inside a Nix build sandbox.
-              vulkanIcdMesa = prev.mesa;
-              vulkanIcdPath = "${vulkanIcdMesa}/share/vulkan/icd.d/radeon_icd.x86_64.json";
-              wrapLlamaCppVulkan =
-                pkg:
-                pkg.overrideAttrs (old: {
-                  nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ prev.makeWrapper ];
-                  postFixup = (old.postFixup or "") + ''
-                    for bin in "$out"/bin/*; do
-                      if [ -f "$bin" ] && [ -x "$bin" ] && [ ! -L "$bin" ]; then
-                        wrapProgram "$bin" \
-                          --set-default VK_DRIVER_FILES ${prev.lib.escapeShellArg vulkanIcdPath}
-                      fi
-                    done
-                  '';
-                  passthru = (old.passthru or { }) // {
-                    vulkanIcd = vulkanIcdPath;
-                    vulkanIcdPackage = vulkanIcdMesa;
-                  };
-                });
-              llamaCppVulkanBase = wrapLlamaCppVulkan (
-                prev.llama-cpp.override {
-                  vulkanSupport = true;
-                  rpcSupport = true;
-                }
-              );
-
-              # Pin the NVIDIA userspace driver into CUDA llama.cpp builds for
-              # the same reason as the Vulkan wrap above: autoAddDriverRunpath
-              # otherwise routes libcuda.so / libnvidia-ml.so lookups through
-              # /run/opengl-driver/lib, leaking the runner host's nvidia
-              # package into every benchmark closure. The wrap couples the
-              # benchmark to a specific nvidia userspace; the runner's kernel
-              # module must match this version.
-              nvidiaDriverPackage = prev.linuxPackages.nvidia_x11;
-              wrapLlamaCppCuda =
-                pkg:
-                pkg.overrideAttrs (old: {
-                  nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ prev.makeWrapper ];
-                  postFixup = (old.postFixup or "") + ''
-                    for bin in "$out"/bin/*; do
-                      if [ -f "$bin" ] && [ -x "$bin" ] && [ ! -L "$bin" ]; then
-                        wrapProgram "$bin" \
-                          --prefix LD_LIBRARY_PATH : ${prev.lib.escapeShellArg "${nvidiaDriverPackage}/lib"}
-                      fi
-                    done
-                  '';
-                  passthru = (old.passthru or { }) // {
-                    inherit nvidiaDriverPackage;
-                  };
-                });
-              llamaCppCudaBase = wrapLlamaCppCuda (
-                prev.llama-cpp.override {
-                  cudaSupport = true;
-                  rpcSupport = true;
-                }
-              );
+              llamaCppVulkanBase = prev.llama-cpp.override {
+                vulkanSupport = true;
+                rpcSupport = true;
+              };
+              llamaCppCudaBase = prev.llama-cpp.override {
+                cudaSupport = true;
+                rpcSupport = true;
+              };
               ds4RocmTargets = builtins.filter (
                 rocmTarget: builtins.hasAttr rocmTarget.packageSuffix defaultTherockSources.rocm.linux
               ) rocmTargets;
@@ -1656,6 +1616,7 @@
                     and .requirements.hostProfiles == [ "linux-nvidia-cuda" ]
                     and (.requirements.sandboxPaths | index("/dev/nvidia0") != null)
                     and (.requirements.sandboxPaths | index("/run/opengl-driver") == null)
+                    and (.env.LD_LIBRARY_PATH | test("nvidia-x11-[^/]+/lib$"))
                     and .target.deviceClass == "rtx4090"
                     and .target.arch == "sm_89"
                     and .packages == [ "llama-cpp-master-cuda", "nvidia-x11" ]
@@ -1730,49 +1691,26 @@
             package-strix-halo-mes-firmware = pkgs.strix-halo-mes-firmware;
             "therock-pytorch-${s}" = pkgs.${therockPytorchPackage};
 
-            llama-cpp-vulkan-icd-wrap = pkgs.runCommandLocal "ci-llama-cpp-vulkan-icd-wrap" { } ''
-              pkg=${pkgs.llama-cpp-vulkan}
-              icd=${pkgs.llama-cpp-vulkan.passthru.vulkanIcd}
+            llama-cpp-vulkan-benchmark-icd-pin =
+              let
+                vulkanBench = benchmarkSet.bench-llama2-7b-llama-cpp-vulkan-b1-fa1;
+                vulkanMetadata = builtins.toJSON vulkanBench.passthru.benchmark;
+              in
+              pkgs.runCommandLocal "ci-llama-cpp-vulkan-benchmark-icd-pin"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                }
+                ''
+                  cat > metadata.json <<'JSON'
+                  ${vulkanMetadata}
+                  JSON
 
-              if [ ! -e "$icd" ]; then
-                echo "expected Vulkan ICD JSON missing: $icd" >&2
-                exit 1
-              fi
+                  jq -e '
+                    (.env.VK_DRIVER_FILES | test("/share/vulkan/icd.d/radeon_icd\\.x86_64\\.json$"))
+                  ' metadata.json
 
-              if ! grep -q radeon_icd.x86_64.json "$pkg/bin/llama-bench"; then
-                echo "llama-bench wrapper does not reference the pinned Vulkan ICD" >&2
-                exit 1
-              fi
-
-              if ! grep -q VK_DRIVER_FILES "$pkg/bin/llama-cli"; then
-                echo "llama-cli wrapper does not set VK_DRIVER_FILES" >&2
-                exit 1
-              fi
-
-              touch "$out"
-            '';
-
-            llama-cpp-cuda-driver-wrap = pkgs.runCommandLocal "ci-llama-cpp-cuda-driver-wrap" { } ''
-              pkg=${(cudaPackagesFor system).llama-cpp-cuda}
-              driver=${(cudaPackagesFor system).llama-cpp-cuda.passthru.nvidiaDriverPackage}
-
-              if [ ! -e "$driver/lib/libcuda.so.1" ] && [ ! -e "$driver/lib/libcuda.so" ]; then
-                echo "pinned nvidia driver package missing libcuda: $driver" >&2
-                exit 1
-              fi
-
-              if ! grep -q LD_LIBRARY_PATH "$pkg/bin/llama-bench"; then
-                echo "llama-bench wrapper does not set LD_LIBRARY_PATH" >&2
-                exit 1
-              fi
-
-              if ! grep -q "$driver/lib" "$pkg/bin/llama-cli"; then
-                echo "llama-cli wrapper does not reference the pinned nvidia driver" >&2
-                exit 1
-              fi
-
-              touch "$out"
-            '';
+                  touch "$out"
+                '';
 
             live-iso-boot =
               let
