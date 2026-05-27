@@ -151,7 +151,9 @@ The lower-level ROCm module overlay also exposes reusable narrowed package scope
 - `pkgs.therockRocmPackages.gfx11`
 - `pkgs.therockRocmPackages.gfx9`, `gfx10`, and `gfx12`
 
-Consumers can build their own target lists with the exported helpers:
+Consumers can build their own target lists with the exported helpers.
+`mkTherockRocmOverlay` consumes the target's `rocmGpuTargets` to narrow
+TheRock's ROCm builds; no separate narrowing helper is needed.
 
 ```nix
 let
@@ -162,9 +164,6 @@ let
 in
 {
   nixpkgs.overlays = [
-    (nix-strix-halo.lib.mkRocmNarrowOverlay {
-      rocmGpuTargets = myTarget.rocmGpuTargets;
-    })
     (nix-strix-halo.lib.mkTherockRocmOverlay {
       rocmTargets = [ myTarget ];
       target = myTarget;
