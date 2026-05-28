@@ -335,6 +335,11 @@ let
     "-Wl,-rpath,${stdenv.cc.libc}/lib"
     "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
     "-Wl,-rpath,${gcc.cc.lib}/lib"
+    # rocRoller's GPUArchitectureGenerator (and other sub-built binaries
+    # linking libelf) need elfutils in their RPATH — the build runs the
+    # generator inline to emit YAML, so libelf has to be loadable without
+    # LD_LIBRARY_PATH help.
+    "-Wl,-rpath,${elfutils.out}/lib"
   ];
 
   nixToolchainExeLinkerFlags =
