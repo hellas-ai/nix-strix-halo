@@ -500,6 +500,17 @@ let
         'COMMAND ''${CMAKE_CXX_COMPILER} --sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib -x hip ''${matrix_transform_cpp} --offload-arch=''${arch} -c --offload-device-only'
   '';
 
+  # Tensile (hipBLASLt's kernel generator) invokes clang++ -x hip directly
+  # from Python with a hardcoded default_args list. Same root cause as the
+  # matrix-transform patch: the HIP runtime wrapper needs the Nix gcc-toolchain
+  # paths to find <cmath>/<cstdlib>. Inject the flags into default_args.
+  hipblasltTensileSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/hipblaslt/tensilelite/Tensile/Toolchain/Component.py \
+      --replace-fail \
+        '"-D__HIP_HCC_COMPAT_MODE__=1",' \
+        '"--sysroot=${nixSysroot}", "--gcc-toolchain=${nixSysroot}/usr", "-B${nixSysroot}/lib", "-D__HIP_HCC_COMPAT_MODE__=1",'
+  '';
+
   ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
         substituteInPlace iree-libs/CMakeLists.txt \
           --replace-fail \
@@ -907,7 +918,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \
