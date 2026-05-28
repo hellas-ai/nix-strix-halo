@@ -329,18 +329,37 @@ let
 
   nixToolchainDriverFlags = "--sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib";
 
-  nixToolchainRuntimeLinkerFlags = lib.concatStringsSep " " [
-    "-L${nixSysroot}/lib"
-    "-Wl,-rpath,${nixSysroot}/lib"
-    "-Wl,-rpath,${stdenv.cc.libc}/lib"
-    "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
-    "-Wl,-rpath,${gcc.cc.lib}/lib"
-    # rocRoller's GPUArchitectureGenerator (and other sub-built binaries
-    # linking libelf) need elfutils in their RPATH — the build runs the
-    # generator inline to emit YAML, so libelf has to be loadable without
-    # LD_LIBRARY_PATH help.
-    "-Wl,-rpath,${elfutils.out}/lib"
-  ];
+  # Several subprojects (rocRoller's GPUArchitectureGenerator,
+  # rocprofiler-systems plug-ins, hipify driver helpers) build small
+  # binaries during the build and then *run* them in-place to generate
+  # YAML / .cpp / docs. Those binaries link against the nixpkgs system
+  # libs in buildInputs (libelf, libdrm, libnuma, libpciaccess,
+  # libxml2, zstd, ncurses, …) but the upstream CMakeLists do not add
+  # the install paths to RPATH because they expect /usr/lib. List the
+  # runtime libs the build-time tools have been observed to dlopen so
+  # the toolchain rpath covers them — each new failure of the form
+  # `error while loading shared libraries: libX.so.N` belongs here.
+  nixToolchainRuntimeLinkerFlags = lib.concatStringsSep " " (
+    [
+      "-L${nixSysroot}/lib"
+      "-Wl,-rpath,${nixSysroot}/lib"
+      "-Wl,-rpath,${stdenv.cc.libc}/lib"
+      "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
+      "-Wl,-rpath,${gcc.cc.lib}/lib"
+    ]
+    ++ map (p: "-Wl,-rpath,${p}/lib") [
+      elfutils.out
+      libdrm
+      numactl.out
+      libpciaccess
+      libxml2.out
+      zlib.out
+      ncurses.out
+      expat
+      libffi
+      glog
+    ]
+  );
 
   nixToolchainExeLinkerFlags =
     nixToolchainRuntimeLinkerFlags + " -Wl,--dynamic-linker=${stdenv.cc.bintools.dynamicLinker}";
