@@ -618,7 +618,12 @@
               allKeys = builtins.attrNames (overlay { } { stdenv.isLinux = true; });
             in
             lib.filter (
-              k: !lib.elem k [ "llama-cpp-cuda" "llama-cpp-master-cuda" ] && lib.isDerivation pkgs.${k}
+              k:
+              !lib.elem k [
+                "llama-cpp-cuda"
+                "llama-cpp-master-cuda"
+              ]
+              && lib.isDerivation pkgs.${k}
             ) allKeys;
 
           genericPackages = {
@@ -631,20 +636,19 @@
             jaccl = jacclPackage;
           };
 
-          linuxPackages = lib.genAttrs localPackagesKeys (name: pkgs.${name})
-            // {
-              inherit (pkgs)
-                linux-thunderbolt
-                linux-thunderbolt-dev
-                linux-thunderbolt-modules
-                rdma-core-usb4
-                thunderbolt-ibverbs
-                thunderbolt-ibverbs-linux-thunderbolt
-                ;
-              inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
-              live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
-              mlx = pkgs.mlx-rocm;
-            };
+          linuxPackages = lib.genAttrs localPackagesKeys (name: pkgs.${name}) // {
+            inherit (pkgs)
+              linux-thunderbolt
+              linux-thunderbolt-dev
+              linux-thunderbolt-modules
+              rdma-core-usb4
+              thunderbolt-ibverbs
+              thunderbolt-ibverbs-linux-thunderbolt
+              ;
+            inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
+            live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
+            mlx = pkgs.mlx-rocm;
+          };
 
           darwinPackages =
             let
