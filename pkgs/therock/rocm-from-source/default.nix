@@ -329,16 +329,28 @@ let
 
   nixToolchainDriverFlags = "--sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib";
 
-  # Several subprojects (rocRoller's GPUArchitectureGenerator,
+  # Subprojects (rocRoller's GPUArchitectureGenerator,
   # rocprofiler-systems plug-ins, hipify driver helpers) build small
   # binaries during the build and then *run* them in-place to generate
-  # YAML / .cpp / docs. Those binaries link against the nixpkgs system
-  # libs in buildInputs (libelf, libdrm, libnuma, libpciaccess,
-  # libxml2, zstd, ncurses, …) but the upstream CMakeLists do not add
-  # the install paths to RPATH because they expect /usr/lib. List the
-  # runtime libs the build-time tools have been observed to dlopen so
-  # the toolchain rpath covers them — each new failure of the form
+  # YAML / .cpp / docs. They dynamically link against the nixpkgs system
+  # libs in buildInputs but upstream CMakeLists don't add the install
+  # paths to RPATH (they expect /usr/lib). List the runtime libs the
+  # build-time tools have been observed to dlopen so the toolchain
+  # rpath covers them — each new failure of the form
   # `error while loading shared libraries: libX.so.N` belongs here.
+  buildTimeToolRuntimeLibs = [
+    elfutils.out
+    expat
+    glog
+    libdrm
+    libffi
+    libpciaccess
+    libxml2.out
+    ncurses.out
+    numactl.out
+    zlib.out
+  ];
+
   nixToolchainRuntimeLinkerFlags = lib.concatStringsSep " " (
     [
       "-L${nixSysroot}/lib"
@@ -347,18 +359,7 @@ let
       "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
       "-Wl,-rpath,${gcc.cc.lib}/lib"
     ]
-    ++ map (p: "-Wl,-rpath,${p}/lib") [
-      elfutils.out
-      libdrm
-      numactl.out
-      libpciaccess
-      libxml2.out
-      zlib.out
-      ncurses.out
-      expat
-      libffi
-      glog
-    ]
+    ++ map (p: "-Wl,-rpath,${p}/lib") buildTimeToolRuntimeLibs
   );
 
   nixToolchainExeLinkerFlags =
@@ -706,6 +707,13 @@ let
         "-DROCGDB_GMP_LIBRARY_DIR=${gmp}/lib"
         "-DROCGDB_MPFR_INCLUDE_DIR=${mpfr.dev}/include"
         "-DROCGDB_MPFR_LIBRARY_DIR=${mpfr}/lib"
+        # rocprofiler-systems compiles a tree of HIP-mode example programs
+        # (examples/{roctx,openmp,unified-memory,…}) where clang's bundled
+        # HIP runtime wrapper can't find the libstdc++ headers under the
+        # gcc-toolchain. The subproject is not a dependency of vllm or
+        # the downstream consumers we care about; disable until the
+        # header-path mismatch is sorted out upstream or in a follow-up.
+        "-DTHEROCK_ENABLE_ROCPROFSYS=OFF"
       ]
     else
       throw "unknown TheRock ROCm profile: ${profile}";
