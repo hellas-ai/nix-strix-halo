@@ -1,14 +1,15 @@
 # nix-strix-halo
 
-[![Hydra quick][hydra-quick-badge]][hydra-quick]
 [![Hydra full][hydra-full-badge]][hydra-full]
-
-[hydra-quick]: https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.pr-quick.all
-[hydra-quick-badge]: https://img.shields.io/endpoint?label=hydra%20quick&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fnix-strix-halo%2Fx86_64-linux.pr-quick.all%2Fshield
-[hydra-full]: https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.pr-full.all
 [hydra-full-badge]: https://img.shields.io/endpoint?label=hydra%20full&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fnix-strix-halo%2Fx86_64-linux.pr-full.all%2Fshield
 
-Small Nix flake for Strix Halo / Sixunited AXB35 systems.
+*NO SUPPORT / WARRANTY*
+
+Until version reaches 1.0, the layout and functionality of this flake are subject to change and should not be relied upon, even when pinned to specific commits. I'll try not to rewrite history or introduce breaking changes, but until that point the primary purpose of this repo is for me to trigger CI and populate the `cache.hellas.ai` binary cache for development and testing workflows. Consider yourself warned.
+
+*END WARNING*
+
+Workspace flake for Hellas- libraries and applications from ML ecosystem, packaged composably with nix.
 
 It provides:
 
