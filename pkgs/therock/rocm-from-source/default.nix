@@ -314,6 +314,7 @@ let
       python-magic
       pyyaml
       pyzstd
+      rich
       setuptools
       tomli
       zstandard
@@ -509,6 +510,18 @@ let
       --replace-fail \
         '"-D__HIP_HCC_COMPAT_MODE__=1",' \
         '"--sysroot=${nixSysroot}", "--gcc-toolchain=${nixSysroot}/usr", "-B${nixSysroot}/lib", "-D__HIP_HCC_COMPAT_MODE__=1",'
+  '';
+
+  # rocBLAS's cmake helper pip-installs the in-tree Tensile into a venv at
+  # configure time. pip's default PEP 517 build isolation creates a fresh
+  # env and tries to fetch setuptools from PyPI, which fails in the sandbox.
+  # The venv is already created with --system-site-packages, so use
+  # --no-build-isolation to fall back to the Nix python env's setuptools.
+  rocblasVirtualenvSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/rocblas/cmake/virtualenv.cmake \
+      --replace-fail \
+        'COMMAND ''${VIRTUALENV_BIN_DIR}/''${VIRTUALENV_PYTHON_EXENAME} -m pip install ''${ARGN}' \
+        'COMMAND ''${VIRTUALENV_BIN_DIR}/''${VIRTUALENV_PYTHON_EXENAME} -m pip install --no-build-isolation ''${ARGN}'
   '';
 
   ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
@@ -927,7 +940,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \
