@@ -257,6 +257,65 @@ let
       ]
     );
 
+  # Re-compose the default-target package set with a non-default rocm
+  # provider, so hydra can build the parameterised abstraction
+  # end-to-end. The composition mirrors flake.nix's internal `pkgsFor`
+  # (intentionally not exposed via flake.lib).
+  mkPkgsForProvider =
+    {
+      rocmProvider,
+      pythonProvider ? "therock-wheels",
+    }:
+    import nixpkgs {
+      inherit system;
+      config = {
+        allowUnfree = true;
+      };
+      overlays = [
+        self.inputs.thunderbolt-ibverbs.overlays.default
+        (
+          _: prev:
+          let
+            tb = self.inputs.thunderbolt-ibverbs.packages.${prev.stdenv.hostPlatform.system};
+          in
+          {
+            thunderbolt-ibverbs-bench-tools = tb.bench-tools;
+            thunderbolt-ibverbs-perftest = tb.perftest;
+          }
+          // lib.optionalAttrs prev.stdenv.isLinux {
+            inherit (tb)
+              linux-thunderbolt
+              linux-thunderbolt-dev
+              linux-thunderbolt-modules
+              rdma-core-usb4
+              thunderbolt-ibverbs
+              thunderbolt-ibverbs-linux-thunderbolt
+              ;
+            rdma-core = tb.rdma-core-usb4;
+          }
+        )
+        (flakeLib.mkRocmOverlay {
+          provider = rocmProvider;
+          rocmTarget = defaultRocmTarget;
+        })
+        (flakeLib.mkPythonOverlay {
+          provider = pythonProvider;
+          rocmTarget = defaultRocmTarget;
+        })
+        (import ./overlays/therock-vllm.nix {
+          inherit lib;
+          target = defaultRocmTarget;
+          vllmSrc = self.inputs.vllm-src;
+          vllmVersion = "0.21.0";
+        })
+        (flakeLib.mkPkgsOverlay { rocmTarget = defaultRocmTarget; })
+      ];
+    };
+
+  fromSourcePkgs = lib.optionalAttrs (system == "x86_64-linux") (mkPkgsForProvider {
+    rocmProvider = "therock-source";
+  });
+
   prFullJobs = {
     default = afterPrQuick "default" self.packages.${system}.default;
     jaccl = afterPrQuick "jaccl" self.packages.${system}.jaccl;
@@ -268,12 +327,31 @@ let
     mlx-metal-gemm-smoke = afterPrQuick "mlx-metal-gemm-smoke" benchmarks.bench-mlx-metal-gemm-smoke;
   }
   // lib.optionalAttrs (system == "x86_64-linux") {
+    # Default-target binary outputs covering the locally-defined package surface.
+    inherit (self.packages.${system})
+      ds4-rocm
+      ec-su-axb35-monitor
+      fastflowlm
+      llama-cpp-rocm
+      llama-cpp-vulkan
+      llama-cpp-master
+      strix-halo-mes-firmware
+      therock-rocm
+      tokenizers-cpp
+      vllm-rocm
+      xrt-amdxdna
+      ;
     mlx-rocm = afterPrQuick "mlx-rocm" self.packages.${system}.mlx-rocm;
     mlx-rocm-gemm-smoke = afterPrQuick "mlx-rocm-gemm-smoke" benchmarks.bench-mlx-rocm-gemm-smoke;
     live-iso = afterPrQuick "live-iso" self.packages.${system}.live-iso;
-    vllm = afterPrQuick "vllm" self.packages.${system}.vllm-rocm;
     vllm-throughput-smoke = afterPrQuick "vllm-throughput-smoke" benchmarks.bench-qwen3-0-6b-vllm-rocm-throughput-smoke;
     cuda-smoke = afterPrQuick "cuda-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+
+    # Provider-variant builds. Exercise the rocm.nix dispatcher
+    # end-to-end against the from-source TheRock build. Long builds.
+    vllm-rocm-from-source = fromSourcePkgs.vllm-rocm;
+    therock-rocm-from-source = fromSourcePkgs.therock-rocm;
+    llama-cpp-rocm-from-source = fromSourcePkgs.llama-cpp-rocm;
   };
 in
 {

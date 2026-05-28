@@ -22,40 +22,51 @@
 # the provider doesn't already, so cross-provider consumers see a
 # uniform `pkgs.rocmPackages` shape.
 
+let
+  providers = import ../lib/providers.nix { inherit lib; };
+  assertionOk = providers.assertRocmProvider provider;
+
+  therockBinOverlay = import ../pkgs/therock {
+    inherit lib rocmTargets;
+    target = rocmTarget;
+    therockRocmSources = sources.rocm;
+    therockPythonWheelSources = sources.pythonWheels;
+    therockRocmSourcePins = sources.rocmSourcePins;
+    therockRocmSourceTrees = sources.rocmSourceTrees;
+    therockRocmThirdPartySources = sources.rocmThirdParty;
+  };
+
+  suffix = rocmTarget.packageSuffix;
+in
+
+assert assertionOk;
+
 final: prev:
 if !prev.stdenv.isLinux then
   { }
+else if provider == "therock-bin" then
+  therockBinOverlay final prev
+else if provider == "therock-source" then
+  let
+    binAttrs = therockBinOverlay final prev;
+  in
+  binAttrs
+  // {
+    # Swap the active target's `therock-rocm-${suffix}` alias to point at
+    # the from-source build. Downstream consumers (vllm overlay, the
+    # `therock-rocm` alias in overlays/pkgs.nix) read this attr, so the
+    # source-built SDK flows through transparently. Sibling attrs
+    # (`-env`, `-rocshmem-env`, `-core`, `-cmake`) still reference the
+    # binary tarball — they are mostly tooling wrappers and don't change
+    # behaviour for the source build.
+    "therock-rocm-${suffix}" = binAttrs."therock-rocm-from-source-${suffix}";
+  }
+else if provider == "nixpkgs" then
+  throw ''
+    rocm provider "nixpkgs" is not implemented yet. The provider tag is
+    reserved; an overlay would narrow nixpkgs rocmPackages (magma, rccl,
+    hipblaslt, hipfft, miopen, rocblas, rocfft, composable_kernel,
+    aotriton) to rocmTarget.gpuTargets. See lib/providers.nix.
+  ''
 else
-  (
-    let
-      providers = import ../lib/providers.nix { inherit lib; };
-    in
-
-    assert providers.assertRocmProvider provider;
-
-    if provider == "therock-bin" then
-      import ../pkgs/therock {
-        inherit lib rocmTargets;
-        target = rocmTarget;
-        therockRocmSources = sources.rocm;
-        therockPythonWheelSources = sources.pythonWheels;
-        therockRocmSourcePins = sources.rocmSourcePins;
-        therockRocmSourceTrees = sources.rocmSourceTrees;
-        therockRocmThirdPartySources = sources.rocmThirdParty;
-      } final prev
-    else if provider == "nixpkgs" then
-      throw ''
-        rocm provider "nixpkgs" is not implemented yet. The provider tag is
-        reserved; an overlay would narrow nixpkgs rocmPackages (magma, rccl,
-        hipblaslt, hipfft, miopen, rocblas, rocfft, composable_kernel,
-        aotriton) to rocmTarget.gpuTargets. See lib/providers.nix.
-      ''
-    else if provider == "therock-source" then
-      throw ''
-        rocm provider "therock-source" is not implemented yet. Source-built
-        TheRock lives in pkgs/therock/rocm-from-source but is not wired into
-        a final overlay. See lib/providers.nix.
-      ''
-    else
-      throw "unreachable: assertRocmProvider should have rejected ${provider}"
-  )
+  throw "unreachable: assertRocmProvider should have rejected ${provider}"

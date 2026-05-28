@@ -538,8 +538,7 @@
           args:
           import ./overlays/pkgs.nix (
             {
-              inherit lib inputVersion;
-              inherit (inputs) ec-su-axb35;
+              inherit lib inputs inputVersion;
             }
             // args
           );
