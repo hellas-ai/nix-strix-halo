@@ -605,6 +605,22 @@
               rdma-core = pkgs.rdma-core-usb4;
             }
           );
+
+          # Dynamically extract the keys of the local packages defined in overlays/pkgs.nix.
+          # This avoids duplicate maintenance of the package list.
+          localPackagesKeys =
+            let
+              overlay = import ./overlays/pkgs.nix {
+                inherit inputs lib;
+                inputVersion = _: _: "version";
+                rocmTarget = defaultRocmTarget;
+              };
+              allKeys = builtins.attrNames (overlay { } { stdenv.isLinux = true; });
+            in
+            lib.filter (
+              k: !lib.elem k [ "llama-cpp-cuda" "llama-cpp-master-cuda" ] && lib.isDerivation pkgs.${k}
+            ) allKeys;
+
           genericPackages = {
             default = pkgs.llama-cpp;
             inherit (pkgs)
@@ -615,7 +631,7 @@
             jaccl = jacclPackage;
           };
 
-          linuxPackages = lib.genAttrs (import ./lib/packages.nix) (name: pkgs.${name})
+          linuxPackages = lib.genAttrs localPackagesKeys (name: pkgs.${name})
             // {
               inherit (pkgs)
                 linux-thunderbolt
