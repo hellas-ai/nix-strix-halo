@@ -524,6 +524,19 @@ let
         'COMMAND ''${VIRTUALENV_BIN_DIR}/''${VIRTUALENV_PYTHON_EXENAME} -m pip install --no-build-isolation ''${ARGN}'
   '';
 
+  # Shared Tensile (used by rocBLAS) — same sysroot-missing problem as the
+  # hipBLASLt copy: SourceCommands.py builds a hipFlags list that omits the
+  # Nix gcc-toolchain paths, so the HIP runtime wrapper can't find
+  # <cmath>/<cstdlib>. Inject the flags up front so every Tensile-driven
+  # HIP compile sees them. Pre-emptive patch — rocBLAS hits this during
+  # the kernel-generation build phase after the venv install succeeds.
+  sharedTensileSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/shared/tensile/Tensile/BuildCommands/SourceCommands.py \
+      --replace-fail \
+        'hipFlags = ["-D__HIP_HCC_COMPAT_MODE__=1"]' \
+        'hipFlags = ["--sysroot=${nixSysroot}", "--gcc-toolchain=${nixSysroot}/usr", "-B${nixSysroot}/lib", "-D__HIP_HCC_COMPAT_MODE__=1"]'
+  '';
+
   ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
         substituteInPlace iree-libs/CMakeLists.txt \
           --replace-fail \
@@ -940,7 +953,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \
