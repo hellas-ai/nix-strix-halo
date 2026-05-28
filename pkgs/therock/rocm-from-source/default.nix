@@ -474,6 +474,20 @@ let
         FetchContent_Declare(sqlite_local'
       '';
 
+  # hipBLASLt's tensilelite/rocisa subproject pulls nanobind via FetchContent.
+  # TheRock sets FETCHCONTENT_FULLY_DISCONNECTED=ON globally, so the fetch
+  # silently no-ops and configure aborts on the first nanobind_add_module call.
+  # Top-level -DFETCHCONTENT_SOURCE_DIR_NANOBIND doesn't propagate to TheRock
+  # sub-projects, so inject the override into rocisa's CMakeLists directly
+  # (same shape as the OTF2 / SQLite patches above).
+  hipblasltNanobindSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/hipblaslt/tensilelite/rocisa/CMakeLists.txt \
+      --replace-fail \
+        'FetchContent_MakeAvailable(nanobind)' \
+        'set(FETCHCONTENT_SOURCE_DIR_NANOBIND "${python3.pkgs.nanobind.src}" CACHE PATH "Pre-extracted nanobind source tree" FORCE)
+    FetchContent_MakeAvailable(nanobind)'
+  '';
+
   ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
         substituteInPlace iree-libs/CMakeLists.txt \
           --replace-fail \
@@ -714,13 +728,6 @@ let
         # the downstream consumers we care about; disable until the
         # header-path mismatch is sorted out upstream or in a follow-up.
         "-DTHEROCK_ENABLE_ROCPROFSYS=OFF"
-
-        # hipBLASLt's tensilelite/rocisa subproject pulls in nanobind via
-        # FetchContent. With FETCHCONTENT_FULLY_DISCONNECTED=ON the fetch
-        # silently fails and configure aborts on `nanobind_add_module`.
-        # Point it at the nixpkgs nanobind source — same workaround the
-        # nixpkgs-route hipblaslt module uses.
-        "-DFETCHCONTENT_SOURCE_DIR_NANOBIND=${python3.pkgs.nanobind.src}"
       ]
     else
       throw "unknown TheRock ROCm profile: ${profile}";
@@ -888,7 +895,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \
