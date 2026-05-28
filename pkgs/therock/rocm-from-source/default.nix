@@ -488,6 +488,18 @@ let
     FetchContent_MakeAvailable(nanobind)'
   '';
 
+  # hipBLASLt's matrix-transform device library is built via a bare
+  # add_custom_command that invokes clang++ -x hip --offload-device-only
+  # without any of TheRock's HIP toolchain plumbing. The clang HIP runtime
+  # wrapper #includes <cmath>/<cstdlib>, which require the gcc-toolchain
+  # search paths. Patch the custom command to forward the Nix sysroot.
+  hipblasltMatrixTransformSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/hipblaslt/device-library/matrix-transform/CMakeLists.txt \
+      --replace-fail \
+        'COMMAND ''${CMAKE_CXX_COMPILER} -x hip ''${matrix_transform_cpp} --offload-arch=''${arch} -c --offload-device-only' \
+        'COMMAND ''${CMAKE_CXX_COMPILER} --sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib -x hip ''${matrix_transform_cpp} --offload-arch=''${arch} -c --offload-device-only'
+  '';
+
   ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
         substituteInPlace iree-libs/CMakeLists.txt \
           --replace-fail \
@@ -895,7 +907,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \
