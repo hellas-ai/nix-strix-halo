@@ -12,9 +12,6 @@
   inputs,
   ...
 }:
-let
-  selfPackages = inputs.self.packages.${pkgs.stdenv.hostPlatform.system};
-in
 {
   imports = [
     "${modulesPath}/installer/cd-dvd/installation-cd-base.nix"
@@ -65,7 +62,7 @@ in
   environment.systemPackages = with pkgs; [
     llama-cpp-rocm
     llama-cpp-vulkan
-    selfPackages.mlx-rocm
+    mlx-rocm
     fastflowlm
     ec-su-axb35-monitor
     thunderbolt-ibverbs-bench-tools

@@ -615,38 +615,20 @@
             jaccl = jacclPackage;
           };
 
-          linuxPackages = {
-            inherit (pkgs)
-              ds4-rocm
-              ec-su-axb35-monitor
-              fastflowlm
-              llama-cpp-rocm
-              llama-cpp-vulkan
-              llama-cpp-master
-              llama-cpp-master-rocm
-              llama-cpp-master-vulkan
-              linux-thunderbolt
-              linux-thunderbolt-dev
-              linux-thunderbolt-modules
-              mlx-rocm
-              rdma-core-usb4
-              strix-halo-mes-firmware
-              therock-rocm
-              therock-rocm-env
-              therock-python
-              therock-amdsmi
-              torch-rocm
-              vllm-rocm
-              thunderbolt-ibverbs
-              thunderbolt-ibverbs-linux-thunderbolt
-              tokenizers-cpp
-              xrt
-              xrt-amdxdna
-              ;
-            inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
-            live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
-            mlx = pkgs.mlx-rocm;
-          };
+          linuxPackages = lib.genAttrs (import ./lib/packages.nix) (name: pkgs.${name})
+            // {
+              inherit (pkgs)
+                linux-thunderbolt
+                linux-thunderbolt-dev
+                linux-thunderbolt-modules
+                rdma-core-usb4
+                thunderbolt-ibverbs
+                thunderbolt-ibverbs-linux-thunderbolt
+                ;
+              inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
+              live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
+              mlx = pkgs.mlx-rocm;
+            };
 
           darwinPackages =
             let

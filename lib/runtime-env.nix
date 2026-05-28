@@ -35,12 +35,15 @@
         paths = [ package ];
         nativeBuildInputs = [ pkgs.makeWrapper ];
         postBuild = ''
-          for bin in "$out"/bin/*; do
-            [[ -L "$bin" ]] || continue
-            target=$(readlink -f "$bin")
-            rm "$bin"
-            makeWrapper "$target" "$bin" ${wrapperArgs}
-          done
+          if [ -d "$out"/bin ]; then
+            for bin in "$out"/bin/*; do
+              [ -e "$bin" ] || continue
+              [ ! -d "$bin" ] || continue
+              target=$(readlink -f "$bin")
+              rm "$bin"
+              makeWrapper "$target" "$bin" ${wrapperArgs}
+            done
+          fi
         '';
         passthru = (package.passthru or { }) // {
           unwrapped = package;
