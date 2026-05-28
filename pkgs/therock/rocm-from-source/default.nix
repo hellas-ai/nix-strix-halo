@@ -714,6 +714,13 @@ let
         # the downstream consumers we care about; disable until the
         # header-path mismatch is sorted out upstream or in a follow-up.
         "-DTHEROCK_ENABLE_ROCPROFSYS=OFF"
+
+        # hipBLASLt's tensilelite/rocisa subproject pulls in nanobind via
+        # FetchContent. With FETCHCONTENT_FULLY_DISCONNECTED=ON the fetch
+        # silently fails and configure aborts on `nanobind_add_module`.
+        # Point it at the nixpkgs nanobind source — same workaround the
+        # nixpkgs-route hipblaslt module uses.
+        "-DFETCHCONTENT_SOURCE_DIR_NANOBIND=${python3.pkgs.nanobind.src}"
       ]
     else
       throw "unknown TheRock ROCm profile: ${profile}";
