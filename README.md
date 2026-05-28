@@ -28,56 +28,6 @@ It provides:
 nix flake show
 ```
 
-Main package outputs:
-
-- `packages.aarch64-darwin.default`
-- `packages.aarch64-darwin.ds4`
-- `packages.aarch64-darwin.jaccl`
-- `packages.aarch64-darwin.llama-cpp`
-- `packages.aarch64-darwin.mlx`
-- `packages.aarch64-darwin.mlx-metal`
-- `packages.x86_64-linux.default`
-- `packages.x86_64-linux.ds4-rocm`
-- `packages.x86_64-linux.ds4-rocm-gfx1151`
-- `packages.x86_64-linux.fastflowlm`
-- `packages.x86_64-linux.jaccl`
-- `packages.x86_64-linux.llama-cpp`
-- `packages.x86_64-linux.llama-cpp-rocm`
-- `packages.x86_64-linux.llama-cpp-rocm-gfx1151`
-- `packages.x86_64-linux.llama-cpp-vulkan`
-- `packages.x86_64-linux.mlx`
-- `packages.x86_64-linux.mlx-rocm`
-- `packages.x86_64-linux.mlx-rocm-gfx1151`
-- `packages.x86_64-linux.rdma-core-usb4`
-- `packages.x86_64-linux.thunderbolt-ibverbs`
-- `packages.x86_64-linux.thunderbolt-ibverbs-bench-tools`
-- `packages.x86_64-linux.thunderbolt-ibverbs-perftest`
-- `packages.x86_64-linux.ec-su-axb35-monitor`
-- `packages.x86_64-linux.live-iso`
-- `packages.x86_64-linux.strix-halo-mes-firmware`
-- `packages.x86_64-linux.vllm-rocm-therock-gfx1151`
-- `packages.x86_64-linux.xrt-amdxdna`
-
-Main app outputs:
-
-- `apps.aarch64-darwin.llama-cli`
-- `apps.aarch64-darwin.llama-server`
-- `apps.aarch64-darwin.ds4`
-- `apps.aarch64-darwin.ds4-server`
-- `apps.aarch64-darwin.ds4-bench`
-- `apps.x86_64-linux.llama-cli`
-- `apps.x86_64-linux.llama-server`
-- `apps.x86_64-linux.llama-cli-rocm`
-- `apps.x86_64-linux.llama-server-rocm`
-- `apps.x86_64-linux.llama-cli-gfx1151`
-- `apps.x86_64-linux.llama-server-gfx1151`
-- `apps.x86_64-linux.flm`
-- `apps.x86_64-linux.live-iso-vm`
-
-Example configuration helper:
-
-- `lib.mkLiveIsoConfiguration`
-
 ## Use The Overlay
 
 ```nix
