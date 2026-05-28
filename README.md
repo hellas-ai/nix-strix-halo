@@ -8,19 +8,11 @@
 [hydra-full]: https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.pr-full.all
 [hydra-full-badge]: https://img.shields.io/endpoint?label=hydra%20full&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fnix-strix-halo%2Fx86_64-linux.pr-full.all%2Fshield
 
-Small Nix flake for Strix Halo / Sixunited AXB35 systems.
+<!-- WARNING / status notice — drop in whatever you wanted here -->
 
-It provides:
-
-- generic `llama-cpp` outputs for Linux and macOS
-- Linux-only ROCm outputs, including generic ROCm builds and Strix Halo `gfx1151` narrowed builds
-- TheRock ROCm/PyTorch packaging for configured Linux GPU targets
-- source-built vLLM ROCm packaging against the TheRock Python/ROCm stack
-- FastFlowLM packaging for AMD XDNA2 NPU inference
-- DS4-HIP packaging for DwarfStar 4 ROCm inference
-- NixOS modules for llama.cpp RPC servers, EC fan/power controls, Ryzen power limits, RAID0 disk layout, system tuning, and benchmark hosts
-- cross-platform benchmark helpers and derivations for reproducible local model/tool runs
-- a USB-bootable Strix Halo live ISO with the overlay tooling pre-installed
+Nix flake for AMD Strix Halo (gfx1151) workstations: ROCm-accelerated
+inference packaging plus the NixOS plumbing to deploy it. Targets the
+Sixunited AXB35 mainboard but reusable on any Strix Halo box.
 
 ## Outputs
 
