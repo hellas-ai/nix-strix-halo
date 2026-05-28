@@ -858,6 +858,15 @@ stdenv.mkDerivation {
     zlib.dev
   ];
 
+  # Nix sandbox sets HOME=/homeless-shelter (non-existent). hipBLASLt's
+  # Tensile.TensileCreateLibrary unconditionally tries to mkdir
+  # `$HOME/.tensile/helper_cache`, and rocm_smi_lib's cmake package registry
+  # write similarly assumes $HOME exists. Point HOME at a writable tmpdir.
+  preConfigure = ''
+    export HOME="$TMPDIR/home"
+    mkdir -p "$HOME"
+  '';
+
   configurePhase = ''
     runHook preConfigure
 
