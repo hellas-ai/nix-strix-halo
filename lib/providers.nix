@@ -18,8 +18,8 @@ let
     # narrowing. Default. Implemented in overlays/rocm.nix.
     "therock-bin"
 
-    # nixpkgs `rocmPackages.*`, narrowed to the target's gpuTargets.
-    # Not implemented yet — overlays/rocm.nix throws.
+    # nixpkgs `rocmPackages.${suffix}` — the per-arch narrowed scope
+    # nixpkgs already publishes. Doesn't pull in any TheRock attrs.
     "nixpkgs"
 
     # TheRock built from source via pkgs/therock/rocm-from-source.

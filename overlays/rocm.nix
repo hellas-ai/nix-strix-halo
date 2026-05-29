@@ -15,8 +15,11 @@
 #                        therock-bin attrs and swaps the active
 #                        target's `therock-rocm-${suffix}` alias to
 #                        point at the source build.
-#   - "nixpkgs"         nixpkgs.rocmPackages narrowed to the target's
-#                        gpuTargets. Not implemented — throws.
+#   - "nixpkgs"         nixpkgs.rocmPackages.${target}, which nixpkgs
+#                        already publishes as the per-arch narrowed
+#                        scope. Doesn't pull in any TheRock attrs, so
+#                        downstream packages that reference
+#                        therock-rocm-* (vllm, ds4, mlx) won't resolve.
 
 let
   providers = import ../lib/providers.nix { inherit lib; };
@@ -58,11 +61,13 @@ else if provider == "therock-source" then
     "therock-rocm-${suffix}" = binAttrs."therock-rocm-from-source-${suffix}";
   }
 else if provider == "nixpkgs" then
-  throw ''
-    rocm provider "nixpkgs" is not implemented yet. The provider tag is
-    reserved; an overlay would narrow nixpkgs rocmPackages (magma, rccl,
-    hipblaslt, hipfft, miopen, rocblas, rocfft, composable_kernel,
-    aotriton) to rocmTarget.gpuTargets. See lib/providers.nix.
-  ''
+  let
+    narrowed =
+      prev.rocmPackages.${suffix}
+        or (throw "nixpkgs.rocmPackages has no narrowed scope for ${suffix}");
+  in
+  {
+    rocmPackages = narrowed;
+  }
 else
   throw "unreachable: assertRocmProvider should have rejected ${provider}"
