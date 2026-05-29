@@ -947,27 +947,27 @@ stdenv.mkDerivation {
   # Several sub-projects bake their build-time dist/ directory (e.g.
   # /build/.../build/core/clr/dist/lib) into RPATH alongside the $ORIGIN
   # entries needed at runtime. Those /build/ paths are stale once the
-  # install copies everything into $out, so noAuditTmpdir rejects them.
-  #
-  # stdenv's fixupOutput already runs `patchelf --shrink-rpath` on every
-  # ELF in $out, but for these files it doesn't actually drop the /build/
-  # entry (verified empirically — running the same command a second time
-  # on the failed output strips it cleanly, so this looks like a
-  # shrink-rpath state quirk we don't want to dig into here). Bypass it
-  # with explicit string surgery: enumerate the current rpath, filter
-  # out colon-separated entries that start with /build/, and rewrite.
-  postFixup = ''
-    find "$out" -type f -print0 2>/dev/null \
-      | while IFS= read -r -d "" f; do
-          old=$(patchelf --print-rpath "$f" 2>/dev/null) || continue
-          [ -n "$old" ] || continue
-          case ":$old:" in
-            *:/build/*) ;;
-            *) continue ;;
-          esac
-          new=$(printf '%s' "$old" | tr ':' '\n' | grep -v '^/build/' | paste -sd:)
-          patchelf --set-rpath "$new" "$f" 2>/dev/null || true
-        done
+  # install copies everything into $out, so the audit-tmpdir fixup hook
+  # rejects them. Runs in preFixup specifically because audit-tmpdir is
+  # registered in fixupOutputHooks (between preFixup and postFixup), so
+  # a postFixup hook would be too late — the build would already have
+  # aborted. stdenv's own `patchelf --shrink-rpath` (also in
+  # fixupOutputHooks) doesn't actually drop these /build/ entries; we
+  # bypass that with explicit string surgery — enumerate the current
+  # rpath, filter colon-separated entries that start with /build/,
+  # rewrite. Verified out-of-band: all 16 binaries flagged by
+  # audit-tmpdir come up clean.
+  preFixup = ''
+    while IFS= read -r -d "" f; do
+      old=$(patchelf --print-rpath "$f" 2>/dev/null) || continue
+      [ -n "$old" ] || continue
+      case ":$old:" in
+        *:/build/*) ;;
+        *) continue ;;
+      esac
+      new=$(printf '%s' "$old" | tr ':' '\n' | grep -v '^/build/' | paste -sd:)
+      patchelf --set-rpath "$new" "$f" 2>/dev/null || true
+    done < <(find "$out" -type f -print0 2>/dev/null)
   '';
 
   configurePhase = ''
