@@ -565,14 +565,17 @@ let
   # on gcc <9; gcc 11+ ships filesystem inside libstdc++ proper and there is
   # no separate libstdc++fs.so, so links fail with
   # `ld.lld: error: unable to find library -lstdc++fs`. MIOpen self-gates on
-  # a check_cxx_linker_flag detection (`HAS_LIB_STD_FILESYSTEM`) and is
-  # safe; the rest assume it always exists. Strip every reference in
-  # rocm-libraries/projects so we hit them all in one sweep (rocBLAS lib,
-  # hipBLAS clients, hipSPARSE clients, rocRAND tools, miopen addkernels
-  # /test/fin/gtest helpers).
+  # a check_cxx_linker_flag(-lstdc++fs HAS_LIB_STD_FILESYSTEM) probe whose
+  # gates already correctly drop the link line when the flag is unsupported,
+  # so its subtree is excluded from the sweep — stripping `-lstdc++fs` from
+  # the probe itself would leave an empty argument and break configure.
+  # Everywhere else (rocBLAS lib, hipBLAS clients, hipSPARSE clients,
+  # rocRAND tools) assumes the lib always exists.
   rocmStdcxxFsSourcePatch = lib.optionalString (profile == "full") ''
     find rocm-libraries/projects \
-      -name CMakeLists.txt -type f -print0 \
+      -name CMakeLists.txt -type f \
+      -not -path 'rocm-libraries/projects/miopen/*' \
+      -print0 \
       | xargs -0 perl -pi -e 's/-lstdc\+\+fs//g; s/(?<!-l)\bstdc\+\+fs\b//g;'
   '';
 
