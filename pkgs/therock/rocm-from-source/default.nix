@@ -37,6 +37,7 @@
   mpfr,
   zstd,
   xz,
+  bzip2,
   libva,
   ffmpeg,
   sqlite,
@@ -899,6 +900,8 @@ stdenv.mkDerivation {
     xorgproto
   ]
   ++ lib.optionals (profile == "full") [
+    bzip2.dev
+    bzip2.out
     gmp
     gmp.dev
     mpfr
