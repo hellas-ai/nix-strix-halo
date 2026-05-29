@@ -968,6 +968,57 @@ stdenv.mkDerivation {
       new=$(printf '%s' "$old" | tr ':' '\n' | grep -v '^/build/' | paste -sd:)
       patchelf --set-rpath "$new" "$f" 2>/dev/null || true
     done < <(find "$out" -type f -print0 2>/dev/null)
+
+    ${lib.optionalString (profile == "full") ''
+      # Match the binary SDK's $out/bin/therock-hip-clang++ wrapper. CMake's
+      # HIP language detection (CMakeDetermineHIPCompiler.cmake) probes the
+      # compiler to discover --gcc-toolchain / sysroot / dynamic linker; the
+      # raw $out/lib/llvm/bin/clang++ doesn't know about Nix's split layout,
+      # so vllm's `enable_language(HIP)` aborts with "Failed to find a
+      # default HIP architecture". Build the wrapper from cc-wrapper's
+      # nix-support metadata, same shape as pkgs/therock/rocm-sdk so
+      # downstream consumers (vllm overlay, etc.) see a uniform interface
+      # regardless of the rocm provider.
+      cc_cflags_before="$(cat ${stdenv.cc}/nix-support/cc-cflags-before 2>/dev/null || true)"
+      cc_cflags="$(cat ${stdenv.cc}/nix-support/cc-cflags 2>/dev/null || true)"
+      libc_cflags="$(cat ${stdenv.cc}/nix-support/libc-cflags 2>/dev/null || true)"
+      libc_crt1_cflags="$(cat ${stdenv.cc}/nix-support/libc-crt1-cflags 2>/dev/null || true)"
+      libc_ldflags="$(cat ${stdenv.cc}/nix-support/libc-ldflags 2>/dev/null || true)"
+      cc_ldflags="$(cat ${stdenv.cc}/nix-support/cc-ldflags 2>/dev/null || true)"
+      libc="$(cat ${stdenv.cc}/nix-support/orig-libc 2>/dev/null || true)"
+      dynamic_linker="$(cat ${stdenv.cc}/nix-support/dynamic-linker 2>/dev/null || true)"
+
+      cat > "$out/bin/therock-hip-clang++" <<EOF
+      #!/bin/sh
+      exec "$out/lib/llvm/bin/clang++" \\
+        --gcc-toolchain=${stdenv.cc.cc} \\
+        --rocm-path="$out" \\
+        $cc_cflags_before \\
+        $cc_cflags \\
+        $libc_cflags \\
+        $libc_crt1_cflags \\
+        "\$@" \\
+        -L$libc/lib \\
+        -Wl,--dynamic-linker=$dynamic_linker \\
+        -Wl,-rpath,${stdenv.cc.cc.lib}/lib \\
+        -Wl,-rpath,$libc/lib \\
+        $libc_ldflags \\
+        $cc_ldflags
+      EOF
+      sed -i 's/^      //' "$out/bin/therock-hip-clang++"
+      chmod 755 "$out/bin/therock-hip-clang++"
+
+      # Override the in-tree hipcc_cmake_linker_helper so HIP link steps go
+      # through the Nix-aware wrapper instead of the bundled clang++ which
+      # loses libc/libstdc++ search paths.
+      cat > "$out/bin/hipcc_cmake_linker_helper" <<EOF
+      #!/bin/sh
+      [ "\$#" -gt 0 ] && shift
+      exec "$out/bin/therock-hip-clang++" "\$@"
+      EOF
+      sed -i 's/^      //' "$out/bin/hipcc_cmake_linker_helper"
+      chmod 755 "$out/bin/hipcc_cmake_linker_helper"
+    ''}
   '';
 
   configurePhase = ''
