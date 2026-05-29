@@ -537,6 +537,28 @@ let
         'hipFlags = ["--sysroot=${nixSysroot}", "--gcc-toolchain=${nixSysroot}/usr", "-B${nixSysroot}/lib", "-D__HIP_HCC_COMPAT_MODE__=1"]'
   '';
 
+  # hipSOLVER falls back to ExternalProject_Add of OpenBLAS from
+  # https://github.com/OpenMathLib/OpenBLAS when HIPSOLVER_INTERNAL_LAPACK_BUILD
+  # is ON (the default). The Nix sandbox has no network, so the git clone
+  # fails. TheRock already ships an OpenBLAS sub-project (`therock-host-blas`,
+  # in third-party/host-blas/) that pulls from the same S3 mirror we redirect
+  # to file:// in postPatch. Wire hipSOLVER at that one instead:
+  #   1. seed hipSOLVER_optional_deps with therock-host-blas so it's a
+  #      dependency regardless of THEROCK_BUILD_TESTING; and
+  #   2. force HIPSOLVER_INTERNAL_LAPACK_BUILD=OFF so its CMakeLists takes
+  #      the find_package(LAPACK) path, which TheRock's cmake/finders/
+  #      FindLAPACK.cmake resolves to the host-blas sub-project.
+  hipsolverLapackSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace math-libs/BLAS/CMakeLists.txt \
+      --replace-fail \
+        'set(hipSOLVER_optional_deps)' \
+        'set(hipSOLVER_optional_deps therock-host-blas)' \
+      --replace-fail \
+        '-DHIPSOLVER_FIND_PACKAGE_LAPACK_CONFIG=OFF' \
+        '-DHIPSOLVER_FIND_PACKAGE_LAPACK_CONFIG=OFF
+        -DHIPSOLVER_INTERNAL_LAPACK_BUILD=OFF'
+  '';
+
   # Several rocm-libraries CMakeLists hardcode -lstdc++fs / bare `stdc++fs`
   # in target_link_libraries. That was the C++17 filesystem helper library
   # on gcc <9; gcc 11+ ships filesystem inside libstdc++ proper and there is
@@ -969,7 +991,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}${rocmStdcxxFsSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}${rocmStdcxxFsSourcePatch}${hipsolverLapackSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \
