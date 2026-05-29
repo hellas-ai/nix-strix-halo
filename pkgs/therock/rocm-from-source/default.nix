@@ -947,13 +947,15 @@ stdenv.mkDerivation {
   # Several sub-projects bake their build-time dist/ directory (e.g.
   # /build/.../build/core/clr/dist/lib) into RPATH alongside the $ORIGIN
   # entries needed at runtime. Those /build/ paths are stale once the
-  # install copies everything into $out/lib, so noAuditTmpdir rejects
-  # them. Walk $out/{lib,bin} and ask patchelf to drop RPATH entries
-  # that don't resolve any DT_NEEDED — verified on librocrand.so.1.1:
-  # the /build/ entry goes, the $ORIGIN and sysroot entries (where the
-  # deps now live) stay. patchelf errors on non-ELF files; swallow them.
+  # install copies everything into $out, so noAuditTmpdir rejects them.
+  # Walk every file in $out (full profile binaries live in $out/{lib,bin},
+  # compiler profile lays them out under $out/compiler/amd-llvm/stage/...)
+  # and ask patchelf to drop RPATH entries that don't resolve any
+  # DT_NEEDED — verified on librocrand.so.1.1: the /build/ entry goes,
+  # the $ORIGIN and sysroot entries (where the deps now live) stay.
+  # patchelf errors on non-ELF files; swallow them.
   postFixup = ''
-    find "$out/lib" "$out/bin" -type f -print0 2>/dev/null \
+    find "$out" -type f -print0 2>/dev/null \
       | while IFS= read -r -d "" f; do
           patchelf --shrink-rpath "$f" 2>/dev/null || true
         done
