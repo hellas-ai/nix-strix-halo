@@ -282,6 +282,12 @@ let
           ];
         };
 
+        # vllm-rocm compiles a few hundred HIP kernels through the TheRock
+        # toolchain — heavy enough to need a big-parallel builder. Pair with
+        # the same tag on therock-rocm-from-source so Hydra schedules both
+        # on the same kind of host.
+        requiredSystemFeatures = (old.requiredSystemFeatures or [ ]) ++ [ "big-parallel" ];
+
         nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
           final.pkg-config
         ];

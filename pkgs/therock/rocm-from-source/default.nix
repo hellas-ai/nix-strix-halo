@@ -838,6 +838,11 @@ stdenv.mkDerivation {
   }";
   inherit version;
 
+  # Compiles tens of thousands of HIP kernel TUs (composable_kernel alone is
+  # 1682 of them) and amd-llvm on top. Tag the build so Hydra schedules it
+  # on a `big-parallel`-advertising builder rather than a general CI box.
+  requiredSystemFeatures = [ "big-parallel" ];
+
   src = therockSource;
 
   patches = [

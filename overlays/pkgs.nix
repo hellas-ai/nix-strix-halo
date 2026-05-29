@@ -62,6 +62,14 @@ lib.optionalAttrs prev.stdenv.isLinux (
         (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
       ];
     });
+
+    # ROCm packages compile hundreds-to-thousands of HIP kernels via amdclang;
+    # tag them so Hydra schedules them on a `big-parallel`-advertising builder.
+    bigParallel =
+      drv:
+      drv.overrideAttrs (old: {
+        requiredSystemFeatures = (old.requiredSystemFeatures or [ ]) ++ [ "big-parallel" ];
+      });
   in
   {
     ec-su-axb35 = ecPackages.kernelModule;
@@ -82,29 +90,33 @@ lib.optionalAttrs prev.stdenv.isLinux (
       src = inputs.fastflowlm;
     };
 
-    llama-cpp-rocm = prev.llama-cpp.override rocmOverride;
+    llama-cpp-rocm = bigParallel (prev.llama-cpp.override rocmOverride);
     llama-cpp-vulkan = prev.llama-cpp.override vulkanOverride;
     llama-cpp-cuda = prev.llama-cpp.override cudaOverride;
     llama-cpp-master = llamaCppMaster;
-    llama-cpp-master-rocm = llamaCppMaster.override rocmOverride;
+    llama-cpp-master-rocm = bigParallel (llamaCppMaster.override rocmOverride);
     llama-cpp-master-vulkan = llamaCppMaster.override vulkanOverride;
     llama-cpp-master-cuda = llamaCppMaster.override cudaOverride;
 
-    ds4-rocm = prev.callPackage ../pkgs/ds4-rocm {
-      src = inputs.ds4-hip;
-      rocmSdk = final."therock-rocm-${rocmTarget.packageSuffix}";
-      version = inputVersion "experimental" inputs.ds4-hip;
-      inherit (rocmTarget) packageSuffix;
-      offloadArch = builtins.head rocmTarget.buildTargets;
-      hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
-    };
+    ds4-rocm = bigParallel (
+      prev.callPackage ../pkgs/ds4-rocm {
+        src = inputs.ds4-hip;
+        rocmSdk = final."therock-rocm-${rocmTarget.packageSuffix}";
+        version = inputVersion "experimental" inputs.ds4-hip;
+        inherit (rocmTarget) packageSuffix;
+        offloadArch = builtins.head rocmTarget.buildTargets;
+        hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+      }
+    );
 
-    mlx-rocm = final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
-      pname = "mlx-rocm";
-      rdma-core = final.rdma-core-usb4;
-      rocmPackages = final.therockRocmPackages.${builtins.head rocmTarget.buildTargets};
-      gfx = builtins.head rocmTarget.buildTargets;
-    };
+    mlx-rocm = bigParallel (
+      final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
+        pname = "mlx-rocm";
+        rdma-core = final.rdma-core-usb4;
+        rocmPackages = final.therockRocmPackages.${builtins.head rocmTarget.buildTargets};
+        gfx = builtins.head rocmTarget.buildTargets;
+      }
+    );
 
     # Unsuffixed aliases for the active rocmTarget. Lets consumers write
     # `pkgs.therock-rocm` instead of `pkgs.therock-rocm-gfx1151` once the
