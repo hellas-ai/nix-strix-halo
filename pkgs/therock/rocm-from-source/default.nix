@@ -984,14 +984,21 @@ stdenv.mkDerivation {
       # nix-support metadata, same shape as pkgs/therock/rocm-sdk so
       # downstream consumers (vllm overlay, etc.) see a uniform interface
       # regardless of the rocm provider.
-      cc_cflags_before="$(cat ${stdenv.cc}/nix-support/cc-cflags-before 2>/dev/null || true)"
-      cc_cflags="$(cat ${stdenv.cc}/nix-support/cc-cflags 2>/dev/null || true)"
-      libc_cflags="$(cat ${stdenv.cc}/nix-support/libc-cflags 2>/dev/null || true)"
-      libc_crt1_cflags="$(cat ${stdenv.cc}/nix-support/libc-crt1-cflags 2>/dev/null || true)"
-      libc_ldflags="$(cat ${stdenv.cc}/nix-support/libc-ldflags 2>/dev/null || true)"
-      cc_ldflags="$(cat ${stdenv.cc}/nix-support/cc-ldflags 2>/dev/null || true)"
-      libc="$(cat ${stdenv.cc}/nix-support/orig-libc 2>/dev/null || true)"
-      dynamic_linker="$(cat ${stdenv.cc}/nix-support/dynamic-linker 2>/dev/null || true)"
+      # Read metadata from the GCC wrapper, NOT stdenv.cc — the from-source
+      # build forces stdenv = llvmPackages_21.stdenv (a clang wrapper), and
+      # the clang wrapper's cc-cflags injects clang-specific flags like
+      # `-resource-dir=…/clang-wrapper/resource-root`. The wrapper script
+      # below invokes the ROCm-bundled clang++ which has its own resource
+      # dir; the nixpkgs-clang one points it at clang's HIP runtime
+      # wrapper headers and breaks the cmath/cstdlib lookup.
+      cc_cflags_before="$(cat ${gcc}/nix-support/cc-cflags-before 2>/dev/null || true)"
+      cc_cflags="$(cat ${gcc}/nix-support/cc-cflags 2>/dev/null || true)"
+      libc_cflags="$(cat ${gcc}/nix-support/libc-cflags 2>/dev/null || true)"
+      libc_crt1_cflags="$(cat ${gcc}/nix-support/libc-crt1-cflags 2>/dev/null || true)"
+      libc_ldflags="$(cat ${gcc}/nix-support/libc-ldflags 2>/dev/null || true)"
+      cc_ldflags="$(cat ${gcc}/nix-support/cc-ldflags 2>/dev/null || true)"
+      libc="$(cat ${gcc}/nix-support/orig-libc 2>/dev/null || true)"
+      dynamic_linker="$(cat ${gcc}/nix-support/dynamic-linker 2>/dev/null || true)"
 
       cat > "$out/bin/therock-hip-clang++" <<EOF
       #!/bin/sh
