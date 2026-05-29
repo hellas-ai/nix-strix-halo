@@ -537,6 +537,22 @@ let
         'hipFlags = ["--sysroot=${nixSysroot}", "--gcc-toolchain=${nixSysroot}/usr", "-B${nixSysroot}/lib", "-D__HIP_HCC_COMPAT_MODE__=1"]'
   '';
 
+  # Several rocm-libraries CMakeLists hardcode -lstdc++fs / bare `stdc++fs`
+  # in target_link_libraries. That was the C++17 filesystem helper library
+  # on gcc <9; gcc 11+ ships filesystem inside libstdc++ proper and there is
+  # no separate libstdc++fs.so, so links fail with
+  # `ld.lld: error: unable to find library -lstdc++fs`. MIOpen self-gates on
+  # a check_cxx_linker_flag detection (`HAS_LIB_STD_FILESYSTEM`) and is
+  # safe; the rest assume it always exists. Strip every reference in
+  # rocm-libraries/projects so we hit them all in one sweep (rocBLAS lib,
+  # hipBLAS clients, hipSPARSE clients, rocRAND tools, miopen addkernels
+  # /test/fin/gtest helpers).
+  rocmStdcxxFsSourcePatch = lib.optionalString (profile == "full") ''
+    find rocm-libraries/projects \
+      -name CMakeLists.txt -type f -print0 \
+      | xargs -0 perl -pi -e 's/-lstdc\+\+fs//g; s/(?<!-l)\bstdc\+\+fs\b//g;'
+  '';
+
   ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
         substituteInPlace iree-libs/CMakeLists.txt \
           --replace-fail \
@@ -953,7 +969,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}${rocmStdcxxFsSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \
