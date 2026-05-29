@@ -65,7 +65,10 @@ let
 
   optionalSandboxPaths = paths: map (path: "${path}?") paths;
 
-  systemFeatures = unique (concatMap runnerFeatures enabledRunners);
+  # Pair with lib/bench.nix: every benchmark derivation requires the
+  # `benchmark` system feature. Hosts that enable any runner advertise it
+  # so the scheduler can find them.
+  systemFeatures = unique ([ "benchmark" ] ++ concatMap runnerFeatures enabledRunners);
   extraSandboxPaths = unique (
     [
       modelsPath
