@@ -316,6 +316,13 @@ let
     rocmProvider = "therock-source";
   });
 
+  # nixpkgs.rocmPackages.${suffix} narrowed scope. vllm/ds4/mlx hard-ref
+  # TheRock attrs and don't resolve here, but llama-cpp-rocm exercises
+  # the dispatcher cleanly.
+  nixpkgsRocmPkgs = lib.optionalAttrs (system == "x86_64-linux") (mkPkgsForProvider {
+    rocmProvider = "nixpkgs";
+  });
+
   prFullJobs = {
     default = afterPrQuick "default" self.packages.${system}.default;
     jaccl = afterPrQuick "jaccl" self.packages.${system}.jaccl;
@@ -352,6 +359,11 @@ let
     vllm-rocm-from-source = fromSourcePkgs.vllm-rocm;
     therock-rocm-from-source = fromSourcePkgs.therock-rocm;
     llama-cpp-rocm-from-source = fromSourcePkgs.llama-cpp-rocm;
+
+    # nixpkgs provider variant — same dispatcher, different rocm
+    # source. Only llama-cpp-rocm builds against it (vllm/ds4/mlx
+    # are TheRock-shaped).
+    llama-cpp-rocm-nixpkgs = nixpkgsRocmPkgs.llama-cpp-rocm;
   };
 in
 {
