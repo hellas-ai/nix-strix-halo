@@ -799,5 +799,11 @@
 
       formatter = perSystem (pkgs: pkgs.nixfmt-tree);
 
+      # Hydra reads its jobset from `flake.hydraJobs`. The build matrix
+      # itself lives in ./hydra.nix (so curious humans can `nix-build
+      # hydra.nix -A pr-full.all` without a flake roundtrip); expose it
+      # here too so Hydra's flake-aware evaluator finds something.
+      hydraJobs = forAllSystems (system: import ./hydra.nix { inherit self system; });
+
     };
 }
