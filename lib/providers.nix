@@ -23,7 +23,8 @@ let
     "nixpkgs"
 
     # TheRock built from source via pkgs/therock/rocm-from-source.
-    # Not implemented yet — overlays/rocm.nix throws.
+    # Implemented in overlays/rocm.nix — the dispatcher swaps the
+    # binary therock-rocm output for the source build of the same target.
     "therock-source"
   ];
 
