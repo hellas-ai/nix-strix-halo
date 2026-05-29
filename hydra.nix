@@ -342,9 +342,9 @@ let
       xrt-amdxdna
       ;
     mlx-rocm = afterPrQuick "mlx-rocm" self.packages.${system}.mlx-rocm;
-    mlx-rocm-gemm-smoke = afterPrQuick "mlx-rocm-gemm-smoke" benchmarks.bench-mlx-rocm-gemm-smoke;
+    mlx-rocm-gemm-smoke = afterPrQuick "mlx-rocm-gemm-smoke" benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
     live-iso = afterPrQuick "live-iso" self.packages.${system}.live-iso;
-    vllm-throughput-smoke = afterPrQuick "vllm-throughput-smoke" benchmarks.bench-qwen3-0-6b-vllm-rocm-throughput-smoke;
+    vllm-throughput-smoke = afterPrQuick "vllm-throughput-smoke" benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
     cuda-smoke = afterPrQuick "cuda-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
 
     # Provider-variant builds. Exercise the rocm.nix dispatcher
