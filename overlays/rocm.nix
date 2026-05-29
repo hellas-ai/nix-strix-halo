@@ -10,17 +10,13 @@
 #
 #   - "therock-bin"     binary TheRock SDK tarball pinned per target;
 #                        delegates to pkgs/therock/default.nix.
-#   - "nixpkgs"         nixpkgs.rocmPackages narrowed to the target's
-#                        gpuTargets (magma, rccl, hipblas family, CK,
-#                        aotriton). Stub — see TODO.
 #   - "therock-source"  TheRock built from source via
-#                        pkgs/therock/rocm-from-source. Stub — wire up
-#                        when the source build leaves the experimental
-#                        track in pkgs/therock/.
-#
-# The same overlay also baseline-narrows the target's gpuTargets where
-# the provider doesn't already, so cross-provider consumers see a
-# uniform `pkgs.rocmPackages` shape.
+#                        pkgs/therock/rocm-from-source. Reuses the
+#                        therock-bin attrs and swaps the active
+#                        target's `therock-rocm-${suffix}` alias to
+#                        point at the source build.
+#   - "nixpkgs"         nixpkgs.rocmPackages narrowed to the target's
+#                        gpuTargets. Not implemented — throws.
 
 let
   providers = import ../lib/providers.nix { inherit lib; };
