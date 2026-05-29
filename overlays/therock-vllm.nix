@@ -269,6 +269,16 @@ let
             "-DCMAKE_HIP_COMPILER=${sdk}/bin/therock-hip-clang++"
             "-DCMAKE_HIP_COMPILER_ROCM_ROOT=${sdk}"
             "-DHIP_ROOT_DIR=${sdk}"
+            # Pin the HIP arch so CMakeDetermineHIPCompiler.cmake doesn't have
+            # to probe the wrapper. The binary SDK happens to expose a clean
+            # enough compiler identity that detection works; the source SDK's
+            # wrapper inherits llvmPackages_21.stdenv cc-wrapper flags
+            # (-nostdlibinc, -resource-dir=…) that derail compiler-ID probing
+            # and produce: "The HIP compiler identification is unknown" /
+            # "Failed to find a default HIP architecture". The target is
+            # already known from the package's overlay context, so just set
+            # it.
+            "-DCMAKE_HIP_ARCHITECTURES=${prev.lib.concatStringsSep ";" vllmGpuTargets}"
           ];
         };
 

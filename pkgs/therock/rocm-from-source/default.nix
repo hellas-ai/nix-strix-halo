@@ -991,7 +991,7 @@ stdenv.mkDerivation {
       cat > "$out/bin/therock-hip-clang++" <<EOF
       #!/bin/sh
       exec "$out/lib/llvm/bin/clang++" \\
-        --gcc-toolchain=${stdenv.cc.cc} \\
+        --gcc-toolchain=${gcc.cc} \\
         --rocm-path="$out" \\
         $cc_cflags_before \\
         $cc_cflags \\
