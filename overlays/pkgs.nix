@@ -10,11 +10,11 @@
 # `final.rocmPackages` / `final.python3Packages`, so the consumer
 # controls those via the rocm.nix / python.nix overlays applied earlier.
 #
-# Single outputs per logical package — `llama-cpp-rocm`, `ds4-rocm`,
-# etc. — narrowed to `rocmTarget`. Building for a different target
-# means composing this overlay with a different `rocmTarget`; the
-# per-target suffix outputs that the old flake produced are now
-# emergent from that composition rather than baked into the overlay.
+# Single output per logical package — `llama-cpp-rocm`, `ds4-rocm`,
+# etc. — narrowed to `rocmTarget`. Building for a different target is a
+# matter of composing this overlay with a different `rocmTarget`;
+# per-target suffix attrs fall out of `legacyPackages.<system>.<suffix>`
+# at the flake level rather than being baked into the overlay.
 
 final: prev:
 

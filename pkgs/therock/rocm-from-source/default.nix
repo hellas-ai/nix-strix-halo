@@ -525,12 +525,11 @@ let
         'COMMAND ''${VIRTUALENV_BIN_DIR}/''${VIRTUALENV_PYTHON_EXENAME} -m pip install --no-build-isolation ''${ARGN}'
   '';
 
-  # Shared Tensile (used by rocBLAS) — same sysroot-missing problem as the
-  # hipBLASLt copy: SourceCommands.py builds a hipFlags list that omits the
-  # Nix gcc-toolchain paths, so the HIP runtime wrapper can't find
-  # <cmath>/<cstdlib>. Inject the flags up front so every Tensile-driven
-  # HIP compile sees them. Pre-emptive patch — rocBLAS hits this during
-  # the kernel-generation build phase after the venv install succeeds.
+  # Shared Tensile (used by rocBLAS for kernel generation) builds its
+  # HIP compile command in SourceCommands.py with a hipFlags list that
+  # omits the Nix gcc-toolchain paths, so the clang HIP runtime wrapper
+  # can't find <cmath>/<cstdlib>. Inject the sysroot flags up front so
+  # every Tensile-driven HIP compile picks them up.
   sharedTensileSourcePatch = lib.optionalString (profile == "full") ''
     substituteInPlace rocm-libraries/shared/tensile/Tensile/BuildCommands/SourceCommands.py \
       --replace-fail \
@@ -953,15 +952,16 @@ stdenv.mkDerivation {
   # /build/.../build/core/clr/dist/lib) into RPATH alongside the $ORIGIN
   # entries needed at runtime. Those /build/ paths are stale once the
   # install copies everything into $out, so the audit-tmpdir fixup hook
-  # rejects them. Runs in preFixup specifically because audit-tmpdir is
-  # registered in fixupOutputHooks (between preFixup and postFixup), so
-  # a postFixup hook would be too late — the build would already have
-  # aborted. stdenv's own `patchelf --shrink-rpath` (also in
-  # fixupOutputHooks) doesn't actually drop these /build/ entries; we
-  # bypass that with explicit string surgery — enumerate the current
-  # rpath, filter colon-separated entries that start with /build/,
-  # rewrite. Verified out-of-band: all 16 binaries flagged by
-  # audit-tmpdir come up clean.
+  # rejects them.
+  #
+  # Hook in preFixup, not postFixup: audit-tmpdir is registered in
+  # fixupOutputHooks, which runs *between* preFixup and postFixup, so
+  # a postFixup-shaped patcher would never reach the rejected files.
+  # stdenv's own `patchelf --shrink-rpath` in fixupOutputHooks happens
+  # before audit-tmpdir but for these binaries doesn't actually drop
+  # the /build/ entries, so do explicit string surgery on the rpath
+  # instead — filter out colon-separated entries that start with
+  # /build/ and rewrite.
   preFixup = ''
     while IFS= read -r -d "" f; do
       old=$(patchelf --print-rpath "$f" 2>/dev/null) || continue
@@ -975,22 +975,19 @@ stdenv.mkDerivation {
     done < <(find "$out" -type f -print0 2>/dev/null)
 
     ${lib.optionalString (profile == "full") ''
-      # Match the binary SDK's $out/bin/therock-hip-clang++ wrapper. CMake's
-      # HIP language detection (CMakeDetermineHIPCompiler.cmake) probes the
-      # compiler to discover --gcc-toolchain / sysroot / dynamic linker; the
-      # raw $out/lib/llvm/bin/clang++ doesn't know about Nix's split layout,
-      # so vllm's `enable_language(HIP)` aborts with "Failed to find a
-      # default HIP architecture". Build the wrapper from cc-wrapper's
-      # nix-support metadata, same shape as pkgs/therock/rocm-sdk so
-      # downstream consumers (vllm overlay, etc.) see a uniform interface
-      # regardless of the rocm provider.
-      # Read metadata from the GCC wrapper, NOT stdenv.cc — the from-source
-      # build forces stdenv = llvmPackages_21.stdenv (a clang wrapper), and
-      # the clang wrapper's cc-cflags injects clang-specific flags like
-      # `-resource-dir=…/clang-wrapper/resource-root`. The wrapper script
-      # below invokes the ROCm-bundled clang++ which has its own resource
-      # dir; the nixpkgs-clang one points it at clang's HIP runtime
-      # wrapper headers and breaks the cmath/cstdlib lookup.
+      # Install $out/bin/therock-hip-clang++ — a thin wrapper that calls
+      # the ROCm-bundled clang++ with the Nix sysroot / gcc-toolchain
+      # plumbing baked in. Downstream consumers (vllm overlay etc.) set
+      # CMAKE_HIP_COMPILER to this script, so the same interface works
+      # against either rocm provider.
+      #
+      # Read the metadata from `${gcc}`, NOT `${stdenv.cc}`: this
+      # derivation forces stdenv = llvmPackages_21.stdenv (a clang
+      # wrapper), and clang-wrapper's cc-cflags inject clang-specific
+      # flags like `-resource-dir=…/clang-wrapper/resource-root`. The
+      # wrapper script invokes ROCm's clang++ which has its own
+      # resource-dir bundled with its HIP runtime headers; pointing it
+      # at the nixpkgs-clang one breaks the cmath/cstdlib lookup.
       cc_cflags_before="$(cat ${gcc}/nix-support/cc-cflags-before 2>/dev/null || true)"
       cc_cflags="$(cat ${gcc}/nix-support/cc-cflags 2>/dev/null || true)"
       libc_cflags="$(cat ${gcc}/nix-support/libc-cflags 2>/dev/null || true)"

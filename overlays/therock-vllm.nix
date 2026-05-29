@@ -269,15 +269,9 @@ let
             "-DCMAKE_HIP_COMPILER=${sdk}/bin/therock-hip-clang++"
             "-DCMAKE_HIP_COMPILER_ROCM_ROOT=${sdk}"
             "-DHIP_ROOT_DIR=${sdk}"
-            # Pin the HIP arch so CMakeDetermineHIPCompiler.cmake doesn't have
-            # to probe the wrapper. The binary SDK happens to expose a clean
-            # enough compiler identity that detection works; the source SDK's
-            # wrapper inherits llvmPackages_21.stdenv cc-wrapper flags
-            # (-nostdlibinc, -resource-dir=…) that derail compiler-ID probing
-            # and produce: "The HIP compiler identification is unknown" /
-            # "Failed to find a default HIP architecture". The target is
-            # already known from the package's overlay context, so just set
-            # it.
+            # Pin the HIP arch so CMakeDetermineHIPCompiler.cmake doesn't
+            # have to probe the wrapper for it. The target is known from
+            # the package's overlay context — there's nothing to detect.
             "-DCMAKE_HIP_ARCHITECTURES=${prev.lib.concatStringsSep ";" vllmGpuTargets}"
           ];
         };
@@ -291,12 +285,11 @@ let
         nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
           final.pkg-config
         ];
-        # rocm_smi-config.cmake (pulled in by torch's LoadHIP.cmake during
-        # vllm's configure) does pkg_check_modules(libdrm REQUIRED). The
-        # binary TheRock SDK bundles libdrm under lib/rocm_sysdeps/; the
-        # source SDK doesn't, so consumers must surface libdrm.pc
-        # themselves. Add libdrm.dev unconditionally — harmless when the
-        # binary SDK already provides it.
+        # rocm_smi-config.cmake (pulled in by torch's LoadHIP.cmake
+        # during vllm's configure) does pkg_check_modules(libdrm REQUIRED).
+        # The source-built SDK uses nixpkgs' libdrm via buildInputs and
+        # doesn't re-export libdrm.pc, so surface it here. Idempotent
+        # when the binary SDK already ships it under lib/rocm_sysdeps/.
         buildInputs = (old.buildInputs or [ ]) ++ [ final.libdrm.dev ];
         pythonRemoveDeps = (old.pythonRemoveDeps or [ ]) ++ dropVllmDependencyNames;
         dependencies = lib.unique (

@@ -9,10 +9,9 @@
 # the few packages where retuning is known to matter (llama-cpp, openblas,
 # torch, numpy).
 #
-# Stub — the heavy lifting (CPU-specific openblas target, doc-stripping,
-# llvm target narrowing, etc.) used to live in lib/vllm.nix on the
-# origin/master line. Not ported here yet; per-CPU rebuilds are usually a
-# bad cost/benefit trade until proven otherwise.
+# Intentionally minimal — per-CPU rebuilds are a bad cost/benefit trade
+# until proven otherwise. Heavier knobs (CPU-specific openblas target,
+# llvm target narrowing, etc.) belong elsewhere when needed.
 
 let
   appendCompileFlags =

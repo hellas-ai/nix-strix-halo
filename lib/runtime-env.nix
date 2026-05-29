@@ -7,10 +7,9 @@
 #   original package untouched when `env` is empty, so it is safe to
 #   call unconditionally.
 #
-#   `mkApp` — uniform builder for flake `apps.<name>` entries; replaces
-#   the historical mkApp / mkDirectApp / mkTargetLlamaApp / mkDs4App
-#   trio whose only real differences were defaulting policy and whether
-#   they open-coded HSA env wrapping via writeShellScript.
+#   `mkApp` — uniform builder for flake `apps.<name>` entries. Takes a
+#   package, the executable to invoke, optional runtime env, and
+#   returns the `{ type = "app"; program = …; }` shape `apps` expects.
 
 {
   wrapRuntimeEnv =
