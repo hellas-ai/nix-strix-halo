@@ -819,6 +819,13 @@ let
         # the downstream consumers we care about; disable until the
         # header-path mismatch is sorted out upstream or in a follow-up.
         "-DTHEROCK_ENABLE_ROCPROFSYS=OFF"
+        # hipDNN_samples builds an ExternalProject example_engine_plugin in
+        # its own cmake context that doesn't inherit TheRock's toolchain
+        # wiring (Scrt1.o / crti.o / libstdc++ / libm / libgcc_s / libc all
+        # missing). It's documentation-style example code, not a dependency
+        # of vllm or torch — disable until the example sub-cmake learns
+        # the sysroot.
+        "-DTHEROCK_ENABLE_HIPDNN_SAMPLES=OFF"
       ]
     else
       throw "unknown TheRock ROCm profile: ${profile}";
