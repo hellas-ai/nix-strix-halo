@@ -275,6 +275,13 @@ let
         nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
           final.pkg-config
         ];
+        # rocm_smi-config.cmake (pulled in by torch's LoadHIP.cmake during
+        # vllm's configure) does pkg_check_modules(libdrm REQUIRED). The
+        # binary TheRock SDK bundles libdrm under lib/rocm_sysdeps/; the
+        # source SDK doesn't, so consumers must surface libdrm.pc
+        # themselves. Add libdrm.dev unconditionally — harmless when the
+        # binary SDK already provides it.
+        buildInputs = (old.buildInputs or [ ]) ++ [ final.libdrm.dev ];
         pythonRemoveDeps = (old.pythonRemoveDeps or [ ]) ++ dropVllmDependencyNames;
         dependencies = lib.unique (
           dropNamedDeps dropVllmDependencyNames (old.dependencies or [ ]) ++ extraDependencies
