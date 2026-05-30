@@ -842,6 +842,12 @@ stdenv.mkDerivation {
   # on a `big-parallel`-advertising builder rather than a general CI box.
   requiredSystemFeatures = [ "big-parallel" ];
 
+  # stdenv's stripPhase corrupts the bundled libLLVM.so.23.0git (truncates
+  # section headers), which makes the rocm-bundled clang SIGBUS on every
+  # invocation and ripples into every downstream HIP build. The binary
+  # rocm-sdk derivation hits the same issue and sets dontStrip = true.
+  dontStrip = true;
+
   src = therockSource;
 
   patches = [
