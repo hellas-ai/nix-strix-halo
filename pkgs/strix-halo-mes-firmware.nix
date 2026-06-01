@@ -19,6 +19,7 @@ runCommand "strix-halo-mes-firmware-0x80"
       description = "Strix Halo MES 0x80 firmware blobs";
       homepage = "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git";
       license = lib.licenses.unfreeRedistributableFirmware;
+      maintainers = with lib.maintainers; [ georgewhewell ];
       platforms = lib.platforms.linux;
     };
   }

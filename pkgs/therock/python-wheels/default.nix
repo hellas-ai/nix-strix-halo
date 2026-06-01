@@ -151,6 +151,7 @@ python312Packages.buildPythonPackage (finalAttrs: {
   meta = {
     description = "TheRock pinned ROCm/PyTorch/Triton wheels for ${wheelSources.target}";
     homepage = "https://github.com/ROCm/TheRock";
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = [ "x86_64-linux" ];
   };
 })

@@ -96,7 +96,7 @@ let
       description = "AMD XDNA driver userspace plugin for XRT";
       homepage = "https://github.com/amd/xdna-driver";
       license = lib.licenses.asl20;
-      maintainers = [ ];
+      maintainers = with lib.maintainers; [ georgewhewell ];
       platforms = lib.platforms.linux;
     };
   };
@@ -118,7 +118,7 @@ symlinkJoin {
     description = "Xilinx Runtime with AMD XDNA NPU support for Ryzen AI";
     homepage = "https://github.com/amd/xdna-driver";
     license = lib.licenses.asl20;
-    maintainers = [ ];
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = lib.platforms.linux;
   };
 }
