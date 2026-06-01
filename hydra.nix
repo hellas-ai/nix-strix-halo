@@ -27,7 +27,7 @@ let
   inherit (flakeLib.therockTargets) defaultRocmTarget;
 
   pkgs = self.legacyPackages.${system}.${defaultRocmTarget.packageSuffix};
-  # CUDA-configured nixpkgs for the cuda-smoke bench.
+  # CUDA-configured nixpkgs for the RTX 4090 device smoke bench.
   cudaPkgs = import nixpkgs {
     inherit system;
     config = {
@@ -166,7 +166,7 @@ let
     flattenBenchmarks ds4MetalBenchmarks // flattenBenchmarks mlxMetalBenchmarks
   );
 
-  cudaSmokeBenchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
+  cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
     let
       nvidiaSmi = cudaPkgs.linuxPackages.nvidia_x11.bin;
       nvidiaDriver = cudaPkgs.linuxPackages.nvidia_x11;
@@ -188,7 +188,10 @@ let
           LD_LIBRARY_PATH = "${nvidiaDriver}/lib";
         };
         requirements = {
-          systemFeatures = [ "cuda-smoke" ];
+          systemFeatures = [
+            "rtx4090"
+            "benchmark"
+          ];
           hostProfiles = [ "linux-nvidia-cuda" ];
           sandboxPaths = [
             "/dev/nvidia0"
@@ -200,7 +203,7 @@ let
           ];
         };
         metadata = {
-          kind = "cuda-smoke";
+          kind = "cuda-device-smoke";
           suite = "cuda";
           accelerator = "cuda";
           scenario = "device-smoke";
@@ -208,7 +211,7 @@ let
             vendor = "nvidia";
             arch = "sm_89";
             deviceClass = "rtx4090";
-            systemFeature = "cuda-smoke";
+            systemFeature = "rtx4090";
           };
           tool = {
             backend = "cuda";
@@ -223,7 +226,7 @@ let
   );
 
   benchmarks =
-    flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaSmokeBenchmarks;
+    flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaRtx4090Benchmarks;
 
   # Hydra aggregates
   mkAggregate =
@@ -349,10 +352,14 @@ let
       xrt-amdxdna
       ;
     mlx-rocm = afterPrQuick "mlx-rocm" self.packages.${system}.mlx-rocm;
-    mlx-rocm-gemm-smoke = afterPrQuick "mlx-rocm-gemm-smoke" benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
+    mlx-rocm-gemm-smoke =
+      afterPrQuick "mlx-rocm-gemm-smoke"
+        benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
     live-iso = afterPrQuick "live-iso" self.packages.${system}.live-iso;
-    vllm-throughput-smoke = afterPrQuick "vllm-throughput-smoke" benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
-    cuda-smoke = afterPrQuick "cuda-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+    vllm-throughput-smoke =
+      afterPrQuick "vllm-throughput-smoke"
+        benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
+    cuda-rtx4090-device-smoke = afterPrQuick "cuda-rtx4090-device-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
 
     # Provider-variant builds. Exercise the rocm.nix dispatcher
     # end-to-end against the from-source TheRock build. Long builds.

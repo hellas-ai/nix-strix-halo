@@ -40,7 +40,7 @@
     };
 
     thunderbolt-ibverbs = {
-      url = "git+ssh://git@github.com/hellas-ai/thunderbolt-ibverbs.git";
+      url = "github:hellas-ai/thunderbolt-ibverbs";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 

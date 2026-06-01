@@ -48,7 +48,7 @@ let
   # builders that don't advertise `benchmark` (general CI boxes like ax102,
   # trex) don't end up running model-dependent jobs that would fail on a
   # missing /models tree. Suites that already include `benchmark` (Metal,
-  # cuda-smoke) stay idempotent via the `lib.unique` in mergeRequirements.
+  # CUDA device smoke tests) stay idempotent via the `lib.unique` in mergeRequirements.
   normalizeRequirements =
     requirements:
     emptyRequirements
