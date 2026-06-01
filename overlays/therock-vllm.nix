@@ -269,12 +269,28 @@ let
             "-DCMAKE_HIP_COMPILER=${sdk}/bin/therock-hip-clang++"
             "-DCMAKE_HIP_COMPILER_ROCM_ROOT=${sdk}"
             "-DHIP_ROOT_DIR=${sdk}"
+            # Pin the HIP arch so CMakeDetermineHIPCompiler.cmake doesn't
+            # have to probe the wrapper for it. The target is known from
+            # the package's overlay context — there's nothing to detect.
+            "-DCMAKE_HIP_ARCHITECTURES=${prev.lib.concatStringsSep ";" vllmGpuTargets}"
           ];
         };
+
+        # vllm-rocm compiles a few hundred HIP kernels through the TheRock
+        # toolchain — heavy enough to need a big-parallel builder. Pair with
+        # the same tag on therock-rocm-from-source so Hydra schedules both
+        # on the same kind of host.
+        requiredSystemFeatures = (old.requiredSystemFeatures or [ ]) ++ [ "big-parallel" ];
 
         nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
           final.pkg-config
         ];
+        # rocm_smi-config.cmake (pulled in by torch's LoadHIP.cmake
+        # during vllm's configure) does pkg_check_modules(libdrm REQUIRED).
+        # The source-built SDK uses nixpkgs' libdrm via buildInputs and
+        # doesn't re-export libdrm.pc, so surface it here. Idempotent
+        # when the binary SDK already ships it under lib/rocm_sysdeps/.
+        buildInputs = (old.buildInputs or [ ]) ++ [ final.libdrm.dev ];
         pythonRemoveDeps = (old.pythonRemoveDeps or [ ]) ++ dropVllmDependencyNames;
         dependencies = lib.unique (
           dropNamedDeps dropVllmDependencyNames (old.dependencies or [ ]) ++ extraDependencies

@@ -10,7 +10,7 @@
 
 let
   inherit (pkgs) lib;
-  benchLib = import ../lib.nix { inherit lib; };
+  benchLib = import ../../lib/bench.nix { inherit lib; };
 
   resolvedModelsRoot = if modelsRoot != null then modelsRoot else benchLib.defaultModelsRoot pkgs;
   resolvedModelRoot =

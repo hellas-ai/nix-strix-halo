@@ -18,6 +18,7 @@
         x86_64-linux = [
           "benchmark"
           "gfx1151"
+          "rtx4090"
         ];
         aarch64-darwin = [ "benchmark" ];
       };
@@ -36,7 +37,7 @@
       hydraJobs = lib.genAttrs benchmarkSystems (
         system:
         lib.filterAttrs (_: supportedOn system) (
-          lib.mapAttrs (_: addBenchmarkFeature) src.benchmarks.${system}
+          lib.mapAttrs (_: addBenchmarkFeature) src.hydraJobs.${system}.benchmarks
         )
       );
     };

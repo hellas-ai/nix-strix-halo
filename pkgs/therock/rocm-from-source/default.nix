@@ -37,6 +37,7 @@
   mpfr,
   zstd,
   xz,
+  bzip2,
   libva,
   ffmpeg,
   sqlite,
@@ -314,6 +315,7 @@ let
       python-magic
       pyyaml
       pyzstd
+      rich
       setuptools
       tomli
       zstandard
@@ -329,13 +331,38 @@ let
 
   nixToolchainDriverFlags = "--sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib";
 
-  nixToolchainRuntimeLinkerFlags = lib.concatStringsSep " " [
-    "-L${nixSysroot}/lib"
-    "-Wl,-rpath,${nixSysroot}/lib"
-    "-Wl,-rpath,${stdenv.cc.libc}/lib"
-    "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
-    "-Wl,-rpath,${gcc.cc.lib}/lib"
+  # Subprojects (rocRoller's GPUArchitectureGenerator,
+  # rocprofiler-systems plug-ins, hipify driver helpers) build small
+  # binaries during the build and then *run* them in-place to generate
+  # YAML / .cpp / docs. They dynamically link against the nixpkgs system
+  # libs in buildInputs but upstream CMakeLists don't add the install
+  # paths to RPATH (they expect /usr/lib). List the runtime libs the
+  # build-time tools have been observed to dlopen so the toolchain
+  # rpath covers them — each new failure of the form
+  # `error while loading shared libraries: libX.so.N` belongs here.
+  buildTimeToolRuntimeLibs = [
+    elfutils.out
+    expat
+    glog
+    libdrm
+    libffi
+    libpciaccess
+    libxml2.out
+    ncurses.out
+    numactl.out
+    zlib.out
   ];
+
+  nixToolchainRuntimeLinkerFlags = lib.concatStringsSep " " (
+    [
+      "-L${nixSysroot}/lib"
+      "-Wl,-rpath,${nixSysroot}/lib"
+      "-Wl,-rpath,${stdenv.cc.libc}/lib"
+      "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
+      "-Wl,-rpath,${gcc.cc.lib}/lib"
+    ]
+    ++ map (p: "-Wl,-rpath,${p}/lib") buildTimeToolRuntimeLibs
+  );
 
   nixToolchainExeLinkerFlags =
     nixToolchainRuntimeLinkerFlags + " -Wl,--dynamic-linker=${stdenv.cc.bintools.dynamicLinker}";
@@ -448,6 +475,108 @@ let
             'set(FETCHCONTENT_SOURCE_DIR_SQLITE_LOCAL "''${CMAKE_CURRENT_LIST_DIR}/../sqlite-source-prebuilt" CACHE PATH "Pre-extracted SQLite amalgamation source tree" FORCE)
         FetchContent_Declare(sqlite_local'
       '';
+
+  # hipBLASLt's tensilelite/rocisa subproject pulls nanobind via FetchContent.
+  # TheRock sets FETCHCONTENT_FULLY_DISCONNECTED=ON globally, so the fetch
+  # silently no-ops and configure aborts on the first nanobind_add_module call.
+  # Top-level -DFETCHCONTENT_SOURCE_DIR_NANOBIND doesn't propagate to TheRock
+  # sub-projects, so inject the override into rocisa's CMakeLists directly
+  # (same shape as the OTF2 / SQLite patches above).
+  hipblasltNanobindSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/hipblaslt/tensilelite/rocisa/CMakeLists.txt \
+      --replace-fail \
+        'FetchContent_MakeAvailable(nanobind)' \
+        'set(FETCHCONTENT_SOURCE_DIR_NANOBIND "${python3.pkgs.nanobind.src}" CACHE PATH "Pre-extracted nanobind source tree" FORCE)
+    FetchContent_MakeAvailable(nanobind)'
+  '';
+
+  # hipBLASLt's matrix-transform device library is built via a bare
+  # add_custom_command that invokes clang++ -x hip --offload-device-only
+  # without any of TheRock's HIP toolchain plumbing. The clang HIP runtime
+  # wrapper #includes <cmath>/<cstdlib>, which require the gcc-toolchain
+  # search paths. Patch the custom command to forward the Nix sysroot.
+  hipblasltMatrixTransformSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/hipblaslt/device-library/matrix-transform/CMakeLists.txt \
+      --replace-fail \
+        'COMMAND ''${CMAKE_CXX_COMPILER} -x hip ''${matrix_transform_cpp} --offload-arch=''${arch} -c --offload-device-only' \
+        'COMMAND ''${CMAKE_CXX_COMPILER} --sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib -x hip ''${matrix_transform_cpp} --offload-arch=''${arch} -c --offload-device-only'
+  '';
+
+  # Tensile (hipBLASLt's kernel generator) invokes clang++ -x hip directly
+  # from Python with a hardcoded default_args list. Same root cause as the
+  # matrix-transform patch: the HIP runtime wrapper needs the Nix gcc-toolchain
+  # paths to find <cmath>/<cstdlib>. Inject the flags into default_args.
+  hipblasltTensileSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/hipblaslt/tensilelite/Tensile/Toolchain/Component.py \
+      --replace-fail \
+        '"-D__HIP_HCC_COMPAT_MODE__=1",' \
+        '"--sysroot=${nixSysroot}", "--gcc-toolchain=${nixSysroot}/usr", "-B${nixSysroot}/lib", "-D__HIP_HCC_COMPAT_MODE__=1",'
+  '';
+
+  # rocBLAS's cmake helper pip-installs the in-tree Tensile into a venv at
+  # configure time. pip's default PEP 517 build isolation creates a fresh
+  # env and tries to fetch setuptools from PyPI, which fails in the sandbox.
+  # The venv is already created with --system-site-packages, so use
+  # --no-build-isolation to fall back to the Nix python env's setuptools.
+  rocblasVirtualenvSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/projects/rocblas/cmake/virtualenv.cmake \
+      --replace-fail \
+        'COMMAND ''${VIRTUALENV_BIN_DIR}/''${VIRTUALENV_PYTHON_EXENAME} -m pip install ''${ARGN}' \
+        'COMMAND ''${VIRTUALENV_BIN_DIR}/''${VIRTUALENV_PYTHON_EXENAME} -m pip install --no-build-isolation ''${ARGN}'
+  '';
+
+  # Shared Tensile (used by rocBLAS for kernel generation) builds its
+  # HIP compile command in SourceCommands.py with a hipFlags list that
+  # omits the Nix gcc-toolchain paths, so the clang HIP runtime wrapper
+  # can't find <cmath>/<cstdlib>. Inject the sysroot flags up front so
+  # every Tensile-driven HIP compile picks them up.
+  sharedTensileSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace rocm-libraries/shared/tensile/Tensile/BuildCommands/SourceCommands.py \
+      --replace-fail \
+        'hipFlags = ["-D__HIP_HCC_COMPAT_MODE__=1"]' \
+        'hipFlags = ["--sysroot=${nixSysroot}", "--gcc-toolchain=${nixSysroot}/usr", "-B${nixSysroot}/lib", "-D__HIP_HCC_COMPAT_MODE__=1"]'
+  '';
+
+  # hipSOLVER falls back to ExternalProject_Add of OpenBLAS from
+  # https://github.com/OpenMathLib/OpenBLAS when HIPSOLVER_INTERNAL_LAPACK_BUILD
+  # is ON (the default). The Nix sandbox has no network, so the git clone
+  # fails. TheRock already ships an OpenBLAS sub-project (`therock-host-blas`,
+  # in third-party/host-blas/) that pulls from the same S3 mirror we redirect
+  # to file:// in postPatch. Wire hipSOLVER at that one instead:
+  #   1. seed hipSOLVER_optional_deps with therock-host-blas so it's a
+  #      dependency regardless of THEROCK_BUILD_TESTING; and
+  #   2. force HIPSOLVER_INTERNAL_LAPACK_BUILD=OFF so its CMakeLists takes
+  #      the find_package(LAPACK) path, which TheRock's cmake/finders/
+  #      FindLAPACK.cmake resolves to the host-blas sub-project.
+  hipsolverLapackSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace math-libs/BLAS/CMakeLists.txt \
+      --replace-fail \
+        'set(hipSOLVER_optional_deps)' \
+        'set(hipSOLVER_optional_deps therock-host-blas)' \
+      --replace-fail \
+        '-DHIPSOLVER_FIND_PACKAGE_LAPACK_CONFIG=OFF' \
+        '-DHIPSOLVER_FIND_PACKAGE_LAPACK_CONFIG=OFF
+        -DHIPSOLVER_INTERNAL_LAPACK_BUILD=OFF'
+  '';
+
+  # Several rocm-libraries CMakeLists hardcode -lstdc++fs / bare `stdc++fs`
+  # in target_link_libraries. That was the C++17 filesystem helper library
+  # on gcc <9; gcc 11+ ships filesystem inside libstdc++ proper and there is
+  # no separate libstdc++fs.so, so links fail with
+  # `ld.lld: error: unable to find library -lstdc++fs`. MIOpen self-gates on
+  # a check_cxx_linker_flag(-lstdc++fs HAS_LIB_STD_FILESYSTEM) probe whose
+  # gates already correctly drop the link line when the flag is unsupported,
+  # so its subtree is excluded from the sweep — stripping `-lstdc++fs` from
+  # the probe itself would leave an empty argument and break configure.
+  # Everywhere else (rocBLAS lib, hipBLAS clients, hipSPARSE clients,
+  # rocRAND tools) assumes the lib always exists.
+  rocmStdcxxFsSourcePatch = lib.optionalString (profile == "full") ''
+    find rocm-libraries/projects \
+      -name CMakeLists.txt -type f \
+      -not -path 'rocm-libraries/projects/miopen/*' \
+      -print0 \
+      | xargs -0 perl -pi -e 's/-lstdc\+\+fs//g; s/(?<!-l)\bstdc\+\+fs\b//g;'
+  '';
 
   ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
         substituteInPlace iree-libs/CMakeLists.txt \
@@ -682,6 +811,20 @@ let
         "-DROCGDB_GMP_LIBRARY_DIR=${gmp}/lib"
         "-DROCGDB_MPFR_INCLUDE_DIR=${mpfr.dev}/include"
         "-DROCGDB_MPFR_LIBRARY_DIR=${mpfr}/lib"
+        # rocprofiler-systems compiles a tree of HIP-mode example programs
+        # (examples/{roctx,openmp,unified-memory,…}) where clang's bundled
+        # HIP runtime wrapper can't find the libstdc++ headers under the
+        # gcc-toolchain. The subproject is not a dependency of vllm or
+        # the downstream consumers we care about; disable until the
+        # header-path mismatch is sorted out upstream or in a follow-up.
+        "-DTHEROCK_ENABLE_ROCPROFSYS=OFF"
+        # hipDNN_samples builds an ExternalProject example_engine_plugin in
+        # its own cmake context that doesn't inherit TheRock's toolchain
+        # wiring (Scrt1.o / crti.o / libstdc++ / libm / libgcc_s / libc all
+        # missing). It's documentation-style example code, not a dependency
+        # of vllm or torch — disable until the example sub-cmake learns
+        # the sysroot.
+        "-DTHEROCK_ENABLE_HIPDNN_SAMPLES=OFF"
       ]
     else
       throw "unknown TheRock ROCm profile: ${profile}";
@@ -693,6 +836,17 @@ stdenv.mkDerivation {
     lib.optionalString (nameSuffix != "") "-${nameSuffix}"
   }";
   inherit version;
+
+  # Compiles tens of thousands of HIP kernel TUs (composable_kernel alone is
+  # 1682 of them) and amd-llvm on top. Tag the build so Hydra schedules it
+  # on a `big-parallel`-advertising builder rather than a general CI box.
+  requiredSystemFeatures = [ "big-parallel" ];
+
+  # stdenv's stripPhase corrupts the bundled libLLVM.so.23.0git (truncates
+  # section headers), which makes the rocm-bundled clang SIGBUS on every
+  # invocation and ripples into every downstream HIP build. The binary
+  # rocm-sdk derivation hits the same issue and sets dontStrip = true.
+  dontStrip = true;
 
   src = therockSource;
 
@@ -766,6 +920,8 @@ stdenv.mkDerivation {
     xorgproto
   ]
   ++ lib.optionals (profile == "full") [
+    bzip2.dev
+    bzip2.out
     gmp
     gmp.dev
     mpfr
@@ -788,6 +944,97 @@ stdenv.mkDerivation {
     ncurses.dev
     zlib.dev
   ];
+
+  # Nix sandbox sets HOME=/homeless-shelter (non-existent). hipBLASLt's
+  # Tensile.TensileCreateLibrary unconditionally tries to mkdir
+  # `$HOME/.tensile/helper_cache`, and rocm_smi_lib's cmake package registry
+  # write similarly assumes $HOME exists. Point HOME at a writable tmpdir.
+  preConfigure = ''
+    export HOME="$TMPDIR/home"
+    mkdir -p "$HOME"
+  '';
+
+  # Several sub-projects bake their build-time dist/ directory (e.g.
+  # /build/.../build/core/clr/dist/lib) into RPATH alongside the $ORIGIN
+  # entries needed at runtime. Those /build/ paths are stale once the
+  # install copies everything into $out, so the audit-tmpdir fixup hook
+  # rejects them.
+  #
+  # Hook in preFixup, not postFixup: audit-tmpdir is registered in
+  # fixupOutputHooks, which runs *between* preFixup and postFixup, so
+  # a postFixup-shaped patcher would never reach the rejected files.
+  # stdenv's own `patchelf --shrink-rpath` in fixupOutputHooks happens
+  # before audit-tmpdir but for these binaries doesn't actually drop
+  # the /build/ entries, so do explicit string surgery on the rpath
+  # instead — filter out colon-separated entries that start with
+  # /build/ and rewrite.
+  preFixup = ''
+    while IFS= read -r -d "" f; do
+      old=$(patchelf --print-rpath "$f" 2>/dev/null) || continue
+      [ -n "$old" ] || continue
+      case ":$old:" in
+        *:/build/*) ;;
+        *) continue ;;
+      esac
+      new=$(printf '%s' "$old" | tr ':' '\n' | grep -v '^/build/' | paste -sd:)
+      patchelf --set-rpath "$new" "$f" 2>/dev/null || true
+    done < <(find "$out" -type f -print0 2>/dev/null)
+
+    ${lib.optionalString (profile == "full") ''
+      # Install $out/bin/therock-hip-clang++ — a thin wrapper that calls
+      # the ROCm-bundled clang++ with the Nix sysroot / gcc-toolchain
+      # plumbing baked in. Downstream consumers (vllm overlay etc.) set
+      # CMAKE_HIP_COMPILER to this script, so the same interface works
+      # against either rocm provider.
+      #
+      # Read the metadata from `${gcc}`, NOT `${stdenv.cc}`: this
+      # derivation forces stdenv = llvmPackages_21.stdenv (a clang
+      # wrapper), and clang-wrapper's cc-cflags inject clang-specific
+      # flags like `-resource-dir=…/clang-wrapper/resource-root`. The
+      # wrapper script invokes ROCm's clang++ which has its own
+      # resource-dir bundled with its HIP runtime headers; pointing it
+      # at the nixpkgs-clang one breaks the cmath/cstdlib lookup.
+      cc_cflags_before="$(cat ${gcc}/nix-support/cc-cflags-before 2>/dev/null || true)"
+      cc_cflags="$(cat ${gcc}/nix-support/cc-cflags 2>/dev/null || true)"
+      libc_cflags="$(cat ${gcc}/nix-support/libc-cflags 2>/dev/null || true)"
+      libc_crt1_cflags="$(cat ${gcc}/nix-support/libc-crt1-cflags 2>/dev/null || true)"
+      libc_ldflags="$(cat ${gcc}/nix-support/libc-ldflags 2>/dev/null || true)"
+      cc_ldflags="$(cat ${gcc}/nix-support/cc-ldflags 2>/dev/null || true)"
+      libc="$(cat ${gcc}/nix-support/orig-libc 2>/dev/null || true)"
+      dynamic_linker="$(cat ${gcc}/nix-support/dynamic-linker 2>/dev/null || true)"
+
+      cat > "$out/bin/therock-hip-clang++" <<EOF
+      #!/bin/sh
+      exec "$out/lib/llvm/bin/clang++" \\
+        --gcc-toolchain=${gcc.cc} \\
+        --rocm-path="$out" \\
+        $cc_cflags_before \\
+        $cc_cflags \\
+        $libc_cflags \\
+        $libc_crt1_cflags \\
+        "\$@" \\
+        -L$libc/lib \\
+        -Wl,--dynamic-linker=$dynamic_linker \\
+        -Wl,-rpath,${stdenv.cc.cc.lib}/lib \\
+        -Wl,-rpath,$libc/lib \\
+        $libc_ldflags \\
+        $cc_ldflags
+      EOF
+      sed -i 's/^      //' "$out/bin/therock-hip-clang++"
+      chmod 755 "$out/bin/therock-hip-clang++"
+
+      # Override the in-tree hipcc_cmake_linker_helper so HIP link steps go
+      # through the Nix-aware wrapper instead of the bundled clang++ which
+      # loses libc/libstdc++ search paths.
+      cat > "$out/bin/hipcc_cmake_linker_helper" <<EOF
+      #!/bin/sh
+      [ "\$#" -gt 0 ] && shift
+      exec "$out/bin/therock-hip-clang++" "\$@"
+      EOF
+      sed -i 's/^      //' "$out/bin/hipcc_cmake_linker_helper"
+      chmod 755 "$out/bin/hipcc_cmake_linker_helper"
+    ''}
+  '';
 
   configurePhase = ''
     runHook preConfigure
@@ -849,7 +1096,7 @@ stdenv.mkDerivation {
         ${hipLanguageFlagsToolchainLine}'
 
                 ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
-                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}
+                ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}${rocmStdcxxFsSourcePatch}${hipsolverLapackSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
                   --replace-fail \

@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "ds4": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779778674,
+        "narHash": "sha256-ICjNBjLL/KvleDJZksTCgUVaHipeoOT752/BiE9SVeE=",
+        "owner": "antirez",
+        "repo": "ds4",
+        "rev": "ec6a82aaa9a3a98bee803801440b0e803aa48f09",
+        "type": "github"
+      },
+      "original": {
+        "owner": "antirez",
+        "repo": "ds4",
+        "type": "github"
+      }
+    },
     "ds4-hip": {
       "flake": false,
       "locked": {
@@ -49,6 +65,24 @@
         "type": "github"
       }
     },
+    "linux-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779802034,
+        "narHash": "sha256-AtgoTQnF7yPt7dyYJjQIy8zt1JGdebkHSmVcoUxu7Xo=",
+        "ref": "refs/heads/next",
+        "rev": "d73a08958e66849ea713d2f458b2fcf7b183f987",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
+      },
+      "original": {
+        "ref": "refs/heads/next",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
+      }
+    },
     "llama-cpp-master": {
       "flake": false,
       "locked": {
@@ -62,6 +96,23 @@
       "original": {
         "owner": "ggml-org",
         "repo": "llama.cpp",
+        "type": "github"
+      }
+    },
+    "mlx-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1777394396,
+        "narHash": "sha256-3OOYc2MlBAMVZGwulp25X0VOVKS/vYTIWQjSz16DmFg=",
+        "owner": "ml-explore",
+        "repo": "mlx",
+        "rev": "e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ml-explore",
+        "repo": "mlx",
+        "rev": "e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1",
         "type": "github"
       }
     },
@@ -92,10 +143,12 @@
     },
     "src": {
       "inputs": {
+        "ds4": "ds4",
         "ds4-hip": "ds4-hip",
         "ec-su-axb35": "ec-su-axb35",
         "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",
+        "mlx-src": "mlx-src",
         "nixpkgs": "nixpkgs",
         "therock-src-7-13-gfx1151-base-half-011b45bd": "therock-src-7-13-gfx1151-base-half-011b45bd",
         "therock-src-7-13-gfx1151-base-rocm-cmake-ec512d84": "therock-src-7-13-gfx1151-base-rocm-cmake-ec512d84",
@@ -152,6 +205,7 @@
         "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": "therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf",
         "therock-src-7-13-gfx1151-root": "therock-src-7-13-gfx1151-root",
         "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-7-13-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c",
+        "thunderbolt-ibverbs": "thunderbolt-ibverbs",
         "vllm-src": "vllm-src",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"
@@ -1098,6 +1152,28 @@
         "owner": "ROCm",
         "repo": "mesa-fork",
         "rev": "9a0d5b03fd540cb2448c64bbda17dbf17ccb12bf",
+        "type": "github"
+      }
+    },
+    "thunderbolt-ibverbs": {
+      "inputs": {
+        "linux-src": "linux-src",
+        "nixpkgs": [
+          "src",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1780321682,
+        "narHash": "sha256-RVom8lwovRCk6YAZaWQBdhxOK7xxJ474zw1PWOpfsco=",
+        "owner": "hellas-ai",
+        "repo": "thunderbolt-ibverbs",
+        "rev": "1f7833dd440ca3b957d1f6710f4c19e4ae3e28f8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hellas-ai",
+        "repo": "thunderbolt-ibverbs",
         "type": "github"
       }
     },

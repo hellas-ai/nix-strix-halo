@@ -43,11 +43,19 @@ let
     sandboxPaths = [ ];
   };
 
+  # Every benchmark is gated on a `benchmark` system feature in addition to
+  # whatever per-suite features it asks for (GPU/NPU/dataset paths). Hydra
+  # builders that don't advertise `benchmark` (general CI boxes like ax102,
+  # trex) don't end up running model-dependent jobs that would fail on a
+  # missing /models tree. Suites that already include `benchmark` (Metal,
+  # CUDA device smoke tests) stay idempotent via the `lib.unique` in mergeRequirements.
   normalizeRequirements =
     requirements:
     emptyRequirements
     // {
-      systemFeatures = requirements.systemFeatures or emptyRequirements.systemFeatures;
+      systemFeatures = lib.unique (
+        (requirements.systemFeatures or emptyRequirements.systemFeatures) ++ [ "benchmark" ]
+      );
       hostProfiles = requirements.hostProfiles or emptyRequirements.hostProfiles;
       sandboxPaths = requirements.sandboxPaths or emptyRequirements.sandboxPaths;
     }

@@ -1145,17 +1145,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1779825632,
-        "narHash": "sha256-E9C8XDbRWzUjQ3S/Q7DaKaCL5UVdA275knCO+xum8+w=",
-        "ref": "refs/heads/main",
-        "rev": "72133d6ab61c121fcbf8feeebd052bc905c3ae66",
-        "revCount": 226,
-        "type": "git",
-        "url": "ssh://git@github.com/hellas-ai/thunderbolt-ibverbs.git"
+        "lastModified": 1780321682,
+        "narHash": "sha256-RVom8lwovRCk6YAZaWQBdhxOK7xxJ474zw1PWOpfsco=",
+        "owner": "hellas-ai",
+        "repo": "thunderbolt-ibverbs",
+        "rev": "1f7833dd440ca3b957d1f6710f4c19e4ae3e28f8",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "ssh://git@github.com/hellas-ai/thunderbolt-ibverbs.git"
+        "owner": "hellas-ai",
+        "repo": "thunderbolt-ibverbs",
+        "type": "github"
       }
     },
     "vllm-src": {
