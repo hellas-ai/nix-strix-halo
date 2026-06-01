@@ -3,12 +3,14 @@
   target,
   vllmSrc,
   vllmVersion,
+  enabled ? true,
 }:
 let
   s = target.packageSuffix;
 in
 final: prev:
 let
+  hasTherockVllmInputs = enabled && prev.stdenv.isLinux;
   sdkBase = final."therock-rocm-${s}";
   vllmGpuTargets = target.buildTargets;
   sdk = sdkBase // {
@@ -310,6 +312,6 @@ let
 
   vllmTherock = lib.makeOverridable mkVllmTherock { };
 in
-{
+lib.optionalAttrs hasTherockVllmInputs {
   "vllm-rocm-therock-${s}" = vllmTherock;
 }

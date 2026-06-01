@@ -16,6 +16,8 @@
 {
   self ? builtins.getFlake (toString ./.),
   system ? builtins.currentSystem,
+  jobset ? "default",
+  ...
 }:
 
 let
@@ -228,6 +230,32 @@ let
   benchmarks =
     flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaRtx4090Benchmarks;
 
+  supportedBenchmarkFeatures = {
+    x86_64-linux = [
+      "benchmark"
+      "gfx1151"
+      "xdna2"
+      "rtx4090"
+    ];
+    aarch64-darwin = [ "benchmark" ];
+  };
+
+  addBenchmarkFeature =
+    drv:
+    drv.overrideAttrs (old: {
+      requiredSystemFeatures = lib.unique ((old.requiredSystemFeatures or [ ]) ++ [ "benchmark" ]);
+    });
+
+  supportedOnBenchmarkHost =
+    _name: drv:
+    lib.all (feature: lib.elem feature (supportedBenchmarkFeatures.${system} or [ ])) (
+      drv.requiredSystemFeatures or [ ]
+    );
+
+  benchmarkJobs = lib.filterAttrs supportedOnBenchmarkHost (
+    lib.mapAttrs (_: addBenchmarkFeature) benchmarks
+  );
+
   # Hydra aggregates
   maintainerMeta = {
     maintainers = with lib.maintainers; [ georgewhewell ];
@@ -256,9 +284,9 @@ let
 
   isSourceCheckSystem = system == "x86_64-linux";
 
-  # pr-quick currently has no jobs — flake.checks lost its metadata
-  # assertions in the cleanup. Bring them back here later if needed.
-  prQuickJobs = { };
+  # Keep the fast source/evaluation checks ahead of every pr-full link-farm
+  # entry so Hydra catches regressions before scheduling the heavier jobs.
+  prQuickJobs = lib.optionalAttrs isSourceCheckSystem self.checks.${system};
   prQuick = mkAggregate "pr-quick" prQuickJobs;
 
   afterPrQuick =
@@ -286,6 +314,23 @@ let
       rocmProvider,
       pythonProvider ? "therock-wheels",
     }:
+    let
+      suffix = defaultRocmTarget.packageSuffix;
+      sources = flakeLib.defaultTherockSources;
+      enableTherockVllm =
+        rocmProvider != "nixpkgs"
+        && pythonProvider == "therock-wheels"
+        && lib.hasAttrByPath [
+          "rocm"
+          "linux"
+          suffix
+        ] sources
+        && lib.hasAttrByPath [
+          "pythonWheels"
+          "targets"
+          suffix
+        ] sources;
+    in
     import nixpkgs {
       inherit system;
       config = {
@@ -327,8 +372,12 @@ let
           target = defaultRocmTarget;
           vllmSrc = self.inputs.vllm-src;
           vllmVersion = "0.21.0";
+          enabled = enableTherockVllm;
         })
-        (flakeLib.mkPkgsOverlay { rocmTarget = defaultRocmTarget; })
+        (flakeLib.mkPkgsOverlay {
+          inherit rocmProvider pythonProvider;
+          rocmTarget = defaultRocmTarget;
+        })
       ];
     };
 
@@ -336,9 +385,9 @@ let
     rocmProvider = "therock-source";
   });
 
-  # nixpkgs.rocmPackages.${suffix} narrowed scope. vllm/ds4/mlx hard-ref
-  # TheRock attrs and don't resolve here, but llama-cpp-rocm exercises
-  # the dispatcher cleanly.
+  # nixpkgs.rocmPackages.${suffix} narrowed scope. The package overlay
+  # hides TheRock-shaped attrs for this provider, so llama-cpp-rocm is
+  # the provider-dispatch smoke here.
   nixpkgsRocmPkgs = lib.optionalAttrs (system == "x86_64-linux") (mkPkgsForProvider {
     rocmProvider = "nixpkgs";
   });
@@ -376,9 +425,7 @@ let
     vllm-throughput-smoke =
       afterPrQuick "vllm-throughput-smoke"
         benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
-    fastflowlm-npu-smoke =
-      afterPrQuick "fastflowlm-npu-smoke"
-        benchmarks.bench-llama3-2-1b-fastflowlm-medium;
+    fastflowlm-npu-smoke = afterPrQuick "fastflowlm-npu-smoke" benchmarks.bench-llama3-2-1b-fastflowlm-medium;
     cuda-rtx4090-device-smoke = afterPrQuick "cuda-rtx4090-device-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
 
     # Provider-variant builds. Exercise the rocm.nix dispatcher
@@ -392,21 +439,28 @@ let
     # are TheRock-shaped).
     llama-cpp-rocm-nixpkgs = nixpkgsRocmPkgs.llama-cpp-rocm;
   };
+
+  defaultJobs = {
+    inherit benchmarks;
+
+    pr-quick = prQuickJobs // {
+      all = prQuick;
+    };
+
+    pr-full = prFullJobs // {
+      all = mkAggregate "pr-full" prFullJobs;
+    };
+  }
+  // lib.optionalAttrs (system == "x86_64-linux") {
+    # Re-export the raw ISO so Hydra's "download iso" UI can find the
+    # underlying build product. The linkFarm-wrapped `pr-full.live-iso`
+    # loses the `nix-support/hydra-build-products` file.
+    live-iso = self.packages.${system}.live-iso;
+  };
 in
-{
-  inherit benchmarks;
-
-  pr-quick = prQuickJobs // {
-    all = prQuick;
-  };
-
-  pr-full = prFullJobs // {
-    all = mkAggregate "pr-full" prFullJobs;
-  };
-}
-// lib.optionalAttrs (system == "x86_64-linux") {
-  # Re-export the raw ISO so Hydra's "download iso" UI can find the
-  # underlying build product. The linkFarm-wrapped `pr-full.live-iso`
-  # loses the `nix-support/hydra-build-products` file.
-  live-iso = self.packages.${system}.live-iso;
-}
+if jobset == "default" then
+  defaultJobs
+else if jobset == "benchmarks" then
+  benchmarkJobs
+else
+  throw "unknown hydra jobset ${jobset}; valid: default, benchmarks"

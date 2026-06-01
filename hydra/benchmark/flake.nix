@@ -13,33 +13,15 @@
         "x86_64-linux"
         "aarch64-darwin"
       ];
-
-      supportedFeatures = {
-        x86_64-linux = [
-          "benchmark"
-          "gfx1151"
-          "xdna2"
-          "rtx4090"
-        ];
-        aarch64-darwin = [ "benchmark" ];
-      };
-
-      addBenchmarkFeature =
-        drv:
-        drv.overrideAttrs (old: {
-          requiredSystemFeatures = lib.unique ((old.requiredSystemFeatures or [ ]) ++ [ "benchmark" ]);
-        });
-
-      supportedOn =
-        system: drv:
-        lib.all (feature: lib.elem feature supportedFeatures.${system}) (drv.requiredSystemFeatures or [ ]);
     in
     {
       hydraJobs = lib.genAttrs benchmarkSystems (
         system:
-        lib.filterAttrs (_: supportedOn system) (
-          lib.mapAttrs (_: addBenchmarkFeature) src.hydraJobs.${system}.benchmarks
-        )
+        import "${src}/hydra.nix" {
+          self = src;
+          inherit system;
+          jobset = "benchmarks";
+        }
       );
     };
 }

@@ -3,6 +3,9 @@
   lib,
   inputVersion,
   rocmTarget,
+  rocmProvider ? "therock-bin",
+  pythonProvider ? "therock-wheels",
+  sources ? null,
 }:
 
 # Locally-defined packages. One overlay, one source of truth for "what
@@ -38,6 +41,30 @@ lib.optionalAttrs prev.stdenv.isLinux (
       cudaSupport = true;
       rpcSupport = true;
     };
+    suffix = rocmTarget.packageSuffix;
+    firstBuildTarget = builtins.head rocmTarget.buildTargets;
+
+    sourceHas = path: sources != null && lib.hasAttrByPath path sources;
+    sourceHasTherockRocm = sourceHas [
+      "rocm"
+      "linux"
+      suffix
+    ];
+    sourceHasTherockPython = sourceHas [
+      "pythonWheels"
+      "targets"
+      suffix
+    ];
+    finalHas = name: builtins.hasAttr name final;
+
+    rocmProviderHasTherockAttrs = rocmProvider == "therock-bin" || rocmProvider == "therock-source";
+    pythonProviderHasTherockAttrs = pythonProvider == "therock-wheels";
+    supportsTherockRocm =
+      rocmProviderHasTherockAttrs
+      && (if sources != null then sourceHasTherockRocm else finalHas "therock-rocm-${suffix}");
+    supportsTherockPython =
+      pythonProviderHasTherockAttrs
+      && (if sources != null then sourceHasTherockPython else finalHas "therock-python-${suffix}");
 
     georgewhewellMaintained =
       drv:
@@ -81,6 +108,12 @@ lib.optionalAttrs prev.stdenv.isLinux (
       drv.overrideAttrs (old: {
         requiredSystemFeatures = (old.requiredSystemFeatures or [ ]) ++ [ "big-parallel" ];
       });
+
+    setPname =
+      pname: drv:
+      drv.overrideAttrs (_: {
+        inherit pname;
+      });
   in
   {
     ec-su-axb35 = ecPackages.kernelModule;
@@ -101,45 +134,54 @@ lib.optionalAttrs prev.stdenv.isLinux (
       src = inputs.fastflowlm;
     };
 
-    llama-cpp-rocm = bigParallel (georgewhewellMaintained (prev.llama-cpp.override rocmOverride));
+    llama-cpp-rocm = bigParallel (
+      setPname "llama-cpp-rocm-${suffix}" (georgewhewellMaintained (prev.llama-cpp.override rocmOverride))
+    );
     llama-cpp-vulkan = georgewhewellMaintained (prev.llama-cpp.override vulkanOverride);
     llama-cpp-cuda = georgewhewellMaintained (prev.llama-cpp.override cudaOverride);
     llama-cpp-master = llamaCppMaster;
     llama-cpp-master-rocm = bigParallel (
-      georgewhewellMaintained (llamaCppMaster.override rocmOverride)
+      setPname "llama-cpp-master-rocm-${suffix}" (
+        georgewhewellMaintained (llamaCppMaster.override rocmOverride)
+      )
     );
     llama-cpp-master-vulkan = georgewhewellMaintained (llamaCppMaster.override vulkanOverride);
     llama-cpp-master-cuda = georgewhewellMaintained (llamaCppMaster.override cudaOverride);
-
+  }
+  // lib.optionalAttrs supportsTherockRocm {
     ds4-rocm = bigParallel (
       prev.callPackage ../pkgs/ds4-rocm {
         src = inputs.ds4-hip;
-        rocmSdk = final."therock-rocm-${rocmTarget.packageSuffix}";
+        rocmSdk = final."therock-rocm-${suffix}";
         version = inputVersion "experimental" inputs.ds4-hip;
         inherit (rocmTarget) packageSuffix;
-        offloadArch = builtins.head rocmTarget.buildTargets;
+        offloadArch = firstBuildTarget;
         hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
       }
     );
 
     mlx-rocm = bigParallel (
       final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
-        pname = "mlx-rocm";
+        pname = "mlx-rocm-${suffix}";
         rdma-core = final.rdma-core-usb4;
-        rocmPackages = final.therockRocmPackages.${builtins.head rocmTarget.buildTargets};
-        gfx = builtins.head rocmTarget.buildTargets;
+        rocmPackages = final.therockRocmPackages.${firstBuildTarget};
+        gfx = firstBuildTarget;
       }
     );
 
     # Unsuffixed aliases for the active rocmTarget. Lets consumers write
     # `pkgs.therock-rocm` instead of `pkgs.therock-rocm-gfx1151` once the
     # package set's target is fixed (which it is per pkgsFor invocation).
-    therock-rocm = final."therock-rocm-${rocmTarget.packageSuffix}";
-    therock-rocm-env = final."therock-rocm-${rocmTarget.packageSuffix}-env";
-    therock-python = final."therock-python-${rocmTarget.packageSuffix}";
-    therock-python-wheels = final."therock-python-wheels-${rocmTarget.packageSuffix}";
-    therock-amdsmi = final."therock-amdsmi-${rocmTarget.packageSuffix}";
-    torch-rocm = final."torch-rocm-${rocmTarget.packageSuffix}";
-    vllm-rocm = final."vllm-rocm-therock-${rocmTarget.packageSuffix}";
+    therock-rocm = final."therock-rocm-${suffix}";
+    therock-rocm-env = final."therock-rocm-${suffix}-env";
+  }
+  // lib.optionalAttrs supportsTherockPython {
+    therock-python = final."therock-python-${suffix}";
+    therock-python-wheels = final."therock-python-wheels-${suffix}";
+    therock-amdsmi = final."therock-amdsmi-${suffix}";
+    torch-rocm = final."torch-rocm-${suffix}";
+  }
+  // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython) {
+    vllm-rocm = final."vllm-rocm-therock-${suffix}";
   }
 )
