@@ -425,6 +425,7 @@ let
     vllm-throughput-smoke =
       afterPrQuick "vllm-throughput-smoke"
         benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
+    ds4-rocm-smoke = afterPrQuick "ds4-rocm-smoke" benchmarks.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
     fastflowlm-npu-smoke = afterPrQuick "fastflowlm-npu-smoke" benchmarks.bench-llama3-2-1b-fastflowlm-medium;
     cuda-rtx4090-device-smoke = afterPrQuick "cuda-rtx4090-device-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
 
