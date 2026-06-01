@@ -124,7 +124,7 @@ stdenv.mkDerivation (finalAttrs: {
     description = "High-performance LLM inference engine for AMD Ryzen AI NPUs";
     homepage = "https://github.com/FastFlowLM/FastFlowLM";
     license = lib.licenses.mit;
-    maintainers = [ ];
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = [ "x86_64-linux" ];
     mainProgram = "flm";
   };

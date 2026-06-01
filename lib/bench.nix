@@ -226,7 +226,10 @@ rec {
         meta = {
           inherit description;
         }
-        // meta;
+        // meta
+        // {
+          maintainers = with pkgs.lib.maintainers; [ georgewhewell ];
+        };
       }
       ''
         set -euo pipefail

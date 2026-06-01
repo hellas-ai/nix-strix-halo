@@ -119,7 +119,7 @@ stdenv.mkDerivation (finalAttrs: {
     description = "Xilinx Runtime for FPGA/ACAP devices (and Ryzen AI NPUs via xrt.xdna)";
     homepage = "https://github.com/Xilinx/XRT";
     license = lib.licenses.asl20;
-    maintainers = [ ];
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = lib.platforms.linux;
   };
 })

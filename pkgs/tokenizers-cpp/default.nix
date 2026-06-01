@@ -41,6 +41,7 @@ let
       description = "C FFI bindings for the Hugging Face tokenizers library";
       homepage = "https://github.com/mlc-ai/tokenizers-cpp";
       license = lib.licenses.asl20;
+      maintainers = with lib.maintainers; [ georgewhewell ];
       platforms = lib.platforms.unix;
     };
   };
@@ -85,7 +86,7 @@ stdenv.mkDerivation {
     description = "C++ wrapper for Hugging Face tokenizers with cross-platform support";
     homepage = "https://github.com/mlc-ai/tokenizers-cpp";
     license = lib.licenses.asl20;
-    maintainers = [ ];
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = lib.platforms.unix;
   };
 }

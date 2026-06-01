@@ -187,6 +187,7 @@ mlx.overrideAttrs (old: {
         "Apple MLX with Metal backend built from source";
     homepage = "https://github.com/ml-explore/mlx";
     license = licenses.mit;
+    maintainers = with maintainers; [ georgewhewell ];
     platforms = [ "aarch64-darwin" ];
   };
 })

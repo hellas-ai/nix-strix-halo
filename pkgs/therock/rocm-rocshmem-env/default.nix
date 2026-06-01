@@ -74,6 +74,7 @@ writeShellApplication {
 
   meta = with lib; {
     description = "Run a command inside TheRock ${packageSuffix} with rocSHMEM + IB verbs sysfs filter";
+    maintainers = with maintainers; [ georgewhewell ];
     platforms = platforms.linux;
   };
 }

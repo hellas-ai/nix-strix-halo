@@ -145,6 +145,7 @@ stdenv.mkDerivation {
     homepage = "https://github.com/antirez/ds4";
     license = lib.licenses.mit;
     mainProgram = "ds4";
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = lib.platforms.darwin;
   };
 }

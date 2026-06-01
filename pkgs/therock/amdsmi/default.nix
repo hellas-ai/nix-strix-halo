@@ -1,4 +1,5 @@
 {
+  lib,
   buildPythonPackage,
   python,
   wheels,
@@ -31,6 +32,7 @@ buildPythonPackage {
   meta = {
     description = "Python AMD SMI bindings from the matching TheRock Python ROCm bundle";
     homepage = "https://github.com/ROCm/TheRock";
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = [ "x86_64-linux" ];
   };
 }

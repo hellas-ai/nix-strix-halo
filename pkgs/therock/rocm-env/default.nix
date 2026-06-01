@@ -76,6 +76,7 @@ writeShellApplication {
 
   meta = with lib; {
     description = "Run a command inside the TheRock ${packageSuffix} ROCm SDK environment";
+    maintainers = with maintainers; [ georgewhewell ];
     platforms = platforms.linux;
   };
 }

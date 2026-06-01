@@ -328,6 +328,7 @@ stdenv.mkDerivation {
     description = "JACCL RDMA-over-Thunderbolt collective communication library from MLX";
     homepage = "https://github.com/ml-explore/mlx";
     license = licenses.mit;
+    maintainers = with maintainers; [ georgewhewell ];
     platforms = platforms.linux ++ [ "aarch64-darwin" ];
   };
 }

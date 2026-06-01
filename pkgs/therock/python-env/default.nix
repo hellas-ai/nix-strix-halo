@@ -147,6 +147,7 @@ stdenv.mkDerivation {
   meta = {
     description = "TheRock pinned Python ROCm/PyTorch wheel runtime for ${wheelSources.target}";
     homepage = "https://github.com/ROCm/TheRock";
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = [ "x86_64-linux" ];
   };
 }

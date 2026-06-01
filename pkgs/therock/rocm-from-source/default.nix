@@ -1319,6 +1319,7 @@ stdenv.mkDerivation {
     description = "TheRock ROCm ${version} built from source for ${target}";
     homepage = "https://github.com/ROCm/TheRock";
     license = lib.licenses.mit;
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = [ "x86_64-linux" ];
   };
 }
