@@ -20,7 +20,7 @@
     inputs.self.nixosModules.tuning
     inputs.self.nixosModules.ec-su-axb35
     inputs.self.nixosModules.rpc-server
-    inputs.self.nixosModules.fastflowlm-server
+    inputs.self.nixosModules.fastflowlm
   ];
 
   boot = {

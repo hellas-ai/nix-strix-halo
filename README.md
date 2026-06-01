@@ -90,7 +90,7 @@ the tag in `lib/providers.nix`.
 
 - `nixosModules.default` — apply the overlay
 - `nixosModules.rpc-server` — llama-cpp RPC server instances
-- `nixosModules.fastflowlm-server` — FastFlowLM OpenAI-compatible server (XDNA2)
+- `nixosModules.fastflowlm` — FastFlowLM OpenAI-compatible server (XDNA2)
 - `nixosModules.benchmark-runner` / `benchmark-executor` — local + remote bench infra
 - `nixosModules.ec-su-axb35`, `ryzenadj`, `tuning` — Strix Halo hardware modules
 

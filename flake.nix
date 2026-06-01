@@ -565,7 +565,7 @@
         benchmark-executor = import ./modules/benchmark-executor.nix;
         benchmark-runner = import ./modules/benchmark-runner.nix;
         ec-su-axb35 = import ./modules/ec-su-axb35.nix;
-        fastflowlm-server = import ./modules/fastflowlm-server.nix;
+        fastflowlm = import ./modules/fastflowlm.nix;
         ryzenadj = import ./modules/ryzenadj.nix;
         tuning = import ./modules/tuning.nix;
         thunderbolt-ibverbs = inputs.thunderbolt-ibverbs.nixosModules.default;
