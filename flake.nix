@@ -418,6 +418,24 @@
           pythonProvider ? "therock-wheels",
           cpu ? null,
         }:
+        let
+          suffix = rocmTarget.packageSuffix;
+          hasTherockRocmSource = lib.hasAttrByPath [
+            "rocm"
+            "linux"
+            suffix
+          ] defaultTherockSources;
+          hasTherockPythonSource = lib.hasAttrByPath [
+            "pythonWheels"
+            "targets"
+            suffix
+          ] defaultTherockSources;
+          enableTherockVllm =
+            rocmProvider != "nixpkgs"
+            && pythonProvider == "therock-wheels"
+            && hasTherockRocmSource
+            && hasTherockPythonSource;
+        in
         [
           thunderboltIbverbsOverlay
           thunderboltRenamesOverlay
@@ -437,6 +455,7 @@
             target = rocmTarget;
             vllmSrc = inputs.vllm-src;
             vllmVersion = "0.21.0";
+            enabled = enableTherockVllm;
           })
           (import ./overlays/pkgs.nix {
             inherit
@@ -444,7 +463,10 @@
               lib
               inputVersion
               rocmTarget
+              rocmProvider
+              pythonProvider
               ;
+            sources = defaultTherockSources;
           })
         ]
         ++ lib.optional (cpu != null) (import ./overlays/mtune.nix { inherit lib cpu; });
@@ -516,7 +538,7 @@
           mkLiveIsoConfiguration
           ;
         inherit (rocmTargetLib) mkRocmTarget;
-        inherit (providers) rocmProviders pythonProviders;
+        inherit (providers) rocmProviders pythonProviders pythonProviderStubs;
         therockTargets = therockTargetConfig;
         bench = benchLib;
 
@@ -539,6 +561,7 @@
           import ./overlays/pkgs.nix (
             {
               inherit lib inputs inputVersion;
+              sources = defaultTherockSources;
             }
             // args
           );
@@ -581,7 +604,7 @@
     }
     // {
       # Per-target pkgs sets. Use to escape-hatch to a non-default rocm
-      # target: `nix build .#legacyPackages.x86_64-linux.gfx1100.llama-cpp-rocm`.
+      # target: `nix build .#legacyPackages.x86_64-linux.gfx1103.llama-cpp-rocm`.
       legacyPackages = forAllSystems (
         system:
         lib.listToAttrs (
@@ -613,6 +636,7 @@
                 inherit inputs lib;
                 inputVersion = _: _: "version";
                 rocmTarget = defaultRocmTarget;
+                sources = defaultTherockSources;
               };
               allKeys = builtins.attrNames (overlay { } { stdenv.isLinux = true; });
             in
@@ -776,6 +800,68 @@
         // lib.optionalAttrs pkgs.stdenv.isDarwin darwinApps
       );
 
+      checks = perSystem (
+        pkgs:
+        lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") (
+          let
+            system = pkgs.stdenv.hostPlatform.system;
+            src = self;
+            runSourceCheck =
+              name: nativeBuildInputs: command:
+              pkgs.runCommandLocal "ci-${name}"
+                {
+                  inherit nativeBuildInputs;
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  export HOME="$TMPDIR/home"
+                  export XDG_CACHE_HOME="$TMPDIR/cache"
+                  mkdir -p "$HOME" "$XDG_CACHE_HOME"
+                  cp -R --no-preserve=mode,ownership ${src} "$TMPDIR/src"
+                  chmod -R u+rwX "$TMPDIR/src"
+                  cd "$TMPDIR/src"
+                  ${command}
+                  touch "$out"
+                '';
+
+            packageSurface =
+              let
+                plain = builtins.unsafeDiscardStringContext;
+              in
+              assert
+                self.packages.${system}.llama-cpp-rocm.drvPath
+                == self.legacyPackages.${system}.gfx1151.llama-cpp-rocm.drvPath;
+              assert
+                self.packages.${system}.vllm-rocm.drvPath
+                == self.legacyPackages.${system}.gfx1151.vllm-rocm.drvPath;
+              assert !(self.packages.${system} ? llama-cpp-rocm-gfx1151);
+              assert !(self.packages.${system} ? vllm-rocm-therock-gfx1151);
+              assert !(self.legacyPackages.${system}.gfx1103 ? ds4-rocm);
+              assert !(self.legacyPackages.${system}.gfx1103 ? vllm-rocm);
+              pkgs.runCommandLocal "ci-package-surface"
+                {
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  cat > "$out" <<'EOF'
+                  default llama-cpp-rocm: ${plain self.packages.${system}.llama-cpp-rocm.drvPath}
+                  legacy gfx1151 llama-cpp-rocm: ${plain self.legacyPackages.${system}.gfx1151.llama-cpp-rocm.drvPath}
+                  legacy gfx1103 llama-cpp-rocm: ${plain self.legacyPackages.${system}.gfx1103.llama-cpp-rocm.drvPath}
+                  default vllm-rocm: ${plain self.packages.${system}.vllm-rocm.drvPath}
+                  EOF
+                '';
+          in
+          {
+            deadnix = runSourceCheck "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
+            statix = runSourceCheck "statix" [ pkgs.statix ] "statix check .";
+            nixfmt = runSourceCheck "nixfmt" [
+              pkgs.nixfmt-tree
+            ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
+            package-surface = packageSurface;
+          }
+        )
+      );
+
       devShells = perSystem (pkgs: {
         default = pkgs.mkShell {
           packages =
@@ -798,12 +884,6 @@
       });
 
       formatter = perSystem (pkgs: pkgs.nixfmt-tree);
-
-      # Hydra reads its jobset from `flake.hydraJobs`. The build matrix
-      # itself lives in ./hydra.nix (so curious humans can `nix-build
-      # hydra.nix -A pr-full.all` without a flake roundtrip); expose it
-      # here too so Hydra's flake-aware evaluator finds something.
-      hydraJobs = forAllSystems (system: import ./hydra.nix { inherit self system; });
 
     };
 }

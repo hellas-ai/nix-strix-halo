@@ -17,9 +17,9 @@
 #                        point at the source build.
 #   - "nixpkgs"         nixpkgs.rocmPackages.${target}, which nixpkgs
 #                        already publishes as the per-arch narrowed
-#                        scope. Doesn't pull in any TheRock attrs, so
-#                        downstream packages that reference
-#                        therock-rocm-* (vllm, ds4, mlx) won't resolve.
+#                        scope. Doesn't pull in any TheRock attrs; the
+#                        local package overlay only exposes packages
+#                        that can build without them.
 
 let
   providers = import ../lib/providers.nix { inherit lib; };
@@ -63,8 +63,7 @@ else if provider == "therock-source" then
 else if provider == "nixpkgs" then
   let
     narrowed =
-      prev.rocmPackages.${suffix}
-        or (throw "nixpkgs.rocmPackages has no narrowed scope for ${suffix}");
+      prev.rocmPackages.${suffix} or (throw "nixpkgs.rocmPackages has no narrowed scope for ${suffix}");
   in
   {
     rocmPackages = narrowed;

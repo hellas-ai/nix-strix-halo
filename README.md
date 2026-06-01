@@ -69,16 +69,21 @@ The package set is parameterised over three axes:
 
 | axis | tag/value source | default |
 |---|---|---|
-| rocm provider | `lib.rocmProviders` (`therock-bin`, `therock-source`) | `therock-bin` |
-| python provider | `lib.pythonProviders` (`therock-wheels`) | `therock-wheels` |
+| rocm provider | `lib.rocmProviders` (`therock-bin`, `therock-source`, `nixpkgs`) | `therock-bin` |
+| python provider | `lib.pythonProviders` (`therock-wheels`; future stubs in `lib.pythonProviderStubs`) | `therock-wheels` |
 | GPU target | `pkgs/therock/targets.nix` | `gfx1151` |
 
 Per-target packages (default providers) are available under
 `legacyPackages`:
 
 ```bash
-nix build .#legacyPackages.x86_64-linux.gfx1100.llama-cpp-rocm
+nix build .#legacyPackages.x86_64-linux.gfx1103.llama-cpp-rocm
 ```
+
+Only targets with matching TheRock binary/Python source pins expose
+TheRock-shaped packages such as `therock-rocm`, `ds4-rocm`, `mlx-rocm`, and
+`vllm-rocm`. At the moment those pins exist for `gfx1151`; `llama-cpp-rocm`
+is available for every target listed in `pkgs/therock/targets.nix`.
 
 For non-default providers compose your own overlays with `lib.mkRocmOverlay`,
 `lib.mkPythonOverlay`, and `lib.mkPkgsOverlay`. Add a new target by
@@ -97,13 +102,15 @@ the tag in `lib/providers.nix`.
 ## Hydra / CI
 
 `hydra.nix` (project root, not a flake output) composes the build matrix
-Hydra reads. Each default-target package gets a job, plus `-from-source`
-variants of `vllm-rocm`, `therock-rocm`, and `llama-cpp-rocm` that
-exercise the parameterised abstraction end-to-end.
+Hydra reads. It imports the flake to reuse its packages, checks, overlays,
+and helper libraries. Each default-target package gets a job, plus
+`-from-source` variants of `vllm-rocm`, `therock-rocm`, and
+`llama-cpp-rocm` that exercise the parameterised abstraction end-to-end.
 
 ```bash
 nix-build hydra.nix --argstr system x86_64-linux -A pr-full.all
 nix-build hydra.nix --argstr system x86_64-linux -A pr-full.vllm-rocm-from-source
+nix-build hydra.nix --argstr system x86_64-linux --argstr jobset benchmarks -A bench-mlx-rocm-gfx1151-gemm-smoke
 ```
 
 ## Development

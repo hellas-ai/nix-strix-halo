@@ -32,12 +32,14 @@ let
     # TheRock-published cu/rocm wheels. Default. Implemented in
     # overlays/python.nix.
     "therock-wheels"
+  ];
 
-    # nixpkgs python3Packages.torch with rocmSupport = true. Stub.
+  pythonProviderStubs = [
+    # Reserved for nixpkgs python3Packages.torch with rocmSupport = true.
     "nixpkgs"
 
-    # PyTorch + Triton built from source against the chosen rocm
-    # provider. Stub.
+    # Reserved for PyTorch + Triton built from source against the chosen
+    # rocm provider.
     "therock-source"
   ];
 
@@ -46,7 +48,7 @@ let
     lib.assertMsg (lib.elem tag providers) "unknown ${kind} provider \"${tag}\"; valid: ${lib.concatStringsSep ", " providers}";
 in
 {
-  inherit rocmProviders pythonProviders;
+  inherit rocmProviders pythonProviders pythonProviderStubs;
 
   assertRocmProvider = tag: assertProvider "rocm" rocmProviders tag;
   assertPythonProvider = tag: assertProvider "python" pythonProviders tag;
