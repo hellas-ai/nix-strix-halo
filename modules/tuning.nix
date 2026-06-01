@@ -2,7 +2,6 @@
 {
   boot = {
     kernelParams = [
-      "amd_iommu=pt"
       # GTT: 80GB (leaves ~30GB system RAM for OS/apps)
       "ttm.pages_limit=20971520"
     ];

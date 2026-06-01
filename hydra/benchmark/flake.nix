@@ -18,6 +18,7 @@
         x86_64-linux = [
           "benchmark"
           "gfx1151"
+          "xdna2"
           "rtx4090"
         ];
         aarch64-darwin = [ "benchmark" ];

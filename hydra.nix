@@ -376,6 +376,9 @@ let
     vllm-throughput-smoke =
       afterPrQuick "vllm-throughput-smoke"
         benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
+    fastflowlm-npu-smoke =
+      afterPrQuick "fastflowlm-npu-smoke"
+        benchmarks.bench-llama3-2-1b-fastflowlm-medium;
     cuda-rtx4090-device-smoke = afterPrQuick "cuda-rtx4090-device-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
 
     # Provider-variant builds. Exercise the rocm.nix dispatcher
