@@ -3,11 +3,11 @@
     "ds4": {
       "flake": false,
       "locked": {
-        "lastModified": 1779778674,
-        "narHash": "sha256-ICjNBjLL/KvleDJZksTCgUVaHipeoOT752/BiE9SVeE=",
+        "lastModified": 1780156411,
+        "narHash": "sha256-Xda49a2yhrXjGNMB8LUZzlQWPMQfGjq+OIZvlwdPda8=",
         "owner": "antirez",
         "repo": "ds4",
-        "rev": "ec6a82aaa9a3a98bee803801440b0e803aa48f09",
+        "rev": "ba00a8a88c4c5810a3d1fed6b7b8fa2b44b82fdc",
         "type": "github"
       },
       "original": {
