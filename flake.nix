@@ -40,7 +40,7 @@
     };
 
     thunderbolt-ibverbs = {
-      url = "git+ssh://git@github.com/hellas-ai/thunderbolt-ibverbs.git";
+      url = "github:hellas-ai/thunderbolt-ibverbs";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -583,7 +583,7 @@
             flattenBenchmarks ds4MetalBenchmarks // flattenBenchmarks mlxMetalBenchmarks
           );
 
-          cudaSmokeBenchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
+          cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
             let
               cudaPkgs = cudaPackagesFor system;
               nvidiaSmi = cudaPkgs.linuxPackages.nvidia_x11.bin;
@@ -609,7 +609,10 @@
                   LD_LIBRARY_PATH = "${nvidiaDriver}/lib";
                 };
                 requirements = {
-                  systemFeatures = [ "cuda-smoke" ];
+                  systemFeatures = [
+                    "rtx4090"
+                    "benchmark"
+                  ];
                   hostProfiles = [ "linux-nvidia-cuda" ];
                   sandboxPaths = [
                     "/dev/nvidia0"
@@ -621,7 +624,7 @@
                   ];
                 };
                 metadata = {
-                  kind = "cuda-smoke";
+                  kind = "cuda-device-smoke";
                   suite = "cuda";
                   accelerator = "cuda";
                   scenario = "device-smoke";
@@ -629,7 +632,7 @@
                     vendor = "nvidia";
                     arch = "sm_89";
                     deviceClass = "rtx4090";
-                    systemFeature = "cuda-smoke";
+                    systemFeature = "rtx4090";
                   };
                   tool = {
                     backend = "cuda";
@@ -643,7 +646,7 @@
             }
           );
         in
-        flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaSmokeBenchmarks;
+        flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaRtx4090Benchmarks;
 
       mkLiveIsoConfiguration =
         {
@@ -1451,9 +1454,9 @@
             vllmLatencyBenchmarkMetadata = builtins.toJSON (
               removeAttrs vllmLatencyBenchmark.passthru.benchmark [ "command" ]
             );
-            cudaSmokeBenchmark = benchmarkSet.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
-            cudaSmokeBenchmarkMetadata = builtins.toJSON (
-              removeAttrs cudaSmokeBenchmark.passthru.benchmark [ "command" ]
+            cudaRtx4090Benchmark = benchmarkSet.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+            cudaRtx4090BenchmarkMetadata = builtins.toJSON (
+              removeAttrs cudaRtx4090Benchmark.passthru.benchmark [ "command" ]
             );
           in
           {
@@ -1588,27 +1591,28 @@
                   touch "$out"
                 '';
 
-            cuda-smoke-benchmark-metadata =
-              pkgs.runCommandLocal "ci-cuda-smoke-benchmark-metadata"
+            cuda-rtx4090-benchmark-metadata =
+              pkgs.runCommandLocal "ci-cuda-rtx4090-benchmark-metadata"
                 {
                   nativeBuildInputs = [ pkgs.jq ];
                 }
                 ''
                   cat > metadata.json <<'JSON'
-                  ${cudaSmokeBenchmarkMetadata}
+                  ${cudaRtx4090BenchmarkMetadata}
                   JSON
 
                   jq -e '
-                    .kind == "cuda-smoke"
+                    .kind == "cuda-device-smoke"
                     and .accelerator == "cuda"
                     and .scenario == "device-smoke"
-                    and .requirements.systemFeatures == [ "cuda-smoke" ]
+                    and .requirements.systemFeatures == [ "rtx4090", "benchmark" ]
                     and .requirements.hostProfiles == [ "linux-nvidia-cuda" ]
                     and (.requirements.sandboxPaths | index("/dev/nvidia0") != null)
                     and (.requirements.sandboxPaths | index("/run/opengl-driver") == null)
                     and (.env.LD_LIBRARY_PATH | test("nvidia-x11-[^/]+/lib$"))
                     and .target.deviceClass == "rtx4090"
                     and .target.arch == "sm_89"
+                    and .target.systemFeature == "rtx4090"
                     and .packages == [ "llama-cpp-master-cuda", "nvidia-x11" ]
                     and .tool.executable == "llama-bench --list-devices"
                   ' metadata.json
@@ -1895,8 +1899,8 @@
             vllm-throughput-smoke =
               afterPrQuick "vllm-throughput-smoke"
                 self.benchmarks.${system}.bench-qwen3-0-6b-vllm-rocm-gfx1151-throughput-smoke;
-            cuda-smoke =
-              afterPrQuick "cuda-smoke"
+            cuda-rtx4090-device-smoke =
+              afterPrQuick "cuda-rtx4090-device-smoke"
                 self.benchmarks.${system}.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
           };
         in
