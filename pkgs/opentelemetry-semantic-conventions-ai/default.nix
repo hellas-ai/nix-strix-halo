@@ -24,6 +24,6 @@ buildPythonPackage rec {
     description = "OpenTelemetry semantic conventions extension for generative AI";
     homepage = "https://github.com/traceloop/openllmetry/tree/main/packages/opentelemetry-semantic-conventions-ai";
     license = lib.licenses.asl20;
-    maintainers = [ ];
+    maintainers = with lib.maintainers; [ georgewhewell ];
   };
 }

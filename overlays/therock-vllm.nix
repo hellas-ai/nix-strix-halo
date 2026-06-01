@@ -303,6 +303,9 @@ let
           vllmFeatureOptions = featureFlags;
           vllmUnsupportedFeatures = unsupportedFeatureReasons;
         };
+        meta = (old.meta or { }) // {
+          maintainers = with lib.maintainers; [ georgewhewell ];
+        };
       });
 
   vllmTherock = lib.makeOverridable mkVllmTherock { };

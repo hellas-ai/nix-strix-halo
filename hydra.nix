@@ -229,9 +229,26 @@ let
     flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaRtx4090Benchmarks;
 
   # Hydra aggregates
+  maintainerMeta = {
+    maintainers = with lib.maintainers; [ georgewhewell ];
+  };
+
+  mkLinkFarm =
+    name: entries:
+    pkgs.runCommandLocal name
+      {
+        meta = maintainerMeta;
+      }
+      ''
+        mkdir -p "$out"
+        ${lib.concatMapStringsSep "\n" (entry: ''
+          ln -s ${entry.path} "$out"/${lib.escapeShellArg entry.name}
+        '') entries}
+      '';
+
   mkAggregate =
     aggregateName: jobs:
-    pkgs.linkFarm "nix-strix-halo-${aggregateName}" (
+    mkLinkFarm "nix-strix-halo-${aggregateName}" (
       lib.mapAttrsToList (name: path: {
         inherit name path;
       }) jobs
@@ -246,7 +263,7 @@ let
 
   afterPrQuick =
     name: path:
-    pkgs.linkFarm "nix-strix-halo-pr-full-${name}" (
+    mkLinkFarm "nix-strix-halo-pr-full-${name}" (
       lib.optionals isSourceCheckSystem [
         {
           name = "pr-quick";

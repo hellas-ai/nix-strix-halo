@@ -181,6 +181,7 @@ stdenv.mkDerivation {
     homepage = "https://github.com/ejpir/ds4-hip/tree/rocm-upstream-shape-cyberneurova";
     license = lib.licenses.mit;
     mainProgram = "ds4";
+    maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = [ "x86_64-linux" ];
   };
 }

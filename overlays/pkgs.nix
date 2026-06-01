@@ -39,6 +39,14 @@ lib.optionalAttrs prev.stdenv.isLinux (
       rpcSupport = true;
     };
 
+    georgewhewellMaintained =
+      drv:
+      drv.overrideAttrs (old: {
+        meta = (old.meta or { }) // {
+          maintainers = with lib.maintainers; [ georgewhewell ];
+        };
+      });
+
     masterRev = inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown";
     # llama-cpp-master is the upstream HEAD variant. Override is via
     # `.overrideAttrs` (the package doesn't expose `src` through .override),
@@ -61,6 +69,9 @@ lib.optionalAttrs prev.stdenv.isLinux (
         (lib.cmakeBool "LLAMA_BUILD_UI" false)
         (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
       ];
+      meta = (old.meta or { }) // {
+        maintainers = with lib.maintainers; [ georgewhewell ];
+      };
     });
 
     # ROCm packages compile hundreds-to-thousands of HIP kernels via amdclang;
@@ -90,13 +101,15 @@ lib.optionalAttrs prev.stdenv.isLinux (
       src = inputs.fastflowlm;
     };
 
-    llama-cpp-rocm = bigParallel (prev.llama-cpp.override rocmOverride);
-    llama-cpp-vulkan = prev.llama-cpp.override vulkanOverride;
-    llama-cpp-cuda = prev.llama-cpp.override cudaOverride;
+    llama-cpp-rocm = bigParallel (georgewhewellMaintained (prev.llama-cpp.override rocmOverride));
+    llama-cpp-vulkan = georgewhewellMaintained (prev.llama-cpp.override vulkanOverride);
+    llama-cpp-cuda = georgewhewellMaintained (prev.llama-cpp.override cudaOverride);
     llama-cpp-master = llamaCppMaster;
-    llama-cpp-master-rocm = bigParallel (llamaCppMaster.override rocmOverride);
-    llama-cpp-master-vulkan = llamaCppMaster.override vulkanOverride;
-    llama-cpp-master-cuda = llamaCppMaster.override cudaOverride;
+    llama-cpp-master-rocm = bigParallel (
+      georgewhewellMaintained (llamaCppMaster.override rocmOverride)
+    );
+    llama-cpp-master-vulkan = georgewhewellMaintained (llamaCppMaster.override vulkanOverride);
+    llama-cpp-master-cuda = georgewhewellMaintained (llamaCppMaster.override cudaOverride);
 
     ds4-rocm = bigParallel (
       prev.callPackage ../pkgs/ds4-rocm {
