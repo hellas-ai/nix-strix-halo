@@ -1,6 +1,6 @@
 # nix-strix-halo
 
-[![Hydra full](https://img.shields.io/endpoint?label=hydra%20full&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fnix-strix-halo%2Fx86_64-linux.pr-full.all%2Fshield)](https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.pr-full.all)
+[![Hydra CI](https://img.shields.io/endpoint?label=hydra%20ci&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fnix-strix-halo%2Fx86_64-linux.ci.smoke%2Fshield)](https://hydra.hellas.ai/job/hellas/nix-strix-halo/x86_64-linux.ci.smoke)
 
 *NO SUPPORT / WARRANTY*
 
@@ -99,16 +99,23 @@ the tag in `lib/providers.nix`.
 
 ## Hydra / CI
 
-`hydra.nix` (project root, not a flake output) composes the build matrix
-Hydra reads. It imports the flake to reuse its packages, checks, overlays,
-and helper libraries. Each default-target package gets a job, plus
-`-from-source` variants of `vllm-rocm`, `therock-rocm`, and
-`llama-cpp-rocm` that exercise the parameterised abstraction end-to-end.
+Hydra reads the root flake's `hydraJobs` output. Required PR CI is split
+into three gates:
+
+- `ci.checks` runs source/meta checks such as formatting and Nix linting.
+- `ci.build` builds the package surface, including cross-platform package
+  outputs and provider variants.
+- `ci.smoke` runs one small real-hardware smoke per accelerated engine.
+
+The separate `hydraBenchmarkJobs` output is used by the background benchmark
+jobset. Those benchmark sweeps are useful for regression data but are not
+required for PR merge.
 
 ```bash
-nix-build hydra.nix --argstr system x86_64-linux -A pr-full.all
-nix-build hydra.nix --argstr system x86_64-linux -A pr-full.vllm-rocm-from-source
-nix-build hydra.nix --argstr system x86_64-linux --argstr jobset benchmarks -A bench-mlx-rocm-gfx1151-gemm-smoke
+nix build .#hydraJobs.x86_64-linux.ci.checks
+nix build .#hydraJobs.x86_64-linux.ci.build
+nix build .#hydraJobs.x86_64-linux.ci.smoke
+nix build .#hydraBenchmarkJobs.x86_64-linux.bench-mlx-rocm-gfx1151-gemm-smoke
 ```
 
 ## Development
