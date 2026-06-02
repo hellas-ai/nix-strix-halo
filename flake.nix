@@ -4,6 +4,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    nix-ai-tools = {
+      url = "github:numtide/nix-ai-tools";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     ec-su-axb35 = {
       url = "github:cmetz/ec-su_axb35-linux";
       flake = false;
@@ -642,6 +647,7 @@
       packages = perSystem (
         pkgs:
         let
+          aiTools = inputs.nix-ai-tools.packages.${pkgs.stdenv.hostPlatform.system};
           cudaPkgs = cudaPkgsFor pkgs.stdenv.hostPlatform.system;
           jacclPackage = pkgs.callPackage ./pkgs/jaccl (
             {
@@ -675,6 +681,10 @@
 
           genericPackages = {
             default = pkgs.llama-cpp;
+            pi-wrap = pkgs.callPackage ./pkgs/pi-wrap {
+              inherit (aiTools) pi;
+            };
+            inherit (aiTools) pi;
             inherit (pkgs)
               llama-cpp
               thunderbolt-ibverbs-bench-tools
@@ -753,6 +763,9 @@
           };
 
           genericApps = {
+            pi-wrap =
+              ap self.packages.${system}.pi-wrap "pi-wrap"
+                "Run pi with provider settings from environment";
             llama-cli = ap pkgs.llama-cpp "llama-cli" "Run llama-cli";
             llama-server = ap pkgs.llama-cpp "llama-server" "Run llama-server";
           };
@@ -895,6 +908,12 @@
               nixfmt-tree
               statix
             ])
+            ++ (with inputs.nix-ai-tools.packages.${pkgs.stdenv.hostPlatform.system}; [
+              pi
+            ])
+            ++ [
+              self.packages.${pkgs.stdenv.hostPlatform.system}.pi-wrap
+            ]
             ++ lib.optionals pkgs.stdenv.isLinux [
               (pkgs.python3.withPackages (
                 ps: with ps; [

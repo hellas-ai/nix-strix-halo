@@ -128,6 +128,12 @@ let
           package = self.packages.${system}.ds4;
           accelerator = "metal";
         }).benchmarks;
+      ds4PiBenchmarks =
+        (import ./ds4-pi.nix {
+          inherit pkgs modelsRoot;
+          ds4Package = self.packages.${system}.ds4;
+          piWrapPackage = self.packages.${system}.pi-wrap;
+        }).benchmarks;
       mlxMetalBenchmarks =
         (import ./mlx.nix {
           inherit pkgs;
@@ -135,7 +141,9 @@ let
           accelerator = "metal";
         }).benchmarks;
     in
-    flattenBenchmarks ds4MetalBenchmarks // flattenBenchmarks mlxMetalBenchmarks
+    flattenBenchmarks ds4MetalBenchmarks
+    // flattenBenchmarks ds4PiBenchmarks
+    // flattenBenchmarks mlxMetalBenchmarks
   );
 
   cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
