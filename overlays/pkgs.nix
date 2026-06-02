@@ -74,6 +74,19 @@ lib.optionalAttrs prev.stdenv.isLinux (
         };
       });
 
+    # Compose Strix llama.cpp variants with the thunderbolt-ibverbs
+    # rdma-core overlay so ggml's RPC backend builds its RDMA transport.
+    # Keep this in one helper so ROCm/Vulkan and master/current variants
+    # do not drift.
+    withRdmaRpc =
+      drv:
+      drv.overrideAttrs (old: {
+        buildInputs = (old.buildInputs or [ ]) ++ [ final.rdma-core-usb4 ];
+        cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+          (lib.cmakeBool "GGML_RPC_RDMA" true)
+        ];
+      });
+
     masterRev = inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown";
     # llama-cpp-master is the upstream HEAD variant. Override is via
     # `.overrideAttrs` (the package doesn't expose `src` through .override),
@@ -135,17 +148,21 @@ lib.optionalAttrs prev.stdenv.isLinux (
     };
 
     llama-cpp-rocm = bigParallel (
-      setPname "llama-cpp-rocm-${suffix}" (georgewhewellMaintained (prev.llama-cpp.override rocmOverride))
+      setPname "llama-cpp-rocm-${suffix}" (
+        withRdmaRpc (georgewhewellMaintained (prev.llama-cpp.override rocmOverride))
+      )
     );
-    llama-cpp-vulkan = georgewhewellMaintained (prev.llama-cpp.override vulkanOverride);
+    llama-cpp-vulkan = withRdmaRpc (georgewhewellMaintained (prev.llama-cpp.override vulkanOverride));
     llama-cpp-cuda = georgewhewellMaintained (prev.llama-cpp.override cudaOverride);
     llama-cpp-master = llamaCppMaster;
     llama-cpp-master-rocm = bigParallel (
       setPname "llama-cpp-master-rocm-${suffix}" (
-        georgewhewellMaintained (llamaCppMaster.override rocmOverride)
+        withRdmaRpc (georgewhewellMaintained (llamaCppMaster.override rocmOverride))
       )
     );
-    llama-cpp-master-vulkan = georgewhewellMaintained (llamaCppMaster.override vulkanOverride);
+    llama-cpp-master-vulkan = withRdmaRpc (
+      georgewhewellMaintained (llamaCppMaster.override vulkanOverride)
+    );
     llama-cpp-master-cuda = georgewhewellMaintained (llamaCppMaster.override cudaOverride);
   }
   // lib.optionalAttrs supportsTherockRocm {
