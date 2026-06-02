@@ -128,6 +128,7 @@ let
 
       smokeJobs = lib.optionalAttrs isGateSystem {
         ds4-metal = darwinBenchmarks.bench-deepseek-v4-flash-ds4-metal-smoke;
+        ds4-pi-metal = darwinBenchmarks.bench-deepseek-v4-flash-ds4-metal-pi-smoke;
         ds4-rocm = x86Benchmarks.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
         mlx-metal = darwinBenchmarks.bench-mlx-metal-gemm-smoke;
         mlx-rocm = x86Benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
