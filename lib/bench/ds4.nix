@@ -22,7 +22,7 @@ assert pkgs.lib.assertMsg (
 
 let
   inherit (pkgs) lib;
-  benchLib = import ../../lib/bench.nix { inherit lib; };
+  benchLib = import ./lib.nix { inherit lib; };
 
   clean = lib.replaceStrings [ ":" "." "/" "_" ] [ "-" "-" "-" "-" ];
 

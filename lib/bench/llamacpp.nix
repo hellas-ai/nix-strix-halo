@@ -7,7 +7,7 @@
 }:
 let
   inherit (pkgs) lib;
-  benchLib = import ../../lib/bench.nix { inherit lib; };
+  benchLib = import ./lib.nix { inherit lib; };
   resolvedModelsRoot = if modelsRoot != null then modelsRoot else benchLib.defaultModelsRoot pkgs;
   resolvedModelRoot = if modelRoot != null then modelRoot else resolvedModelsRoot;
 
@@ -203,7 +203,7 @@ let
 in
 assert lib.assertMsg (
   benchmarkTools != [ ]
-) "bench/default.nix requires at least one tool descriptor";
+) "lib/bench/llamacpp.nix requires at least one tool descriptor";
 {
   llama2-7b = generateModelBenchmarks modelConfigs.llama2-7b;
   qwen25-32b = generateModelBenchmarks modelConfigs.qwen25-32b;
