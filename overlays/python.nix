@@ -1,32 +1,53 @@
 {
   lib,
-  provider ? "therock-wheels",
-  rocmTarget,
+  provider ? "nixpkgs",
+  rocmTarget ? null,
 }:
 
-# Parameterised python overlay. Swaps `python312Packages.torch`,
+# Parameterised Python overlay. Always applies shared Python package
+# compatibility fixes, and optionally swaps `python312Packages.torch`,
 # `triton`, `amdsmi`, and the `rocm-sdk-*` shims depending on provider.
 #
-#   - "therock-wheels"  TheRock-published binary wheels. Default.
-#                        Delegates to overlays/therock-python.nix.
+#   - "nixpkgs"         Stock nixpkgs Python packages plus the shared fixes.
+#   - "therock-wheels"  TheRock-published binary wheels, used by the
+#                        flake's default package set.
 # Reserved future providers are listed in lib.providers.pythonProviderStubs.
 
 final: prev:
-if !prev.stdenv.isLinux then
-  { }
-else
-  (
-    let
-      providers = import ../lib/providers.nix { inherit lib; };
-    in
+let
+  providers = import ../lib/providers.nix { inherit lib; };
+  pythonFixes =
+    _pyfinal: pyprev:
+    lib.optionalAttrs (prev.stdenv.hostPlatform.isDarwin && pyprev ? sentence-transformers) {
+      # sentence-transformers' runtime closure is usable on Darwin, but its
+      # nixpkgs test extras pull `phonemizer -> dlinfo`, and dlinfo is marked
+      # broken on Darwin. Downstream eval tooling only needs runtime imports.
+      sentence-transformers = pyprev.sentence-transformers.overridePythonAttrs (_old: {
+        nativeCheckInputs = [ ];
+        doCheck = false;
+        pythonImportsCheck = [ ];
+      });
+    };
 
+  providerAttrs =
     assert providers.assertPythonProvider provider;
 
-    if provider == "therock-wheels" then
+    # TheRock wheels are Linux-only; non-Linux systems stay on stock
+    # nixpkgs Python packages and still receive pythonFixes below.
+    if provider == "nixpkgs" || !prev.stdenv.hostPlatform.isLinux then
+      { }
+    else if provider == "therock-wheels" then
+      assert lib.assertMsg (rocmTarget != null) "therock-wheels python provider requires rocmTarget";
       import ./therock-python.nix {
         inherit lib;
         target = rocmTarget;
       } final prev
     else
-      throw "unreachable: assertPythonProvider should have rejected ${provider}"
-  )
+      throw "unreachable: assertPythonProvider should have rejected ${provider}";
+in
+providerAttrs
+// {
+  pythonPackagesExtensions =
+    (providerAttrs.pythonPackagesExtensions or (prev.pythonPackagesExtensions or [ ]))
+    ++ [ pythonFixes ];
+}

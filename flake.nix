@@ -591,6 +591,9 @@
         default = lib.composeManyExtensions (mkOverlays {
           rocmTarget = defaultRocmTarget;
         });
+        python = self.lib.mkPythonOverlay {
+          provider = "nixpkgs";
+        };
       };
 
       # NixOS modules
