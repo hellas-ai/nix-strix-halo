@@ -370,7 +370,7 @@
         ;
 
       providers = import ./lib/providers.nix { inherit lib; };
-      benchLib = import ./lib/bench.nix { inherit lib; };
+      benchLib = import ./lib/bench/lib.nix { inherit lib; };
 
       defaultTherockSources = {
         rocm = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm.json);
@@ -513,6 +513,25 @@
 
       perSystem = f: forAllSystems (system: f (defaultPkgsFor system));
 
+      mkBenchmarkSuites = import ./lib/bench {
+        inherit
+          lib
+          self
+          defaultRocmTarget
+          cudaPkgsFor
+          benchLib
+          ;
+      };
+
+      hydraLib = import ./lib/hydra.nix {
+        inherit
+          lib
+          self
+          pkgsFor
+          defaultRocmTarget
+          ;
+      };
+
       mkLiveIsoConfiguration =
         {
           system ? "x86_64-linux",
@@ -614,6 +633,8 @@
           }) rocmTargets
         )
       );
+
+      benchmarks = perSystem mkBenchmarkSuites;
 
       packages = perSystem (
         pkgs:
@@ -884,6 +905,10 @@
       });
 
       formatter = perSystem (pkgs: pkgs.nixfmt-tree);
+
+      hydraBenchmarkJobs = perSystem hydraLib.mkBenchmarkJobs;
+
+      hydraJobs = perSystem hydraLib.mkJobs;
 
     };
 }
