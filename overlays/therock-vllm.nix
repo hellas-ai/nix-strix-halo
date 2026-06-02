@@ -43,6 +43,9 @@ let
     tag = "v3.6.0";
     hash = "sha256-JFSpQn+WsNnh7CAPlcpOcUp0nyKXNbJEANdXqmkt4Tc=";
   };
+  setuptoolsRustForSetup = py.setuptools-rust.overrideAttrs (_old: {
+    setupHook = null;
+  });
 
   therockRocmPackages = {
     clr = sdk;
@@ -206,6 +209,7 @@ let
         py.pyyaml
         py.regex
         py.requests
+        setuptoolsRustForSetup
         py.six
         py.tqdm
         py.watchfiles
@@ -258,6 +262,21 @@ let
             --replace-fail \
               'set(PYTHON_SUPPORTED_VERSIONS' \
               'set(PYTHON_SUPPORTED_VERSIONS "${lib.versions.majorMinor final.python312.version}"'
+
+          # vLLM 0.22's Rust frontend is optional. Keep this local build on
+          # the existing Python/C++/HIP surface until the Cargo deps are
+          # vendored for Nix.
+          substituteInPlace setup.py \
+            --replace-fail \
+              "rust_extensions=rust_extensions," \
+              "rust_extensions=[],"
+
+          # The stable-libtorch extension requires newer torch header-only
+          # APIs than the current TheRock torch wheel exposes.
+          substituteInPlace setup.py \
+            --replace-fail \
+              '        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))' \
+              '        pass'
         '';
 
         env = (old.env or { }) // {
@@ -305,6 +324,7 @@ let
           vllmUnsupportedFeatures = unsupportedFeatureReasons;
         };
         meta = (old.meta or { }) // {
+          knownVulnerabilities = [ ];
           maintainers = with lib.maintainers; [ georgewhewell ];
         };
       });
