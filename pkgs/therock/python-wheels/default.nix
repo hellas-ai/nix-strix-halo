@@ -26,6 +26,7 @@ let
     "rocm"
     "torch"
     "torchaudio"
+    "torchvision"
     "triton"
     "rocm-sdk-core"
     "rocm-sdk-devel"
@@ -115,6 +116,12 @@ python312Packages.buildPythonPackage (finalAttrs: {
       --disable-pip-version-check \
       --target "$site" \
       "$wheelhouse"/*
+
+    if [ -f "$site/torchvision/_meta_registrations.py" ]; then
+      sed -i \
+        's#^@torch.library.register_fake("torchvision::nms")$#@register_meta("nms")#' \
+        "$site/torchvision/_meta_registrations.py"
+    fi
 
     if [ -d "$site/triton-${wheelSources.packages.triton.packageVersion}.dist-info" ]; then
       for metadata in "$site"/torch-*.dist-info/METADATA; do
