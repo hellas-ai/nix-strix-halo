@@ -92,7 +92,6 @@ let
     "tilelang"
     "timm"
     "torchcodec"
-    "torchvision"
     "xformers"
   ];
 

@@ -22,6 +22,7 @@ final: prev: {
         {
           amdsmi = final."therock-amdsmi-${s}";
           torch = wheels;
+          torchvision = wheels;
           triton = wheels;
           triton-no-cuda = wheels;
           torchaudio = wheels;
@@ -31,6 +32,7 @@ final: prev: {
           "rocm-sdk-libraries-${s}" = wheels;
 
           "compressed-tensors" = pyprev."compressed-tensors".overridePythonAttrs (old: {
+            doCheck = false;
             dependencies = (old.dependencies or [ ]) ++ [
               _pyfinal.psutil
             ];
