@@ -3,7 +3,7 @@ updates:
   - package-ecosystem: "nix"
     directories:
       - "/"
-      - "/hydra/benchmark"
+      - "/lib/hydra/benchmark"
     schedule:
       interval: "daily"
     groups:
