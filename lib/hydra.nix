@@ -13,7 +13,10 @@ let
       "xdna2"
       "rtx4090"
     ];
-    aarch64-darwin = [ "benchmark" ];
+    aarch64-darwin = [
+      "benchmark"
+      "metal"
+    ];
   };
 
   mkBenchmarkJobs =
@@ -40,7 +43,11 @@ let
     pkgs:
     let
       system = pkgs.stdenv.hostPlatform.system;
-      benchmarks = self.benchmarks.${system};
+      isGateSystem = system == "x86_64-linux";
+      x86Packages = self.packages.x86_64-linux;
+      x86Benchmarks = self.benchmarks.x86_64-linux;
+      darwinPackages = self.packages.aarch64-darwin;
+      darwinBenchmarks = self.benchmarks.aarch64-darwin;
 
       maintainerMeta = {
         maintainers = with lib.maintainers; [ georgewhewell ];
@@ -67,27 +74,6 @@ let
           }) jobs
         );
 
-      isSourceCheckSystem = system == "x86_64-linux";
-
-      prQuickJobs = lib.optionalAttrs isSourceCheckSystem self.checks.${system};
-      prQuick = mkAggregate "pr-quick" prQuickJobs;
-
-      afterPrQuick =
-        name: path:
-        mkLinkFarm "nix-strix-halo-pr-full-${name}" (
-          lib.optionals isSourceCheckSystem [
-            {
-              name = "pr-quick";
-              path = prQuick;
-            }
-          ]
-          ++ [
-            {
-              inherit name path;
-            }
-          ]
-        );
-
       mkPkgsForProvider =
         {
           rocmProvider,
@@ -97,68 +83,66 @@ let
           inherit system rocmProvider pythonProvider;
         };
 
-      fromSourcePkgs = lib.optionalAttrs (system == "x86_64-linux") (mkPkgsForProvider {
+      fromSourcePkgs = lib.optionalAttrs isGateSystem (mkPkgsForProvider {
         rocmProvider = "therock-source";
       });
 
-      nixpkgsRocmPkgs = lib.optionalAttrs (system == "x86_64-linux") (mkPkgsForProvider {
+      nixpkgsRocmPkgs = lib.optionalAttrs isGateSystem (mkPkgsForProvider {
         rocmProvider = "nixpkgs";
       });
 
-      prFullJobs = {
-        default = afterPrQuick "default" self.packages.${system}.default;
-        jaccl = afterPrQuick "jaccl" self.packages.${system}.jaccl;
-      }
-      // lib.optionalAttrs (system == "aarch64-darwin") {
-        ds4 = afterPrQuick "ds4" self.packages.${system}.ds4;
-        mlx = afterPrQuick "mlx" self.packages.${system}.mlx;
-        mlx-metal = afterPrQuick "mlx-metal" self.packages.${system}.mlx-metal;
-        mlx-metal-gemm-smoke = afterPrQuick "mlx-metal-gemm-smoke" benchmarks.bench-mlx-metal-gemm-smoke;
-      }
-      // lib.optionalAttrs (system == "x86_64-linux") {
-        inherit (self.packages.${system})
+      checkJobs = lib.optionalAttrs isGateSystem self.checks.x86_64-linux;
+
+      buildJobs = lib.optionalAttrs isGateSystem {
+        inherit (x86Packages)
+          default
+          jaccl
           ds4-rocm
           ec-su-axb35-monitor
           fastflowlm
           llama-cpp-rocm
           llama-cpp-vulkan
           llama-cpp-master
+          mlx-rocm
           strix-halo-mes-firmware
           therock-rocm
           tokenizers-cpp
           vllm-rocm
           xrt-amdxdna
+          live-iso
           ;
-        mlx-rocm = afterPrQuick "mlx-rocm" self.packages.${system}.mlx-rocm;
-        mlx-rocm-gemm-smoke =
-          afterPrQuick "mlx-rocm-gemm-smoke"
-            benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
-        live-iso = afterPrQuick "live-iso" self.packages.${system}.live-iso;
-        vllm-throughput-smoke =
-          afterPrQuick "vllm-throughput-smoke"
-            benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
-        ds4-rocm-smoke = afterPrQuick "ds4-rocm-smoke" benchmarks.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
-        fastflowlm-npu-smoke = afterPrQuick "fastflowlm-npu-smoke" benchmarks.bench-llama3-2-1b-fastflowlm-medium;
-        cuda-rtx4090-device-smoke = afterPrQuick "cuda-rtx4090-device-smoke" benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+
+        darwin-default = darwinPackages.default;
+        darwin-jaccl = darwinPackages.jaccl;
+        ds4-metal = darwinPackages.ds4;
+        inherit (darwinPackages)
+          mlx
+          mlx-metal
+          ;
 
         vllm-rocm-from-source = fromSourcePkgs.vllm-rocm;
         therock-rocm-from-source = fromSourcePkgs.therock-rocm;
         llama-cpp-rocm-from-source = fromSourcePkgs.llama-cpp-rocm;
         llama-cpp-rocm-nixpkgs = nixpkgsRocmPkgs.llama-cpp-rocm;
       };
+
+      smokeJobs = lib.optionalAttrs isGateSystem {
+        ds4-metal = darwinBenchmarks.bench-deepseek-v4-flash-ds4-metal-smoke;
+        ds4-rocm = x86Benchmarks.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
+        mlx-metal = darwinBenchmarks.bench-mlx-metal-gemm-smoke;
+        mlx-rocm = x86Benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
+        fastflowlm-npu = x86Benchmarks.bench-llama3-2-1b-fastflowlm-medium;
+        vllm-rocm =
+          x86Benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
+        cuda-rtx4090 = x86Benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+      };
     in
-    lib.optionalAttrs isSourceCheckSystem {
-      pr-quick = prQuickJobs // {
-        all = prQuick;
+    lib.optionalAttrs isGateSystem {
+      ci = {
+        checks = mkAggregate "ci-checks" checkJobs;
+        build = mkAggregate "ci-build" buildJobs;
+        smoke = mkAggregate "ci-smoke" smokeJobs;
       };
-    }
-    // {
-      pr-full = prFullJobs // {
-        all = mkAggregate "pr-full" prFullJobs;
-      };
-    }
-    // lib.optionalAttrs (system == "x86_64-linux") {
-      live-iso = self.packages.${system}.live-iso;
     };
 in
 {

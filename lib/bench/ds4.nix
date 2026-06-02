@@ -100,12 +100,24 @@ let
     fastFull = true;
   };
 
+  metalCtxSweepCase = fastFullCase // {
+    scenario = "ctx-sweep";
+    fastFull = false;
+  };
+
   modelConfigs = {
     deepseek-v4-flash = {
       path = resolvedModelPath;
       repo = "antirez/deepseek-v4-gguf";
       description = "DeepSeek V4 Flash GGUF for DwarfStar 4";
-      cases = if cases == null then [ smokeCase ] ++ lib.optionals (!isMetal) [ fastFullCase ] else cases;
+      cases =
+        if cases == null then
+          [
+            smokeCase
+            (if isMetal then metalCtxSweepCase else fastFullCase)
+          ]
+        else
+          cases;
     };
   };
 
