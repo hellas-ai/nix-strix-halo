@@ -1,7 +1,7 @@
 {
-  description = "Hydra benchmark job wrapper";
+  description = "Hydra benchmark job selector";
 
-  inputs.src.url = "path:../..";
+  inputs.src.url = "path:../../..";
 
   outputs =
     { src, ... }:
