@@ -29,15 +29,17 @@ let
   ];
 
   pythonProviders = [
+    # Stock nixpkgs Python packages plus small compatibility fixes from
+    # overlays/python.nix. Useful for downstream flakes that want the shared
+    # Python fixes without TheRock wheels or ROCm package attrs.
+    "nixpkgs"
+
     # TheRock-published cu/rocm wheels. Default. Implemented in
     # overlays/python.nix.
     "therock-wheels"
   ];
 
   pythonProviderStubs = [
-    # Reserved for nixpkgs python3Packages.torch with rocmSupport = true.
-    "nixpkgs"
-
     # Reserved for PyTorch + Triton built from source against the chosen
     # rocm provider.
     "therock-source"
