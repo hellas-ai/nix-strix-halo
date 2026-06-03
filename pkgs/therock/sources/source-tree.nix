@@ -71,123 +71,153 @@
       }
       {
         path = "rocm-libraries/shared/tensile/HostLibraryTests/googletest";
-        source = inputs."therock-src-7-13-gfx1151-rocm-libraries-shared-tensile-hostlibrarytests-googletest-dd647abc";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-libraries-shared-tensile-hostlibrarytests-googletest-dd647abc";
       }
       {
         path = "rocm-systems/experimental/python/perfxpert/opencode";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-experimental-python-perfxpert-opencode-2fa84e1d";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-experimental-python-perfxpert-opencode-2fa84e1d";
       }
       {
         path = "rocm-systems/projects/rocprofiler-register/external/fmt";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-register-external-fmt-93ca61ec";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-register-external-fmt-93ca61ec";
       }
       {
         path = "rocm-systems/projects/rocprofiler-register/external/glog";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-register-external-glog-da9d9e82";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-register-external-glog-da9d9e82";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/abseil-cpp";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/cereal";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/doxygen-awesome-css";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-doxygen-awesome-c-15f99d59";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-doxygen-awesome-c-15f99d59";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/elfio";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/filesystem";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-filesystem-807165f4";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-filesystem-807165f4";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/fmt";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-fmt-90ac0bf5";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-fmt-90ac0bf5";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/googletest";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-googletest-0a626aae";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-googletest-0a626aae";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/gotcha";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-gotcha-10fa2c98";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-gotcha-10fa2c98";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/json";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-json-a3f85fd2";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-json-a3f85fd2";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/perfetto";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/ptl";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/pybind11";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/sqlite";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-sqlite-373e906e";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-sqlite-373e906e";
       }
       {
         path = "rocm-systems/projects/rocprofiler-sdk/external/yaml-cpp";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-yaml-cpp-1bef3305";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-yaml-cpp-1bef3305";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/dyninst";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/elfio";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-elfio-5047d340";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-elfio-5047d340";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/filesystem";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-filesystem-ded63cc0";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-filesystem-ded63cc0";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/googletest";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-googletest-88801747";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-googletest-88801747";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/json";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/onetbb";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/papi";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/perfetto";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/pybind11";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/spdlog";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-spdlog-1f6adb92";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-spdlog-1f6adb92";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/sqlite";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-sqlite-1519e496";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-sqlite-1519e496";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/timemory";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf";
       }
       {
         path = "third-party/sysdeps/linux/amd-mesa/mesa-fork";
@@ -195,31 +225,38 @@
       }
       {
         path = "rocm-systems/projects/rocprofiler-compute/src/vendored/pyyaml";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974";
       }
       {
         path = "rocm-systems/projects/rocprofiler/plugin/perfetto/perfetto";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-plugin-perfetto-perfetto-4d7082cd";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-plugin-perfetto-perfetto-4d7082cd";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/examples/lulesh/external/kokkos";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-examples-lulesh-extern-cd755d3c";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-examples-lulesh-extern-cd755d3c";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/examples/openmp/external/ompvv";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-examples-openmp-extern-2e954ae7";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-examples-openmp-extern-2e954ae7";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/timemory/external/gotcha";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/timemory/external/libunwind";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f";
       }
       {
         path = "rocm-systems/projects/rocprofiler-systems/external/timemory/external/yaml-cpp";
-        source = inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c";
+        source =
+          inputs."therock-src-7-13-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c";
       }
     ];
   };
