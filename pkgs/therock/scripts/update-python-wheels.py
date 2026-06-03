@@ -146,6 +146,14 @@ def dist_matches_platform(dist: Distribution) -> bool:
     }
 
 
+def package_version_key(version: str) -> tuple[tuple[int, int | str], ...]:
+    public_version = version.split("+", 1)[0]
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part)
+        for part in re.findall(r"\d+|[A-Za-z]+", public_version)
+    )
+
+
 def choose_rocm_version(
     distributions_by_project: dict[str, list[Distribution]],
     *,
@@ -195,7 +203,13 @@ def choose_distribution(
         raise SystemExit(
             f"no distribution found for {distributions[0].project}: ROCm {rocm_version}, Python {python_tag}"
         )
-    return sorted(candidates, key=lambda dist: (dist.kind == "wheel", dist.package_version))[-1]
+    return sorted(
+        candidates,
+        key=lambda dist: (
+            dist.kind == "wheel",
+            package_version_key(dist.package_version),
+        ),
+    )[-1]
 
 
 def prefetch(url: str) -> dict[str, str]:

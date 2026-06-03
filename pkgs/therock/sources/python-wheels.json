@@ -19,10 +19,10 @@
           "kind": "sdist"
         },
         "torch": {
-          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/torch-2.9.1%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
-          "hash": "sha256-KT7OsGNR+RAyngK2ovKF6sKloSGOgTLCRCWULmotegA=",
-          "filename": "torch-2.9.1+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
-          "packageVersion": "2.9.1+rocm7.13.0a20260513",
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/torch-2.10.0%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "hash": "sha256-p807KHwBZWlZHmFUOK+1z8N+Jrh8HDO9pfb6m3n8m8M=",
+          "filename": "torch-2.10.0+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "packageVersion": "2.10.0+rocm7.13.0a20260513",
           "rocmVersion": "7.13.0a20260513",
           "pythonTag": "cp312",
           "abiTag": "cp312",
@@ -41,10 +41,10 @@
           "kind": "wheel"
         },
         "torchaudio": {
-          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/torchaudio-2.9.0%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
-          "hash": "sha256-3dHettgsMH8rGhB6vX7s7WDXbvdc0ZDTYbftfdIRI7s=",
-          "filename": "torchaudio-2.9.0+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
-          "packageVersion": "2.9.0+rocm7.13.0a20260513",
+          "url": "https://rocm.nightlies.amd.com/v2/gfx1151/torchaudio-2.10.0%2Brocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "hash": "sha256-lor6yoDuc6IHjRdvX9aQHHjrltCMAiVq7Cq6bKnVXQQ=",
+          "filename": "torchaudio-2.10.0+rocm7.13.0a20260513-cp312-cp312-linux_x86_64.whl",
+          "packageVersion": "2.10.0+rocm7.13.0a20260513",
           "rocmVersion": "7.13.0a20260513",
           "pythonTag": "cp312",
           "abiTag": "cp312",
@@ -96,8 +96,8 @@
           "kind": "wheel"
         }
       },
-      "updated": "2026-05-20T16:11:31.764139+00:00"
+      "updated": "2026-06-02T23:56:47.641706+00:00"
     }
   },
-  "updated": "2026-05-20T16:11:31.764139+00:00"
+  "updated": "2026-06-02T23:56:47.641706+00:00"
 }

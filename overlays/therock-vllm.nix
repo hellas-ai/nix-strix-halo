@@ -271,12 +271,6 @@ let
               "rust_extensions=rust_extensions," \
               "rust_extensions=[],"
 
-          # The stable-libtorch extension requires newer torch header-only
-          # APIs than the current TheRock torch wheel exposes.
-          substituteInPlace setup.py \
-            --replace-fail \
-              '        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))' \
-              '        pass'
         '';
 
         env = (old.env or { }) // {
