@@ -77,11 +77,11 @@
     "ds4-hip": {
       "flake": false,
       "locked": {
-        "lastModified": 1780261454,
-        "narHash": "sha256-9FojDByjJd84x2EAkIyaB0UCA6UI2y5CqwPWT5CPTUQ=",
+        "lastModified": 1780431161,
+        "narHash": "sha256-UsgQwjykps2XWPBMGV8NylQXgc/1OB0dDZaaWdit7a4=",
         "owner": "ejpir",
         "repo": "ds4-hip",
-        "rev": "afb151f9a1dd7d4e7eb25c6d5b7799d580cf9d6b",
+        "rev": "a1717f1d23d1c3ee3b0abcc12a9226e7e1f2650f",
         "type": "github"
       },
       "original": {
