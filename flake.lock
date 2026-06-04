@@ -1319,11 +1319,11 @@
     "xdna-driver-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1779227778,
-        "narHash": "sha256-srpsvE7Np9gev0K/vXtlc8WownzX+oZVwLMLxU89qQ0=",
+        "lastModified": 1780591096,
+        "narHash": "sha256-pG9fptnKMoHbK2HSBObfflCyBt9k0uDO/leKvtsKUnA=",
         "ref": "1.7",
-        "rev": "944ca35a395b7dfa37ac3f437f1da48feca7bffc",
-        "revCount": 871,
+        "rev": "0fb464f6e043fdaf8d9007b76bd9e9a666ffe870",
+        "revCount": 873,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/amd/xdna-driver"
