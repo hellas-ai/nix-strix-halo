@@ -11,6 +11,7 @@ let
   system = pkgs.stdenv.hostPlatform.system;
   cudaPkgs = cudaPkgsFor system;
   modelsRoot = benchLib.defaultModelsRoot pkgs;
+  nvidiaRuntime = import ../nvidia-runtime.nix;
 
   flattenBenchmarks =
     benchmarks:
@@ -148,24 +149,23 @@ let
 
   cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
     let
-      nvidiaSmi = cudaPkgs.linuxPackages.nvidia_x11.bin;
-      nvidiaDriver = cudaPkgs.linuxPackages.nvidia_x11;
+      inherit (nvidiaRuntime) binPath libraryPath sandboxPaths;
     in
     {
       bench-cuda-rtx4090-llama-cpp-master-device-smoke = benchLib.mkBenchmark {
         pkgs = cudaPkgs;
         name = "cuda-rtx4090-llama-cpp-master-device-smoke";
         package = cudaPkgs.llama-cpp-master-cuda;
-        packages = [ nvidiaSmi ];
         command = [
           (cudaPkgs.writeShellScript "cuda-rtx4090-llama-cpp-master-device-smoke" ''
             set -euo pipefail
-            ${nvidiaSmi}/bin/nvidia-smi -L
+            ${binPath}/nvidia-smi --query-gpu=driver_version,name --format=csv,noheader
+            ${binPath}/nvidia-smi -L
             ${cudaPkgs.llama-cpp-master-cuda}/bin/llama-bench --list-devices
           '')
         ];
         env = {
-          LD_LIBRARY_PATH = "${nvidiaDriver}/lib";
+          LD_LIBRARY_PATH = libraryPath;
         };
         requirements = {
           systemFeatures = [
@@ -180,7 +180,8 @@ let
             "/dev/nvidia-uvm-tools"
             "/dev/nvidia-caps"
             "/proc/driver/nvidia"
-          ];
+          ]
+          ++ sandboxPaths;
         };
         metadata = {
           kind = "cuda-device-smoke";
@@ -192,6 +193,9 @@ let
             arch = "sm_89";
             deviceClass = "rtx4090";
             systemFeature = "rtx4090";
+            runtimeDriver = {
+              inherit binPath libraryPath;
+            };
           };
           tool = {
             backend = "cuda";
