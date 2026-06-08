@@ -165,11 +165,11 @@
     "llama-cpp-master": {
       "flake": false,
       "locked": {
-        "lastModified": 1780402495,
-        "narHash": "sha256-GHNJnysVclMGfMQFiAPNRKr90qNWpcgRa8eTFMcbVOI=",
+        "lastModified": 1780909905,
+        "narHash": "sha256-nJubJokZNWQ9aKytJ5zIaRTsKvT/GNKlQA0YQtXMjHk=",
         "owner": "ggml-org",
         "repo": "llama.cpp",
-        "rev": "60130d18f9ac7f42cb4d7f6060b088a45d8f242e",
+        "rev": "715b86a3663648211347d2bb0cf3beb8fc057f2b",
         "type": "github"
       },
       "original": {
