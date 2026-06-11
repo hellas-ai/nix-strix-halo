@@ -3,10 +3,12 @@
     "blueprint": {
       "inputs": {
         "nixpkgs": [
+          "src",
           "nix-ai-tools",
           "nixpkgs"
         ],
         "systems": [
+          "src",
           "nix-ai-tools",
           "systems"
         ]
@@ -28,18 +30,22 @@
     "bun2nix": {
       "inputs": {
         "flake-parts": [
+          "src",
           "nix-ai-tools",
           "flake-parts"
         ],
         "nixpkgs": [
+          "src",
           "nix-ai-tools",
           "nixpkgs"
         ],
         "systems": [
+          "src",
           "nix-ai-tools",
           "systems"
         ],
         "treefmt-nix": [
+          "src",
           "nix-ai-tools",
           "treefmt-nix"
         ]
@@ -126,6 +132,7 @@
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
+          "src",
           "nix-ai-tools",
           "nixpkgs"
         ]
@@ -201,17 +208,18 @@
         "bun2nix": "bun2nix",
         "flake-parts": "flake-parts",
         "nixpkgs": [
+          "src",
           "nixpkgs"
         ],
         "systems": "systems",
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1781157766,
-        "narHash": "sha256-InNpK3w0V6odvKtC5wCXZZiluiWAD6uLElz3to+sQA0=",
+        "lastModified": 1780556826,
+        "narHash": "sha256-jIIa+5nPnhny882wYeq8SOa2WRMjhDU0ls6cgyC1D7k=",
         "owner": "numtide",
         "repo": "nix-ai-tools",
-        "rev": "0b3a6a2dc43576f223d036ba70a29a2f0de99061",
+        "rev": "d0a147485f849ab4f20c1a61a6ea1c312cd0a229",
         "type": "github"
       },
       "original": {
@@ -237,6 +245,11 @@
       }
     },
     "root": {
+      "inputs": {
+        "src": "src"
+      }
+    },
+    "src": {
       "inputs": {
         "ds4": "ds4",
         "ds4-hip": "ds4-hip",
@@ -305,7 +318,16 @@
         "vllm-src": "vllm-src",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"
-      }
+      },
+      "locked": {
+        "path": "../../..",
+        "type": "path"
+      },
+      "original": {
+        "path": "../../..",
+        "type": "path"
+      },
+      "parent": []
     },
     "systems": {
       "locked": {
@@ -1261,6 +1283,7 @@
       "inputs": {
         "linux-src": "linux-src",
         "nixpkgs": [
+          "src",
           "nixpkgs"
         ]
       },
@@ -1281,6 +1304,7 @@
     "treefmt-nix": {
       "inputs": {
         "nixpkgs": [
+          "src",
           "nix-ai-tools",
           "nixpkgs"
         ]

@@ -27,6 +27,7 @@ let
     ;
 
   common = import ./benchmark-common.nix { inherit lib pkgs; };
+  nvidiaRuntime = import ../lib/nvidia-runtime.nix;
   cfg = config.benchmark;
 
   setfacl = "${getBin pkgs.acl}/bin/setfacl";
@@ -64,6 +65,10 @@ let
   hasRdma = any (runner: runner.rdma.enable) enabledRunners;
 
   optionalSandboxPaths = paths: map (path: "${path}?") paths;
+  nvidiaDriverSandboxPaths = optionals hasNvidiaGpu [
+    "${nvidiaRuntime.driverPath}=${config.hardware.nvidia.package}"
+    "${nvidiaRuntime.driverBinPath}=${getBin config.hardware.nvidia.package}"
+  ];
 
   # Pair with lib/bench/lib.nix: every benchmark derivation requires the
   # `benchmark` system feature. Hosts that enable any runner advertise it
@@ -121,6 +126,7 @@ let
         "/dev/nvidia-caps"
       ]
     )
+    ++ nvidiaDriverSandboxPaths
   );
 
   relaxSandbox = any (runner: runner.relaxSandbox) enabledRunners;
