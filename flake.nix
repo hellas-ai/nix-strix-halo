@@ -887,6 +887,73 @@
                   default vllm-rocm: ${plain self.packages.${system}.vllm-rocm.drvPath}
                   EOF
                 '';
+
+            cudaHostDriverRuntime =
+              let
+                cudaBenchmark = self.benchmarks.${system}.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+                cudaBenchmarkMetadata = builtins.toJSON (
+                  removeAttrs cudaBenchmark.passthru.benchmark [ "command" ]
+                );
+                runnerConfig =
+                  (lib.nixosSystem {
+                    inherit system;
+                    modules = [
+                      self.nixosModules.benchmark-runner
+                      (
+                        { config, ... }:
+                        {
+                          nixpkgs.config.allowUnfree = true;
+                          boot.kernelParams = [ "iommu=off" ];
+                          hardware.nvidia.package = config.boot.kernelPackages.nvidiaPackages.latest;
+                          benchmark.runners.cuda-rtx4090.gpus = [
+                            {
+                              type = "nvidia";
+                              arch = "rtx4090";
+                            }
+                          ];
+                        }
+                      )
+                    ];
+                  }).config;
+                runnerMetadata = builtins.toJSON {
+                  features = runnerConfig.nix.settings.system-features;
+                  sandboxPaths = runnerConfig.nix.settings.extra-sandbox-paths;
+                };
+              in
+              pkgs.runCommandLocal "ci-cuda-host-driver-runtime"
+                {
+                  nativeBuildInputs = [ pkgs.jq ];
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  cat > benchmark.json <<'JSON'
+                  ${cudaBenchmarkMetadata}
+                  JSON
+
+                  cat > runner.json <<'JSON'
+                  ${runnerMetadata}
+                  JSON
+
+                  jq -e '
+                    .env.LD_LIBRARY_PATH == "/run/benchmark-nvidia-driver/lib"
+                    and (.requirements.sandboxPaths | index("/run/benchmark-nvidia-driver") != null)
+                    and (.requirements.sandboxPaths | index("/run/benchmark-nvidia-driver-bin") != null)
+                    and .target.runtimeDriver.libraryPath == "/run/benchmark-nvidia-driver/lib"
+                    and .target.runtimeDriver.binPath == "/run/benchmark-nvidia-driver-bin/bin"
+                    and .tool.packageRole == "llama-cpp-master-cuda"
+                    and (.packages | index("nvidia-x11") == null)
+                  ' benchmark.json
+
+                  jq -e '
+                    (.features | index("benchmark") != null)
+                    and (.features | index("rtx4090") != null)
+                    and (.sandboxPaths | index("/dev/nvidia0?") != null)
+                    and (.sandboxPaths | map(select(test("^/run/benchmark-nvidia-driver=/nix/store/"))) | length) == 1
+                    and (.sandboxPaths | map(select(test("^/run/benchmark-nvidia-driver-bin=/nix/store/"))) | length) == 1
+                  ' runner.json
+
+                  touch "$out"
+                '';
           in
           {
             deadnix = runSourceCheck "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
@@ -894,6 +961,7 @@
             nixfmt = runSourceCheck "nixfmt" [
               pkgs.nixfmt-tree
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
+            cuda-host-driver-runtime = cudaHostDriverRuntime;
             package-surface = packageSurface;
           }
         )
