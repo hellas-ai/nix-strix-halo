@@ -935,11 +935,11 @@
                   JSON
 
                   jq -e '
-                    .env.LD_LIBRARY_PATH == "/run/benchmark-nvidia-driver/lib"
-                    and (.requirements.sandboxPaths | index("/run/benchmark-nvidia-driver") != null)
-                    and (.requirements.sandboxPaths | index("/run/benchmark-nvidia-driver-bin") != null)
-                    and .target.runtimeDriver.libraryPath == "/run/benchmark-nvidia-driver/lib"
-                    and .target.runtimeDriver.binPath == "/run/benchmark-nvidia-driver-bin/bin"
+                    .env.LD_LIBRARY_PATH == "/run/opengl-driver-lib"
+                    and (.requirements.sandboxPaths | index("/run/opengl-driver") != null)
+                    and (.requirements.sandboxPaths | index("/run/opengl-driver-lib") != null)
+                    and .target.runtimeDriver.libraryPath == "/run/opengl-driver-lib"
+                    and (.target.runtimeDriver | has("binPath") | not)
                     and .tool.packageRole == "llama-cpp-master-cuda"
                     and (.packages | index("nvidia-x11") == null)
                   ' benchmark.json
@@ -948,8 +948,10 @@
                     (.features | index("benchmark") != null)
                     and (.features | index("rtx4090") != null)
                     and (.sandboxPaths | index("/dev/nvidia0?") != null)
-                    and (.sandboxPaths | map(select(test("^/run/benchmark-nvidia-driver=/nix/store/"))) | length) == 1
-                    and (.sandboxPaths | map(select(test("^/run/benchmark-nvidia-driver-bin=/nix/store/"))) | length) == 1
+                    and (.sandboxPaths | index("/run/opengl-driver") != null)
+                    and (.sandboxPaths | index("/run/opengl-driver-lib=/run/opengl-driver/lib") != null)
+                    and (.sandboxPaths | map(select(test("^/nix/store/.*nvidia-x11"))) | length) == 1
+                    and (.sandboxPaths | map(select(test("benchmark-nvidia-driver"))) | length) == 0
                   ' runner.json
 
                   touch "$out"
