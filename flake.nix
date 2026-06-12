@@ -647,6 +647,7 @@
       packages = perSystem (
         pkgs:
         let
+          s = defaultRocmTarget.packageSuffix;
           aiTools = inputs.nix-ai-tools.packages.${pkgs.stdenv.hostPlatform.system};
           cudaPkgs = cudaPkgsFor pkgs.stdenv.hostPlatform.system;
           jacclPackage = pkgs.callPackage ./pkgs/jaccl (
@@ -705,6 +706,17 @@
             jaccl = jacclPackage;
           };
 
+          # Two-host vLLM transport-matrix driver. The driver only needs the
+          # vLLM closure to expose both `vllm` and `ray`, so join the default
+          # ROCm vLLM package with ray rather than baking ray into vllm-rocm.
+          vllmPairBenchEnv = pkgs.symlinkJoin {
+            name = "vllm-rocm-${s}-ray-env";
+            paths = [
+              pkgs.vllm-rocm
+              pkgs.python312Packages.ray
+            ];
+          };
+
           linuxPackages = lib.genAttrs localPackagesKeys (name: pkgs.${name}) // {
             inherit (pkgs)
               linux-thunderbolt
@@ -717,6 +729,10 @@
             inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
             live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
             mlx = pkgs.mlx-rocm;
+            "strix-halo-vllm-pair-bench-${s}" = pkgs.callPackage ./pkgs/strix-halo-vllm-pair-bench {
+              vllmPackage = vllmPairBenchEnv;
+              packageSuffix = s;
+            };
           };
 
           darwinPackages =
@@ -792,6 +808,9 @@
               ap llamaRocmRuntime "llama-server"
                 "Run llama-server with ROCm (default target ${defaultRocmTarget.description})";
             flm = ap pkgs.fastflowlm "flm" "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
+            "strix-halo-vllm-pair-bench-${s}" =
+              ap self.packages.${system}."strix-halo-vllm-pair-bench-${s}" "strix-halo-vllm-pair-bench-${s}"
+                "Run vLLM transport-matrix scenarios across a Strix Halo pair";
             therock-rocm-env =
               ap pkgs.therock-rocm-env "therock-rocm-${s}-env"
                 "Run a command in the pinned TheRock ROCm ${s} environment";
@@ -975,6 +994,45 @@
 
                   touch "$out"
                 '';
+
+            # Build the pair-bench driver against stub vLLM/RDMA/GCC closures so
+            # CI validates the wrapper, matrix script, and client without the
+            # heavy ROCm closure or a real two-host lab.
+            fakeVllmEnv = pkgs.runCommandLocal "ci-fake-vllm-env" { } ''
+              mkdir -p "$out/bin"
+              for exe in vllm ray python python3; do
+                printf '%s\n' \
+                  '#!/bin/sh' \
+                  'echo "fake $(basename "$0") $*"' \
+                  > "$out/bin/$exe"
+                chmod +x "$out/bin/$exe"
+              done
+            '';
+            fakeRdmaCore = pkgs.runCommandLocal "ci-fake-rdma-core" { } ''
+              mkdir -p "$out/bin" "$out/lib"
+              touch "$out/lib/libibverbs.so.1"
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'echo "device"' \
+                'echo "------"' \
+                'echo "usb4_rdma0"' \
+                > "$out/bin/ibv_devices"
+              chmod +x "$out/bin/ibv_devices"
+            '';
+            fakeGcc = pkgs.runCommandLocal "ci-fake-gcc-prefix" { } ''
+              mkdir -p "$out/bin"
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'echo "fake gcc $*"' \
+                > "$out/bin/gcc"
+              chmod +x "$out/bin/gcc"
+            '';
+            vllmPairBenchCheckPackage = pkgs.callPackage ./pkgs/strix-halo-vllm-pair-bench {
+              gcc = fakeGcc;
+              rdma-core = fakeRdmaCore;
+              vllmPackage = fakeVllmEnv;
+              packageSuffix = "ci";
+            };
           in
           {
             deadnix = runSourceCheck "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
@@ -984,6 +1042,22 @@
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
             cuda-host-driver-runtime = cudaHostDriverRuntime;
             package-surface = packageSurface;
+            vllm-pair-bench-dry-run =
+              pkgs.runCommandLocal "ci-vllm-pair-bench-dry-run"
+                {
+                  nativeBuildInputs = [
+                    pkgs.gnugrep
+                    pkgs.python3
+                    vllmPairBenchCheckPackage
+                  ];
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  bash -n ${./lib/bench/vllm-transport-matrix.sh}
+                  python3 -m py_compile ${./lib/bench/vllm-stream-client.py}
+                  strix-halo-vllm-pair-bench-ci --scenario qwen-peak --dry-run | tee "$out"
+                  grep -q "dry-run: not invoking" "$out"
+                '';
           }
         )
       );
