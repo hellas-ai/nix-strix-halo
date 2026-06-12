@@ -204,6 +204,10 @@ let
       export VLLM_CACHE_ROOT="$TMPDIR/vllm-cache"
       export TORCHINDUCTOR_CACHE_DIR="$TMPDIR/torchinductor-cache"
       export TRITON_CACHE_DIR="$TMPDIR/triton-cache"
+      # EngineCore workers die silently on native faults (SIGSEGV/SIGABRT in
+      # the HIP/torch stack), leaving "Engine core initialization failed" with
+      # no trace in the step log. Make every python process print one.
+      export PYTHONFAULTHANDLER=1
       mkdir -p \
         "$HOME" \
         "$XDG_CACHE_HOME" \

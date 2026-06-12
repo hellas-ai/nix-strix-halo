@@ -260,15 +260,36 @@ def load_sources(path: Path) -> dict:
     return {"targets": data}
 
 
+def pinned_series(output: str) -> str | None:
+    """Series (major.minor) of the currently pinned rocmVersion, so the
+    default follows the checked-in pin instead of going stale when the
+    nightly train rolls to a new series."""
+    try:
+        text = Path(output).read_text()
+        match = re.search(r'"rocmVersion":\s*"(\d+\.\d+)\.', text)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--python-tag", default=DEFAULT_PYTHON_TAG)
-    parser.add_argument("--series", default=DEFAULT_SERIES)
+    parser.add_argument(
+        "--series",
+        help="Version prefix to select; defaults to the currently pinned series",
+    )
     parser.add_argument("--rocm-version", help="Exact ROCm wheel version to pin")
     parser.add_argument("--package", action="append", default=[], help="Project to pin")
     parser.add_argument("--output", default="pkgs/therock/sources/python-wheels.json")
     args = parser.parse_args()
+
+    if not args.series and not args.rocm_version:
+        args.series = pinned_series(args.output) or DEFAULT_SERIES
+        print(f"series from current pin: {args.series}", file=sys.stderr)
 
     projects = args.package or default_packages(args.target)
     distributions_by_project = {project: list_distributions(args.target, project) for project in projects}

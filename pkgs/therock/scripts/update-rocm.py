@@ -66,13 +66,39 @@ def prefetch(url: str) -> dict[str, str]:
     return json.loads(result.stdout)
 
 
+def pinned_series(output: str) -> str | None:
+    """Derive the version series (major.minor) from the current pin so the
+    default tracks whatever is checked in instead of going stale when the
+    nightly train rolls (7.13 stopped publishing 2026-05-15; the updater
+    silently found "no new version" for a month)."""
+    try:
+        sources = json.loads(Path(output).read_text())
+        for entry in sources.get("linux", {}).values():
+            version = entry.get("version", "")
+            match = re.match(r"(\d+\.\d+)\.", version)
+            if match:
+                return match.group(1)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", action="append", default=[], help="GPU target to pin")
-    parser.add_argument("--series", default="7.13", help="Version prefix to select")
+    parser.add_argument(
+        "--series",
+        help="Version prefix to select; defaults to the currently pinned series",
+    )
     parser.add_argument("--version", help="Exact TheRock version to pin")
     parser.add_argument("--output", default="pkgs/therock/sources/rocm.json")
     args = parser.parse_args()
+
+    if not args.series and not args.version:
+        args.series = pinned_series(args.output)
+        if not args.series:
+            parser.error("--series required (no existing pin to derive it from)")
+        print(f"series from current pin: {args.series}", file=sys.stderr)
 
     targets = args.target or ["gfx1151"]
     index = "" if args.version else fetch_index()
