@@ -27,6 +27,9 @@ let
     export DS4_METAL_NO_RESIDENCY=1
     export DS4_METAL_NO_MODEL_WARMUP=1
     export DS4_SERVER_PERFLEVEL=skip
+    # Shared darwin /tmp: a stale 0600 lock from another _nixbld user kills
+    # the run. Use the per-build TMPDIR.
+    export DS4_LOCK_FILE="$TMPDIR/ds4.lock"
 
     port="$(${pkgs.python3}/bin/python3 - <<'PY'
     import socket
