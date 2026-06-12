@@ -23,6 +23,7 @@ TheRock-published Python wheels.
 | `mlx-rocm` | MLX with the ROCm backend |
 | `ds4-rocm` | DwarfStar 4 HIP build |
 | `fastflowlm` | XDNA2 NPU CLI (`flm`) |
+| `strix-halo-vllm-pair-bench-gfx1151` | two-host vLLM transport-matrix bench driver |
 | `therock-rocm`, `therock-python`, `torch-rocm` | TheRock binary SDK + wheels |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
@@ -60,6 +61,27 @@ nix build .#vllm-rocm
 nix build .#live-iso             # iso at ./result/iso/*.iso
 nix run  .#live-iso-vm           # boot the iso in QEMU
 ```
+
+### Two-host vLLM pair benchmark
+
+`strix-halo-vllm-pair-bench-gfx1151` drives the multi-host vLLM transport
+matrix for real lab runs. It copies the vLLM, GCC, RDMA, and benchmark-script
+closures to both hosts, runs the matrix from the master node, then fetches the
+result CSV. Scenarios: `qwen-peak`, `llama-tp2-win`, `qwen35-122b-awq-capacity`,
+`qwen35-122b-awq-prime`, `minimax-m27-awq-strix-2h`.
+
+```bash
+nix run .#strix-halo-vllm-pair-bench-gfx1151 -- \
+  --scenario qwen-peak \
+  --master grw@strix-1.lan.satanic.link \
+  --worker grw@strix-2.lan.satanic.link
+
+# inspect the plan without touching the hosts
+nix run .#strix-halo-vllm-pair-bench-gfx1151 -- --scenario qwen-peak --dry-run
+```
+
+Each scenario fixes the model, transports (`solo`, `lan_tcp`, `usb4_rdma`),
+concurrencies, and vLLM args; results land in `./out-vllm-<scenario>-<ts>/`.
 
 ## Non-default targets and providers
 

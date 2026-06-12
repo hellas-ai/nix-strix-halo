@@ -109,6 +109,9 @@ lib.optionalAttrs prev.stdenv.isLinux (
         (lib.cmakeBool "LLAMA_BUILD_UI" false)
         (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
       ];
+      patches = (old.patches or [ ]) ++ [
+        ../pkgs/llama-cpp/patches/0001-rpc-rdma-configurable-chunk-size.patch
+      ];
       meta = (old.meta or { }) // {
         maintainers = with lib.maintainers; [ georgewhewell ];
       };
