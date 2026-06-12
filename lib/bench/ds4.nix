@@ -145,6 +145,12 @@ let
     pkgs.writeShellScript "${namePrefix}-benchmark-runner" ''
       set -euo pipefail
 
+      # ds4's single-instance lock defaults to /tmp/ds4.lock. The darwin
+      # sandbox shares /tmp, so a lock left by an aborted run under another
+      # _nixbld user is unopenable (0600) and fails the whole benchmark.
+      # Keep it in the per-build TMPDIR instead.
+      export DS4_LOCK_FILE="$TMPDIR/ds4.lock"
+
       prompt="$TMPDIR/ds4-prompt.txt"
       for i in $(seq 1 ${toString promptRepeats}); do
         printf 'DwarfStar 4 ${promptBackend} benchmark prompt paragraph %05d. This text is intentionally repetitive and deterministic so the fixed token sequence is long enough for context frontier measurement. It discusses GPU memory bandwidth, attention prefill, routed experts, and decode throughput. ' "$i"
