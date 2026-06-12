@@ -149,7 +149,7 @@ let
 
   cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
     let
-      inherit (nvidiaRuntime) binPath libraryPath sandboxPaths;
+      inherit (nvidiaRuntime) fallbackLibraryPath libraryPath sandboxPaths;
     in
     {
       bench-cuda-rtx4090-llama-cpp-master-device-smoke = benchLib.mkBenchmark {
@@ -159,8 +159,13 @@ let
         command = [
           (cudaPkgs.writeShellScript "cuda-rtx4090-llama-cpp-master-device-smoke" ''
             set -euo pipefail
-            ${binPath}/nvidia-smi --query-gpu=driver_version,name --format=csv,noheader
-            ${binPath}/nvidia-smi -L
+            cat /proc/driver/nvidia/version
+            driver_lib=${libraryPath}
+            if [ ! -e "$driver_lib/libcuda.so.1" ] && [ -e ${fallbackLibraryPath}/libcuda.so.1 ]; then
+              driver_lib=${fallbackLibraryPath}
+            fi
+            test -e "$driver_lib/libcuda.so.1"
+            export LD_LIBRARY_PATH="$driver_lib"
             ${cudaPkgs.llama-cpp-master-cuda}/bin/llama-bench --list-devices
           '')
         ];
@@ -194,7 +199,7 @@ let
             deviceClass = "rtx4090";
             systemFeature = "rtx4090";
             runtimeDriver = {
-              inherit binPath libraryPath;
+              inherit libraryPath;
             };
           };
           tool = {
