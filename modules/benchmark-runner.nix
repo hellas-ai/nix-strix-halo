@@ -65,9 +65,14 @@ let
   hasRdma = any (runner: runner.rdma.enable) enabledRunners;
 
   optionalSandboxPaths = paths: map (path: "${path}?") paths;
+  # Expose the standard NixOS host GPU userspace to build sandboxes.
+  # /run/opengl-driver-lib binds the lib dir with the /run symlink resolved
+  # at mount time; the driver store path makes the aggregate's symlinks
+  # resolvable inside the sandbox.
   nvidiaDriverSandboxPaths = optionals hasNvidiaGpu [
-    "${nvidiaRuntime.driverPath}=${config.hardware.nvidia.package}"
-    "${nvidiaRuntime.driverBinPath}=${getBin config.hardware.nvidia.package}"
+    "/run/opengl-driver"
+    "${nvidiaRuntime.libraryPath}=${nvidiaRuntime.fallbackLibraryPath}"
+    "${config.hardware.nvidia.package}"
   ];
 
   # Pair with lib/bench/lib.nix: every benchmark derivation requires the
