@@ -657,6 +657,18 @@
               rdma-core = pkgs.rdma-core-usb4;
             }
           );
+          mkMlxLm =
+            mlxPackage:
+            pkgs.python3Packages.mlx-lm.overridePythonAttrs (oldAttrs: {
+              dependencies =
+                lib.filter (dep: dep.pname or "" != "mlx") (
+                  oldAttrs.dependencies or oldAttrs.propagatedBuildInputs or [ ]
+                )
+                ++ [ mlxPackage ];
+              meta = (oldAttrs.meta or { }) // {
+                mainProgram = "mlx_lm";
+              };
+            });
 
           # Dynamically extract the keys of the local packages defined in overlays/pkgs.nix.
           # This avoids duplicate maintenance of the package list.
@@ -720,6 +732,7 @@
                 buildStage = 1;
                 backendPackage = mlxMetalBackend;
               };
+              mlxLm = mkMlxLm mlxMetal;
             in
             {
               ds4 = pkgs.callPackage ./pkgs/ds4 {
@@ -727,6 +740,7 @@
                 version = unstableInputVersion inputs.ds4;
               };
               mlx = mlxMetal;
+              mlx-lm = mlxLm;
               mlx-metal = mlxMetalBackend;
             };
         in
@@ -822,6 +836,7 @@
           darwinApps =
             let
               ds4 = ap self.packages.${system}.ds4;
+              mlxLm = self.packages.${system}.mlx-lm;
             in
             {
               ds4 = ds4 "ds4" "Run DwarfStar 4 with Metal";
@@ -830,6 +845,10 @@
               ds4-eval = ds4 "ds4-eval" "Run DwarfStar 4 eval with Metal";
               ds4-agent = ds4 "ds4-agent" "Run the DwarfStar 4 agent with Metal";
               ds4-download-model = ds4 "ds4-download-model" "Download DS4 DeepSeek V4 Flash GGUF weights";
+              mlx-lm = ap mlxLm "mlx_lm" "Run the MLX LM CLI";
+              mlx-lm-generate = ap mlxLm "mlx_lm.generate" "Generate text with MLX LM";
+              mlx-lm-chat = ap mlxLm "mlx_lm.chat" "Run the MLX LM chat CLI";
+              mlx-lm-server = ap mlxLm "mlx_lm.server" "Run the MLX LM HTTP server";
             };
         in
         genericApps
