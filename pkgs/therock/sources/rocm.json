@@ -1,11 +1,11 @@
 {
   "linux": {
     "gfx1151": {
-      "url": "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-gfx1151-7.13.0a20260515.tar.gz",
-      "hash": "sha256-hAMl7gvHGJcWIJb0cinJhBoG01YY9ZlpYwBYsMcj6Xo=",
-      "version": "7.13.0a20260515",
-      "filename": "therock-dist-linux-gfx1151-7.13.0a20260515.tar.gz",
-      "updated": "2026-05-19T11:35:42.281035+00:00"
+      "url": "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-gfx1151-7.14.0a20260613.tar.gz",
+      "hash": "sha256-VfJKdSHuv/PAo2kBTb+V9ZVDM0C4jmcEpFiUkwzM4/0=",
+      "version": "7.14.0a20260613",
+      "filename": "therock-dist-linux-gfx1151-7.14.0a20260613.tar.gz",
+      "updated": "2026-06-14T03:22:15.931403+00:00"
     }
   }
 }
