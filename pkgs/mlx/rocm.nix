@@ -1,8 +1,11 @@
 {
   lib,
+  stdenv,
   mlx,
   applyPatches,
+  bash,
   mlx-src,
+  makeWrapper,
   patchelf,
   python,
   rdma-core,
@@ -17,6 +20,37 @@ let
     src = mlx-src;
     patches = [ ./rocm-include-rocblas.patch ];
   };
+  gccCxxInclude = "${stdenv.cc.cc}/include/c++/${stdenv.cc.cc.version}";
+  rocmRuntimeEnv = {
+    ROCM_HOME = "${rocmPackages.clr}";
+    ROCM_PATH = "${rocmPackages.clr}";
+    HIP_PATH = "${rocmPackages.clr}";
+    HIP_PLATFORM = "amd";
+    HIP_CLANG_PATH = "${rocmPackages.clr}/llvm/bin";
+    HSA_PATH = "${rocmPackages.rocm-runtime}";
+    DEVICE_LIB_PATH = "${rocmPackages.rocm-device-libs}/amdgcn/bitcode";
+    HIP_DEVICE_LIB_PATH = "${rocmPackages.rocm-device-libs}/amdgcn/bitcode";
+    CPATH = lib.concatStringsSep ":" [
+      "${rocmPackages.clr}/include"
+      "${stdenv.cc.libc.dev}/include"
+    ];
+    CPLUS_INCLUDE_PATH = lib.concatStringsSep ":" [
+      gccCxxInclude
+      "${gccCxxInclude}/${stdenv.hostPlatform.config}"
+      "${gccCxxInclude}/backward"
+      "${stdenv.cc.libc.dev}/include"
+    ];
+    LIBRARY_PATH = lib.makeLibraryPath [
+      rocmPackages.clr
+      stdenv.cc.cc.lib
+      stdenv.cc.libc
+    ];
+  };
+  rocmWrapperArgs = lib.concatStringsSep " " (
+    lib.mapAttrsToList (
+      key: value: "--set ${lib.escapeShellArg key} ${lib.escapeShellArg (toString value)}"
+    ) rocmRuntimeEnv
+  );
 in
 mlx.overrideAttrs (old: {
   inherit pname;
@@ -26,6 +60,11 @@ mlx.overrideAttrs (old: {
   patches = [ ];
 
   postPatch = (old.postPatch or "") + ''
+          substituteInPlace python/mlx/_distributed_utils/launch.py \
+            --replace-fail \
+              'executable="/bin/bash"' \
+              'executable="${bash}/bin/bash"'
+
           substituteInPlace CMakeLists.txt \
             --replace-fail \
               '  FetchContent_Declare(
@@ -324,6 +363,9 @@ mlx.overrideAttrs (old: {
 
   nativeBuildInputs =
     (old.nativeBuildInputs or [ ])
+    ++ [
+      makeWrapper
+    ]
     ++ (with rocmPackages; [
       hipcc
       clang
@@ -344,6 +386,12 @@ mlx.overrideAttrs (old: {
 
   postFixup = (old.postFixup or "") + ''
     ${patchelf}/bin/patchelf --add-rpath '$ORIGIN/../lib' "$out/${python.sitePackages}/mlx/lib64/libmlx.so"
+
+    for bin in "$out"/bin/*; do
+      [ -e "$bin" ] || continue
+      [ ! -d "$bin" ] || continue
+      wrapProgram "$bin" ${rocmWrapperArgs}
+    done
   '';
 
   doCheck = false;
@@ -357,5 +405,9 @@ mlx.overrideAttrs (old: {
     maintainers = with lib.maintainers; [ georgewhewell ];
     platforms = [ "x86_64-linux" ];
     broken = false;
+  };
+
+  passthru = (old.passthru or { }) // {
+    inherit rocmRuntimeEnv;
   };
 })
