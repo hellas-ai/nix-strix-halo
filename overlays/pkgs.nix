@@ -182,6 +182,7 @@ lib.optionalAttrs prev.stdenv.isLinux (
 
     mlx-rocm = bigParallel (
       final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
+        inherit (inputs) mlx-src;
         pname = "mlx-rocm-${suffix}";
         rdma-core = final.rdma-core-usb4;
         rocmPackages = final.therockRocmPackages.${firstBuildTarget};

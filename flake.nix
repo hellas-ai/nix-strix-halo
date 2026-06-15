@@ -40,7 +40,7 @@
     };
 
     mlx-src = {
-      url = "github:ml-explore/mlx/e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1";
+      url = "github:NripeshN/mlx/rocm-support";
       flake = false;
     };
 

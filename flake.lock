@@ -181,17 +181,17 @@
     "mlx-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1777394396,
-        "narHash": "sha256-3OOYc2MlBAMVZGwulp25X0VOVKS/vYTIWQjSz16DmFg=",
-        "owner": "ml-explore",
+        "lastModified": 1781500641,
+        "narHash": "sha256-muzdcRnY53Q1R0HeBeoT9yI4GtdgNpSdVOJCFUGN42M=",
+        "owner": "NripeshN",
         "repo": "mlx",
-        "rev": "e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1",
+        "rev": "24c1065fabec9c42b822eff161dc796496b2e949",
         "type": "github"
       },
       "original": {
-        "owner": "ml-explore",
+        "owner": "NripeshN",
+        "ref": "rocm-support",
         "repo": "mlx",
-        "rev": "e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1",
         "type": "github"
       }
     },
