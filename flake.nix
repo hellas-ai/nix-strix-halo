@@ -459,7 +459,7 @@
             inherit lib;
             target = rocmTarget;
             vllmSrc = inputs.vllm-src;
-            vllmVersion = "0.22.0";
+            vllmVersion = "0.23.0";
             enabled = enableTherockVllm;
           })
           (import ./overlays/pkgs.nix {
