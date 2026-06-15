@@ -56,6 +56,7 @@ let
           outputLen = 32;
           numPrompts = 8;
           maxModelLen = 512;
+          extraArgs = [ "--enforce-eager" ];
         }
         {
           mode = "latency";
@@ -66,6 +67,7 @@ let
           numItersWarmup = 1;
           numIters = 3;
           maxModelLen = 512;
+          extraArgs = [ "--enforce-eager" ];
         }
       ];
     };

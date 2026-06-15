@@ -260,6 +260,7 @@ let
 
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;
+        llvmPackages = prev.llvmPackages_21;
         inherit (cmakeConfig) target amdgpuTargets distBundleName;
         inherit (source) version;
         profile = "compiler";
@@ -273,6 +274,7 @@ let
       fromSource = prev.callPackage ./rocm-from-source (
         {
           stdenv = prev.llvmPackages_21.stdenv;
+          llvmPackages = prev.llvmPackages_21;
           inherit (cmakeConfig) target amdgpuTargets distBundleName;
           inherit (source) version;
           profile = "full";
