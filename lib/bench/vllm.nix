@@ -44,6 +44,13 @@ let
     else
       lib.splitString " " args;
 
+  # vLLM's automatic GPU memory profiling is fragile on shared ROCm builders.
+  # The smoke cases only need a small deterministic KV cache.
+  smokeKvCacheArgs = [
+    "--kv-cache-memory-bytes"
+    "1073741824"
+  ];
+
   modelConfigs = {
     qwen3-0-6b = {
       id = "Qwen/Qwen3-0.6B";
@@ -56,10 +63,7 @@ let
           outputLen = 32;
           numPrompts = 8;
           maxModelLen = 512;
-          extraArgs = [
-            "--kv-cache-memory-bytes"
-            "1073741824"
-          ];
+          extraArgs = smokeKvCacheArgs;
         }
         {
           mode = "latency";
@@ -70,10 +74,7 @@ let
           numItersWarmup = 1;
           numIters = 3;
           maxModelLen = 512;
-          extraArgs = [
-            "--kv-cache-memory-bytes"
-            "1073741824"
-          ];
+          extraArgs = smokeKvCacheArgs;
         }
       ];
     };
