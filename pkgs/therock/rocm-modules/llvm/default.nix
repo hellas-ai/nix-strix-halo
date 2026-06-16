@@ -373,7 +373,11 @@ overrideLlvmPackagesRocm (s: {
       preFixup = ''
         moveToOutput "lib/lib*.a" "$dev"
         moveToOutput "lib/cmake" "$dev"
-        sed -Ei "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" $dev/lib/cmake/llvm/*.cmake
+        sed -Ei \
+          -e 's|\$\{_IMPORT_PREFIX\}/lib/(lib[^/]*)\.a|'"$dev"'/lib/\1.a|g' \
+          -e "s|$out/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+          -e "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+          $dev/lib/cmake/llvm/*.cmake
       '';
       env = (old.env or { }) // {
         NIX_CFLAGS_COMPILE = "${(old.env or { }).NIX_CFLAGS_COMPILE or ""} ${llvmExtraCflags}";
@@ -497,7 +501,11 @@ overrideLlvmPackagesRocm (s: {
           moveToOutput "lib/cmake" "$dev"
           mkdir -p $dev/lib/clang/
           ln -s $lib/lib/clang/${llvmMajorVersion} $dev/lib/clang/
-          sed -Ei "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" $dev/lib/cmake/clang/*.cmake
+          sed -Ei \
+            -e 's|\$\{_IMPORT_PREFIX\}/lib/(lib[^/]*)\.a|'"$dev"'/lib/\1.a|g' \
+            -e "s|$out/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+            -e "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+            $dev/lib/cmake/clang/*.cmake
         '';
         postFixup = ''
           ${toString old.postFixup or ""}

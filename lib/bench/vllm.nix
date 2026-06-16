@@ -56,7 +56,11 @@ let
           outputLen = 32;
           numPrompts = 8;
           maxModelLen = 512;
-          extraArgs = [ "--enforce-eager" ];
+          extraArgs = [
+            "--enforce-eager"
+            "--kv-cache-memory-bytes"
+            "1073741824"
+          ];
         }
         {
           mode = "latency";
@@ -67,7 +71,11 @@ let
           numItersWarmup = 1;
           numIters = 3;
           maxModelLen = 512;
-          extraArgs = [ "--enforce-eager" ];
+          extraArgs = [
+            "--enforce-eager"
+            "--kv-cache-memory-bytes"
+            "1073741824"
+          ];
         }
       ];
     };
