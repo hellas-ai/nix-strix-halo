@@ -1,0 +1,447 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -52,8 +52,11 @@
+ static constexpr size_t RDMA_DEFAULT_CHUNK = 256 * 1024; // 256 KiB per send/recv
+ static constexpr int    RDMA_DEFAULT_RX_DEPTH = 24;      // pre-posted recv ring
+ static constexpr size_t RDMA_GID_SIZE = 16;            // RoCE GID / IB GID is always 16 bytes
+-static constexpr size_t RDMA_FRAME_HEADER = 8;         // magic + payload length
++static constexpr size_t RDMA_FRAME_HEADER = 16;        // magic + payload length + sequence
+ static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
++static constexpr uint32_t RDMA_FRAME_ACK = 0xffffffffu;
++static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 20000;
++static constexpr int      RDMA_ACK_RETRIES_DEFAULT = 1000;
+ using rdma_gid_t = std::array<uint8_t, RDMA_GID_SIZE>;
+ 
+ static size_t rdma_align_alloc_size(size_t size) {
+@@ -106,6 +109,51 @@
+     return static_cast<int>(parsed);
+ }
+ 
++static bool rdma_frame_ack_enabled() {
++    const char * env = std::getenv("GGML_RPC_RDMA_FRAME_ACK");
++    return !env || strcmp(env, "0") != 0;
++}
++
++static bool rdma_send_frame_ack_enabled() {
++    const char * env = std::getenv("GGML_RPC_RDMA_SEND_FRAME_ACK");
++    return !env || strcmp(env, "0") != 0;
++}
++
++static bool rdma_wait_frame_ack_enabled() {
++    const char * env = std::getenv("GGML_RPC_RDMA_WAIT_FRAME_ACK");
++    return !env || strcmp(env, "0") != 0;
++}
++
++static uint64_t rdma_ack_timeout_us() {
++    const char * env = std::getenv("GGML_RPC_RDMA_ACK_TIMEOUT_US");
++    if (!env || !*env) {
++        return RDMA_ACK_TIMEOUT_US_DEFAULT;
++    }
++    errno = 0;
++    char * end = nullptr;
++    unsigned long long parsed = std::strtoull(env, &end, 10);
++    if (errno != 0 || end == env || *end != '\0' || parsed == 0) {
++        GGML_LOG_ERROR("Ignoring invalid GGML_RPC_RDMA_ACK_TIMEOUT_US=%s\n", env);
++        return RDMA_ACK_TIMEOUT_US_DEFAULT;
++    }
++    return static_cast<uint64_t>(parsed);
++}
++
++static int rdma_ack_retries() {
++    const char * env = std::getenv("GGML_RPC_RDMA_ACK_RETRIES");
++    if (!env || !*env) {
++        return RDMA_ACK_RETRIES_DEFAULT;
++    }
++    errno = 0;
++    char * end = nullptr;
++    unsigned long parsed = std::strtoul(env, &end, 10);
++    if (errno != 0 || end == env || *end != '\0' || parsed > 1000000) {
++        GGML_LOG_ERROR("Ignoring invalid GGML_RPC_RDMA_ACK_RETRIES=%s\n", env);
++        return RDMA_ACK_RETRIES_DEFAULT;
++    }
++    return static_cast<int>(parsed);
++}
++
+ static enum ibv_qp_type rdma_qp_type() {
+     const char * env = std::getenv("GGML_RDMA_QP_TYPE");
+     if (env && (strcmp(env, "UC") == 0 || strcmp(env, "uc") == 0)) {
+@@ -212,19 +260,39 @@
+            (uint32_t)src[3];
+ }
+ 
+-static void rdma_write_frame_header(uint8_t * dst, size_t payload_size) {
++static void rdma_store_u64_be(uint8_t * dst, uint64_t value) {
++    for (int i = 7; i >= 0; --i) {
++        dst[7 - i] = (uint8_t)(value >> (i * 8));
++    }
++}
++
++static uint64_t rdma_load_u64_be(const uint8_t * src) {
++    uint64_t value = 0;
++    for (int i = 0; i < 8; ++i) {
++        value = (value << 8) | (uint64_t)src[i];
++    }
++    return value;
++}
++
++static void rdma_write_frame_header(uint8_t * dst, size_t payload_size, uint64_t seq) {
+     rdma_store_u32_be(dst, RDMA_FRAME_MAGIC);
+     rdma_store_u32_be(dst + 4, (uint32_t)payload_size);
++    rdma_store_u64_be(dst + 8, seq);
+ }
+ 
+-static bool rdma_read_frame_header(const uint8_t * src, size_t * payload_size) {
++static bool rdma_read_frame_header(const uint8_t * src, size_t * payload_size, uint64_t * seq) {
+     if (rdma_load_u32_be(src) != RDMA_FRAME_MAGIC) {
+         return false;
+     }
+     *payload_size = rdma_load_u32_be(src + 4);
++    *seq = rdma_load_u64_be(src + 8);
+     return true;
+ }
+ 
++static bool rdma_frame_is_ack(size_t payload_size) {
++    return payload_size == RDMA_FRAME_ACK;
++}
++
+ #ifdef __APPLE__
+ static bool rdma_darwin_leak_on_close() {
+     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+@@ -243,6 +311,10 @@
+     struct ibv_mr * tx_mr  = nullptr;
+     int             tx_depth = 1;
+     int             tx_head = 0;
++    bool            send_frame_ack = false;
++    bool            wait_frame_ack = false;
++    uint64_t        tx_seq = 1;
++    uint64_t        rx_seq = 1;
+ 
+     void          * rx_buf = nullptr; // rx_depth slots of chunk_size bytes
+     struct ibv_mr * rx_mr  = nullptr;
+@@ -341,6 +413,10 @@
+     bool rdma_activate(uint32_t remote_qpn, uint32_t remote_psn, const uint8_t * remote_gid);
+     void rdma_reset_for_fallback(const char * reason);
+     bool rdma_poll(struct ibv_cq * cq, struct ibv_wc * wc);
++    bool rdma_poll_timeout(struct ibv_cq * cq, struct ibv_wc * wc, uint64_t timeout_us, bool * timed_out);
++    bool rdma_post_fixed_frame(uint8_t * frame, size_t wire_chunk);
++    bool rdma_send_fixed_ack(uint64_t seq);
++    bool rdma_wait_fixed_ack(uint64_t seq, uint8_t * frame, size_t wire_chunk);
+     bool rdma_send(const void * data, size_t size);
+     bool rdma_recv(void * data, size_t size);
+ 
+@@ -600,6 +676,9 @@
+     const size_t rx_bytes = static_cast<size_t>(rdma->rx_depth) * rdma->chunk_size;
+     const int default_tx_depth = rdma->rx_depth < 8192 ? 8192 : rdma->rx_depth;
+     rdma->tx_depth = rdma->fixed_frames() ? rdma_tx_depth(default_tx_depth) : 1;
++    const bool frame_ack = rdma->fixed_frames() && rdma_frame_ack_enabled();
++    rdma->send_frame_ack = frame_ack && rdma_send_frame_ack_enabled();
++    rdma->wait_frame_ack = frame_ack && rdma_wait_frame_ack_enabled();
+     const size_t tx_bytes = static_cast<size_t>(rdma->tx_depth) * rdma->chunk_size;
+     const size_t tx_alloc_bytes = rdma_align_alloc_size(tx_bytes);
+     const size_t rx_alloc_bytes = rdma_align_alloc_size(rx_bytes);
+@@ -634,10 +713,13 @@
+     } else if (gid_version == IBV_GID_TYPE_ROCE_V1) {
+         ver_str = " RoCEv1";
+     }
+-    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu frame=%s mtu=%d\n",
++    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu frame=%s ack=%s mtu=%d\n",
+                   matched_dev, gid_idx, ver_str, rdma_qp_type_name(rdma->qp_type),
+                   rdma_local.qpn, rdma->max_inline, rdma->chunk_size,
+                   rdma->fixed_frames() ? "fixed" : "raw",
++                  rdma->send_frame_ack ?
++                      (rdma->wait_frame_ack ? "send+wait" : "send") :
++                      (rdma->wait_frame_ack ? "wait" : "off"),
+                   128 << rdma_local.path_mtu);
+     GGML_LOG_INFO("RDMA local PSN: %u\n", rdma_local.psn);
+     return true;
+@@ -746,6 +828,199 @@
+     }
+ }
+ 
++bool socket_t::impl::rdma_poll_timeout(struct ibv_cq * cq, struct ibv_wc * wc, uint64_t timeout_us, bool * timed_out) {
++    struct timespec start = {};
++    if (timed_out) {
++        *timed_out = false;
++    }
++    clock_gettime(CLOCK_MONOTONIC, &start);
++
++    for (uint64_t s = 0; ; s++) {
++        int n = ibv_poll_cq(cq, 1, wc);
++        if (n > 0) {
++            if (wc->status != IBV_WC_SUCCESS) {
++                GGML_LOG_ERROR("RDMA CQ wc error: status=%d (%s) vendor_err=0x%x\n",
++                    wc->status, ibv_wc_status_str(wc->status), wc->vendor_err);
++            }
++            return wc->status == IBV_WC_SUCCESS;
++        }
++        if (n < 0) return false;
++        if ((s & 0x3FFF) == 0 && s > 0) {
++            struct timespec now = {};
++            if (tcp_peer_closed()) {
++                return false;
++            }
++            clock_gettime(CLOCK_MONOTONIC, &now);
++            int64_t elapsed_us =
++                (int64_t)(now.tv_sec - start.tv_sec) * 1000000ll +
++                (int64_t)(now.tv_nsec - start.tv_nsec) / 1000ll;
++            if (elapsed_us >= 0 && (uint64_t)elapsed_us >= timeout_us) {
++                if (timed_out) {
++                    *timed_out = true;
++                }
++                return false;
++            }
++        }
++    }
++}
++
++bool socket_t::impl::rdma_post_fixed_frame(uint8_t * frame, size_t wire_chunk) {
++    rdma_conn * c = rdma.get();
++
++    struct ibv_sge sge = {};
++    sge.addr   = (uintptr_t)frame;
++    sge.length = wire_chunk;
++    sge.lkey   = c->tx_mr->lkey;
++
++    struct ibv_send_wr wr = {}, * bad = nullptr;
++    wr.wr_id      = wire_chunk;
++    wr.opcode     = IBV_WR_SEND;
++    wr.sg_list    = &sge;
++    wr.num_sge    = 1;
++    wr.send_flags = IBV_SEND_SIGNALED;
++
++    errno = 0;
++    if (ibv_post_send(c->qp, &wr, &bad) != 0) {
++        GGML_LOG_ERROR("RDMA fixed-frame post_send failed: wire_chunk=%zu errno=%d (%s)\n",
++                       wire_chunk, errno, strerror(errno));
++        return false;
++    }
++
++    struct ibv_wc wc;
++    return rdma_poll(c->scq, &wc);
++}
++
++bool socket_t::impl::rdma_send_fixed_ack(uint64_t seq) {
++    rdma_conn * c = rdma.get();
++    uint8_t * frame = c->tx_slot(c->tx_head);
++    c->tx_head = (c->tx_head + 1) % c->tx_depth;
++    rdma_write_frame_header(frame, RDMA_FRAME_ACK, seq);
++    memset(frame + RDMA_FRAME_HEADER, 0, c->frame_payload_size());
++
++    if (!rdma_post_fixed_frame(frame, c->chunk_size)) {
++        return false;
++    }
++    if (rdma_trace_io()) {
++        GGML_LOG_ERROR("RDMA fixed-frame ACK sent: seq=%llu\n",
++                       (unsigned long long)seq);
++    }
++    return true;
++}
++
++bool socket_t::impl::rdma_wait_fixed_ack(uint64_t seq, uint8_t * frame, size_t wire_chunk) {
++    rdma_conn * c = rdma.get();
++    const uint64_t timeout_us = rdma_ack_timeout_us();
++    const int max_retries = rdma_ack_retries();
++    int retries = 0;
++
++    for (;;) {
++        struct ibv_wc wc;
++        bool timed_out = false;
++        if (!rdma_poll_timeout(c->rcq, &wc, timeout_us, &timed_out)) {
++            if (!timed_out) {
++                return false;
++            }
++            if (retries >= max_retries) {
++                GGML_LOG_ERROR("RDMA fixed-frame ACK timeout: seq=%llu retries=%d timeout_us=%llu\n",
++                               (unsigned long long)seq, retries,
++                               (unsigned long long)timeout_us);
++                return false;
++            }
++            retries++;
++            if (rdma_trace_io() || retries == 1) {
++                GGML_LOG_WARN("RDMA fixed-frame retransmit: seq=%llu retry=%d timeout_us=%llu\n",
++                              (unsigned long long)seq, retries,
++                              (unsigned long long)timeout_us);
++            }
++            if (!rdma_post_fixed_frame(frame, wire_chunk)) {
++                return false;
++            }
++            continue;
++        }
++
++        int slot = (int)wc.wr_id;
++        size_t got = wc.byte_len;
++        if (got != c->chunk_size) {
++            GGML_LOG_ERROR("RDMA fixed-frame ACK wait got unexpected byte count: got=%zu expected=%zu\n",
++                           got, c->chunk_size);
++            return false;
++        }
++
++        const uint8_t * rx_frame = c->rx_slot(slot);
++        size_t payload = 0;
++        uint64_t rx_seq = 0;
++        if (!rdma_read_frame_header(rx_frame, &payload, &rx_seq) ||
++            (!rdma_frame_is_ack(payload) && payload > c->frame_payload_size())) {
++            GGML_LOG_ERROR("RDMA fixed-frame ACK wait got invalid header: got=%zu payload=%zu seq=%llu\n",
++                           got, payload, (unsigned long long)rx_seq);
++            return false;
++        }
++
++        if (rdma_frame_is_ack(payload)) {
++            if (!c->post_rx(slot)) {
++                return false;
++            }
++            if (rx_seq == seq) {
++                if (rdma_trace_io()) {
++                    GGML_LOG_ERROR("RDMA fixed-frame ACK received: seq=%llu retries=%d\n",
++                                   (unsigned long long)seq, retries);
++                }
++                return true;
++            }
++            if (rx_seq < seq) {
++                if (rdma_trace_io()) {
++                    GGML_LOG_ERROR("RDMA fixed-frame stale ACK skipped: ack_seq=%llu want=%llu\n",
++                                   (unsigned long long)rx_seq,
++                                   (unsigned long long)seq);
++                }
++                continue;
++            }
++            GGML_LOG_ERROR("RDMA fixed-frame future ACK: ack_seq=%llu want=%llu\n",
++                           (unsigned long long)rx_seq, (unsigned long long)seq);
++            return false;
++        }
++
++        if (rx_seq < c->rx_seq) {
++            if (!c->post_rx(slot)) {
++                return false;
++            }
++            if (c->send_frame_ack && !rdma_send_fixed_ack(rx_seq)) {
++                return false;
++            }
++            if (rdma_trace_io()) {
++                GGML_LOG_ERROR("RDMA fixed-frame duplicate buffered-side drop: seq=%llu expected=%llu\n",
++                               (unsigned long long)rx_seq,
++                               (unsigned long long)c->rx_seq);
++            }
++            continue;
++        }
++        if (rx_seq > c->rx_seq) {
++            GGML_LOG_ERROR("RDMA fixed-frame out-of-order while waiting ACK: got=%llu expected=%llu\n",
++                           (unsigned long long)rx_seq,
++                           (unsigned long long)c->rx_seq);
++            return false;
++        }
++        if (c->rx_pending_len != 0) {
++            GGML_LOG_ERROR("RDMA fixed-frame ACK wait received data while pending data is buffered\n");
++            return false;
++        }
++        memcpy(c->rx_pending.data(), rx_frame + RDMA_FRAME_HEADER, payload);
++        c->rx_pending_off = 0;
++        c->rx_pending_len = payload;
++        c->rx_seq++;
++        if (!c->post_rx(slot)) {
++            return false;
++        }
++        if (c->send_frame_ack && !rdma_send_fixed_ack(rx_seq)) {
++            return false;
++        }
++        if (rdma_trace_io()) {
++            GGML_LOG_ERROR("RDMA fixed-frame ACK wait buffered payload=%zu seq=%llu\n",
++                           payload, (unsigned long long)rx_seq);
++        }
++    }
++}
++
+ bool socket_t::impl::rdma_send(const void * data, size_t size) {
+     rdma_conn * c = rdma.get();
+     const uint8_t * src = (const uint8_t *)data;
+@@ -767,14 +1042,18 @@
+         wr.sg_list = &sge;
+         wr.num_sge = 1;
+ 
++        uint8_t * fixed_frame = nullptr;
++        uint64_t frame_seq = 0;
+         if (fixed_frames) {
+             uint8_t * frame = c->tx_slot(c->tx_head);
+             c->tx_head = (c->tx_head + 1) % c->tx_depth;
+-            rdma_write_frame_header(frame, chunk);
++            frame_seq = c->tx_seq++;
++            rdma_write_frame_header(frame, chunk, frame_seq);
+             memcpy(frame + RDMA_FRAME_HEADER, src, chunk);
+             if (chunk < max_payload) {
+                 memset(frame + RDMA_FRAME_HEADER + chunk, 0, max_payload - chunk);
+             }
++            fixed_frame = frame;
+             sge.addr   = (uintptr_t)frame;
+             sge.length = wire_chunk;
+             sge.lkey   = c->tx_mr->lkey;
+@@ -792,9 +1071,9 @@
+         }
+ 
+         if (rdma_trace_io()) {
+-            GGML_LOG_ERROR("RDMA post_send: chunk=%zu wire_chunk=%zu inline=%d lkey=0x%x rem=%zu\n",
++            GGML_LOG_ERROR("RDMA post_send: chunk=%zu wire_chunk=%zu inline=%d lkey=0x%x rem=%zu seq=%llu\n",
+                            chunk, wire_chunk, (wr.send_flags & IBV_SEND_INLINE) != 0,
+-                           sge.lkey, rem);
++                           sge.lkey, rem, (unsigned long long)frame_seq);
+         }
+         errno = 0;
+         if (ibv_post_send(c->qp, &wr, &bad) != 0) {
+@@ -808,6 +1087,10 @@
+             GGML_LOG_ERROR("RDMA send complete: wr_id=%llu byte_len=%u\n",
+                            (unsigned long long)wc.wr_id, wc.byte_len);
+         }
++        if (fixed_frames && c->wait_frame_ack &&
++            !rdma_wait_fixed_ack(frame_seq, fixed_frame, wire_chunk)) {
++            return false;
++        }
+ 
+         src += chunk;
+         rem -= chunk;
+@@ -857,9 +1140,35 @@
+ 
+             const uint8_t * frame = c->rx_slot(slot);
+             size_t payload = 0;
+-            if (!rdma_read_frame_header(frame, &payload) || payload > c->frame_payload_size()) {
+-                GGML_LOG_ERROR("RDMA fixed frame has invalid header: got=%zu payload=%zu\n",
+-                               got, payload);
++            uint64_t frame_seq = 0;
++            if (!rdma_read_frame_header(frame, &payload, &frame_seq) ||
++                (!rdma_frame_is_ack(payload) && payload > c->frame_payload_size())) {
++                GGML_LOG_ERROR("RDMA fixed frame has invalid header: got=%zu payload=%zu seq=%llu\n",
++                               got, payload, (unsigned long long)frame_seq);
++                return false;
++            }
++            if (rdma_frame_is_ack(payload)) {
++                if (!c->post_rx(slot)) return false;
++                if (rdma_trace_io()) {
++                    GGML_LOG_ERROR("RDMA fixed-frame ACK skipped in recv: seq=%llu\n",
++                                   (unsigned long long)frame_seq);
++                }
++                continue;
++            }
++            if (frame_seq < c->rx_seq) {
++                if (!c->post_rx(slot)) return false;
++                if (c->send_frame_ack && !rdma_send_fixed_ack(frame_seq)) return false;
++                if (rdma_trace_io()) {
++                    GGML_LOG_ERROR("RDMA fixed-frame duplicate dropped: seq=%llu expected=%llu\n",
++                                   (unsigned long long)frame_seq,
++                                   (unsigned long long)c->rx_seq);
++                }
++                continue;
++            }
++            if (frame_seq > c->rx_seq) {
++                GGML_LOG_ERROR("RDMA fixed-frame out-of-order: got=%llu expected=%llu\n",
++                               (unsigned long long)frame_seq,
++                               (unsigned long long)c->rx_seq);
+                 return false;
+             }
+ 
+@@ -872,6 +1181,8 @@
+             }
+ 
+             if (!c->post_rx(slot)) return false;
++            c->rx_seq++;
++            if (c->send_frame_ack && !rdma_send_fixed_ack(frame_seq)) return false;
+ 
+             dst += copy;
+             rem -= copy;

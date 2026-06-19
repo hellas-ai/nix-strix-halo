@@ -697,26 +697,31 @@
             else
               mlxLm;
 
-          # Dynamically extract the keys of the local packages defined in overlays/pkgs.nix.
-          # This avoids duplicate maintenance of the package list.
-          localPackagesKeys =
-            let
-              overlay = import ./overlays/pkgs.nix {
-                inherit inputs lib;
-                inputVersion = _: _: "version";
-                rocmTarget = defaultRocmTarget;
-                sources = defaultTherockSources;
-              };
-              allKeys = builtins.attrNames (overlay { } { stdenv.isLinux = true; });
-            in
-            lib.filter (
-              k:
-              !lib.elem k [
-                "llama-cpp-cuda"
-                "llama-cpp-master-cuda"
-              ]
-              && lib.isDerivation pkgs.${k}
-            ) allKeys;
+          availableDerivationNames =
+            names: lib.filter (name: builtins.hasAttr name pkgs && lib.isDerivation pkgs.${name}) names;
+
+          linuxLocalPackageNames = [
+            "ds4-rocm"
+            "ec-su-axb35"
+            "ec-su-axb35-monitor"
+            "fastflowlm"
+            "llama-cpp-master-rocm"
+            "llama-cpp-master-vulkan"
+            "llama-cpp-rocm"
+            "llama-cpp-vulkan"
+            "mlx-rocm"
+            "strix-halo-mes-firmware"
+            "therock-amdsmi"
+            "therock-python"
+            "therock-python-wheels"
+            "therock-rocm"
+            "therock-rocm-env"
+            "tokenizers-cpp"
+            "torch-rocm"
+            "vllm-rocm"
+            "xrt"
+            "xrt-amdxdna"
+          ];
 
           genericPackages = {
             default = pkgs.llama-cpp;
@@ -726,6 +731,7 @@
             inherit (aiTools) pi;
             inherit (pkgs)
               llama-cpp
+              llama-cpp-master
               thunderbolt-ibverbs-bench-tools
               thunderbolt-ibverbs-perftest
               ;
@@ -748,7 +754,7 @@
               mlxRocm = pkgs.mlx-rocm;
               mlxLmRocm = mkMlxLm mlxRocm;
             in
-            lib.genAttrs localPackagesKeys (name: pkgs.${name})
+            lib.genAttrs (availableDerivationNames linuxLocalPackageNames) (name: pkgs.${name})
             // {
               inherit (pkgs)
                 linux-thunderbolt
@@ -788,6 +794,7 @@
                 src = inputs.ds4;
                 version = unstableInputVersion inputs.ds4;
               };
+              llama-cpp-master-rdma = pkgs.llama-cpp-master-rdma;
               mlx = mlxMetal;
               mlx-lm = mlxLm;
               mlx-metal = mlxMetalBackend;
@@ -831,6 +838,14 @@
                 "Run pi with provider settings from environment";
             llama-cli = ap pkgs.llama-cpp "llama-cli" "Run llama-cli";
             llama-server = ap pkgs.llama-cpp "llama-server" "Run llama-server";
+            llama-rpc-server = ap pkgs.llama-cpp "llama-rpc-server" "Run the llama.cpp RPC server";
+            llama-cli-master = ap pkgs.llama-cpp-master "llama-cli" "Run llama-cli from llama.cpp HEAD";
+            llama-server-master =
+              ap pkgs.llama-cpp-master "llama-server"
+                "Run llama-server from llama.cpp HEAD";
+            llama-rpc-server-master =
+              ap pkgs.llama-cpp-master "llama-rpc-server"
+                "Run the llama.cpp HEAD RPC server";
           };
 
           linuxApps = {
@@ -840,6 +855,9 @@
             llama-server-rocm =
               ap llamaRocmRuntime "llama-server"
                 "Run llama-server with ROCm (default target ${defaultRocmTarget.description})";
+            llama-rpc-server-rocm =
+              ap llamaRocmRuntime "llama-rpc-server"
+                "Run the llama.cpp RPC server with ROCm (default target ${defaultRocmTarget.description})";
             flm = ap pkgs.fastflowlm "flm" "Run the FastFlowLM CLI on AMD Ryzen AI NPUs";
             "strix-halo-vllm-pair-bench-${s}" =
               ap self.packages.${system}."strix-halo-vllm-pair-bench-${s}" "strix-halo-vllm-pair-bench-${s}"
@@ -905,6 +923,12 @@
               ds4-eval = ds4 "ds4-eval" "Run DwarfStar 4 eval with Metal";
               ds4-agent = ds4 "ds4-agent" "Run the DwarfStar 4 agent with Metal";
               ds4-download-model = ds4 "ds4-download-model" "Download DS4 DeepSeek V4 Flash GGUF weights";
+              llama-cli-master-rdma =
+                ap pkgs.llama-cpp-master-rdma "llama-cli"
+                  "Run llama-cli from llama.cpp HEAD with Apple RDMA support";
+              llama-rpc-server-master-rdma =
+                ap pkgs.llama-cpp-master-rdma "llama-rpc-server"
+                  "Run the llama.cpp HEAD RPC server with Apple RDMA support";
               mlx-lm = ap mlxLm "mlx_lm" "Run the MLX LM CLI";
               mlx-lm-generate = ap mlxLm "mlx_lm.generate" "Generate text with MLX LM";
               mlx-lm-chat = ap mlxLm "mlx_lm.chat" "Run the MLX LM chat CLI";

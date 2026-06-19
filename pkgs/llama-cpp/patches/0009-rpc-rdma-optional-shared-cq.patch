@@ -1,0 +1,48 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -158,6 +158,11 @@ static bool rdma_trace_io() {
+     return env && strcmp(env, "0") != 0;
+ }
+ 
++static bool rdma_shared_cq() {
++    const char * env = std::getenv("GGML_RDMA_SHARED_CQ");
++    return env && strcmp(env, "0") != 0;
++}
++
+ #ifdef __APPLE__
+ static bool rdma_darwin_leak_on_close() {
+     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+@@ -199,7 +204,9 @@ struct rdma_conn {
+         free(rx_buf);
+         if (qp)  ibv_destroy_qp(qp);
+-        if (scq) ibv_destroy_cq(scq);
+-        if (rcq) ibv_destroy_cq(rcq);
++        if (rcq && rcq != scq) {
++            ibv_destroy_cq(rcq);
++        }
++        if (scq) ibv_destroy_cq(scq);
+         if (pd)  ibv_dealloc_pd(pd);
+         if (ctx) ibv_close_device(ctx);
+     }
+@@ -445,12 +452,18 @@ bool socket_t::impl::rdma_probe() {
+     if (!rdma->pd) return rdma_probe_fail("ibv_alloc_pd");
+ 
+     GGML_LOG_INFO("RDMA probe: creating completion queues\n");
++    rdma->qp_type = rdma_qp_type();
+     errno = 0;
+-    rdma->scq = ibv_create_cq(ibctx, 16, nullptr, nullptr, 0);
+-    rdma->rcq = ibv_create_cq(ibctx, RDMA_RX_DEPTH + 4, nullptr, nullptr, 0);
++    if (rdma_shared_cq()) {
++        GGML_LOG_INFO("RDMA probe: using shared completion queue\n");
++        rdma->scq = ibv_create_cq(ibctx, RDMA_RX_DEPTH + 8, nullptr, nullptr, 0);
++        rdma->rcq = rdma->scq;
++    } else {
++        rdma->scq = ibv_create_cq(ibctx, 16, nullptr, nullptr, 0);
++        rdma->rcq = ibv_create_cq(ibctx, RDMA_RX_DEPTH + 4, nullptr, nullptr, 0);
++    }
+     if (!rdma->scq || !rdma->rcq) return rdma_probe_fail("ibv_create_cq");
+ 
+-    rdma->qp_type = rdma_qp_type();
+     ibv_qp_init_attr qia = {};
+     qia.send_cq = rdma->scq;
+     qia.recv_cq = rdma->rcq;

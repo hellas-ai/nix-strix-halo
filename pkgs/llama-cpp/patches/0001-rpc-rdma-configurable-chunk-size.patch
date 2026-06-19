@@ -9,7 +9,7 @@
 +static constexpr int    RDMA_RX_DEPTH      = 24;         // pre-posted recv ring
 @@ -49,0 +51,20 @@
 +static size_t rdma_align_alloc_size(size_t size) {
-+    static constexpr size_t ALIGN = 4096;
++    static constexpr size_t ALIGN = 16 * 1024;
 +    return ((size + ALIGN - 1) / ALIGN) * ALIGN;
 +}
 +
@@ -47,8 +47,8 @@
 @@ -296,2 +322,2 @@
 -    rdma->tx_buf = aligned_alloc(4096, RDMA_CHUNK);
 -    rdma->rx_buf = aligned_alloc(4096, static_cast<size_t>(RDMA_RX_DEPTH) * RDMA_CHUNK);
-+    rdma->tx_buf = aligned_alloc(4096, tx_alloc_bytes);
-+    rdma->rx_buf = aligned_alloc(4096, rx_alloc_bytes);
++    rdma->tx_buf = aligned_alloc(16 * 1024, tx_alloc_bytes);
++    rdma->rx_buf = aligned_alloc(16 * 1024, rx_alloc_bytes);
 @@ -300,2 +326,2 @@
 -    rdma->tx_mr = ibv_reg_mr(rdma->pd, rdma->tx_buf, RDMA_CHUNK, IBV_ACCESS_LOCAL_WRITE);
 -    rdma->rx_mr = ibv_reg_mr(rdma->pd, rdma->rx_buf, static_cast<size_t>(RDMA_RX_DEPTH) * RDMA_CHUNK,

@@ -1,0 +1,237 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -22,6 +22,7 @@
+ #include <cstring>
+ #include <mutex>
+ #include <optional>
++#include <vector>
+ 
+ #ifdef GGML_RPC_RDMA
+ #  include <infiniband/verbs.h>
+@@ -50,6 +51,8 @@
+ static constexpr size_t RDMA_DEFAULT_CHUNK = 256 * 1024; // 256 KiB per send/recv
+ static constexpr int    RDMA_RX_DEPTH      = 24;         // pre-posted recv ring
+ static constexpr size_t RDMA_GID_SIZE = 16;            // RoCE GID / IB GID is always 16 bytes
++static constexpr size_t RDMA_FRAME_HEADER = 8;         // magic + payload length
++static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
+ using rdma_gid_t = std::array<uint8_t, RDMA_GID_SIZE>;
+ 
+ static size_t rdma_align_alloc_size(size_t size) {
+@@ -154,6 +157,38 @@ static bool rdma_shared_cq() {
+     return env && strcmp(env, "0") != 0;
+ }
+ 
++static bool rdma_fixed_frames_env() {
++    const char * env = std::getenv("GGML_RDMA_FIXED_FRAMES");
++    return env && strcmp(env, "0") != 0;
++}
++
++static void rdma_store_u32_be(uint8_t * dst, uint32_t value) {
++    dst[0] = (uint8_t)(value >> 24);
++    dst[1] = (uint8_t)(value >> 16);
++    dst[2] = (uint8_t)(value >> 8);
++    dst[3] = (uint8_t)value;
++}
++
++static uint32_t rdma_load_u32_be(const uint8_t * src) {
++    return ((uint32_t)src[0] << 24) |
++           ((uint32_t)src[1] << 16) |
++           ((uint32_t)src[2] << 8) |
++           (uint32_t)src[3];
++}
++
++static void rdma_write_frame_header(uint8_t * dst, size_t payload_size) {
++    rdma_store_u32_be(dst, RDMA_FRAME_MAGIC);
++    rdma_store_u32_be(dst + 4, (uint32_t)payload_size);
++}
++
++static bool rdma_read_frame_header(const uint8_t * src, size_t * payload_size) {
++    if (rdma_load_u32_be(src) != RDMA_FRAME_MAGIC) {
++        return false;
++    }
++    *payload_size = rdma_load_u32_be(src + 4);
++    return true;
++}
++
+ #ifdef __APPLE__
+ static bool rdma_darwin_leak_on_close() {
+     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+@@ -178,11 +213,22 @@ struct rdma_conn {
+     uint32_t        max_inline = 0;
+     size_t          chunk_size = RDMA_DEFAULT_CHUNK;
+     enum ibv_qp_type qp_type = IBV_QPT_RC;
++    std::vector<uint8_t> rx_pending;
++    size_t          rx_pending_off = 0;
++    size_t          rx_pending_len = 0;
+ 
+     uint8_t * rx_slot(int i) const {
+         return static_cast<uint8_t *>(rx_buf) + static_cast<size_t>(i) * chunk_size;
+     }
+ 
++    bool fixed_frames() const {
++        return qp_type == IBV_QPT_UC || rdma_fixed_frames_env();
++    }
++
++    size_t frame_payload_size() const {
++        return chunk_size - RDMA_FRAME_HEADER;
++    }
++
+     bool post_rx(int i) {
+         struct ibv_sge sge = {};
+         sge.addr   = (uintptr_t)rx_slot(i);
+@@ -482,6 +528,10 @@ bool socket_t::impl::rdma_probe() {
+     if (!rdma->qp) return rdma_probe_fail("ibv_create_qp");
+     rdma->max_inline = qia.cap.max_inline_data;
+     rdma->chunk_size = rdma_chunk_size();
++    if (rdma->fixed_frames() && rdma->chunk_size <= RDMA_FRAME_HEADER) {
++        GGML_LOG_ERROR("RDMA fixed frames require chunk size > %zu\n", RDMA_FRAME_HEADER);
++        return rdma_probe_fail("fixed-frame chunk size");
++    }
+     const size_t rx_bytes = static_cast<size_t>(RDMA_RX_DEPTH) * rdma->chunk_size;
+     const size_t tx_alloc_bytes = rdma_align_alloc_size(rdma->chunk_size);
+     const size_t rx_alloc_bytes = rdma_align_alloc_size(rx_bytes);
+@@ -490,6 +540,9 @@ bool socket_t::impl::rdma_probe() {
+     rdma->tx_buf = aligned_alloc(16 * 1024, tx_alloc_bytes);
+     rdma->rx_buf = aligned_alloc(16 * 1024, rx_alloc_bytes);
+     if (!rdma->tx_buf || !rdma->rx_buf) return rdma_probe_fail("aligned_alloc");
++    if (rdma->fixed_frames()) {
++        rdma->rx_pending.resize(rdma->frame_payload_size());
++    }
+ 
+     GGML_LOG_INFO("RDMA probe: registering memory\n");
+     errno = 0;
+@@ -512,9 +565,10 @@ bool socket_t::impl::rdma_probe() {
+     } else if (gid_version == IBV_GID_TYPE_ROCE_V1) {
+         ver_str = " RoCEv1";
+     }
+-    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu mtu=%d\n",
++    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu frame=%s mtu=%d\n",
+                   matched_dev, gid_idx, ver_str, rdma_qp_type_name(rdma->qp_type),
+                   rdma_local.qpn, rdma->max_inline, rdma->chunk_size,
++                  rdma->fixed_frames() ? "fixed" : "raw",
+                   128 << rdma_local.path_mtu);
+     GGML_LOG_INFO("RDMA local PSN: %u\n", rdma_local.psn);
+     return true;
+@@ -627,20 +681,35 @@ bool socket_t::impl::rdma_send(const void * data, size_t size) {
+     rdma_conn * c = rdma.get();
+     const uint8_t * src = (const uint8_t *)data;
+     size_t rem = size;
++    const bool fixed_frames = c->fixed_frames();
++    const size_t max_payload = fixed_frames ? c->frame_payload_size() : c->chunk_size;
+     if (rdma_trace_io()) {
+-        GGML_LOG_ERROR("RDMA send begin: size=%zu chunk_size=%zu\n", size, c->chunk_size);
++        GGML_LOG_ERROR("RDMA send begin: size=%zu chunk_size=%zu frame=%s\n",
++                       size, c->chunk_size, fixed_frames ? "fixed" : "raw");
+     }
+     while (rem > 0) {
+-        size_t chunk = std::min(rem, c->chunk_size);
++        size_t chunk = std::min(rem, max_payload);
++        size_t wire_chunk = fixed_frames ? c->chunk_size : chunk;
+ 
+         struct ibv_sge sge = {};
+         struct ibv_send_wr wr = {}, * bad = nullptr;
+-        wr.wr_id   = chunk;
++        wr.wr_id   = wire_chunk;
+         wr.opcode  = IBV_WR_SEND;
+         wr.sg_list = &sge;
+         wr.num_sge = 1;
+ 
+-        if (chunk <= c->max_inline) {
++        if (fixed_frames) {
++            uint8_t * frame = static_cast<uint8_t *>(c->tx_buf);
++            rdma_write_frame_header(frame, chunk);
++            memcpy(frame + RDMA_FRAME_HEADER, src, chunk);
++            if (chunk < max_payload) {
++                memset(frame + RDMA_FRAME_HEADER + chunk, 0, max_payload - chunk);
++            }
++            sge.addr   = (uintptr_t)c->tx_buf;
++            sge.length = wire_chunk;
++            sge.lkey   = c->tx_mr->lkey;
++            wr.send_flags = IBV_SEND_SIGNALED;
++        } else if (chunk <= c->max_inline) {
+             sge.addr   = (uintptr_t)src;
+             sge.length = chunk;
+             wr.send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+@@ -653,13 +722,14 @@ bool socket_t::impl::rdma_send(const void * data, size_t size) {
+         }
+ 
+         if (rdma_trace_io()) {
+-            GGML_LOG_ERROR("RDMA post_send: chunk=%zu inline=%d lkey=0x%x rem=%zu\n",
+-                           chunk, (wr.send_flags & IBV_SEND_INLINE) != 0, sge.lkey, rem);
++            GGML_LOG_ERROR("RDMA post_send: chunk=%zu wire_chunk=%zu inline=%d lkey=0x%x rem=%zu\n",
++                           chunk, wire_chunk, (wr.send_flags & IBV_SEND_INLINE) != 0,
++                           sge.lkey, rem);
+         }
+         errno = 0;
+         if (ibv_post_send(c->qp, &wr, &bad) != 0) {
+-            GGML_LOG_ERROR("RDMA post_send failed: chunk=%zu errno=%d (%s)\n",
+-                           chunk, errno, strerror(errno));
++            GGML_LOG_ERROR("RDMA post_send failed: chunk=%zu wire_chunk=%zu errno=%d (%s)\n",
++                           chunk, wire_chunk, errno, strerror(errno));
+             return false;
+         }
+         struct ibv_wc wc;
+@@ -679,10 +749,26 @@ bool socket_t::impl::rdma_recv(void * data, size_t size) {
+     rdma_conn * c = rdma.get();
+     uint8_t * dst = (uint8_t *)data;
+     size_t rem = size;
++    const bool fixed_frames = c->fixed_frames();
+     if (rdma_trace_io()) {
+-        GGML_LOG_ERROR("RDMA recv begin: size=%zu chunk_size=%zu\n", size, c->chunk_size);
++        GGML_LOG_ERROR("RDMA recv begin: size=%zu chunk_size=%zu frame=%s\n",
++                       size, c->chunk_size, fixed_frames ? "fixed" : "raw");
+     }
+     while (rem > 0) {
++        if (fixed_frames && c->rx_pending_off < c->rx_pending_len) {
++            size_t pending = c->rx_pending_len - c->rx_pending_off;
++            size_t copy = std::min(pending, rem);
++            memcpy(dst, c->rx_pending.data() + c->rx_pending_off, copy);
++            c->rx_pending_off += copy;
++            if (c->rx_pending_off == c->rx_pending_len) {
++                c->rx_pending_off = 0;
++                c->rx_pending_len = 0;
++            }
++            dst += copy;
++            rem -= copy;
++            continue;
++        }
++
+         struct ibv_wc wc;
+         if (!rdma_poll(c->rcq, &wc)) return false;
+ 
+@@ -692,6 +778,35 @@ bool socket_t::impl::rdma_recv(void * data, size_t size) {
+             GGML_LOG_ERROR("RDMA recv wc: slot=%d got=%zu rem=%zu chunk_size=%zu\n",
+                            slot, got, rem, c->chunk_size);
+         }
++        if (fixed_frames) {
++            if (got != c->chunk_size) {
++                GGML_LOG_ERROR("RDMA fixed frame got unexpected byte count: got=%zu expected=%zu\n",
++                               got, c->chunk_size);
++                return false;
++            }
++
++            const uint8_t * frame = c->rx_slot(slot);
++            size_t payload = 0;
++            if (!rdma_read_frame_header(frame, &payload) || payload > c->frame_payload_size()) {
++                GGML_LOG_ERROR("RDMA fixed frame has invalid header: got=%zu payload=%zu\n",
++                               got, payload);
++                return false;
++            }
++
++            size_t copy = std::min(payload, rem);
++            memcpy(dst, frame + RDMA_FRAME_HEADER, copy);
++            if (payload > copy) {
++                c->rx_pending_off = 0;
++                c->rx_pending_len = payload - copy;
++                memcpy(c->rx_pending.data(), frame + RDMA_FRAME_HEADER + copy, c->rx_pending_len);
++            }
++
++            if (!c->post_rx(slot)) return false;
++
++            dst += copy;
++            rem -= copy;
++            continue;
++        }
+         if (got > rem) {
+             GGML_LOG_ERROR("RDMA recv got more bytes than requested: got=%zu rem=%zu\n", got, rem);
+             return false;

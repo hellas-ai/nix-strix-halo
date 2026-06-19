@@ -1,0 +1,69 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -108,6 +108,32 @@ static uint16_t rdma_remote_lid() {
+     return static_cast<uint16_t>(parsed);
+ }
+ 
++static enum ibv_mtu rdma_path_mtu(enum ibv_mtu active_mtu) {
++    const char * env = std::getenv("GGML_RDMA_PATH_MTU");
++    if (!env || !*env) {
++        return active_mtu;
++    }
++
++    errno = 0;
++    char * end = nullptr;
++    unsigned long parsed = std::strtoul(env, &end, 10);
++    if (errno != 0 || end == env || *end != '\0') {
++        GGML_LOG_ERROR("Ignoring invalid GGML_RDMA_PATH_MTU=%s\n", env);
++        return active_mtu;
++    }
++
++    switch (parsed) {
++        case 256:  return IBV_MTU_256;
++        case 512:  return IBV_MTU_512;
++        case 1024: return IBV_MTU_1024;
++        case 2048: return IBV_MTU_2048;
++        case 4096: return IBV_MTU_4096;
++        default:
++            GGML_LOG_ERROR("Ignoring invalid GGML_RDMA_PATH_MTU=%s\n", env);
++            return active_mtu;
++    }
++}
++
+ #ifdef __APPLE__
+ static bool rdma_darwin_leak_on_close() {
+     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+@@ -374,7 +402,7 @@ bool socket_t::impl::rdma_probe() {
+             gid_idx = found_gid;
+             gid_version = found_version;
+             matched_dev = dn;
+-            rdma_local.path_mtu = pa.active_mtu;
++            rdma_local.path_mtu = rdma_path_mtu(pa.active_mtu);
+             break;
+         }
+         ibv_close_device(ctx);
+@@ -449,9 +477,10 @@ bool socket_t::impl::rdma_probe() {
+     } else if (gid_version == IBV_GID_TYPE_ROCE_V1) {
+         ver_str = " RoCEv1";
+     }
+-    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu\n",
++    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu mtu=%d\n",
+                   matched_dev, gid_idx, ver_str, rdma_qp_type_name(rdma->qp_type),
+-                  rdma_local.qpn, rdma->max_inline, rdma->chunk_size);
++                  rdma_local.qpn, rdma->max_inline, rdma->chunk_size,
++                  128 << rdma_local.path_mtu);
+     return true;
+ }
+ 
+@@ -469,10 +498,7 @@ bool socket_t::impl::rdma_activate(uint32_t remote_qpn, uint32_t remote_psn, con
+         a.qp_state        = IBV_QPS_INIT;
+         a.port_num        = rdma_local.ib_port;
+         a.pkey_index      = 0;
+-        a.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE;
+-        if (!use_uc) {
+-            a.qp_access_flags |= IBV_ACCESS_REMOTE_READ;
+-        }
++        a.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE;
+         errno = 0;
+         if (ibv_modify_qp(rdma->qp, &a,
+                 IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS) != 0) {

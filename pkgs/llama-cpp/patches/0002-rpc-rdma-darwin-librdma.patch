@@ -1,0 +1,57 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -27,6 +27,9 @@
+ #  ifndef _WIN32
+ #    include <poll.h>
+ #  endif
++#  ifndef POLLRDHUP
++#    define POLLRDHUP 0
++#  endif
+ #endif // GGML_RPC_RDMA
+ 
+ #ifdef _WIN32
+--- a/ggml/src/ggml-rpc/CMakeLists.txt
++++ b/ggml/src/ggml-rpc/CMakeLists.txt
+@@ -9,24 +9,31 @@
+     target_link_libraries(ggml-rpc PRIVATE ws2_32)
+ endif()
+ 
+-# RDMA auto-detection (Linux only, requires libibverbs)
+-if (NOT WIN32 AND NOT APPLE)
+-    find_library(IBVERBS_LIB ibverbs)
++# RDMA auto-detection. Linux uses libibverbs from rdma-core; macOS 26 exposes
++# compatible verbs headers through the SDK and an umbrella librdma.dylib.
++if (WIN32)
++    set(GGML_RPC_RDMA OFF CACHE BOOL "RDMA not available on this platform" FORCE)
++else()
++    if (APPLE)
++        set(GGML_RPC_RDMA_LIBRARY_NAME rdma)
++    else()
++        set(GGML_RPC_RDMA_LIBRARY_NAME ibverbs)
++    endif()
++
++    find_library(GGML_RPC_RDMA_LIB ${GGML_RPC_RDMA_LIBRARY_NAME})
+-    if (IBVERBS_LIB)
++    if (GGML_RPC_RDMA_LIB)
+         option(GGML_RPC_RDMA "ggml: enable RDMA transport for RPC" ON)
+     else()
+         option(GGML_RPC_RDMA "ggml: enable RDMA transport for RPC" OFF)
+     endif()
+-else()
+-    set(GGML_RPC_RDMA OFF CACHE BOOL "RDMA not available on this platform" FORCE)
+ endif()
+ 
+ if (GGML_RPC_RDMA)
+-    if (NOT IBVERBS_LIB)
+-        find_library(IBVERBS_LIB ibverbs REQUIRED)
++    if (NOT GGML_RPC_RDMA_LIB)
++        find_library(GGML_RPC_RDMA_LIB ${GGML_RPC_RDMA_LIBRARY_NAME} REQUIRED)
+     endif()
+     target_compile_definitions(ggml-rpc PRIVATE GGML_RPC_RDMA)
+-    target_link_libraries(ggml-rpc PRIVATE ${IBVERBS_LIB})
+-    message(STATUS "  RDMA transport enabled (auto-detected)")
++    target_link_libraries(ggml-rpc PRIVATE ${GGML_RPC_RDMA_LIB})
++    message(STATUS "  RDMA transport enabled (${GGML_RPC_RDMA_LIBRARY_NAME})")
+ else()
+     message(STATUS "  RDMA transport disabled")
+ endif()

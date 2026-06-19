@@ -1,0 +1,199 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -72,6 +72,25 @@
+     return static_cast<size_t>(parsed);
+ }
+ 
++static enum ibv_qp_type rdma_qp_type() {
++    const char * env = std::getenv("GGML_RDMA_QP_TYPE");
++    if (env && (strcmp(env, "UC") == 0 || strcmp(env, "uc") == 0)) {
++        return IBV_QPT_UC;
++    }
++    return IBV_QPT_RC;
++}
++
++static const char * rdma_qp_type_name(enum ibv_qp_type qp_type) {
++    return qp_type == IBV_QPT_UC ? "UC" : "RC";
++}
++
++#ifdef __APPLE__
++static bool rdma_darwin_leak_on_close() {
++    const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
++    return env && strcmp(env, "0") != 0;
++}
++#endif
++
+ struct rdma_conn {
+     struct ibv_context * ctx = nullptr;
+     struct ibv_pd * pd  = nullptr;
+@@ -88,6 +107,7 @@
+ 
+     uint32_t        max_inline = 0;
+     size_t          chunk_size = RDMA_DEFAULT_CHUNK;
++    enum ibv_qp_type qp_type = IBV_QPT_RC;
+ 
+     uint8_t * rx_slot(int i) const {
+         return static_cast<uint8_t *>(rx_buf) + static_cast<size_t>(i) * chunk_size;
+@@ -102,7 +122,12 @@
+         wr.wr_id   = (uint64_t)i;
+         wr.sg_list = &sge;
+         wr.num_sge = 1;
+-        return ibv_post_recv(qp, &wr, &bad) == 0;
++        int ret = ibv_post_recv(qp, &wr, &bad);
++        if (ret != 0) {
++            GGML_LOG_ERROR("RDMA post_recv failed: slot=%d ret=%d errno=%d (%s)\n",
++                           i, ret, errno, strerror(errno));
++        }
++        return ret == 0;
+     }
+ 
+     ~rdma_conn() {
+@@ -167,7 +192,15 @@
+ 
+ socket_t::impl::~impl() {
+ #ifdef GGML_RPC_RDMA
+-    rdma.reset();
++#ifdef __APPLE__
++    if (rdma && rdma_darwin_leak_on_close()) {
++        GGML_LOG_ERROR("RDMA Darwin close: releasing verbs state because GGML_RDMA_DARWIN_LEAK_ON_CLOSE is set\n");
++        (void)rdma.release();
++    } else
++#endif
++    {
++        rdma.reset();
++    }
+ #endif // GGML_RPC_RDMA
+     LOG_DBG("[%s] closing socket %d\n", __func__, this->fd);
+ #ifdef _WIN32
+@@ -354,17 +387,18 @@
+     rdma->rcq = ibv_create_cq(ibctx, RDMA_RX_DEPTH + 4, nullptr, nullptr, 0);
+     if (!rdma->scq || !rdma->rcq) return rdma_probe_fail("ibv_create_cq");
+ 
++    rdma->qp_type = rdma_qp_type();
+     ibv_qp_init_attr qia = {};
+     qia.send_cq = rdma->scq;
+     qia.recv_cq = rdma->rcq;
+-    qia.qp_type = IBV_QPT_RC;
++    qia.qp_type = rdma->qp_type;
+     qia.cap.max_send_wr     = 4;
+     qia.cap.max_recv_wr     = RDMA_RX_DEPTH + 4;
+     qia.cap.max_send_sge    = 1;
+     qia.cap.max_recv_sge    = 1;
+-    qia.cap.max_inline_data = 256;
++    qia.cap.max_inline_data = rdma->qp_type == IBV_QPT_UC ? 0 : 256;
+ 
+-    GGML_LOG_INFO("RDMA probe: creating RC queue pair\n");
++    GGML_LOG_INFO("RDMA probe: creating %s queue pair\n", rdma_qp_type_name(rdma->qp_type));
+     errno = 0;
+     rdma->qp = ibv_create_qp(rdma->pd, &qia);
+     if (!rdma->qp) return rdma_probe_fail("ibv_create_qp");
+@@ -400,29 +434,41 @@
+     } else if (gid_version == IBV_GID_TYPE_ROCE_V1) {
+         ver_str = " RoCEv1";
+     }
+-    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qpn=%u inline=%u chunk=%zu\n",
+-                  matched_dev, gid_idx, ver_str, rdma_local.qpn, rdma->max_inline, rdma->chunk_size);
++    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu\n",
++                  matched_dev, gid_idx, ver_str, rdma_qp_type_name(rdma->qp_type),
++                  rdma_local.qpn, rdma->max_inline, rdma->chunk_size);
+     return true;
+ }
+ 
+ // Phase 2: Given remote QPN/PSN/GID, transition QP: RESET->INIT->pre-post->RTR->RTS.
+ // On success, the connection is live and ready for rdma_send/rdma_recv.
+ bool socket_t::impl::rdma_activate(uint32_t remote_qpn, uint32_t remote_psn, const uint8_t * remote_gid) {
++    const bool use_uc = rdma->qp_type == IBV_QPT_UC;
++    GGML_LOG_INFO("RDMA activate starting: qp_type=%s qpn=%u->%u\n",
++                  rdma_qp_type_name(rdma->qp_type), rdma_local.qpn, remote_qpn);
+     // RESET -> INIT
+     {
+         struct ibv_qp_attr a = {};
+         a.qp_state        = IBV_QPS_INIT;
+         a.port_num        = rdma_local.ib_port;
+         a.pkey_index      = 0;
+-        a.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE;
++        a.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE;
++        if (!use_uc) {
++            a.qp_access_flags |= IBV_ACCESS_REMOTE_READ;
++        }
++        errno = 0;
+         if (ibv_modify_qp(rdma->qp, &a,
+                 IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS) != 0) {
++            GGML_LOG_ERROR("RDMA activate failed at INIT: errno=%d (%s)\n", errno, strerror(errno));
+             return false;
+         }
+     }
+ 
+     for (int i = 0; i < RDMA_RX_DEPTH; i++) {
+-        if (!rdma->post_rx(i)) return false;
++        if (!rdma->post_rx(i)) {
++            GGML_LOG_ERROR("RDMA activate failed posting receive slot %d\n", i);
++            return false;
++        }
+     }
+ 
+     // INIT -> RTR
+@@ -432,17 +478,22 @@
+         a.path_mtu           = rdma_local.path_mtu;
+         a.dest_qp_num        = remote_qpn;
+         a.rq_psn             = remote_psn;
+-        a.max_dest_rd_atomic = 1;
+-        a.min_rnr_timer      = 1;
+         a.ah_attr.is_global  = 1;
+         memcpy(&a.ah_attr.grh.dgid, remote_gid, RDMA_GID_SIZE);
+         a.ah_attr.grh.hop_limit  = 1;
+         a.ah_attr.grh.sgid_index = rdma_local.gid_idx;
+         a.ah_attr.dlid       = 0;
+         a.ah_attr.port_num   = rdma_local.ib_port;
+-        if (ibv_modify_qp(rdma->qp, &a,
+-                IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
+-                IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER) != 0) {
++        int flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
++                    IBV_QP_DEST_QPN | IBV_QP_RQ_PSN;
++        if (!use_uc) {
++            a.max_dest_rd_atomic = 1;
++            a.min_rnr_timer      = 1;
++            flags |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
++        }
++        errno = 0;
++        if (ibv_modify_qp(rdma->qp, &a, flags) != 0) {
++            GGML_LOG_ERROR("RDMA activate failed at RTR: errno=%d (%s)\n", errno, strerror(errno));
+             return false;
+         }
+     }
+@@ -451,20 +502,26 @@
+     {
+         struct ibv_qp_attr a = {};
+         a.qp_state     = IBV_QPS_RTS;
+-        a.timeout      = 14;
+-        a.retry_cnt    = 7;
+-        a.rnr_retry    = 7;
+         a.sq_psn       = rdma_local.psn;
+-        a.max_rd_atomic = 1;
+-        if (ibv_modify_qp(rdma->qp, &a,
+-                IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
+-                IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC) != 0) {
++        int flags = IBV_QP_STATE | IBV_QP_SQ_PSN;
++        if (!use_uc) {
++            a.timeout       = 14;
++            a.retry_cnt     = 7;
++            a.rnr_retry     = 7;
++            a.max_rd_atomic = 1;
++            flags |= IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
++                     IBV_QP_MAX_QP_RD_ATOMIC;
++        }
++        errno = 0;
++        if (ibv_modify_qp(rdma->qp, &a, flags) != 0) {
++            GGML_LOG_ERROR("RDMA activate failed at RTS: errno=%d (%s)\n", errno, strerror(errno));
+             return false;
+         }
+     }
+ 
+-    GGML_LOG_INFO("RDMA activated: qpn=%u->%u mtu=%d rx_depth=%d\n",
+-                  rdma_local.qpn, remote_qpn, 128 << rdma_local.path_mtu, RDMA_RX_DEPTH);
++    GGML_LOG_INFO("RDMA activated: qp_type=%s qpn=%u->%u mtu=%d rx_depth=%d\n",
++                  rdma_qp_type_name(rdma->qp_type), rdma_local.qpn, remote_qpn,
++                  128 << rdma_local.path_mtu, RDMA_RX_DEPTH);
+     return true;
+ }
+ 

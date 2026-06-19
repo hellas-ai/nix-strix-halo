@@ -21,188 +21,247 @@
 
 final: prev:
 
-lib.optionalAttrs prev.stdenv.isLinux (
-  let
-    ecPackages = prev.callPackage ../pkgs/ec-su-axb35.nix {
-      ec-su-axb35-src = inputs.ec-su-axb35;
-    };
+let
+  suffix = rocmTarget.packageSuffix;
+  firstBuildTarget = builtins.head rocmTarget.buildTargets;
 
-    rocmOverride = {
-      rocmSupport = true;
-      rpcSupport = true;
-      inherit (final) rocmPackages;
-      inherit (rocmTarget) rocmGpuTargets;
-    };
-    vulkanOverride = {
-      vulkanSupport = true;
-      rpcSupport = true;
-    };
-    cudaOverride = {
-      cudaSupport = true;
-      rpcSupport = true;
-    };
-    suffix = rocmTarget.packageSuffix;
-    firstBuildTarget = builtins.head rocmTarget.buildTargets;
+  rocmOverride = {
+    rocmSupport = true;
+    rpcSupport = true;
+    inherit (final) rocmPackages;
+    inherit (rocmTarget) rocmGpuTargets;
+  };
+  vulkanOverride = {
+    vulkanSupport = true;
+    rpcSupport = true;
+  };
+  cudaOverride = {
+    cudaSupport = true;
+    rpcSupport = true;
+  };
 
-    sourceHas = path: sources != null && lib.hasAttrByPath path sources;
-    sourceHasTherockRocm = sourceHas [
-      "rocm"
-      "linux"
-      suffix
-    ];
-    sourceHasTherockPython = sourceHas [
-      "pythonWheels"
-      "targets"
-      suffix
-    ];
-    finalHas = name: builtins.hasAttr name final;
+  sourceHas = path: sources != null && lib.hasAttrByPath path sources;
+  sourceHasTherockRocm = sourceHas [
+    "rocm"
+    "linux"
+    suffix
+  ];
+  sourceHasTherockPython = sourceHas [
+    "pythonWheels"
+    "targets"
+    suffix
+  ];
+  finalHas = name: builtins.hasAttr name final;
 
-    rocmProviderHasTherockAttrs = rocmProvider == "therock-bin" || rocmProvider == "therock-source";
-    pythonProviderHasTherockAttrs = pythonProvider == "therock-wheels";
-    supportsTherockRocm =
-      rocmProviderHasTherockAttrs
-      && (if sources != null then sourceHasTherockRocm else finalHas "therock-rocm-${suffix}");
-    supportsTherockPython =
-      pythonProviderHasTherockAttrs
-      && (if sources != null then sourceHasTherockPython else finalHas "therock-python-${suffix}");
+  rocmProviderHasTherockAttrs = rocmProvider == "therock-bin" || rocmProvider == "therock-source";
+  pythonProviderHasTherockAttrs = pythonProvider == "therock-wheels";
+  supportsTherockRocm =
+    rocmProviderHasTherockAttrs
+    && (if sources != null then sourceHasTherockRocm else finalHas "therock-rocm-${suffix}");
+  supportsTherockPython =
+    pythonProviderHasTherockAttrs
+    && (if sources != null then sourceHasTherockPython else finalHas "therock-python-${suffix}");
 
-    georgewhewellMaintained =
-      drv:
-      drv.overrideAttrs (old: {
-        meta = (old.meta or { }) // {
-          maintainers = with lib.maintainers; [ georgewhewell ];
-        };
-      });
-
-    # Compose Strix llama.cpp variants with the thunderbolt-ibverbs
-    # rdma-core overlay so ggml's RPC backend builds its RDMA transport.
-    # Keep this in one helper so ROCm/Vulkan and master/current variants
-    # do not drift.
-    withRdmaRpc =
-      drv:
-      drv.overrideAttrs (old: {
-        buildInputs = (old.buildInputs or [ ]) ++ [ final.rdma-core-usb4 ];
-        cmakeFlags = (old.cmakeFlags or [ ]) ++ [
-          (lib.cmakeBool "GGML_RPC_RDMA" true)
-        ];
-      });
-
-    masterRev = inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown";
-    # llama-cpp-master is the upstream HEAD variant. Override is via
-    # `.overrideAttrs` (the package doesn't expose `src` through .override),
-    # but `.override` composes through it — `llamaCppMaster.override
-    # { rocmSupport = true; ... }` re-runs nixpkgs' llama-cpp with new
-    # args and re-applies these attrs on top, so the rocm/vulkan/cuda
-    # variants of master fall out of one master-src definition.
-    llamaCppMaster = prev.llama-cpp.overrideAttrs (old: {
-      pname = "llama-cpp-master";
-      version = "master-${masterRev}";
-      src = inputs.llama-cpp-master;
-      npmDeps = null;
-      nativeBuildInputs = lib.filter (x: x.pname or "" != "npm-config-hook") (
-        old.nativeBuildInputs or [ ]
-      );
-      preConfigure = ''
-        prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${masterRev}"
-      '';
-      cmakeFlags = (old.cmakeFlags or [ ]) ++ [
-        (lib.cmakeBool "LLAMA_BUILD_UI" false)
-        (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
-      ];
-      patches = (old.patches or [ ]) ++ [
-        ../pkgs/llama-cpp/patches/0001-rpc-rdma-configurable-chunk-size.patch
-      ];
+  georgewhewellMaintained =
+    drv:
+    drv.overrideAttrs (old: {
       meta = (old.meta or { }) // {
         maintainers = with lib.maintainers; [ georgewhewell ];
       };
     });
 
-    # ROCm packages compile hundreds-to-thousands of HIP kernels via amdclang;
-    # tag them so Hydra schedules them on a `big-parallel`-advertising builder.
-    bigParallel =
-      drv:
-      drv.overrideAttrs (old: {
-        requiredSystemFeatures = (old.requiredSystemFeatures or [ ]) ++ [ "big-parallel" ];
-      });
+  fixDarwinLlamaRpcAlias =
+    drv:
+    drv.overrideAttrs (old: {
+      postFixup =
+        (old.postFixup or "")
+        + lib.optionalString prev.stdenv.hostPlatform.isDarwin ''
+          for bin in "$out"/bin/rpc-server "$out"/bin/llama-rpc-server; do
+            if [ -x "$bin" ] && ! otool -l "$bin" | grep -Fq "$out/lib"; then
+              install_name_tool -add_rpath "$out/lib" "$bin"
+            fi
+          done
+        '';
+    });
 
-    setPname =
-      pname: drv:
-      drv.overrideAttrs (_: {
-        inherit pname;
-      });
-  in
-  {
-    ec-su-axb35 = ecPackages.kernelModule;
-    ec-su-axb35-monitor = ecPackages.monitor;
-    strix-halo-mes-firmware = prev.callPackage ../pkgs/strix-halo-mes-firmware.nix { };
-    tokenizers-cpp = prev.callPackage ../pkgs/tokenizers-cpp { };
+  withoutLlamaUi =
+    drv:
+    drv.overrideAttrs (old: {
+      npmDeps = null;
+      nativeBuildInputs = lib.filter (x: x.pname or "" != "npm-config-hook") (
+        old.nativeBuildInputs or [ ]
+      );
+      preConfigure = ''
+        prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=$(cat COMMIT)"
+      '';
+      cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+        (lib.cmakeBool "LLAMA_BUILD_UI" false)
+      ];
+    });
 
-    xrt = prev.callPackage ../pkgs/xrt {
-      src = inputs.xrt-src;
-      version = inputVersion "2.21" inputs.xrt-src;
-      xdnaSrc = inputs.xdna-driver-src;
-      xdnaVersion = inputVersion "1.7" inputs.xdna-driver-src;
-    };
-    xrt-amdxdna = final.xrt.xdna;
+  localLlamaCpp =
+    args:
+    georgewhewellMaintained (fixDarwinLlamaRpcAlias (withoutLlamaUi (prev.llama-cpp.override args)));
 
-    fastflowlm = prev.callPackage ../pkgs/fastflowlm {
-      inherit (final) tokenizers-cpp xrt;
-      src = inputs.fastflowlm;
-    };
+  llamaCpp = localLlamaCpp { rpcSupport = true; };
 
-    llama-cpp-rocm = bigParallel (
-      setPname "llama-cpp-rocm-${suffix}" (
-        withRdmaRpc (georgewhewellMaintained (prev.llama-cpp.override rocmOverride))
-      )
-    );
-    llama-cpp-vulkan = withRdmaRpc (georgewhewellMaintained (prev.llama-cpp.override vulkanOverride));
-    llama-cpp-cuda = georgewhewellMaintained (prev.llama-cpp.override cudaOverride);
+  masterRev = inputs.llama-cpp-master.shortRev or inputs.llama-cpp-master.rev or "unknown";
+  # llama-cpp-master is the upstream HEAD variant. Override is via
+  # `.overrideAttrs` (the package doesn't expose `src` through .override),
+  # but `.override` composes through it — `llamaCppMaster.override
+  # { rocmSupport = true; ... }` re-runs nixpkgs' llama-cpp with new
+  # args and re-applies these attrs on top, so the rocm/vulkan/cuda
+  # variants of master fall out of one master-src definition.
+  llamaCppMaster = llamaCpp.overrideAttrs (old: {
+    pname = "llama-cpp-master";
+    version = "master-${masterRev}";
+    src = inputs.llama-cpp-master;
+    preConfigure = ''
+      prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${masterRev}"
+    '';
+    cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+      (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
+    ];
+    patches = (old.patches or [ ]) ++ [
+      ../pkgs/llama-cpp/patches/0001-rpc-rdma-configurable-chunk-size.patch
+      ../pkgs/llama-cpp/patches/0002-rpc-rdma-darwin-librdma.patch
+      ../pkgs/llama-cpp/patches/0003-rpc-rdma-log-probe-and-avoid-darwin-fallback-hang.patch
+      ../pkgs/llama-cpp/patches/0004-rpc-rdma-selectable-uc-qp.patch
+      ../pkgs/llama-cpp/patches/0005-rpc-rdma-remote-lid-env.patch
+      ../pkgs/llama-cpp/patches/0006-rpc-rdma-mtu-and-uc-init-shape.patch
+      ../pkgs/llama-cpp/patches/0007-rpc-rdma-psn-env.patch
+      ../pkgs/llama-cpp/patches/0008-rpc-rdma-trace-io.patch
+      ../pkgs/llama-cpp/patches/0009-rpc-rdma-optional-shared-cq.patch
+      ../pkgs/llama-cpp/patches/0010-rpc-rdma-fixed-frame-stream.patch
+      ../pkgs/llama-cpp/patches/0011-rpc-keep-registry-socket-alive.patch
+      ../pkgs/llama-cpp/patches/0012-rpc-rdma-configurable-rx-depth.patch
+      ../pkgs/llama-cpp/patches/0013-rpc-server-one-shot-env.patch
+      ../pkgs/llama-cpp/patches/0014-rpc-rdma-detect-tcp-close-while-polling.patch
+      ../pkgs/llama-cpp/patches/0015-rpc-rdma-fixed-frame-tx-ring.patch
+      ../pkgs/llama-cpp/patches/0016-rpc-rdma-configurable-tx-depth.patch
+      ../pkgs/llama-cpp/patches/0017-rpc-rdma-fixed-frame-ack.patch
+    ];
+  });
+
+  # Compose Strix llama.cpp variants with the thunderbolt-ibverbs
+  # rdma-core overlay so ggml's RPC backend builds its RDMA transport.
+  withRdmaRpc =
+    drv:
+    drv.overrideAttrs (old: {
+      buildInputs = (old.buildInputs or [ ]) ++ [ final.rdma-core-usb4 ];
+      cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+        (lib.cmakeBool "GGML_RPC_RDMA" true)
+      ];
+    });
+
+  # macOS 26 exposes Apple Thunderbolt RDMA through the SDK's infiniband
+  # headers and umbrella librdma.dylib. This is only for Darwin builds; Linux
+  # continues to use rdma-core-usb4 above.
+  withDarwinRdmaRpc =
+    drv:
+    drv.overrideAttrs (old: {
+      buildInputs = (old.buildInputs or [ ]) ++ [ final.apple-sdk_26 ];
+      cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+        (lib.cmakeBool "GGML_RPC_RDMA" true)
+      ];
+    });
+
+  # ROCm packages compile hundreds-to-thousands of HIP kernels via amdclang;
+  # tag them so Hydra schedules them on a `big-parallel`-advertising builder.
+  bigParallel =
+    drv:
+    drv.overrideAttrs (old: {
+      requiredSystemFeatures = (old.requiredSystemFeatures or [ ]) ++ [ "big-parallel" ];
+    });
+
+  setPname =
+    pname: drv:
+    drv.overrideAttrs (_: {
+      inherit pname;
+    });
+
+  commonPackages = {
+    llama-cpp = llamaCpp;
     llama-cpp-master = llamaCppMaster;
-    llama-cpp-master-rocm = bigParallel (
-      setPname "llama-cpp-master-rocm-${suffix}" (
-        withRdmaRpc (georgewhewellMaintained (llamaCppMaster.override rocmOverride))
-      )
-    );
-    llama-cpp-master-vulkan = withRdmaRpc (
-      georgewhewellMaintained (llamaCppMaster.override vulkanOverride)
-    );
-    llama-cpp-master-cuda = georgewhewellMaintained (llamaCppMaster.override cudaOverride);
-  }
-  // lib.optionalAttrs supportsTherockRocm {
-    ds4-rocm = bigParallel (
-      prev.callPackage ../pkgs/ds4-rocm {
-        src = inputs.ds4-hip;
-        rocmSdk = final."therock-rocm-${suffix}";
-        version = inputVersion "experimental" inputs.ds4-hip;
-        inherit (rocmTarget) packageSuffix;
-        offloadArch = firstBuildTarget;
-        hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
-      }
-    );
+  };
 
-    mlx-rocm = bigParallel (
-      final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
-        inherit (inputs) mlx-src;
-        pname = "mlx-rocm-${suffix}";
-        rdma-core = final.rdma-core-usb4;
-        rocmPackages = final.therockRocmPackages.${firstBuildTarget};
-        gfx = firstBuildTarget;
-      }
-    );
+  darwinPackages = lib.optionalAttrs prev.stdenv.isDarwin {
+    llama-cpp-master-rdma = setPname "llama-cpp-master-rdma" (withDarwinRdmaRpc llamaCppMaster);
+  };
 
-    # Unsuffixed aliases for the active rocmTarget. Lets consumers write
-    # `pkgs.therock-rocm` instead of `pkgs.therock-rocm-gfx1151` once the
-    # package set's target is fixed (which it is per pkgsFor invocation).
-    therock-rocm = final."therock-rocm-${suffix}";
-    therock-rocm-env = final."therock-rocm-${suffix}-env";
-  }
-  // lib.optionalAttrs supportsTherockPython {
-    therock-python = final."therock-python-${suffix}";
-    therock-python-wheels = final."therock-python-wheels-${suffix}";
-    therock-amdsmi = final."therock-amdsmi-${suffix}";
-    torch-rocm = final."torch-rocm-${suffix}";
-  }
-  // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython) {
-    vllm-rocm = final."vllm-rocm-therock-${suffix}";
-  }
-)
+  linuxPackages = lib.optionalAttrs prev.stdenv.isLinux (
+    let
+      ecPackages = prev.callPackage ../pkgs/ec-su-axb35.nix {
+        ec-su-axb35-src = inputs.ec-su-axb35;
+      };
+    in
+    {
+      ec-su-axb35 = ecPackages.kernelModule;
+      ec-su-axb35-monitor = ecPackages.monitor;
+      strix-halo-mes-firmware = prev.callPackage ../pkgs/strix-halo-mes-firmware.nix { };
+      tokenizers-cpp = prev.callPackage ../pkgs/tokenizers-cpp { };
+
+      xrt = prev.callPackage ../pkgs/xrt {
+        src = inputs.xrt-src;
+        version = inputVersion "2.21" inputs.xrt-src;
+        xdnaSrc = inputs.xdna-driver-src;
+        xdnaVersion = inputVersion "1.7" inputs.xdna-driver-src;
+      };
+      xrt-amdxdna = final.xrt.xdna;
+
+      fastflowlm = prev.callPackage ../pkgs/fastflowlm {
+        inherit (final) tokenizers-cpp xrt;
+        src = inputs.fastflowlm;
+      };
+
+      llama-cpp-rocm = bigParallel (
+        setPname "llama-cpp-rocm-${suffix}" (withRdmaRpc (localLlamaCpp rocmOverride))
+      );
+      llama-cpp-vulkan = withRdmaRpc (localLlamaCpp vulkanOverride);
+      llama-cpp-cuda = localLlamaCpp cudaOverride;
+      llama-cpp-master-rocm = bigParallel (
+        setPname "llama-cpp-master-rocm-${suffix}" (withRdmaRpc (llamaCppMaster.override rocmOverride))
+      );
+      llama-cpp-master-vulkan = withRdmaRpc (llamaCppMaster.override vulkanOverride);
+      llama-cpp-master-cuda = llamaCppMaster.override cudaOverride;
+    }
+    // lib.optionalAttrs supportsTherockRocm {
+      ds4-rocm = bigParallel (
+        prev.callPackage ../pkgs/ds4-rocm {
+          src = inputs.ds4-hip;
+          rocmSdk = final."therock-rocm-${suffix}";
+          version = inputVersion "experimental" inputs.ds4-hip;
+          inherit (rocmTarget) packageSuffix;
+          offloadArch = firstBuildTarget;
+          hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+        }
+      );
+
+      mlx-rocm = bigParallel (
+        final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
+          inherit (inputs) mlx-src;
+          pname = "mlx-rocm-${suffix}";
+          rdma-core = final.rdma-core-usb4;
+          rocmPackages = final.therockRocmPackages.${firstBuildTarget};
+          gfx = firstBuildTarget;
+        }
+      );
+
+      # Unsuffixed aliases for the active rocmTarget. Lets consumers write
+      # `pkgs.therock-rocm` instead of `pkgs.therock-rocm-gfx1151` once the
+      # package set's target is fixed (which it is per pkgsFor invocation).
+      therock-rocm = final."therock-rocm-${suffix}";
+      therock-rocm-env = final."therock-rocm-${suffix}-env";
+    }
+    // lib.optionalAttrs supportsTherockPython {
+      therock-python = final."therock-python-${suffix}";
+      therock-python-wheels = final."therock-python-wheels-${suffix}";
+      therock-amdsmi = final."therock-amdsmi-${suffix}";
+      torch-rocm = final."torch-rocm-${suffix}";
+    }
+    // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython) {
+      vllm-rocm = final."vllm-rocm-therock-${suffix}";
+    }
+  );
+in
+commonPackages // darwinPackages // linuxPackages
