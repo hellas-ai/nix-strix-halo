@@ -142,6 +142,7 @@ let
       ../pkgs/llama-cpp/patches/0017-rpc-rdma-fixed-frame-ack.patch
       ../pkgs/llama-cpp/patches/0018-rpc-rdma-fixed-frame-cookie.patch
       ../pkgs/llama-cpp/patches/0019-rpc-rdma-peer-device-map.patch
+      ../pkgs/llama-cpp/patches/0020-rpc-rdma-fixed-frame-ack-window.patch
     ];
   });
 
