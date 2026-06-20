@@ -140,6 +140,7 @@ let
       ../pkgs/llama-cpp/patches/0015-rpc-rdma-fixed-frame-tx-ring.patch
       ../pkgs/llama-cpp/patches/0016-rpc-rdma-configurable-tx-depth.patch
       ../pkgs/llama-cpp/patches/0017-rpc-rdma-fixed-frame-ack.patch
+      ../pkgs/llama-cpp/patches/0018-rpc-rdma-fixed-frame-cookie.patch
     ];
   });
 
