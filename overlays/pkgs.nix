@@ -143,6 +143,8 @@ let
       ../pkgs/llama-cpp/patches/0018-rpc-rdma-fixed-frame-cookie.patch
       ../pkgs/llama-cpp/patches/0019-rpc-rdma-peer-device-map.patch
       ../pkgs/llama-cpp/patches/0020-rpc-rdma-fixed-frame-ack-window.patch
+      ../pkgs/llama-cpp/patches/0021-rpc-cache-atomic-set-tensor.patch
+      ../pkgs/llama-cpp/patches/0022-rpc-tensor-cache-manifest.patch
     ];
   });
 

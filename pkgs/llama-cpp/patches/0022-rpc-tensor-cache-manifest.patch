@@ -1,0 +1,260 @@
+--- a/ggml/src/ggml-rpc/ggml-rpc.cpp
++++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
+@@ -156,6 +156,7 @@
+ struct rpc_msg_set_tensor_hash_req {
+     rpc_tensor tensor;
+     uint64_t offset;
++    uint64_t size;
+     uint64_t hash;
+ };
+ 
+@@ -169,6 +170,9 @@
+     uint64_t size;
+ };
+ 
++uint64_t ggml_backend_rpc_tensor_hash(const void * data, size_t size);
++bool ggml_backend_rpc_buffer_set_tensor_hash(ggml_backend_buffer_t buffer, ggml_tensor * tensor, size_t offset, size_t size, uint64_t hash);
++
+ struct rpc_msg_copy_tensor_req {
+     rpc_tensor src;
+     rpc_tensor dst;
+@@ -464,21 +468,15 @@
+ }
+ 
+ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+-    ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
+-    rpc_tensor rpc_tensor = serialize_tensor(tensor);
+     if (size > HASH_THRESHOLD) {
+-        rpc_msg_set_tensor_hash_req request;
+-        request.tensor = rpc_tensor;
+-        request.offset = offset;
+-        request.hash = fnv_hash((const uint8_t*)data, size);
+-        rpc_msg_set_tensor_hash_rsp response;
+-        bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR_HASH, &request, sizeof(request), &response, sizeof(response));
+-        RPC_STATUS_ASSERT(status);
+-        if (response.result) {
++        uint64_t hash = fnv_hash((const uint8_t*)data, size);
++        if (ggml_backend_rpc_buffer_set_tensor_hash(buffer, tensor, offset, size, hash)) {
+             // the server has the same data, no need to send it
+             return;
+         }
+     }
++    ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
++    rpc_tensor rpc_tensor = serialize_tensor(tensor);
+     // input serialization format: | rpc_tensor | offset (8 bytes) | data (size bytes)
+     size_t input_size = sizeof(rpc_tensor) + sizeof(uint64_t) + size;
+     std::vector<uint8_t> input(input_size, 0);
+@@ -489,6 +487,27 @@
+     RPC_STATUS_ASSERT(status);
+ }
+ 
++uint64_t ggml_backend_rpc_tensor_hash(const void * data, size_t size) {
++    return fnv_hash((const uint8_t *)data, size);
++}
++
++bool ggml_backend_rpc_buffer_set_tensor_hash(ggml_backend_buffer_t buffer, ggml_tensor * tensor, size_t offset, size_t size, uint64_t hash) {
++    if (!ggml_backend_buffer_is_rpc(buffer)) {
++        return false;
++    }
++
++    ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
++    rpc_msg_set_tensor_hash_req request;
++    request.tensor = serialize_tensor(tensor);
++    request.offset = offset;
++    request.size = size;
++    request.hash = hash;
++    rpc_msg_set_tensor_hash_rsp response;
++    bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR_HASH, &request, sizeof(request), &response, sizeof(response));
++    RPC_STATUS_ASSERT(status);
++    return response.result != 0;
++}
++
+ static void ggml_backend_rpc_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
+     rpc_msg_get_tensor_req request;
+@@ -1159,6 +1178,10 @@
+         return true;
+     }
+     size_t size = cached_file.size();
++    if (size != request.size) {
++        response.result = 0;
++        return true;
++    }
+     struct ggml_init_params params {
+         /*.mem_size   =*/ ggml_tensor_overhead(),
+         /*.mem_buffer =*/ NULL,
+@@ -1936,6 +1959,12 @@
+     if (std::strcmp(name, "ggml_backend_rpc_start_server") == 0) {
+         return (void *)ggml_backend_rpc_start_server;
+     }
++    if (std::strcmp(name, "ggml_backend_rpc_tensor_hash") == 0) {
++        return (void *)ggml_backend_rpc_tensor_hash;
++    }
++    if (std::strcmp(name, "ggml_backend_rpc_buffer_set_tensor_hash") == 0) {
++        return (void *)ggml_backend_rpc_buffer_set_tensor_hash;
++    }
+     return NULL;
+ 
+     GGML_UNUSED(reg);
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -1,6 +1,7 @@
+ #include "llama-model-loader.h"
+ 
+ #include "ggml-alloc.h"
++#include "ggml-backend.h"
+ #include "ggml.h"
+ #include "gguf.h"
+ #include "llama-hparams.h"
+@@ -9,13 +10,102 @@
+ #include <array>
+ #include <cinttypes>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
++#include <fstream>
+ #include <future>
+ #include <regex>
++#include <unordered_map>
+ 
+ static const size_t kiB = 1024;
+ static const size_t MiB = 1024*kiB;
+ static const size_t GiB = 1024*MiB;
++static const size_t RPC_TENSOR_CACHE_THRESHOLD = 10*MiB;
++
++using rpc_tensor_hash_fn = uint64_t (*)(const void * data, size_t size);
++using rpc_buffer_set_tensor_hash_fn = bool (*)(ggml_backend_buffer_t buffer, ggml_tensor * tensor, size_t offset, size_t size, uint64_t hash);
++
++struct rpc_tensor_cache_fns {
++    rpc_tensor_hash_fn hash = nullptr;
++    rpc_buffer_set_tensor_hash_fn set_tensor_hash = nullptr;
++};
++
++static rpc_tensor_cache_fns rpc_tensor_cache_get_fns() {
++    rpc_tensor_cache_fns result;
++    ggml_backend_reg_t reg = ggml_backend_reg_by_name("RPC");
++    if (reg == nullptr) {
++        return result;
++    }
++    result.hash = (rpc_tensor_hash_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_rpc_tensor_hash");
++    result.set_tensor_hash = (rpc_buffer_set_tensor_hash_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_rpc_buffer_set_tensor_hash");
++    return result;
++}
++
++struct rpc_tensor_cache_manifest {
++    bool enabled = false;
++    std::string path;
++    std::unordered_map<std::string, uint64_t> hashes;
++    std::ofstream out;
++
++    rpc_tensor_cache_manifest() {
++        const char * env = std::getenv("GGML_RPC_TENSOR_CACHE_MANIFEST");
++        if (env == nullptr || env[0] == '\0') {
++            return;
++        }
++
++        enabled = true;
++        path = env;
++
++        std::ifstream in(path);
++        std::string hash_str;
++        uint32_t idx = 0;
++        size_t offs = 0;
++        size_t size = 0;
++        std::string name;
++        while (in >> hash_str >> idx >> offs >> size >> name) {
++            char * end = nullptr;
++            uint64_t hash = std::strtoull(hash_str.c_str(), &end, 16);
++            if (end != hash_str.c_str() && end != nullptr && *end == '\0') {
++                hashes[key(idx, offs, size, name.c_str())] = hash;
++            }
++        }
++
++        out.open(path, std::ios::out | std::ios::app);
++        if (!out) {
++            LLAMA_LOG_WARN("%s: failed to open RPC tensor cache manifest for append: %s\n", __func__, path.c_str());
++        }
++    }
++
++    static std::string key(uint16_t idx, size_t offs, size_t size, const char * name) {
++        return std::to_string(idx) + ":" + std::to_string(offs) + ":" + std::to_string(size) + ":" + name;
++    }
++
++    bool get(uint16_t idx, size_t offs, size_t size, const char * name, uint64_t & hash) const {
++        auto it = hashes.find(key(idx, offs, size, name));
++        if (it == hashes.end()) {
++            return false;
++        }
++        hash = it->second;
++        return true;
++    }
++
++    void put(uint16_t idx, size_t offs, size_t size, const char * name, uint64_t hash) {
++        std::string k = key(idx, offs, size, name);
++        auto it = hashes.find(k);
++        if (it != hashes.end() && it->second == hash) {
++            return;
++        }
++        hashes[k] = hash;
++
++        if (!out) {
++            return;
++        }
++        char hash_str[17];
++        snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
++        out << hash_str << ' ' << idx << ' ' << offs << ' ' << size << ' ' << name << '\n';
++        out.flush();
++    }
++};
+ 
+ const char * llama_file_version_name(llama_fver version) {
+     switch (version) {
+@@ -1518,6 +1608,17 @@
+             ggml_backend_name(upload_backend));
+     }
+ 
++    rpc_tensor_cache_manifest rpc_cache_manifest;
++    rpc_tensor_cache_fns rpc_cache_fns = rpc_cache_manifest.enabled ? rpc_tensor_cache_get_fns() : rpc_tensor_cache_fns{};
++    if (rpc_cache_manifest.enabled) {
++        if (rpc_cache_fns.hash && rpc_cache_fns.set_tensor_hash) {
++            LLAMA_LOG_INFO("%s: RPC tensor cache manifest enabled: %s (%zu entries)\n",
++                    __func__, rpc_cache_manifest.path.c_str(), rpc_cache_manifest.hashes.size());
++        } else {
++            LLAMA_LOG_WARN("%s: RPC tensor cache manifest requested, but RPC cache hooks are unavailable\n", __func__);
++        }
++    }
++
+     for (struct ggml_tensor * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
+         const auto * weight = get_weight(ggml_get_name(cur));
+         if (weight == nullptr) {
+@@ -1573,6 +1674,17 @@
+                     }));
+                 }
+             } else {
++                if (!check_tensors &&
++                    n_size > RPC_TENSOR_CACHE_THRESHOLD &&
++                    rpc_cache_fns.set_tensor_hash) {
++                    uint64_t hash = 0;
++                    if (rpc_cache_manifest.get(weight->idx, weight->offs, n_size, ggml_get_name(cur), hash) &&
++                        rpc_cache_fns.set_tensor_hash(cur->buffer, cur, 0, n_size, hash)) {
++                        size_done += n_size;
++                        continue;
++                    }
++                }
++
+                 // If upload_backend is valid load the tensor in chunks to pinned memory and upload the buffers asynchronously to the GPU.
+                 if (upload_backend) {
+                     size_t offset = weight->offs;
+@@ -1630,6 +1742,12 @@
+                     read_buf.resize(n_size);
+                     file->seek(weight->offs, SEEK_SET);
+                     file->read_raw(read_buf.data(), n_size);
++                    if (!check_tensors &&
++                        n_size > RPC_TENSOR_CACHE_THRESHOLD &&
++                        rpc_cache_fns.hash) {
++                        uint64_t hash = rpc_cache_fns.hash(read_buf.data(), n_size);
++                        rpc_cache_manifest.put(weight->idx, weight->offs, n_size, ggml_get_name(cur), hash);
++                    }
+                     ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
+                     if (check_tensors && !ggml_validate_row_data(cur->type, read_buf.data(), n_size)) {
+                         throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
