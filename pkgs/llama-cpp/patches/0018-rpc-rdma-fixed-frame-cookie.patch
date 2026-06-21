@@ -10,7 +10,7 @@ index 172ad08..7e55cb7 100644
 +static constexpr size_t RDMA_FRAME_HEADER = 24;        // magic + payload length + sequence + cookie
  static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
  static constexpr uint32_t RDMA_FRAME_ACK = 0xffffffffu;
- static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 20000;
+ static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 200000;
 @@ -154,6 +154,21 @@ static int rdma_ack_retries() {
      return static_cast<int>(parsed);
  }

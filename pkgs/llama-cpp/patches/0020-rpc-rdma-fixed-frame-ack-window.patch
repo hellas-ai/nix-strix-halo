@@ -3,8 +3,8 @@ diff --git a/ggml/src/ggml-rpc/transport.cpp b/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
 @@ -56,6 +56,8 @@ static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
  static constexpr uint32_t RDMA_FRAME_ACK = 0xffffffffu;
- static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 20000;
- static constexpr int      RDMA_ACK_RETRIES_DEFAULT = 1000;
+ static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 200000;
+ static constexpr int      RDMA_ACK_RETRIES_DEFAULT = 1;
 +static constexpr int      RDMA_ACK_EVERY_DEFAULT = 1;
 +static constexpr int      RDMA_ACK_WINDOW_DEFAULT = 1;
  using rdma_gid_t = std::array<uint8_t, RDMA_GID_SIZE>;

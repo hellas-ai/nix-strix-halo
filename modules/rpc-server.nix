@@ -199,7 +199,12 @@ in
           PrivateDevices = false; # Need access to GPU devices
         };
 
-        environment = (optionalAttrs inst.enableCache { HOME = inst.cacheDirectory; }) // inst.environment;
+        environment =
+          (optionalAttrs inst.enableCache {
+            HOME = inst.cacheDirectory;
+            XDG_CACHE_HOME = inst.cacheDirectory;
+          })
+          // inst.environment;
       }
     ) enabledInstances;
 
