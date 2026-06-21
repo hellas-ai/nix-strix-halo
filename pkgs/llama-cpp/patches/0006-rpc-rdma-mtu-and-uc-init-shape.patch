@@ -1,13 +1,17 @@
 --- a/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
-@@ -108,6 +108,32 @@ static uint16_t rdma_remote_lid() {
+@@ -108,6 +108,36 @@ static uint16_t rdma_remote_lid() {
      return static_cast<uint16_t>(parsed);
  }
  
++static enum ibv_mtu rdma_default_path_mtu(enum ibv_mtu active_mtu) {
++    return active_mtu < IBV_MTU_1024 ? active_mtu : IBV_MTU_1024;
++}
++
 +static enum ibv_mtu rdma_path_mtu(enum ibv_mtu active_mtu) {
 +    const char * env = std::getenv("GGML_RDMA_PATH_MTU");
 +    if (!env || !*env) {
-+        return active_mtu;
++        return rdma_default_path_mtu(active_mtu);
 +    }
 +
 +    errno = 0;
@@ -15,7 +19,7 @@
 +    unsigned long parsed = std::strtoul(env, &end, 10);
 +    if (errno != 0 || end == env || *end != '\0') {
 +        GGML_LOG_ERROR("Ignoring invalid GGML_RDMA_PATH_MTU=%s\n", env);
-+        return active_mtu;
++        return rdma_default_path_mtu(active_mtu);
 +    }
 +
 +    switch (parsed) {
@@ -26,7 +30,7 @@
 +        case 4096: return IBV_MTU_4096;
 +        default:
 +            GGML_LOG_ERROR("Ignoring invalid GGML_RDMA_PATH_MTU=%s\n", env);
-+            return active_mtu;
++            return rdma_default_path_mtu(active_mtu);
 +    }
 +}
 +

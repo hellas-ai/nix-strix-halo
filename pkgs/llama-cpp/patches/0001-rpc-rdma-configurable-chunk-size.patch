@@ -5,7 +5,7 @@
 @@ -45,2 +46,2 @@
 -static constexpr size_t RDMA_CHUNK    = 256 * 1024;   // 256 KiB per send/recv (fits default 8 MiB memlock)
 -static constexpr int    RDMA_RX_DEPTH = 24;            // pre-posted recv ring: 24 × 256 KiB = 6 MiB
-+static constexpr size_t RDMA_DEFAULT_CHUNK = 256 * 1024; // 256 KiB per send/recv
++static constexpr size_t RDMA_DEFAULT_CHUNK = 4 * 1024; // 4 KiB per fixed-frame send/recv
 +static constexpr int    RDMA_RX_DEPTH      = 24;         // pre-posted recv ring
 @@ -49,0 +51,20 @@
 +static size_t rdma_align_alloc_size(size_t size) {

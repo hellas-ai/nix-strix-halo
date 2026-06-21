@@ -1,15 +1,15 @@
 --- a/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
 @@ -52,8 +52,11 @@
- static constexpr size_t RDMA_DEFAULT_CHUNK = 256 * 1024; // 256 KiB per send/recv
- static constexpr int    RDMA_DEFAULT_RX_DEPTH = 24;      // pre-posted recv ring
+ static constexpr size_t RDMA_DEFAULT_CHUNK = 4 * 1024; // 4 KiB per fixed-frame send/recv
+ static constexpr int    RDMA_DEFAULT_RX_DEPTH = 1020;    // pre-posted recv ring
  static constexpr size_t RDMA_GID_SIZE = 16;            // RoCE GID / IB GID is always 16 bytes
 -static constexpr size_t RDMA_FRAME_HEADER = 8;         // magic + payload length
 +static constexpr size_t RDMA_FRAME_HEADER = 16;        // magic + payload length + sequence
  static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
 +static constexpr uint32_t RDMA_FRAME_ACK = 0xffffffffu;
-+static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 200000;
-+static constexpr int      RDMA_ACK_RETRIES_DEFAULT = 1;
++static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 500000;
++static constexpr int      RDMA_ACK_RETRIES_DEFAULT = 10;
  using rdma_gid_t = std::array<uint8_t, RDMA_GID_SIZE>;
  
  static size_t rdma_align_alloc_size(size_t size) {
@@ -175,7 +175,7 @@
 +            return wc->status == IBV_WC_SUCCESS;
 +        }
 +        if (n < 0) return false;
-+        if ((s & 0x3FFF) == 0 && s > 0) {
++        if ((s & 0xFFFFF) == 0 && s > 0) {
 +            struct timespec now = {};
 +            if (tcp_peer_closed()) {
 +                return false;

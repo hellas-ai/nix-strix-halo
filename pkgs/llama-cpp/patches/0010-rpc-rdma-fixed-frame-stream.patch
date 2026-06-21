@@ -9,7 +9,7 @@
  #ifdef GGML_RPC_RDMA
  #  include <infiniband/verbs.h>
 @@ -50,6 +51,8 @@
- static constexpr size_t RDMA_DEFAULT_CHUNK = 256 * 1024; // 256 KiB per send/recv
+ static constexpr size_t RDMA_DEFAULT_CHUNK = 4 * 1024; // 4 KiB per fixed-frame send/recv
  static constexpr int    RDMA_RX_DEPTH      = 24;         // pre-posted recv ring
  static constexpr size_t RDMA_GID_SIZE = 16;            // RoCE GID / IB GID is always 16 bytes
 +static constexpr size_t RDMA_FRAME_HEADER = 8;         // magic + payload length

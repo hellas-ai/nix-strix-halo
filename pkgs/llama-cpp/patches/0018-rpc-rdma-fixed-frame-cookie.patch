@@ -3,14 +3,14 @@ index 172ad08..7e55cb7 100644
 --- a/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
 @@ -52,7 +52,7 @@ static const char * RPC_DEBUG = std::getenv("GGML_RPC_DEBUG");
- static constexpr size_t RDMA_DEFAULT_CHUNK = 256 * 1024; // 256 KiB per send/recv
- static constexpr int    RDMA_DEFAULT_RX_DEPTH = 24;      // pre-posted recv ring
+ static constexpr size_t RDMA_DEFAULT_CHUNK = 4 * 1024; // 4 KiB per fixed-frame send/recv
+ static constexpr int    RDMA_DEFAULT_RX_DEPTH = 1020;    // pre-posted recv ring
  static constexpr size_t RDMA_GID_SIZE = 16;            // RoCE GID / IB GID is always 16 bytes
 -static constexpr size_t RDMA_FRAME_HEADER = 16;        // magic + payload length + sequence
 +static constexpr size_t RDMA_FRAME_HEADER = 24;        // magic + payload length + sequence + cookie
  static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
  static constexpr uint32_t RDMA_FRAME_ACK = 0xffffffffu;
- static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 200000;
+ static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 500000;
 @@ -154,6 +154,21 @@ static int rdma_ack_retries() {
      return static_cast<int>(parsed);
  }
