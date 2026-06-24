@@ -9,6 +9,7 @@ policy into explicit flake inputs for the root checkout and enabled submodules.
 
 import argparse
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,11 +106,27 @@ def load_sources(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def pinned_series(output: str) -> str | None:
+    """Series of the currently pinned source, so the default follows the
+    checked-in pin instead of going stale when the release train rolls."""
+    try:
+        version = json.loads(Path(output).read_text()).get("version", "")
+        match = re.match(r"(\d+\.\d+)", version)
+        if match:
+            return match.group(1)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="pkgs/therock/sources/rocm-source.json")
     parser.add_argument("--url", default=DEFAULT_URL)
-    parser.add_argument("--series", default=DEFAULT_SERIES)
+    parser.add_argument(
+        "--series",
+        help="Release series to track; defaults to the currently pinned series",
+    )
     parser.add_argument("--ref", help="Git ref to pin; defaults to refs/heads/release/therock-${series}")
     parser.add_argument("--rev", help="Exact TheRock commit; otherwise resolved with git ls-remote")
     parser.add_argument("--target", default=DEFAULT_TARGET)
@@ -128,6 +145,9 @@ def main() -> None:
         help="second-level submodule fetch in parent:path1,path2 form; repeat to replace the default policy",
     )
     args = parser.parse_args()
+
+    if not args.series:
+        args.series = pinned_series(args.output) or DEFAULT_SERIES
 
     output = Path(args.output)
     sources = load_sources(output)
