@@ -307,74 +307,94 @@ let
     ]
   );
   inherit (llvmPackagesRocm) libcxx;
+  localPatch =
+    name: path:
+    runCommand name { } ''
+      cp ${path} "$out"
+    '';
+  perfIncreaseNamestringSizePatch = localPatch "perf-increase-namestring-size.patch" ./perf-increase-namestring-size.patch;
+  rocm23GnuInstallDirsPatch = localPatch "rocm-23-gnu-install-dirs.patch" ./rocm-23-gnu-install-dirs.patch;
+  llvmLibPatches =
+    lib.optionals (therockSource != null) [
+      rocm23GnuInstallDirsPatch
+    ]
+    ++ [
+      perfIncreaseNamestringSizePatch
+    ]
+    # The three v64i8 backports below are upstream commits that ROCm LLVM
+    # 23.0 already carries. Applying them on therockSource hits "Reversed
+    # (or previously applied) patch", so only add them when we're falling
+    # back to the upstream LLVM 22 source.
+    ++ lib.optionals (therockSource == null) [
+      # v64i8 shuffle lowering inf loop on VBMI targets, hangs whisper-cpp etc
+      # https://github.com/NixOS/nixpkgs/issues/497745
+      (fetchpatch {
+        # https://github.com/llvm/llvm-project/pull/182832
+        name = "llvm-x86-v64i8-add-test-coverage.patch";
+        url = "https://github.com/llvm/llvm-project/commit/0e3a96d0ec01e3575674d72c4e23bf98affdca28.patch";
+        relative = "llvm";
+        hash = "sha256-qhRkB8Fjz/fNacuGv1OFkiTNOQ0/QQ9p4pLFudwrTzM=";
+      })
+      (fetchpatch {
+        # https://github.com/llvm/llvm-project/pull/182852
+        name = "llvm-x86-v64i8-prefer-vpermv3-on-vbmi.patch";
+        url = "https://github.com/llvm/llvm-project/commit/8f5880d3ae4e5dfc748985d90e5413671028aa3e.patch";
+        relative = "llvm";
+        hash = "sha256-4DU6gu/1+iQpzvVYBlTTUKtw77QSRyTja4hdel4D5Cw=";
+      })
+      (fetchpatch {
+        # https://github.com/llvm/llvm-project/pull/183109
+        name = "llvm-x86-v64i8-skip-repeated-mask-lane-permute-on-vbmi.patch";
+        url = "https://github.com/llvm/llvm-project/commit/1b9fea021840f17c41ea980300d0fc45e7285909.patch";
+        relative = "llvm";
+        hash = "sha256-9Akm78QQr8BIMrVWwDG3poWS1HuQ0hpIQWfke3oADgg=";
+      })
+      # TODO: consider reapplying "Don't include aliases in RegisterClassInfo::IgnoreCSRForAllocOrder"
+      # it was reverted as it's a pessimization for non-GPU archs, but this compiler
+      # is used mostly for amdgpu
+    ];
 in
 overrideLlvmPackagesRocm (s: {
-  libllvm = (s.prev.libllvm.override { }).overrideAttrs (old: {
-    patches =
-      old.patches
-      ++ [
-        ./perf-increase-namestring-size.patch
-      ]
-      # The three v64i8 backports below are upstream commits that ROCm LLVM
-      # 23.0 already carries. Applying them on therockSource hits "Reversed
-      # (or previously applied) patch", so only add them when we're falling
-      # back to the upstream LLVM 22 source.
-      ++ lib.optionals (therockSource == null) [
-        # v64i8 shuffle lowering inf loop on VBMI targets, hangs whisper-cpp etc
-        # https://github.com/NixOS/nixpkgs/issues/497745
-        (fetchpatch {
-          # https://github.com/llvm/llvm-project/pull/182832
-          name = "llvm-x86-v64i8-add-test-coverage.patch";
-          url = "https://github.com/llvm/llvm-project/commit/0e3a96d0ec01e3575674d72c4e23bf98affdca28.patch";
-          relative = "llvm";
-          hash = "sha256-qhRkB8Fjz/fNacuGv1OFkiTNOQ0/QQ9p4pLFudwrTzM=";
-        })
-        (fetchpatch {
-          # https://github.com/llvm/llvm-project/pull/182852
-          name = "llvm-x86-v64i8-prefer-vpermv3-on-vbmi.patch";
-          url = "https://github.com/llvm/llvm-project/commit/8f5880d3ae4e5dfc748985d90e5413671028aa3e.patch";
-          relative = "llvm";
-          hash = "sha256-4DU6gu/1+iQpzvVYBlTTUKtw77QSRyTja4hdel4D5Cw=";
-        })
-        (fetchpatch {
-          # https://github.com/llvm/llvm-project/pull/183109
-          name = "llvm-x86-v64i8-skip-repeated-mask-lane-permute-on-vbmi.patch";
-          url = "https://github.com/llvm/llvm-project/commit/1b9fea021840f17c41ea980300d0fc45e7285909.patch";
-          relative = "llvm";
-          hash = "sha256-9Akm78QQr8BIMrVWwDG3poWS1HuQ0hpIQWfke3oADgg=";
-        })
-        # TODO: consider reapplying "Don't include aliases in RegisterClassInfo::IgnoreCSRForAllocOrder"
-        # it was reverted as it's a pessimization for non-GPU archs, but this compiler
-        # is used mostly for amdgpu
+  llvm = s.final.libllvm;
+  libllvm =
+    ((s.prev.libllvm.override { }).overrideAttrs (old: {
+      patches = llvmLibPatches;
+      dontStrip = profilableStdenv;
+      # The 66k-test `check-all` target adds hours to every cache miss and we
+      # don't need it to ship a working ROCm toolchain. nixpkgs's top-level
+      # `doCheck = false` arg gets silently dropped because
+      # llvmPackages.override doesn't accept it, so pin it here.
+      doCheck = false;
+      hardeningDisable = [ "all" ];
+      nativeBuildInputs = old.nativeBuildInputs ++ [ removeReferencesTo ];
+      buildInputs = old.buildInputs ++ [
+        zstd
       ];
-    dontStrip = profilableStdenv;
-    # The 66k-test `check-all` target adds hours to every cache miss and we
-    # don't need it to ship a working ROCm toolchain. nixpkgs's top-level
-    # `doCheck = false` arg gets silently dropped because
-    # llvmPackages.override doesn't accept it, so pin it here.
-    doCheck = false;
-    hardeningDisable = [ "all" ];
-    nativeBuildInputs = old.nativeBuildInputs ++ [ removeReferencesTo ];
-    buildInputs = old.buildInputs ++ [
-      zstd
-    ];
-    preFixup = ''
-      moveToOutput "lib/lib*.a" "$dev"
-      moveToOutput "lib/cmake" "$dev"
-      sed -Ei "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" $dev/lib/cmake/llvm/*.cmake
-    '';
-    env = (old.env or { }) // {
-      NIX_CFLAGS_COMPILE = "${(old.env or { }).NIX_CFLAGS_COMPILE or ""} ${llvmExtraCflags}";
-    };
-    cmakeFlags = (builtins.filter tablegenUsage old.cmakeFlags) ++ commonCmakeFlags;
-    # Ensure we don't leak refs to compiler that was used to bootstrap this LLVM
-    disallowedReferences = (old.disallowedReferences or [ ]) ++ disallowedRefsForToolchain;
-    postFixup = ''
-      ${old.postFixup or ""}
-      find $lib -type f -exec remove-references-to -t ${refsToRemove} {} +
-    '';
-    meta = old.meta // llvmMeta;
-  });
+      preFixup = ''
+        moveToOutput "lib/lib*.a" "$dev"
+        moveToOutput "lib/cmake" "$dev"
+        sed -Ei \
+          -e 's|\$\{_IMPORT_PREFIX\}/lib/(lib[^/]*)\.a|'"$dev"'/lib/\1.a|g' \
+          -e "s|$out/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+          -e "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+          $dev/lib/cmake/llvm/*.cmake
+      '';
+      env = (old.env or { }) // {
+        NIX_CFLAGS_COMPILE = "${(old.env or { }).NIX_CFLAGS_COMPILE or ""} ${llvmExtraCflags}";
+      };
+      cmakeFlags = (builtins.filter tablegenUsage old.cmakeFlags) ++ commonCmakeFlags;
+      # Ensure we don't leak refs to compiler that was used to bootstrap this LLVM
+      disallowedReferences = (old.disallowedReferences or [ ]) ++ disallowedRefsForToolchain;
+      postFixup = ''
+        ${old.postFixup or ""}
+        find $lib -type f -exec remove-references-to -t ${refsToRemove} {} +
+      '';
+      meta = old.meta // llvmMeta;
+    })).overrideDerivation
+      (_old: {
+        patches = builtins.toString llvmLibPatches;
+        rocmLlvmPatchInputs = llvmLibPatches;
+      });
   lld =
     (s.prev.lld.override {
     }).overrideAttrs
@@ -481,7 +501,11 @@ overrideLlvmPackagesRocm (s: {
           moveToOutput "lib/cmake" "$dev"
           mkdir -p $dev/lib/clang/
           ln -s $lib/lib/clang/${llvmMajorVersion} $dev/lib/clang/
-          sed -Ei "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" $dev/lib/cmake/clang/*.cmake
+          sed -Ei \
+            -e 's|\$\{_IMPORT_PREFIX\}/lib/(lib[^/]*)\.a|'"$dev"'/lib/\1.a|g' \
+            -e "s|$out/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+            -e "s|$lib/lib/(lib[^/]*)\.a|$dev/lib/\1.a|g" \
+            $dev/lib/cmake/clang/*.cmake
         '';
         postFixup = ''
           ${toString old.postFixup or ""}
