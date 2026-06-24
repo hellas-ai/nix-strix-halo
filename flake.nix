@@ -35,7 +35,7 @@
     };
 
     vllm-src = {
-      url = "github:vllm-project/vllm/v0.22.0";
+      url = "github:vllm-project/vllm/v0.23.0";
       flake = false;
     };
 
@@ -459,7 +459,7 @@
             inherit lib;
             target = rocmTarget;
             vllmSrc = inputs.vllm-src;
-            vllmVersion = "0.22.0";
+            vllmVersion = "0.23.0";
             enabled = enableTherockVllm;
           })
           (import ./overlays/pkgs.nix {

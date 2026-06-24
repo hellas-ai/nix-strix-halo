@@ -61,11 +61,11 @@
     "ds4": {
       "flake": false,
       "locked": {
-        "lastModified": 1781165615,
-        "narHash": "sha256-jjpQTaWfvYG0fmmPiA/pbD3YyYseyPygeCW87C5IDzI=",
+        "lastModified": 1781507951,
+        "narHash": "sha256-sG4cd/YMWxxuQWVG561WsUgSd9bHELoDzXhbBLsWVFk=",
         "owner": "antirez",
         "repo": "ds4",
-        "rev": "d881f2a05e8ff6bec001315a36b794b4aa310173",
+        "rev": "e34a8086693ba7ca5cfabd2b9028ee52f0bfac2e",
         "type": "github"
       },
       "original": {
@@ -207,11 +207,11 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1781245669,
-        "narHash": "sha256-kbVCdRcll+JaelSqVNHhW38oQD5dctDLi/vRWT9t6/M=",
+        "lastModified": 1782280168,
+        "narHash": "sha256-VjXPtEjoUNoBWXHmsC+TarsozLXqgbIvAFBYq09Pqmk=",
         "owner": "numtide",
         "repo": "nix-ai-tools",
-        "rev": "10a7a6c07357af3351455eb4b3638418a4e76fec",
+        "rev": "3c9586476ad8afad108db3b6586384685ce85747",
         "type": "github"
       },
       "original": {
@@ -1302,16 +1302,16 @@
     "vllm-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1780046923,
-        "narHash": "sha256-BiaC6inRc5GJVSZMplhQYT8/RLyvFydpDAD6YZPMXTo=",
+        "lastModified": 1781494517,
+        "narHash": "sha256-9mxu2jLchoKmRzD71enPomVJuP5LjbUtQqLMdP5k+Qw=",
         "owner": "vllm-project",
         "repo": "vllm",
-        "rev": "0b3ba88f165976e77ca5e6a7a3f5bba4562b80af",
+        "rev": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
         "type": "github"
       },
       "original": {
         "owner": "vllm-project",
-        "ref": "v0.22.0",
+        "ref": "v0.23.0",
         "repo": "vllm",
         "type": "github"
       }
