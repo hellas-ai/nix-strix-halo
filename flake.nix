@@ -794,7 +794,7 @@
                 src = inputs.ds4;
                 version = unstableInputVersion inputs.ds4;
               };
-              llama-cpp-master-rdma = pkgs.llama-cpp-master-rdma;
+              inherit (pkgs) llama-cpp-master-rdma;
               mlx = mlxMetal;
               mlx-lm = mlxLm;
               mlx-metal = mlxMetalBackend;
