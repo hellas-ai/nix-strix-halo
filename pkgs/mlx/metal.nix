@@ -90,20 +90,42 @@ mlx.overrideAttrs (old: {
     export SDKROOT=${lib.escapeShellArg darwinSdkRoot}
     export MACOSX_DEPLOYMENT_TARGET=${lib.escapeShellArg darwinDeploymentTarget}
 
-    metal_tool="$(/usr/bin/xcrun -sdk macosx -find metal 2>/dev/null || true)"
-    if [ -z "$metal_tool" ] || ! "$metal_tool" --version >/dev/null 2>&1; then
-      metal_tool="$(find /private/var/run/com.apple.security.cryptexd/mnt \
-        -path '*/Metal.xctoolchain/usr/bin/metal' -type f | head -n 1 || true)"
-    fi
-    if [ -z "$metal_tool" ] || ! "$metal_tool" --version >/dev/null 2>&1; then
-      echo "mlx-metal: missing usable Apple Metal Toolchain" >&2
+    find_metal_tool() {
+      local tool="$1"
+      local path=""
+
+      path="$(/usr/bin/xcrun -sdk macosx -find "$tool" 2>/dev/null || true)"
+      if [ -n "$path" ] && [ -x "$path" ] && "$path" --version >/dev/null 2>&1; then
+        printf '%s\n' "$path"
+        return 0
+      fi
+
+      for root in \
+        /private/var/run/com.apple.security.cryptexd/mnt \
+        /var/run/com.apple.security.cryptexd/mnt; do
+        if [ -d "$root" ]; then
+          path="$(find "$root" -path "*/Metal.xctoolchain/usr/bin/$tool" 2>/dev/null | head -n 1 || true)"
+          if [ -n "$path" ] && [ -x "$path" ] && "$path" --version >/dev/null 2>&1; then
+            printf '%s\n' "$path"
+            return 0
+          fi
+        fi
+      done
+
+      return 1
+    }
+
+    metal_tool="$(find_metal_tool metal || true)"
+    if [ -z "$metal_tool" ]; then
+      echo "mlx-metal: missing usable Apple Metal compiler" >&2
       echo "mlx-metal: run xcodebuild -downloadComponent MetalToolchain on the builder" >&2
       exit 1
     fi
 
-    metallib_tool="$(dirname "$metal_tool")/metallib"
-    if [ ! -x "$metallib_tool" ]; then
-      echo "mlx-metal: missing metallib next to $metal_tool" >&2
+    metallib_tool="$(find_metal_tool metallib || true)"
+    if [ -z "$metallib_tool" ]; then
+      echo "mlx-metal: missing usable Apple Metal linker" >&2
+      echo "mlx-metal: run xcodebuild -downloadComponent MetalToolchain on the builder" >&2
       exit 1
     fi
 

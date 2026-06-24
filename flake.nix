@@ -35,12 +35,12 @@
     };
 
     vllm-src = {
-      url = "github:vllm-project/vllm/v0.22.0";
+      url = "github:vllm-project/vllm/v0.23.0";
       flake = false;
     };
 
     mlx-src = {
-      url = "github:ml-explore/mlx/e8ebdebeeb655feaa85a51f6b24ece5b6d5518d1";
+      url = "github:NripeshN/mlx/rocm-support";
       flake = false;
     };
 
@@ -459,7 +459,7 @@
             inherit lib;
             target = rocmTarget;
             vllmSrc = inputs.vllm-src;
-            vllmVersion = "0.22.0";
+            vllmVersion = "0.23.0";
             enabled = enableTherockVllm;
           })
           (import ./overlays/pkgs.nix {
@@ -650,6 +650,8 @@
           s = defaultRocmTarget.packageSuffix;
           aiTools = inputs.nix-ai-tools.packages.${pkgs.stdenv.hostPlatform.system};
           cudaPkgs = cudaPkgsFor pkgs.stdenv.hostPlatform.system;
+          packageRuntimeEnv = import ./lib/runtime-env.nix { inherit lib; };
+          inherit (packageRuntimeEnv) wrapRuntimeEnv;
           jacclPackage = pkgs.callPackage ./pkgs/jaccl (
             {
               inherit (inputs) mlx-src;
@@ -660,16 +662,40 @@
           );
           mkMlxLm =
             mlxPackage:
-            pkgs.python3Packages.mlx-lm.overridePythonAttrs (oldAttrs: {
-              dependencies =
-                lib.filter (dep: dep.pname or "" != "mlx") (
-                  oldAttrs.dependencies or oldAttrs.propagatedBuildInputs or [ ]
-                )
-                ++ [ mlxPackage ];
-              meta = (oldAttrs.meta or { }) // {
-                mainProgram = "mlx_lm";
-              };
-            });
+            let
+              mlxLm = pkgs.python3Packages.mlx-lm.overridePythonAttrs (
+                oldAttrs:
+                {
+                  dependencies = lib.unique (
+                    lib.filter (dep: dep.pname or "" != "mlx") (
+                      oldAttrs.dependencies or oldAttrs.propagatedBuildInputs or [ ]
+                    )
+                    ++ [
+                      mlxPackage
+                    ]
+                    ++ lib.optional pkgs.stdenv.isLinux pkgs.python3Packages.sentencepiece
+                  );
+                  meta = (oldAttrs.meta or { }) // {
+                    mainProgram = "mlx_lm";
+                  };
+                }
+                // lib.optionalAttrs pkgs.stdenv.isLinux {
+                  doCheck = false;
+                  doInstallCheck = false;
+                  dontCheckRuntimeDeps = true;
+                  pythonImportsCheck = [ "mlx_lm" ];
+                }
+              );
+            in
+            if mlxPackage ? passthru && mlxPackage.passthru ? rocmRuntimeEnv then
+              wrapRuntimeEnv {
+                inherit pkgs;
+                package = mlxLm;
+                name = "mlx-lm-rocm-runtime";
+                env = mlxPackage.passthru.rocmRuntimeEnv;
+              }
+            else
+              mlxLm;
 
           # Dynamically extract the keys of the local packages defined in overlays/pkgs.nix.
           # This avoids duplicate maintenance of the package list.
@@ -717,23 +743,30 @@
             ];
           };
 
-          linuxPackages = lib.genAttrs localPackagesKeys (name: pkgs.${name}) // {
-            inherit (pkgs)
-              linux-thunderbolt
-              linux-thunderbolt-dev
-              linux-thunderbolt-modules
-              rdma-core-usb4
-              thunderbolt-ibverbs
-              thunderbolt-ibverbs-linux-thunderbolt
-              ;
-            inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
-            live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
-            mlx = pkgs.mlx-rocm;
-            "strix-halo-vllm-pair-bench-${s}" = pkgs.callPackage ./pkgs/strix-halo-vllm-pair-bench {
-              vllmPackage = vllmPairBenchEnv;
-              packageSuffix = s;
+          linuxPackages =
+            let
+              mlxRocm = pkgs.mlx-rocm;
+              mlxLmRocm = mkMlxLm mlxRocm;
+            in
+            lib.genAttrs localPackagesKeys (name: pkgs.${name})
+            // {
+              inherit (pkgs)
+                linux-thunderbolt
+                linux-thunderbolt-dev
+                linux-thunderbolt-modules
+                rdma-core-usb4
+                thunderbolt-ibverbs
+                thunderbolt-ibverbs-linux-thunderbolt
+                ;
+              inherit (cudaPkgs) llama-cpp-cuda llama-cpp-master-cuda;
+              live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
+              mlx = mlxRocm;
+              mlx-lm = mlxLmRocm;
+              "strix-halo-vllm-pair-bench-${s}" = pkgs.callPackage ./pkgs/strix-halo-vllm-pair-bench {
+                vllmPackage = vllmPairBenchEnv;
+                packageSuffix = s;
+              };
             };
-          };
 
           darwinPackages =
             let
@@ -820,6 +853,14 @@
             therock-python-env =
               ap pkgs.therock-python "therock-python-env"
                 "Run a command in the pinned TheRock ROCm/PyTorch wheel environment";
+            mlx-lm = ap self.packages.${system}.mlx-lm "mlx_lm" "Run the MLX LM CLI with ROCm";
+            mlx-lm-generate =
+              ap self.packages.${system}.mlx-lm "mlx_lm.generate"
+                "Generate text with MLX LM on ROCm";
+            mlx-lm-chat = ap self.packages.${system}.mlx-lm "mlx_lm.chat" "Run the MLX LM chat CLI on ROCm";
+            mlx-lm-server =
+              ap self.packages.${system}.mlx-lm "mlx_lm.server"
+                "Run the MLX LM HTTP server on ROCm";
 
             live-iso-vm =
               let
