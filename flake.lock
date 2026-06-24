@@ -1302,16 +1302,16 @@
     "vllm-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1780046923,
-        "narHash": "sha256-BiaC6inRc5GJVSZMplhQYT8/RLyvFydpDAD6YZPMXTo=",
+        "lastModified": 1781494517,
+        "narHash": "sha256-9mxu2jLchoKmRzD71enPomVJuP5LjbUtQqLMdP5k+Qw=",
         "owner": "vllm-project",
         "repo": "vllm",
-        "rev": "0b3ba88f165976e77ca5e6a7a3f5bba4562b80af",
+        "rev": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
         "type": "github"
       },
       "original": {
         "owner": "vllm-project",
-        "ref": "v0.22.0",
+        "ref": "v0.23.0",
         "repo": "vllm",
         "type": "github"
       }

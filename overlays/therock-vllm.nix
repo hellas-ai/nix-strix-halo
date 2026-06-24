@@ -78,9 +78,11 @@ let
 
   dropVllmDependencyNames = [
     "amd-quark"
+    "apache-tvm-ffi"
     "bitsandbytes"
     "conch-triton-kernels"
     "datasets"
+    "fastsafetensors"
     "mistral-common"
     "mistral_common"
     "mistralai"
@@ -235,13 +237,9 @@ let
         version = vllmVersion;
         src = vllmSrcWithTag;
 
-        patches =
-          builtins.filter (patch: !(lib.hasSuffix "0006-drop-rocm-extra-reqs.patch" (toString patch))) (
-            old.patches or [ ]
-          )
-          ++ [
-            ../pkgs/vllm/patches/0001-hipify-copy-unchanged-cu-to-hip.patch
-          ];
+        patches = builtins.filter (
+          patch: !(lib.hasSuffix "0006-drop-rocm-extra-reqs.patch" (toString patch))
+        ) (old.patches or [ ]);
 
         postPatch = ''
           rm vllm/third_party/pynvml.py
