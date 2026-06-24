@@ -17,7 +17,7 @@ TheRock-published Python wheels.
 
 | Output (under `packages.x86_64-linux.*`) | What |
 |---|---|
-| `llama-cpp{,-rocm,-vulkan,-cuda}` | nixpkgs llama-cpp + variant flags |
+| `llama-cpp{,-rocm,-vulkan,-cuda}` | nixpkgs llama.cpp with RPC enabled, embedded UI disabled + variant flags |
 | `llama-cpp-master{,-rocm,-vulkan,-cuda}` | same matrix off llama.cpp HEAD |
 | `vllm-rocm` | source-built vLLM 0.23 against TheRock |
 | `mlx-rocm` | MLX with the ROCm backend |
@@ -27,10 +27,10 @@ TheRock-published Python wheels.
 | `therock-rocm`, `therock-python`, `torch-rocm` | TheRock binary SDK + wheels |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
-| Darwin: `llama-cpp`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
+| Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
 
 Apps mirror the package names — `apps.x86_64-linux.llama-cli-rocm`,
-`flm`, `therock-python`, `live-iso-vm`, etc.
+`llama-rpc-server`, `flm`, `therock-python`, `live-iso-vm`, etc.
 
 ## Use the overlay
 
@@ -61,6 +61,77 @@ nix build .#vllm-rocm
 nix build .#live-iso             # iso at ./result/iso/*.iso
 nix run  .#live-iso-vm           # boot the iso in QEMU
 ```
+
+### Darwin llama.cpp RPC RDMA lab path
+
+`packages.aarch64-darwin.llama-cpp-master-rdma` builds llama.cpp HEAD with
+Metal, RPC, and Apple Thunderbolt RDMA (`/usr/lib/librdma.dylib`) enabled.
+The verified lab path is a Darwin/Metal client using Apple RDMA to a Linux
+ROCm RPC server over Thunderbolt/USB4 verbs. The Apple provider rejects RC queue
+pairs on this link, so force UC mode while testing.
+
+```bash
+# Linux ROCm RPC server
+GGML_RDMA_DEV=usb4_rdma4 \
+GGML_RDMA_GID=1 \
+GGML_RDMA_QP_TYPE=UC \
+GGML_RPC_RDMA_CHUNK_SIZE=4096 \
+GGML_RPC_RDMA_RX_DEPTH=1020 \
+GGML_RPC_RDMA_TX_DEPTH=32768 \
+GGML_RDMA_PATH_MTU=1024 \
+GGML_RDMA_REMOTE_LID=2 \
+GGML_RPC_SERVER_ONE_SHOT=1 \
+nix run .#llama-rpc-server-rocm -- --host 0.0.0.0 --port 50162 --threads 16 --cache
+
+# Darwin/Metal client
+GGML_RDMA_DEV=rdma_en3 \
+GGML_RDMA_GID=1 \
+GGML_RDMA_QP_TYPE=UC \
+GGML_RPC_RDMA_CHUNK_SIZE=4096 \
+GGML_RPC_RDMA_RX_DEPTH=1020 \
+GGML_RPC_RDMA_TX_DEPTH=32768 \
+GGML_RDMA_PATH_MTU=1024 \
+GGML_RDMA_REMOTE_LID=1 \
+nix run .#llama-cli-master-rdma -- --rpc <worker-ip>:50162 --list-devices
+
+GGML_RDMA_DEV=rdma_en3 \
+GGML_RDMA_GID=1 \
+GGML_RDMA_QP_TYPE=UC \
+GGML_RPC_RDMA_CHUNK_SIZE=4096 \
+GGML_RPC_RDMA_RX_DEPTH=1020 \
+GGML_RPC_RDMA_TX_DEPTH=32768 \
+GGML_RDMA_PATH_MTU=1024 \
+GGML_RDMA_REMOTE_LID=1 \
+nix run .#llama-cli-master-rdma -- \
+  -m ~/models/qwen3/qwen3-0.6b-q4_k_m.gguf \
+  --rpc <worker-ip>:50162 \
+  --device RPC0 \
+  -ngl 99 \
+  -p "Write one short sentence about RDMA." \
+  -n 8 \
+  --temp 0 \
+  --single-turn \
+  --no-display-prompt \
+  --no-warmup
+```
+
+Before starting the client, `system_profiler SPThunderboltDataType` should show
+a connected peer and `ibv_devinfo -d rdma_en3` should show the Apple port as
+`PORT_ACTIVE`. The Linux worker needs a route back to the Apple RDMA address, for
+example `ip route replace 10.0.5.3/32 dev ardma0`.
+`GGML_RDMA_REMOTE_LID` is currently a lab override for the peer port's
+`port_lid`; use the LID reported by `ibv_devinfo` for the peer endpoint.
+Use 4 KiB fixed frames with a receive depth of 1020 on both endpoints for the
+current Apple UC path; 16 KiB receive WQEs currently fail Darwin RTR on this
+link. Fixed-frame ACK/retry stays on the RDMA data plane and is
+enabled by default for UC/fixed-frame mode: each data frame carries a sequence,
+receivers ACK the sequence after reposting the receive slot, senders wait for
+the matching ACK, and a timed-out frame is retransmitted. Run the server one
+client per process with `GGML_RPC_SERVER_ONE_SHOT=1`; pair it with systemd
+`Restart=always` for repeated client runs. Set `GGML_RPC_RDMA_FRAME_ACK=0` only
+for comparison runs, or override pieces explicitly with
+`GGML_RPC_RDMA_SEND_FRAME_ACK`, `GGML_RPC_RDMA_WAIT_FRAME_ACK`,
+`GGML_RPC_RDMA_ACK_TIMEOUT_US`, and `GGML_RPC_RDMA_ACK_RETRIES`.
 
 ### Two-host vLLM pair benchmark
 
@@ -118,6 +189,33 @@ the tag in `lib/providers.nix`.
 - `nixosModules.fastflowlm` — FastFlowLM OpenAI-compatible server (XDNA2)
 - `nixosModules.benchmark-runner` / `benchmark-executor` — local + remote bench infra
 - `nixosModules.ec-su-axb35`, `ryzenadj`, `tuning` — Strix Halo hardware modules
+
+Example RDMA RPC server instance:
+
+```nix
+{
+  services.llama-cpp-rpc-servers.rdma-worker = {
+    enable = true;
+    package = pkgs.llama-cpp-master-rocm;
+    host = "0.0.0.0";
+    port = 50162;
+    threads = 16;
+    openFirewall = true;
+    restart = "always";
+    environment = {
+      GGML_RDMA_DEV = "usb4_rdma4";
+      GGML_RDMA_GID = "1";
+      GGML_RDMA_QP_TYPE = "UC";
+      GGML_RPC_RDMA_CHUNK_SIZE = "4096";
+      GGML_RPC_RDMA_RX_DEPTH = "1020";
+      GGML_RPC_RDMA_TX_DEPTH = "32768";
+      GGML_RDMA_PATH_MTU = "1024";
+      GGML_RDMA_REMOTE_LID = "2";
+      GGML_RPC_SERVER_ONE_SHOT = "1";
+    };
+  };
+}
+```
 
 ## Hydra / CI
 

@@ -1,0 +1,83 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -153,6 +153,11 @@ static uint32_t rdma_psn(uint32_t fallback) {
+     return static_cast<uint32_t>(parsed);
+ }
+
++static bool rdma_trace_io() {
++    const char * env = std::getenv("GGML_RDMA_TRACE_IO");
++    return env && strcmp(env, "0") != 0;
++}
++
+ #ifdef __APPLE__
+ static bool rdma_darwin_leak_on_close() {
+     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+@@ -603,16 +608,20 @@ bool socket_t::impl::rdma_send(const void * data, size_t size) {
+     rdma_conn * c = rdma.get();
+     const uint8_t * src = (const uint8_t *)data;
+     size_t rem = size;
++    if (rdma_trace_io()) {
++        GGML_LOG_ERROR("RDMA send begin: size=%zu chunk_size=%zu\n", size, c->chunk_size);
++    }
+     while (rem > 0) {
+         size_t chunk = std::min(rem, c->chunk_size);
+
+         struct ibv_sge sge = {};
+         struct ibv_send_wr wr = {}, * bad = nullptr;
++        wr.wr_id   = chunk;
+         wr.opcode  = IBV_WR_SEND;
+         wr.sg_list = &sge;
+         wr.num_sge = 1;
+
+         if (chunk <= c->max_inline) {
+             sge.addr   = (uintptr_t)src;
+             sge.length = chunk;
+             wr.send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+@@ -627,9 +636,22 @@ bool socket_t::impl::rdma_send(const void * data, size_t size) {
+             wr.send_flags = IBV_SEND_SIGNALED;
+         }
+
+-        if (ibv_post_send(c->qp, &wr, &bad) != 0) return false;
++        if (rdma_trace_io()) {
++            GGML_LOG_ERROR("RDMA post_send: chunk=%zu inline=%d lkey=0x%x rem=%zu\n",
++                           chunk, (wr.send_flags & IBV_SEND_INLINE) != 0, sge.lkey, rem);
++        }
++        errno = 0;
++        if (ibv_post_send(c->qp, &wr, &bad) != 0) {
++            GGML_LOG_ERROR("RDMA post_send failed: chunk=%zu errno=%d (%s)\n",
++                           chunk, errno, strerror(errno));
++            return false;
++        }
+         struct ibv_wc wc;
+         if (!rdma_poll(c->scq, &wc)) return false;
++        if (rdma_trace_io()) {
++            GGML_LOG_ERROR("RDMA send complete: wr_id=%llu byte_len=%u\n",
++                           (unsigned long long)wc.wr_id, wc.byte_len);
++        }
+
+         src += chunk;
+         rem -= chunk;
+@@ -647,12 +669,23 @@ bool socket_t::impl::rdma_recv(void * data, size_t size) {
+     rdma_conn * c = rdma.get();
+     uint8_t * dst = (uint8_t *)data;
+     size_t rem = size;
++    if (rdma_trace_io()) {
++        GGML_LOG_ERROR("RDMA recv begin: size=%zu chunk_size=%zu\n", size, c->chunk_size);
++    }
+     while (rem > 0) {
+         struct ibv_wc wc;
+         if (!rdma_poll(c->rcq, &wc)) return false;
+
+         int slot = (int)wc.wr_id;
+         size_t got = wc.byte_len;
++        if (rdma_trace_io()) {
++            GGML_LOG_ERROR("RDMA recv wc: slot=%d got=%zu rem=%zu chunk_size=%zu\n",
++                           slot, got, rem, c->chunk_size);
++        }
++        if (got > rem) {
++            GGML_LOG_ERROR("RDMA recv got more bytes than requested: got=%zu rem=%zu\n", got, rem);
++            return false;
++        }
+         memcpy(dst, c->rx_slot(slot), got);
+
+         if (!c->post_rx(slot)) return false;

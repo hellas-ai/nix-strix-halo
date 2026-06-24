@@ -1,0 +1,101 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -50,7 +50,7 @@
+
+ #ifdef GGML_RPC_RDMA
+ static constexpr size_t RDMA_DEFAULT_CHUNK = 4 * 1024; // 4 KiB per fixed-frame send/recv
+-static constexpr int    RDMA_RX_DEPTH      = 24;         // pre-posted recv ring
++static constexpr int    RDMA_DEFAULT_RX_DEPTH = 1020;    // pre-posted recv ring
+ static constexpr size_t RDMA_GID_SIZE = 16;            // RoCE GID / IB GID is always 16 bytes
+ static constexpr size_t RDMA_FRAME_HEADER = 8;         // magic + payload length
+ static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
+@@ -76,6 +76,21 @@
+     return static_cast<size_t>(parsed);
+ }
+
++static int rdma_rx_depth() {
++    const char * env = std::getenv("GGML_RPC_RDMA_RX_DEPTH");
++    if (!env || !*env) {
++        return RDMA_DEFAULT_RX_DEPTH;
++    }
++    errno = 0;
++    char * end = nullptr;
++    unsigned long parsed = std::strtoul(env, &end, 10);
++    if (errno != 0 || end == env || *end != '\0' || parsed == 0 || parsed > 65535) {
++        GGML_LOG_ERROR("Ignoring invalid GGML_RPC_RDMA_RX_DEPTH=%s\n", env);
++        return RDMA_DEFAULT_RX_DEPTH;
++    }
++    return static_cast<int>(parsed);
++}
++
+ static enum ibv_qp_type rdma_qp_type() {
+     const char * env = std::getenv("GGML_RDMA_QP_TYPE");
+     if (env && (strcmp(env, "UC") == 0 || strcmp(env, "uc") == 0)) {
+@@ -212,12 +227,13 @@
+     void          * tx_buf = nullptr;
+     struct ibv_mr * tx_mr  = nullptr;
+
+-    void          * rx_buf = nullptr; // RDMA_RX_DEPTH slots of chunk_size bytes
++    void          * rx_buf = nullptr; // rx_depth slots of chunk_size bytes
+     struct ibv_mr * rx_mr  = nullptr;
+     int             rx_head = 0;
+
+     uint32_t        max_inline = 0;
+     size_t          chunk_size = RDMA_DEFAULT_CHUNK;
++    int             rx_depth = RDMA_DEFAULT_RX_DEPTH;
+     enum ibv_qp_type qp_type = IBV_QPT_RC;
+     std::vector<uint8_t> rx_pending;
+     size_t          rx_pending_off = 0;
+@@ -507,14 +523,15 @@
+
+     GGML_LOG_INFO("RDMA probe: creating completion queues\n");
+     rdma->qp_type = rdma_qp_type();
++    rdma->rx_depth = rdma_rx_depth();
+     errno = 0;
+     if (rdma_shared_cq()) {
+         GGML_LOG_INFO("RDMA probe: using shared completion queue\n");
+-        rdma->scq = ibv_create_cq(ibctx, RDMA_RX_DEPTH + 8, nullptr, nullptr, 0);
++        rdma->scq = ibv_create_cq(ibctx, rdma->rx_depth + 8, nullptr, nullptr, 0);
+         rdma->rcq = rdma->scq;
+     } else {
+         rdma->scq = ibv_create_cq(ibctx, 16, nullptr, nullptr, 0);
+-        rdma->rcq = ibv_create_cq(ibctx, RDMA_RX_DEPTH + 4, nullptr, nullptr, 0);
++        rdma->rcq = ibv_create_cq(ibctx, rdma->rx_depth + 4, nullptr, nullptr, 0);
+     }
+     if (!rdma->scq || !rdma->rcq) return rdma_probe_fail("ibv_create_cq");
+
+@@ -523,7 +540,7 @@
+     qia.recv_cq = rdma->rcq;
+     qia.qp_type = rdma->qp_type;
+     qia.cap.max_send_wr     = 4;
+-    qia.cap.max_recv_wr     = RDMA_RX_DEPTH + 4;
++    qia.cap.max_recv_wr     = rdma->rx_depth + 4;
+     qia.cap.max_send_sge    = 1;
+     qia.cap.max_recv_sge    = 1;
+     qia.cap.max_inline_data = rdma->qp_type == IBV_QPT_UC ? 0 : 256;
+@@ -538,7 +555,7 @@
+         GGML_LOG_ERROR("RDMA fixed frames require chunk size > %zu\n", RDMA_FRAME_HEADER);
+         return rdma_probe_fail("fixed-frame chunk size");
+     }
+-    const size_t rx_bytes = static_cast<size_t>(RDMA_RX_DEPTH) * rdma->chunk_size;
++    const size_t rx_bytes = static_cast<size_t>(rdma->rx_depth) * rdma->chunk_size;
+     const size_t tx_alloc_bytes = rdma_align_alloc_size(rdma->chunk_size);
+     const size_t rx_alloc_bytes = rdma_align_alloc_size(rx_bytes);
+     GGML_LOG_INFO("RDMA probe: allocating buffers chunk=%zu rx=%zu\n", rdma->chunk_size, rx_bytes);
+@@ -603,7 +620,7 @@
+         }
+     }
+
+-    for (int i = 0; i < RDMA_RX_DEPTH; i++) {
++    for (int i = 0; i < rdma->rx_depth; i++) {
+         if (!rdma->post_rx(i)) {
+             GGML_LOG_ERROR("RDMA activate failed posting receive slot %d\n", i);
+             return false;
+@@ -660,7 +677,7 @@
+
+     GGML_LOG_INFO("RDMA activated: qp_type=%s qpn=%u->%u mtu=%d rx_depth=%d\n",
+                   rdma_qp_type_name(rdma->qp_type), rdma_local.qpn, remote_qpn,
+-                  128 << rdma_local.path_mtu, RDMA_RX_DEPTH);
++                  128 << rdma_local.path_mtu, rdma->rx_depth);
+     return true;
+ }

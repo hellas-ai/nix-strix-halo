@@ -1,0 +1,34 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -91,6 +91,21 @@
+     return static_cast<int>(parsed);
+ }
+
++static int rdma_tx_depth(int fallback) {
++    const char * env = std::getenv("GGML_RPC_RDMA_TX_DEPTH");
++    if (!env || !*env) {
++        return fallback;
++    }
++    errno = 0;
++    char * end = nullptr;
++    unsigned long parsed = std::strtoul(env, &end, 10);
++    if (errno != 0 || end == env || *end != '\0' || parsed == 0 || parsed > 65535) {
++        GGML_LOG_ERROR("Ignoring invalid GGML_RPC_RDMA_TX_DEPTH=%s\n", env);
++        return fallback;
++    }
++    return static_cast<int>(parsed);
++}
++
+ static enum ibv_qp_type rdma_qp_type() {
+     const char * env = std::getenv("GGML_RDMA_QP_TYPE");
+     if (env && (strcmp(env, "UC") == 0 || strcmp(env, "uc") == 0)) {
+@@ -583,7 +598,8 @@
+         return rdma_probe_fail("fixed-frame chunk size");
+     }
+     const size_t rx_bytes = static_cast<size_t>(rdma->rx_depth) * rdma->chunk_size;
+-    rdma->tx_depth = rdma->fixed_frames() ? rdma->rx_depth : 1;
++    const int default_tx_depth = rdma->rx_depth < 8192 ? 8192 : rdma->rx_depth;
++    rdma->tx_depth = rdma->fixed_frames() ? rdma_tx_depth(default_tx_depth) : 1;
+     const size_t tx_bytes = static_cast<size_t>(rdma->tx_depth) * rdma->chunk_size;
+     const size_t tx_alloc_bytes = rdma_align_alloc_size(tx_bytes);
+     const size_t rx_alloc_bytes = rdma_align_alloc_size(rx_bytes);

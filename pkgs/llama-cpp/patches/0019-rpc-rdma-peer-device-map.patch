@@ -1,0 +1,124 @@
+diff --git a/ggml/src/ggml-rpc/transport.cpp b/ggml/src/ggml-rpc/transport.cpp
+index 7e55cb7..a597e22 100644
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -23,6 +23,7 @@
+ #include <mutex>
+ #include <optional>
+ #include <vector>
++#include <string>
+
+ #ifdef GGML_RPC_RDMA
+ #  include <infiniband/verbs.h>
+@@ -154,6 +155,85 @@ static int rdma_ack_retries() {
+     return static_cast<int>(parsed);
+ }
+
++static std::string rdma_trim(std::string value) {
++    size_t first = value.find_first_not_of(" \t\r\n");
++    if (first == std::string::npos) {
++        return "";
++    }
++    size_t last = value.find_last_not_of(" \t\r\n");
++    return value.substr(first, last - first + 1);
++}
++
++static bool rdma_socket_peer(sockfd_t fd, std::string * peer_host, std::string * peer_host_port) {
++#ifdef _WIN32
++    (void)fd;
++    (void)peer_host;
++    (void)peer_host_port;
++    return false;
++#else
++    sockaddr_storage addr = {};
++    socklen_t addr_len = sizeof(addr);
++    if (getpeername(fd, reinterpret_cast<sockaddr *>(&addr), &addr_len) != 0) {
++        return false;
++    }
++
++    char host[INET6_ADDRSTRLEN] = {};
++    uint16_t port = 0;
++    if (addr.ss_family == AF_INET) {
++        const sockaddr_in * in = reinterpret_cast<const sockaddr_in *>(&addr);
++        if (!inet_ntop(AF_INET, &in->sin_addr, host, sizeof(host))) {
++            return false;
++        }
++        port = ntohs(in->sin_port);
++        *peer_host = host;
++        *peer_host_port = std::string(host) + ":" + std::to_string(port);
++        return true;
++    }
++    if (addr.ss_family == AF_INET6) {
++        const sockaddr_in6 * in6 = reinterpret_cast<const sockaddr_in6 *>(&addr);
++        if (!inet_ntop(AF_INET6, &in6->sin6_addr, host, sizeof(host))) {
++            return false;
++        }
++        port = ntohs(in6->sin6_port);
++        *peer_host = host;
++        *peer_host_port = "[" + std::string(host) + "]:" + std::to_string(port);
++        return true;
++    }
++    return false;
++#endif
++}
++
++static bool rdma_peer_env_map(const char * name, const std::string & peer_host,
++                              const std::string & peer_host_port, std::string * value) {
++    const char * env = std::getenv(name);
++    if (!env || !*env) {
++        return false;
++    }
++
++    std::string entries(env);
++    size_t pos = 0;
++    while (pos <= entries.size()) {
++        size_t end = entries.find_first_of(",;", pos);
++        std::string entry = rdma_trim(entries.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
++        if (!entry.empty()) {
++            size_t eq = entry.find('=');
++            if (eq != std::string::npos) {
++                std::string key = rdma_trim(entry.substr(0, eq));
++                std::string candidate = rdma_trim(entry.substr(eq + 1));
++                if (!candidate.empty() && (key == peer_host || key == peer_host_port || key == "*")) {
++                    *value = candidate;
++                    return true;
++                }
++            }
++        }
++        if (end == std::string::npos) {
++            break;
++        }
++        pos = end + 1;
++    }
++    return false;
++}
++
+ static uint64_t rdma_frame_cookie(uint32_t qpn, uint32_t psn) {
+     static std::atomic<uint64_t> next_cookie{0};
+     uint64_t seed = ((uint64_t)time(nullptr) << 32) ^
+@@ -560,10 +640,24 @@ bool socket_t::impl::rdma_probe_fail(const char * stage) {
+ bool socket_t::impl::rdma_probe() {
+     const char * dev_env = std::getenv("GGML_RDMA_DEV");
+     const char * gid_env = std::getenv("GGML_RDMA_GID");
++    std::string peer_host;
++    std::string peer_host_port;
++    std::string mapped_dev;
++    std::string mapped_gid;
++
++    if (rdma_socket_peer(fd, &peer_host, &peer_host_port)) {
++        if (rdma_peer_env_map("GGML_RDMA_DEV_MAP", peer_host, peer_host_port, &mapped_dev)) {
++            dev_env = mapped_dev.c_str();
++        }
++        if (rdma_peer_env_map("GGML_RDMA_GID_MAP", peer_host, peer_host_port, &mapped_gid)) {
++            gid_env = mapped_gid.c_str();
++        }
++    }
+
+-    GGML_LOG_INFO("RDMA probe starting: dev=%s gid=%s\n",
++    GGML_LOG_INFO("RDMA probe starting: peer=%s dev=%s gid=%s\n",
++                  peer_host_port.empty() ? "<unknown>" : peer_host_port.c_str(),
+                   dev_env ? dev_env : "<auto>", gid_env ? gid_env : "<auto>");
+
+     auto target_gid = rdma_build_target_gid();
+     if (!target_gid) {
+         return rdma_probe_fail("socket local GID selection");

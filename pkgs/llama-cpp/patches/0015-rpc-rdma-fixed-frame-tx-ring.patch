@@ -1,0 +1,63 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -226,6 +226,8 @@
+
+     void          * tx_buf = nullptr;
+     struct ibv_mr * tx_mr  = nullptr;
++    int             tx_depth = 1;
++    int             tx_head = 0;
+
+     void          * rx_buf = nullptr; // rx_depth slots of chunk_size bytes
+     struct ibv_mr * rx_mr  = nullptr;
+@@ -243,6 +245,10 @@
+         return static_cast<uint8_t *>(rx_buf) + static_cast<size_t>(i) * chunk_size;
+     }
+
++    uint8_t * tx_slot(int i) const {
++        return static_cast<uint8_t *>(tx_buf) + static_cast<size_t>(i) * chunk_size;
++    }
++
+     bool fixed_frames() const {
+         return qp_type == IBV_QPT_UC || rdma_fixed_frames_env();
+     }
+@@ -577,9 +583,12 @@
+         return rdma_probe_fail("fixed-frame chunk size");
+     }
+     const size_t rx_bytes = static_cast<size_t>(rdma->rx_depth) * rdma->chunk_size;
+-    const size_t tx_alloc_bytes = rdma_align_alloc_size(rdma->chunk_size);
++    rdma->tx_depth = rdma->fixed_frames() ? rdma->rx_depth : 1;
++    const size_t tx_bytes = static_cast<size_t>(rdma->tx_depth) * rdma->chunk_size;
++    const size_t tx_alloc_bytes = rdma_align_alloc_size(tx_bytes);
+     const size_t rx_alloc_bytes = rdma_align_alloc_size(rx_bytes);
+-    GGML_LOG_INFO("RDMA probe: allocating buffers chunk=%zu rx=%zu\n", rdma->chunk_size, rx_bytes);
++    GGML_LOG_INFO("RDMA probe: allocating buffers chunk=%zu tx=%zu rx=%zu\n",
++                  rdma->chunk_size, tx_bytes, rx_bytes);
+
+     rdma->tx_buf = aligned_alloc(16 * 1024, tx_alloc_bytes);
+     rdma->rx_buf = aligned_alloc(16 * 1024, rx_alloc_bytes);
+@@ -590,7 +599,7 @@
+
+     GGML_LOG_INFO("RDMA probe: registering memory\n");
+     errno = 0;
+-    rdma->tx_mr = ibv_reg_mr(rdma->pd, rdma->tx_buf, rdma->chunk_size, IBV_ACCESS_LOCAL_WRITE);
++    rdma->tx_mr = ibv_reg_mr(rdma->pd, rdma->tx_buf, tx_bytes, IBV_ACCESS_LOCAL_WRITE);
+     rdma->rx_mr = ibv_reg_mr(rdma->pd, rdma->rx_buf, rx_bytes,
+                            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+     if (!rdma->tx_mr || !rdma->rx_mr) return rdma_probe_fail("ibv_reg_mr");
+@@ -743,13 +752,14 @@
+         wr.num_sge = 1;
+
+         if (fixed_frames) {
+-            uint8_t * frame = static_cast<uint8_t *>(c->tx_buf);
++            uint8_t * frame = c->tx_slot(c->tx_head);
++            c->tx_head = (c->tx_head + 1) % c->tx_depth;
+             rdma_write_frame_header(frame, chunk);
+             memcpy(frame + RDMA_FRAME_HEADER, src, chunk);
+             if (chunk < max_payload) {
+                 memset(frame + RDMA_FRAME_HEADER + chunk, 0, max_payload - chunk);
+             }
+-            sge.addr   = (uintptr_t)c->tx_buf;
++            sge.addr   = (uintptr_t)frame;
+             sge.length = wire_chunk;
+             sge.lkey   = c->tx_mr->lkey;
+             wr.send_flags = IBV_SEND_SIGNALED;

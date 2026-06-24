@@ -68,6 +68,26 @@ let
           description = "Extra arguments to pass to rpc-server";
         };
 
+        environment = mkOption {
+          type = types.attrsOf types.str;
+          default = { };
+          example = literalExpression ''
+            {
+              GGML_RDMA_DEV = "usb4_rdma4";
+              GGML_RDMA_QP_TYPE = "UC";
+              GGML_RPC_RDMA_CHUNK_SIZE = "8192";
+            }
+          '';
+          description = "Environment variables for the rpc-server process";
+        };
+
+        restart = mkOption {
+          type = types.str;
+          default = "on-failure";
+          example = "always";
+          description = "systemd Restart policy for the rpc-server service";
+        };
+
         user = mkOption {
           type = types.str;
           default = "llama-cpp-rpc";
@@ -168,9 +188,8 @@ in
             escapeShellArgs args;
 
           WorkingDirectory = mkIf inst.enableCache inst.cacheDirectory;
-          Environment = mkIf inst.enableCache "HOME=${inst.cacheDirectory}";
 
-          Restart = "on-failure";
+          Restart = inst.restart;
           RestartSec = 5;
 
           # Security hardening
@@ -179,6 +198,13 @@ in
           NoNewPrivileges = true;
           PrivateDevices = false; # Need access to GPU devices
         };
+
+        environment =
+          (optionalAttrs inst.enableCache {
+            HOME = inst.cacheDirectory;
+            XDG_CACHE_HOME = inst.cacheDirectory;
+          })
+          // inst.environment;
       }
     ) enabledInstances;
 

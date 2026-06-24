@@ -1,0 +1,33 @@
+--- a/ggml/src/ggml-rpc/ggml-rpc.cpp
++++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
+@@ -12,7 +12,8 @@
+ #include <memory>
+ #include <mutex>
+ #include <unordered_map>
+ #include <unordered_set>
++#include <cstdlib>
+ #include <cstring>
+ #include <fstream>
+ #include <filesystem>
+@@ -1692,6 +1693,11 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
+     }
+ }
+
++static bool rpc_server_one_shot() {
++    const char * env = std::getenv("GGML_RPC_SERVER_ONE_SHOT");
++    return env && std::strcmp(env, "0") != 0;
++}
++
+ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
+                                    size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices) {
+     if (n_devices == 0 || devices == nullptr) {
+@@ -1759,6 +1765,9 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
+         rpc_serve_client(backends, cache_dir, client_socket);
+         printf("Client connection closed\n");
+         fflush(stdout);
++        if (rpc_server_one_shot()) {
++            break;
++        }
+     }
+     rpc_transport_shutdown();
+     for (auto backend : backends) {

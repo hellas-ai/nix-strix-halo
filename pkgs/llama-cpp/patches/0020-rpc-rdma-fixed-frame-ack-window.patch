@@ -1,0 +1,209 @@
+diff --git a/ggml/src/ggml-rpc/transport.cpp b/ggml/src/ggml-rpc/transport.cpp
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -56,6 +56,8 @@ static constexpr uint32_t RDMA_FRAME_MAGIC = 0x52444d41; // "RDMA"
+ static constexpr uint32_t RDMA_FRAME_ACK = 0xffffffffu;
+ static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 500000;
+ static constexpr int      RDMA_ACK_RETRIES_DEFAULT = 10;
++static constexpr int      RDMA_ACK_EVERY_DEFAULT = 1;
++static constexpr int      RDMA_ACK_WINDOW_DEFAULT = 1;
+ using rdma_gid_t = std::array<uint8_t, RDMA_GID_SIZE>;
+
+ static size_t rdma_align_alloc_size(size_t size) {
+@@ -154,6 +156,36 @@ static int rdma_ack_retries() {
+     return static_cast<int>(parsed);
+ }
+
++static int rdma_ack_every() {
++    const char * env = std::getenv("GGML_RPC_RDMA_ACK_EVERY");
++    if (!env || !*env) {
++        return RDMA_ACK_EVERY_DEFAULT;
++    }
++    errno = 0;
++    char * end = nullptr;
++    unsigned long parsed = std::strtoul(env, &end, 10);
++    if (errno != 0 || end == env || *end != '\0' || parsed == 0 || parsed > 65535) {
++        GGML_LOG_ERROR("Ignoring invalid GGML_RPC_RDMA_ACK_EVERY=%s\n", env);
++        return RDMA_ACK_EVERY_DEFAULT;
++    }
++    return static_cast<int>(parsed);
++}
++
++static int rdma_ack_window() {
++    const char * env = std::getenv("GGML_RPC_RDMA_ACK_WINDOW");
++    if (!env || !*env) {
++        return RDMA_ACK_WINDOW_DEFAULT;
++    }
++    errno = 0;
++    char * end = nullptr;
++    unsigned long parsed = std::strtoul(env, &end, 10);
++    if (errno != 0 || end == env || *end != '\0' || parsed == 0 || parsed > 65535) {
++        GGML_LOG_ERROR("Ignoring invalid GGML_RPC_RDMA_ACK_WINDOW=%s\n", env);
++        return RDMA_ACK_WINDOW_DEFAULT;
++    }
++    return static_cast<int>(parsed);
++}
++
+ static std::string rdma_trim(std::string value) {
+     size_t first = value.find_first_not_of(" \t\r\n");
+     if (first == std::string::npos) {
+@@ -336,7 +366,11 @@ struct rdma_conn {
+     uint64_t        tx_cookie = 0;
+     uint64_t        rx_cookie = 0;
+     uint64_t        tx_seq = 1;
++    uint64_t        tx_last_acked = 0;
+     uint64_t        rx_seq = 1;
++    uint64_t        rx_last_acked = 0;
++    int             ack_every = RDMA_ACK_EVERY_DEFAULT;
++    int             ack_window = RDMA_ACK_WINDOW_DEFAULT;
+
+     void          * rx_buf = nullptr; // rx_depth slots of chunk_size bytes
+     struct ibv_mr * rx_mr  = nullptr;
+@@ -730,6 +766,13 @@ bool socket_t::impl::rdma_probe() {
+     const bool frame_ack = rdma->fixed_frames() && rdma_frame_ack_enabled();
+     rdma->send_frame_ack = frame_ack && rdma_send_frame_ack_enabled();
+     rdma->wait_frame_ack = frame_ack && rdma_wait_frame_ack_enabled();
++    rdma->ack_every = rdma_ack_every();
++    rdma->ack_window = rdma_ack_window();
++    if (rdma->ack_every > rdma->ack_window) {
++        GGML_LOG_WARN("RDMA ACK every=%d exceeds ACK window=%d; clamping ACK every to window\n",
++                      rdma->ack_every, rdma->ack_window);
++        rdma->ack_every = rdma->ack_window;
++    }
+     const size_t tx_bytes = static_cast<size_t>(rdma->tx_depth) * rdma->chunk_size;
+     const size_t tx_alloc_bytes = rdma_align_alloc_size(tx_bytes);
+     const size_t rx_alloc_bytes = rdma_align_alloc_size(rx_bytes);
+@@ -763,13 +806,14 @@ bool socket_t::impl::rdma_probe() {
+     } else if (gid_version == IBV_GID_TYPE_ROCE_V1) {
+         ver_str = " RoCEv1";
+     }
+-    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu frame=%s ack=%s mtu=%d\n",
++    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qp_type=%s qpn=%u inline=%u chunk=%zu frame=%s ack=%s ack_every=%d ack_window=%d mtu=%d\n",
+                   matched_dev, gid_idx, ver_str, rdma_qp_type_name(rdma->qp_type),
+                   rdma_local.qpn, rdma->max_inline, rdma->chunk_size,
+                   rdma->fixed_frames() ? "fixed" : "raw",
+                   rdma->send_frame_ack ?
+                       (rdma->wait_frame_ack ? "send+wait" : "send") :
+                       (rdma->wait_frame_ack ? "wait" : "off"),
++                  rdma->ack_every, rdma->ack_window,
+                   128 << rdma_local.path_mtu);
+     GGML_LOG_INFO("RDMA local PSN: %u\n", rdma_local.psn);
+     GGML_LOG_INFO("RDMA frame cookie: 0x%016llx\n",
+@@ -928,6 +973,9 @@ bool socket_t::impl::rdma_send_fixed_ack(uint64_t seq) {
+     if (!rdma_post_fixed_frame(frame, c->chunk_size)) {
+         return false;
+     }
++    if (seq > c->rx_last_acked) {
++        c->rx_last_acked = seq;
++    }
+     if (rdma_trace_io()) {
+         GGML_LOG_ERROR("RDMA fixed-frame ACK sent: seq=%llu\n",
+                        (unsigned long long)seq);
+@@ -941,6 +989,10 @@ bool socket_t::impl::rdma_wait_fixed_ack(uint64_t seq, uint8_t * frame, size_t w
+     const int max_retries = rdma_ack_retries();
+     int retries = 0;
+
++    if (c->tx_last_acked >= seq) {
++        return true;
++    }
++
+     for (;;) {
+         struct ibv_wc wc;
+         bool timed_out = false;
+@@ -998,25 +1050,23 @@ bool socket_t::impl::rdma_wait_fixed_ack(uint64_t seq, uint8_t * frame, size_t w
+         if (rdma_frame_is_ack(payload)) {
+             if (!c->post_rx(slot)) {
+                 return false;
+             }
+-            if (rx_seq == seq) {
++            if (rx_seq > c->tx_last_acked) {
++                c->tx_last_acked = rx_seq;
++            }
++            if (c->tx_last_acked >= seq) {
+                 if (rdma_trace_io()) {
+-                    GGML_LOG_ERROR("RDMA fixed-frame ACK received: seq=%llu retries=%d\n",
+-                                   (unsigned long long)seq, retries);
++                    GGML_LOG_ERROR("RDMA fixed-frame ACK received: ack_seq=%llu want=%llu retries=%d\n",
++                                   (unsigned long long)rx_seq,
++                                   (unsigned long long)seq, retries);
+                 }
+                 return true;
+             }
+-            if (rx_seq < seq) {
+-                if (rdma_trace_io()) {
+-                    GGML_LOG_ERROR("RDMA fixed-frame stale ACK skipped: ack_seq=%llu want=%llu\n",
+-                                   (unsigned long long)rx_seq,
+-                                   (unsigned long long)seq);
+-                }
+-                continue;
++            if (rdma_trace_io()) {
++                GGML_LOG_ERROR("RDMA fixed-frame stale ACK skipped: ack_seq=%llu want=%llu\n",
++                               (unsigned long long)rx_seq, (unsigned long long)seq);
+             }
+-            GGML_LOG_ERROR("RDMA fixed-frame future ACK: ack_seq=%llu want=%llu\n",
+-                           (unsigned long long)rx_seq, (unsigned long long)seq);
+-            return false;
++            continue;
+         }
+
+         if (rx_seq < c->rx_seq) {
+@@ -1124,8 +1173,13 @@ bool socket_t::impl::rdma_send(const void * data, size_t size) {
+             GGML_LOG_ERROR("RDMA send complete: wr_id=%llu byte_len=%u\n",
+                            (unsigned long long)wc.wr_id, wc.byte_len);
+         }
+-        if (fixed_frames && c->wait_frame_ack &&
+-            !rdma_wait_fixed_ack(frame_seq, fixed_frame, wire_chunk)) {
++        const bool wait_for_window =
++            fixed_frames && c->wait_frame_ack &&
++            frame_seq > c->tx_last_acked &&
++            frame_seq - c->tx_last_acked >= (uint64_t)c->ack_window;
++        const bool wait_for_final = fixed_frames && c->wait_frame_ack && rem == chunk;
++        if ((wait_for_window || wait_for_final) &&
++            !rdma_wait_fixed_ack(frame_seq, fixed_frame, wire_chunk)) {
+             return false;
+         }
+
+@@ -1140,6 +1195,7 @@ bool socket_t::impl::rdma_recv(void * data, size_t size) {
+     rdma_conn * c = rdma.get();
+     uint8_t * dst = (uint8_t *)data;
+     size_t rem = size;
++    uint64_t recv_last_seq = 0;
+     const bool fixed_frames = c->fixed_frames();
+     if (rdma_trace_io()) {
+         GGML_LOG_ERROR("RDMA recv begin: size=%zu chunk_size=%zu frame=%s\n",
+@@ -1194,6 +1250,9 @@ bool socket_t::impl::rdma_recv(void * data, size_t size) {
+             }
+             if (rdma_frame_is_ack(payload)) {
+                 if (!c->post_rx(slot)) return false;
++                if (frame_seq > c->tx_last_acked) {
++                    c->tx_last_acked = frame_seq;
++                }
+                 if (rdma_trace_io()) {
+                     GGML_LOG_ERROR("RDMA fixed-frame ACK skipped in recv: seq=%llu\n",
+                                    (unsigned long long)frame_seq);
+@@ -1223,8 +1282,12 @@ bool socket_t::impl::rdma_recv(void * data, size_t size) {
+
+             if (!c->post_rx(slot)) return false;
+             c->rx_seq++;
+-            if (c->send_frame_ack && !rdma_send_fixed_ack(frame_seq)) return false;
++            recv_last_seq = frame_seq;
++            if (c->send_frame_ack && frame_seq % (uint64_t)c->ack_every == 0 &&
++                !rdma_send_fixed_ack(frame_seq)) {
++                return false;
++            }
+
+             dst += copy;
+             rem -= copy;
+             continue;
+@@ -1242,6 +1305,12 @@ bool socket_t::impl::rdma_recv(void * data, size_t size) {
+         dst += got;
+         rem -= got;
+     }
++    if (fixed_frames && c->send_frame_ack &&
++        recv_last_seq != 0 && c->rx_last_acked < recv_last_seq &&
++        !rdma_send_fixed_ack(recv_last_seq)) {
++        return false;
++    }
++
+     return true;
+ }
