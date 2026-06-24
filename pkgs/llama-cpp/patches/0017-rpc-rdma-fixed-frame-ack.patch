@@ -11,12 +11,12 @@
 +static constexpr uint64_t RDMA_ACK_TIMEOUT_US_DEFAULT = 500000;
 +static constexpr int      RDMA_ACK_RETRIES_DEFAULT = 10;
  using rdma_gid_t = std::array<uint8_t, RDMA_GID_SIZE>;
- 
+
  static size_t rdma_align_alloc_size(size_t size) {
 @@ -106,6 +109,51 @@
      return static_cast<int>(parsed);
  }
- 
+
 +static bool rdma_frame_ack_enabled() {
 +    const char * env = std::getenv("GGML_RPC_RDMA_FRAME_ACK");
 +    return !env || strcmp(env, "0") != 0;
@@ -68,7 +68,7 @@
 @@ -212,19 +260,39 @@
             (uint32_t)src[3];
  }
- 
+
 -static void rdma_write_frame_header(uint8_t * dst, size_t payload_size) {
 +static void rdma_store_u64_be(uint8_t * dst, uint64_t value) {
 +    for (int i = 7; i >= 0; --i) {
@@ -89,7 +89,7 @@
      rdma_store_u32_be(dst + 4, (uint32_t)payload_size);
 +    rdma_store_u64_be(dst + 8, seq);
  }
- 
+
 -static bool rdma_read_frame_header(const uint8_t * src, size_t * payload_size) {
 +static bool rdma_read_frame_header(const uint8_t * src, size_t * payload_size, uint64_t * seq) {
      if (rdma_load_u32_be(src) != RDMA_FRAME_MAGIC) {
@@ -99,7 +99,7 @@
 +    *seq = rdma_load_u64_be(src + 8);
      return true;
  }
- 
+
 +static bool rdma_frame_is_ack(size_t payload_size) {
 +    return payload_size == RDMA_FRAME_ACK;
 +}
@@ -115,7 +115,7 @@
 +    bool            wait_frame_ack = false;
 +    uint64_t        tx_seq = 1;
 +    uint64_t        rx_seq = 1;
- 
+
      void          * rx_buf = nullptr; // rx_depth slots of chunk_size bytes
      struct ibv_mr * rx_mr  = nullptr;
 @@ -341,6 +413,10 @@
@@ -128,7 +128,7 @@
 +    bool rdma_wait_fixed_ack(uint64_t seq, uint8_t * frame, size_t wire_chunk);
      bool rdma_send(const void * data, size_t size);
      bool rdma_recv(void * data, size_t size);
- 
+
 @@ -600,6 +676,9 @@
      const size_t rx_bytes = static_cast<size_t>(rdma->rx_depth) * rdma->chunk_size;
      const int default_tx_depth = rdma->rx_depth < 8192 ? 8192 : rdma->rx_depth;
@@ -157,7 +157,7 @@
 @@ -746,6 +828,199 @@
      }
  }
- 
+
 +bool socket_t::impl::rdma_poll_timeout(struct ibv_cq * cq, struct ibv_wc * wc, uint64_t timeout_us, bool * timed_out) {
 +    struct timespec start = {};
 +    if (timed_out) {
@@ -357,7 +357,7 @@
 @@ -767,14 +1042,18 @@
          wr.sg_list = &sge;
          wr.num_sge = 1;
- 
+
 +        uint8_t * fixed_frame = nullptr;
 +        uint64_t frame_seq = 0;
          if (fixed_frames) {
@@ -376,7 +376,7 @@
              sge.lkey   = c->tx_mr->lkey;
 @@ -792,9 +1071,9 @@
          }
- 
+
          if (rdma_trace_io()) {
 -            GGML_LOG_ERROR("RDMA post_send: chunk=%zu wire_chunk=%zu inline=%d lkey=0x%x rem=%zu\n",
 +            GGML_LOG_ERROR("RDMA post_send: chunk=%zu wire_chunk=%zu inline=%d lkey=0x%x rem=%zu seq=%llu\n",
@@ -394,11 +394,11 @@
 +            !rdma_wait_fixed_ack(frame_seq, fixed_frame, wire_chunk)) {
 +            return false;
 +        }
- 
+
          src += chunk;
          rem -= chunk;
 @@ -857,9 +1140,35 @@
- 
+
              const uint8_t * frame = c->rx_slot(slot);
              size_t payload = 0;
 -            if (!rdma_read_frame_header(frame, &payload) || payload > c->frame_payload_size()) {
@@ -435,13 +435,13 @@
 +                               (unsigned long long)c->rx_seq);
                  return false;
              }
- 
+
 @@ -872,6 +1181,8 @@
              }
- 
+
              if (!c->post_rx(slot)) return false;
 +            c->rx_seq++;
 +            if (c->send_frame_ack && !rdma_send_fixed_ack(frame_seq)) return false;
- 
+
              dst += copy;
              rem -= copy;

@@ -3,7 +3,7 @@
 @@ -108,6 +108,36 @@ static uint16_t rdma_remote_lid() {
      return static_cast<uint16_t>(parsed);
  }
- 
+
 +static enum ibv_mtu rdma_default_path_mtu(enum ibv_mtu active_mtu) {
 +    return active_mtu < IBV_MTU_1024 ? active_mtu : IBV_MTU_1024;
 +}
@@ -58,7 +58,7 @@
 +                  128 << rdma_local.path_mtu);
      return true;
  }
- 
+
 @@ -469,10 +498,7 @@ bool socket_t::impl::rdma_activate(uint32_t remote_qpn, uint32_t remote_psn, con
          a.qp_state        = IBV_QPS_INIT;
          a.port_num        = rdma_local.ib_port;

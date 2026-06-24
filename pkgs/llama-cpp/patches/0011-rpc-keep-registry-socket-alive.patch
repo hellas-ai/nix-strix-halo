@@ -5,12 +5,12 @@
      std::vector<ggml_backend_dev_t> devices;
 +    socket_ptr                      sock;
  };
- 
+
  static const char * ggml_backend_rpc_reg_get_name(ggml_backend_reg_t reg) {
 @@ -1910,7 +1911,7 @@ ggml_backend_reg_t ggml_backend_rpc_reg(void) {
      return &ggml_backend_rpc_reg;
  }
- 
+
 -static uint32_t ggml_backend_rpc_get_device_count(const char * endpoint) {
 +static uint32_t ggml_backend_rpc_get_device_count(const char * endpoint, socket_ptr * keep_sock = nullptr) {
      auto sock = get_socket(endpoint);
@@ -25,7 +25,7 @@
 +    }
      return response.device_count;
  }
- 
+
 @@ -1936,12 +1940,16 @@ ggml_backend_reg_t ggml_backend_rpc_add_server(const char * endpoint) {
      if (reg_map.find(endpoint) != reg_map.end()) {
          return reg_map[endpoint];

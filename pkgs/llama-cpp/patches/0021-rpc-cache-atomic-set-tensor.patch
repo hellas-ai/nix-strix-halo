@@ -68,5 +68,5 @@
 -    return true;
 +    return (bool)ifs;
  }
- 
+
  bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rpc_msg_set_tensor_hash_rsp & response)

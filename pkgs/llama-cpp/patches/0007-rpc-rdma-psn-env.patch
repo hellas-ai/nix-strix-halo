@@ -5,7 +5,7 @@
 @@ -136,6 +136,28 @@ static enum ibv_mtu rdma_path_mtu(enum ibv_mtu active_mtu) {
      }
  }
- 
+
 +static uint32_t rdma_psn(uint32_t fallback) {
 +    const char * env = std::getenv("GGML_RDMA_PSN");
 +    if (env && *env) {
@@ -33,12 +33,12 @@
      const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
 @@ -470,10 +486,10 @@ bool socket_t::impl::rdma_probe() {
      if (ibv_query_gid(ibctx, ib_port, gid_idx, &local_gid) != 0) return rdma_probe_fail("ibv_query_gid");
- 
+
      rdma_local.qpn = rdma->qp->qp_num;
 -    rdma_local.psn = rdma->qp->qp_num & 0xffffff;
 +    rdma_local.psn = rdma_psn(rdma->qp->qp_num & 0xffffff);
      memcpy(&rdma_local.gid, &local_gid, RDMA_GID_SIZE);
- 
+
      const char * ver_str = "";
      if (gid_version == IBV_GID_TYPE_ROCE_V2) {
          ver_str = " RoCEv2";
@@ -50,4 +50,3 @@
 +    GGML_LOG_INFO("RDMA local PSN: %u\n", rdma_local.psn);
      return true;
  }
- 

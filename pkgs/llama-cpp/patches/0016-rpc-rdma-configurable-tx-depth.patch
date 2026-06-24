@@ -3,7 +3,7 @@
 @@ -91,6 +91,21 @@
      return static_cast<int>(parsed);
  }
- 
+
 +static int rdma_tx_depth(int fallback) {
 +    const char * env = std::getenv("GGML_RPC_RDMA_TX_DEPTH");
 +    if (!env || !*env) {

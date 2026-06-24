@@ -3,7 +3,7 @@
 @@ -91,6 +91,23 @@ static const char * rdma_qp_type_name(enum ibv_qp_type qp_type) {
      return qp_type == IBV_QPT_UC ? "UC" : "RC";
  }
- 
+
 +static uint16_t rdma_remote_lid() {
 +    const char * env = std::getenv("GGML_RDMA_REMOTE_LID");
 +    if (!env || !*env) {
