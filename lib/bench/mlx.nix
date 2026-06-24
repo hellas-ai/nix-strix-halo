@@ -81,7 +81,6 @@ let
     import json
     import math
     import os
-    import time
 
     import mlx.core as mx
 
@@ -101,12 +100,10 @@ let
     for _ in range(warmup):
         mx.eval(a @ b)
 
-    start = time.perf_counter()
     c = None
     for _ in range(iterations):
         c = a @ b
         mx.eval(c)
-    elapsed = time.perf_counter() - start
 
     value = float(c[0, 0].item())
     if not math.isclose(value, expected, rel_tol=0.0, abs_tol=1e-3):
@@ -121,12 +118,10 @@ let
         "device": str(mx.default_device()),
         "device_info": device_info,
         "dtype": "float32",
-        "elapsed_seconds": elapsed,
         "expected": expected,
         "iterations": iterations,
         "n": n,
         "op": "matmul",
-        "seconds_per_iteration": elapsed / iterations,
         "shape": list(c.shape),
         "value": value,
         "verified": True,
