@@ -181,11 +181,11 @@
     "mlx-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1781500641,
-        "narHash": "sha256-muzdcRnY53Q1R0HeBeoT9yI4GtdgNpSdVOJCFUGN42M=",
+        "lastModified": 1782439509,
+        "narHash": "sha256-/rfJQ79J91HqineSLydLjbgmTNuM2DS9i2SnI5i1Teg=",
         "owner": "NripeshN",
         "repo": "mlx",
-        "rev": "24c1065fabec9c42b822eff161dc796496b2e949",
+        "rev": "853708d5d4a3bec19d215ef26bf319d74c0a0af6",
         "type": "github"
       },
       "original": {
