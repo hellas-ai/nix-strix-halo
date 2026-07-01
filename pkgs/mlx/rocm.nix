@@ -18,7 +18,10 @@ let
   mlx-rocm-src = applyPatches {
     name = "mlx-rocm-src";
     src = mlx-src;
-    patches = [ ./rocm-include-rocblas.patch ];
+    patches = [
+      ./rocm-include-rocblas.patch
+      ./rocm-can-reuse-alien-buffer.patch
+    ];
   };
   gccCxxInclude = "${stdenv.cc.cc}/include/c++/${stdenv.cc.cc.version}";
   rocmRuntimeEnv = {
@@ -70,7 +73,7 @@ mlx.overrideAttrs (old: {
               '  FetchContent_Declare(
         nanobind
         GIT_REPOSITORY https://github.com/wjakob/nanobind.git
-        GIT_TAG v2.12.0
+        GIT_TAG v2.13.0
         GIT_SHALLOW TRUE
         EXCLUDE_FROM_ALL)
       FetchContent_MakeAvailable(nanobind)' \
