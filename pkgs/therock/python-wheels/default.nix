@@ -3,8 +3,8 @@
   stdenv,
   fetchurl,
   autoPatchelfHook,
-  python312,
-  python312Packages,
+  therockPython,
+  therockPythonPackages,
   zlib,
   zstd,
   ncurses,
@@ -48,7 +48,7 @@ let
       })
       (lib.filterAttrs (project: _source: lib.elem project selectedPackageNames) wheelSources.packages);
 in
-python312Packages.buildPythonPackage (finalAttrs: {
+therockPythonPackages.buildPythonPackage (finalAttrs: {
   pname = "therock-python-wheels-${wheelSources.target}";
   version = wheelSources.rocmVersion;
   format = "other";
@@ -60,9 +60,9 @@ python312Packages.buildPythonPackage (finalAttrs: {
 
   nativeBuildInputs = [
     autoPatchelfHook
-    python312Packages.pip
-    python312Packages.setuptools
-    python312Packages.wheel
+    therockPythonPackages.pip
+    therockPythonPackages.setuptools
+    therockPythonPackages.wheel
   ];
 
   buildInputs = [
@@ -81,7 +81,7 @@ python312Packages.buildPythonPackage (finalAttrs: {
     ocl-icd
   ];
 
-  propagatedBuildInputs = with python312Packages; [
+  propagatedBuildInputs = with therockPythonPackages; [
     filelock
     fsspec
     jinja2
@@ -100,7 +100,7 @@ python312Packages.buildPythonPackage (finalAttrs: {
   installPhase = ''
     runHook preInstall
 
-    site="$out/${python312.sitePackages}"
+    site="$out/${therockPython.sitePackages}"
     wheelhouse="$TMPDIR/therock-wheels"
     mkdir -p "$site" "$wheelhouse"
 
@@ -133,7 +133,7 @@ python312Packages.buildPythonPackage (finalAttrs: {
     fi
 
     find "$site" -path "*/_rocm_sdk_core/bin/rocgdb-py3.*" \
-      ! -name "rocgdb-py3.12" -delete
+      ! -name "rocgdb-py${lib.versions.majorMinor therockPython.version}" -delete
 
     runHook postInstall
   '';
@@ -145,9 +145,9 @@ python312Packages.buildPythonPackage (finalAttrs: {
 
   passthru = {
     inherit wheelSources;
-    pythonModule = python312;
-    sitePackages = "${finalAttrs.finalPackage}/${python312.sitePackages}";
-    rocmtoolkit_joined = "${finalAttrs.finalPackage}/${python312.sitePackages}/_rocm_sdk_core";
+    pythonModule = therockPython;
+    sitePackages = "${finalAttrs.finalPackage}/${therockPython.sitePackages}";
+    rocmtoolkit_joined = "${finalAttrs.finalPackage}/${therockPython.sitePackages}/_rocm_sdk_core";
     gpuTargets = [ wheelSources.target ];
     gpuTargetString = wheelSources.target;
     cudaSupport = false;

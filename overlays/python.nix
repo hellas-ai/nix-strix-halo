@@ -2,11 +2,12 @@
   lib,
   provider ? "nixpkgs",
   rocmTarget ? null,
+  therockPythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
 }:
 
 # Parameterised Python overlay. Always applies shared Python package
-# compatibility fixes, and optionally swaps `python312Packages.torch`,
-# `triton`, `amdsmi`, and the `rocm-sdk-*` shims depending on provider.
+# compatibility fixes, and optionally swaps the configured TheRock Python
+# package set's `torch`, `triton`, `amdsmi`, and `rocm-sdk-*` shims.
 #
 #   - "nixpkgs"         Stock nixpkgs Python packages plus the shared fixes.
 #   - "therock-wheels"  TheRock-published binary wheels, used by the
@@ -41,6 +42,7 @@ let
       import ./therock-python.nix {
         inherit lib;
         target = rocmTarget;
+        pythonConfig = therockPythonConfig;
       } final prev
     else
       throw "unreachable: assertPythonProvider should have rejected ${provider}";

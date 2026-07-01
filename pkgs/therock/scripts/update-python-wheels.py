@@ -22,7 +22,6 @@ from pathlib import Path
 
 BASE_URL = "https://rocm.nightlies.amd.com/v2"
 DEFAULT_TARGET = "gfx1151"
-DEFAULT_PYTHON_TAG = "cp312"
 DEFAULT_SERIES = "7.13"
 BASE_PACKAGES = [
     "rocm",
@@ -274,10 +273,19 @@ def pinned_series(output: str) -> str | None:
     return None
 
 
+def pinned_python_tag(sources: dict, target: str) -> str | None:
+    target_sources = sources.get("targets", {}).get(target)
+    if isinstance(target_sources, dict):
+        python_tag = target_sources.get("pythonTag")
+        if isinstance(python_tag, str):
+            return python_tag
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default=DEFAULT_TARGET)
-    parser.add_argument("--python-tag", default=DEFAULT_PYTHON_TAG)
+    parser.add_argument("--python-tag", help="Python ABI tag; defaults to the current pin")
     parser.add_argument(
         "--series",
         help="Version prefix to select; defaults to the currently pinned series",
@@ -286,6 +294,10 @@ def main() -> None:
     parser.add_argument("--package", action="append", default=[], help="Project to pin")
     parser.add_argument("--output", default="pkgs/therock/sources/python-wheels.json")
     args = parser.parse_args()
+    sources = load_sources(Path(args.output))
+    python_tag = args.python_tag or pinned_python_tag(sources, args.target)
+    if python_tag is None:
+        parser.error("--python-tag is required when the output has no current pin for this target")
 
     if not args.series and not args.rocm_version:
         args.series = pinned_series(args.output) or DEFAULT_SERIES
@@ -296,14 +308,14 @@ def main() -> None:
     rocm_version = args.rocm_version or choose_rocm_version(
         distributions_by_project,
         series=args.series,
-        python_tag=args.python_tag,
+        python_tag=python_tag,
     )
 
     target_sources = {
         "target": args.target,
         "series": args.series,
         "rocmVersion": rocm_version,
-        "pythonTag": args.python_tag,
+        "pythonTag": python_tag,
         "index": f"{BASE_URL}/{target_slug(args.target)}/",
         "packages": {},
         "updated": datetime.now(timezone.utc).isoformat(),
@@ -313,7 +325,7 @@ def main() -> None:
         dist = choose_distribution(
             distributions_by_project[project],
             rocm_version=rocm_version,
-            python_tag=args.python_tag,
+            python_tag=python_tag,
         )
         print(f"prefetching {project}: {dist.filename}", file=sys.stderr)
         fetched = prefetch(dist.url)
@@ -330,7 +342,6 @@ def main() -> None:
         }
 
     output = Path(args.output)
-    sources = load_sources(output)
     sources["targets"][args.target] = target_sources
     sources["updated"] = target_sources["updated"]
     output.write_text(json.dumps(sources, indent=2) + "\n")

@@ -4,6 +4,7 @@
   rocmTarget,
   rocmTargets,
   sources,
+  therockPythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
 }:
 
 # Parameterised ROCm overlay. Picks one of:
@@ -33,6 +34,7 @@ let
     therockRocmSourcePins = sources.rocmSourcePins;
     therockRocmSourceTrees = sources.rocmSourceTrees;
     therockRocmThirdPartySources = sources.rocmThirdParty;
+    inherit therockPythonConfig;
   };
 
   suffix = rocmTarget.packageSuffix;

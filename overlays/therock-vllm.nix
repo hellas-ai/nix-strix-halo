@@ -3,6 +3,7 @@
   target,
   vllmSrc,
   vllmVersion,
+  therockPythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
   enabled ? true,
 }:
 let
@@ -17,7 +18,7 @@ let
     localGpuTargets = vllmGpuTargets;
     gpuTargets = vllmGpuTargets;
   };
-  py = final.python312Packages;
+  py = final.${therockPythonConfig.packagesAttr};
   vllmSrcWithTag = vllmSrc // {
     tag = vllmSrc.tag or "v${vllmVersion}";
   };
@@ -259,7 +260,7 @@ let
           substituteInPlace CMakeLists.txt \
             --replace-fail \
               'set(PYTHON_SUPPORTED_VERSIONS' \
-              'set(PYTHON_SUPPORTED_VERSIONS "${lib.versions.majorMinor final.python312.version}"'
+              'set(PYTHON_SUPPORTED_VERSIONS "${therockPythonConfig.pythonVersion}"'
 
           # vLLM 0.22's Rust frontend is optional. Keep this local build on
           # the existing Python/C++/HIP surface until the Cargo deps are

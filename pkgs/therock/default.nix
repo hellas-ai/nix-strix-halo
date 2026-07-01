@@ -7,9 +7,13 @@
   therockRocmSourcePins,
   therockRocmSourceTrees,
   therockRocmThirdPartySources,
+  therockPythonConfig ? import ./python-config.nix { inherit lib; },
 }:
 final: prev:
 let
+  therockPython = prev.${therockPythonConfig.packageAttr};
+  therockPythonPackages = prev.${therockPythonConfig.packagesAttr};
+
   targetBySuffix = lib.listToAttrs (
     map (rocmTarget: {
       name = rocmTarget.packageSuffix;
@@ -63,44 +67,6 @@ let
   normalizeRocmVersion =
     version: if builtins.length (lib.splitVersion version) == 2 then "${version}.0" else version;
 
-  mkTorchRocm =
-    rocmTarget:
-    (final.python3Packages.torch.override {
-      rocmSupport = true;
-      cudaSupport = false;
-      rocmPackages = final.therockRocmPackages.${rocmTarget.runtimeArch};
-    }).overrideAttrs
-      (old: {
-        postPatch = (old.postPatch or "") + ''
-          # Current RCCL reports NCCL_VERSION_CODE 22803 (2.28.3) but does
-          # not ship the NCCL 2.28+ device-side symmetric memory APIs. Keep
-          # PyTorch's NCCL symmetric-memory gates closed on ROCm.
-          substituteInPlace torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp \
-            --replace-fail \
-              '#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 28, 0)' \
-              '#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 28, 0) && !defined(USE_ROCM)' \
-            --replace-fail \
-              '#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 29, 0)' \
-              '#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 29, 0) && !defined(USE_ROCM)'
-
-          # intra_node_comm.cpp calls rsmi_init() under `#ifdef USE_ROCM`,
-          # but PyTorch's dependency list does not include rocm_smi64.
-          substituteInPlace cmake/Dependencies.cmake \
-            --replace-fail \
-              'hip::amdhip64 MIOpen hiprtc::hiprtc) # libroctx will be linked in with MIOpen' \
-              'hip::amdhip64 MIOpen hiprtc::hiprtc rocm_smi64) # libroctx will be linked in with MIOpen'
-        '';
-      });
-
-  torchRocmTargets = builtins.filter hasPythonWheelSources rocmTargets;
-
-  torchRocmPerArch = lib.listToAttrs (
-    map (rocmTarget: {
-      name = "torch-rocm-${rocmTarget.packageSuffix}";
-      value = mkTorchRocm rocmTarget;
-    }) torchRocmTargets
-  );
-
   mkTherockRocmSdkAttrs =
     suffix: source:
     let
@@ -137,16 +103,19 @@ let
       suffix = rocmTarget.packageSuffix;
       wheelSources = pythonWheelSourcesFor rocmTarget;
     in
+    assert lib.assertMsg (wheelSources.pythonTag == therockPythonConfig.pythonTag)
+      "TheRock wheel pin for ${suffix} uses ${wheelSources.pythonTag}, but Python config expects ${therockPythonConfig.pythonTag}";
     {
       "therock-python-${suffix}" = prev.callPackage ./python-env {
-        inherit wheelSources;
+        inherit therockPython therockPythonPackages wheelSources;
       };
       "therock-python-wheels-${suffix}" = prev.callPackage ./python-wheels {
-        inherit wheelSources;
+        inherit therockPython therockPythonPackages wheelSources;
       };
-      "therock-amdsmi-${suffix}" = prev.python312Packages.callPackage ./amdsmi {
+      "therock-amdsmi-${suffix}" = therockPythonPackages.callPackage ./amdsmi {
         wheels = final."therock-python-wheels-${suffix}";
       };
+      "torch-rocm-${suffix}" = final."therock-python-wheels-${suffix}";
     };
 
   therockPythonTargets = builtins.filter hasPythonWheelSources rocmTargets;
@@ -316,7 +285,6 @@ in
     }
   );
 }
-// torchRocmPerArch
 // therockRocmSdkPerArch
 // therockPythonPerArch
 // therockFromSourcePerArch
