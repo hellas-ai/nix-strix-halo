@@ -1,0 +1,15 @@
+diff --git a/mlx/backend/rocm/allocator.cpp b/mlx/backend/rocm/allocator.cpp
+index 74e309d..fe7be4c 100644
+--- a/mlx/backend/rocm/allocator.cpp
++++ b/mlx/backend/rocm/allocator.cpp
+@@ -836,6 +836,10 @@ void* Buffer::raw_ptr() {
+   return cbuf.data;
+ }
+ 
++bool can_reuse_alien_buffer(void*) {
++  return true;
++}
++
+ } // namespace allocator
+ 
+ size_t get_active_memory() {
