@@ -376,6 +376,7 @@
 
       providers = import ./lib/providers.nix { inherit lib; };
       benchLib = import ./lib/bench/lib.nix { inherit lib; };
+      therockPythonConfig = import ./pkgs/therock/python-config.nix { inherit lib; };
 
       defaultTherockSources = {
         rocm = builtins.fromJSON (builtins.readFile ./pkgs/therock/sources/rocm.json);
@@ -445,18 +446,18 @@
           thunderboltIbverbsOverlay
           thunderboltRenamesOverlay
           (import ./overlays/rocm.nix {
-            inherit lib;
+            inherit lib therockPythonConfig;
             provider = rocmProvider;
             inherit rocmTarget rocmTargets;
             sources = defaultTherockSources;
           })
           (import ./overlays/python.nix {
-            inherit lib;
+            inherit lib therockPythonConfig;
             provider = pythonProvider;
             inherit rocmTarget;
           })
           (import ./overlays/therock-vllm.nix {
-            inherit lib;
+            inherit lib therockPythonConfig;
             target = rocmTarget;
             vllmSrc = inputs.vllm-src;
             vllmVersion = "0.23.0";
@@ -745,7 +746,7 @@
             name = "vllm-rocm-${s}-ray-env";
             paths = [
               pkgs.vllm-rocm
-              pkgs.python312Packages.ray
+              pkgs.${therockPythonConfig.packagesAttr}.ray
             ];
           };
 

@@ -4,8 +4,8 @@
   fetchurl,
   makeWrapper,
   autoPatchelfHook,
-  python312,
-  python312Packages,
+  therockPython,
+  therockPythonPackages,
   bashInteractive,
   zlib,
   zstd,
@@ -23,7 +23,7 @@
 }:
 
 let
-  basePython = python312.withPackages (
+  basePython = therockPython.withPackages (
     ps: with ps; [
       filelock
       fsspec
@@ -48,6 +48,7 @@ let
       name = source.filename or "${project}.whl";
     };
   }) wheelSources.packages;
+  rocGdbPythonBinary = "rocgdb-py${lib.versions.majorMinor therockPython.version}";
 in
 stdenv.mkDerivation {
   pname = "therock-python-${wheelSources.target}";
@@ -60,9 +61,9 @@ stdenv.mkDerivation {
   nativeBuildInputs = [
     autoPatchelfHook
     makeWrapper
-    python312Packages.pip
-    python312Packages.setuptools
-    python312Packages.wheel
+    therockPythonPackages.pip
+    therockPythonPackages.setuptools
+    therockPythonPackages.wheel
   ];
 
   buildInputs = [
@@ -84,7 +85,7 @@ stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
 
-    site="$out/${python312.sitePackages}"
+    site="$out/${therockPython.sitePackages}"
     wheelhouse="$TMPDIR/therock-wheels"
     mkdir -p "$site" "$out/bin" "$wheelhouse"
 
@@ -102,7 +103,7 @@ stdenv.mkDerivation {
       "$wheelhouse"/*
 
     find "$site" -path "*/_rocm_sdk_core/bin/rocgdb-py3.*" \
-      ! -name "rocgdb-py3.12" -delete
+      ! -name "${rocGdbPythonBinary}" -delete
 
     chmod -R u+w "$out"
 
@@ -141,7 +142,8 @@ stdenv.mkDerivation {
 
   passthru = {
     inherit basePython wheelSources;
-    sitePackages = "${placeholder "out"}/${python312.sitePackages}";
+    pythonModule = therockPython;
+    sitePackages = "${placeholder "out"}/${therockPython.sitePackages}";
   };
 
   meta = {

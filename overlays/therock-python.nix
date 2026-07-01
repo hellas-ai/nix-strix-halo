@@ -1,7 +1,11 @@
-# Opt-in TheRock Python overlay. The TheRock wheels are currently cp312,
-# so keep the substitution scoped to python312 package sets. Other Python
-# interpreters stay on the nixpkgs/libibverbs defaults.
-{ lib, target }:
+# Opt-in TheRock Python overlay. Substitute only the interpreter selected
+# by pkgs/therock/python-config.nix; other Python interpreters stay on
+# nixpkgs defaults.
+{
+  lib,
+  target,
+  pythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
+}:
 let
   s = target.packageSuffix;
   disablePythonChecks =
@@ -15,7 +19,7 @@ final: prev: {
   pythonPackagesExtensions = (prev.pythonPackagesExtensions or [ ]) ++ [
     (
       _pyfinal: pyprev:
-      if lib.versions.majorMinor pyprev.python.version == "3.12" then
+      if lib.versions.majorMinor pyprev.python.version == pythonConfig.pythonVersion then
         let
           wheels = final."therock-python-wheels-${s}";
         in
