@@ -77,7 +77,7 @@ let
       postFixup =
         (old.postFixup or "")
         + lib.optionalString prev.stdenv.hostPlatform.isDarwin ''
-          for bin in "$out"/bin/rpc-server "$out"/bin/llama-rpc-server; do
+          for bin in "$out"/bin/rpc-server "$out"/bin/llama-rpc-server "$out"/bin/ggml-rpc-server; do
             if [ -x "$bin" ] && ! otool -l "$bin" | grep -Fq "$out/lib"; then
               install_name_tool -add_rpath "$out/lib" "$bin"
             fi
@@ -120,6 +120,26 @@ let
     preConfigure = ''
       prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${masterRev}"
     '';
+    postInstall =
+      lib.replaceStrings
+        [ "cp bin/rpc-server $out/bin/llama-rpc-server" ]
+        [
+          ''
+            rpc_server_bin=
+            for bin in bin/rpc-server bin/llama-rpc-server bin/ggml-rpc-server; do
+              if [ -x "$bin" ]; then
+                rpc_server_bin="$bin"
+                break
+              fi
+            done
+            if [ -z "$rpc_server_bin" ]; then
+              echo "could not find llama.cpp RPC server binary" >&2
+              exit 1
+            fi
+            cp "$rpc_server_bin" "$out/bin/llama-rpc-server"
+          ''
+        ]
+        (old.postInstall or "");
     cmakeFlags = (old.cmakeFlags or [ ]) ++ [
       (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
     ];
