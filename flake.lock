@@ -1338,11 +1338,11 @@
     "xrt-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1779224521,
-        "narHash": "sha256-xErKqZFOFiY+k0o1L8bki6kPwahba66hOxvuj4czXh4=",
+        "lastModified": 1780589208,
+        "narHash": "sha256-JrqJIGJoQiXTwXjZpqAXVaHx+6i09B1qtqkJzoRPZKw=",
         "ref": "XRT-2.21",
-        "rev": "c14df528b9e98ef1ecaf05f5720ef05d9158dc22",
-        "revCount": 8683,
+        "rev": "8661761775a266b11992a3bd6eb08209d88aa845",
+        "revCount": 8684,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/Xilinx/XRT"
