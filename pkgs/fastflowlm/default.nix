@@ -22,6 +22,7 @@
   # FastFlowLM hardcodes this in src/CMakePresets.json; we mirror that
   # value here so the CMake build doesn't have to read JSON at eval time.
   npuVersion ? "32.0.203.304",
+  maxBuildJobs ? 8,
   version ? null,
 }:
 
@@ -98,6 +99,15 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   env.NIX_LDFLAGS = "-L${tokenizers-cpp.tokenizers-c}/lib -ltokenizers_c";
+
+  preBuild = ''
+    # Gemma4e translation units in newer FastFlowLM snapshots are large enough
+    # to OOM the CI builder when ninja fans out to all cores.
+    if [ "''${NIX_BUILD_CORES:-1}" -gt ${toString maxBuildJobs} ]; then
+      export NIX_BUILD_CORES=${toString maxBuildJobs}
+      export CMAKE_BUILD_PARALLEL_LEVEL=${toString maxBuildJobs}
+    fi
+  '';
 
   postFixup = ''
     # The bundled NPU runtime shared libs ($out/lib/flm/*.so) are
