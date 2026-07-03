@@ -47,6 +47,8 @@ let
   # vLLM's automatic GPU memory profiling is fragile on shared ROCm builders.
   # The smoke cases only need a small deterministic KV cache.
   smokeKvCacheArgs = [
+    "--gpu-memory-utilization"
+    "0.50"
     "--kv-cache-memory-bytes"
     "1073741824"
   ];
