@@ -19,7 +19,14 @@ let
   providers = import ../lib/providers.nix { inherit lib; };
   pythonFixes =
     _pyfinal: pyprev:
-    lib.optionalAttrs (prev.stdenv.hostPlatform.isDarwin && pyprev ? sentence-transformers) {
+    lib.optionalAttrs (pyprev ? "prometheus-fastapi-instrumentator") {
+      "prometheus-fastapi-instrumentator" =
+        pyprev."prometheus-fastapi-instrumentator".overridePythonAttrs
+          (old: {
+            pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "starlette" ];
+          });
+    }
+    // lib.optionalAttrs (prev.stdenv.hostPlatform.isDarwin && pyprev ? sentence-transformers) {
       # sentence-transformers' runtime closure is usable on Darwin, but its
       # nixpkgs test extras pull `phonemizer -> dlinfo`, and dlinfo is marked
       # broken on Darwin. Downstream eval tooling only needs runtime imports.
