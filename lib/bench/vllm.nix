@@ -48,7 +48,7 @@ let
   # The smoke cases only need a small deterministic KV cache.
   smokeKvCacheArgs = [
     "--gpu-memory-utilization"
-    "0.50"
+    "0.10"
     "--kv-cache-memory-bytes"
     "1073741824"
   ];
