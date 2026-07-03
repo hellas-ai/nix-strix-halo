@@ -94,12 +94,6 @@ mlx.overrideAttrs (old: {
       local tool="$1"
       local path=""
 
-      path="$(/usr/bin/xcrun -sdk macosx -find "$tool" 2>/dev/null || true)"
-      if [ -n "$path" ] && [ -x "$path" ] && "$path" --version >/dev/null 2>&1; then
-        printf '%s\n' "$path"
-        return 0
-      fi
-
       for root in \
         /private/var/run/com.apple.security.cryptexd/mnt \
         /var/run/com.apple.security.cryptexd/mnt; do
@@ -111,6 +105,12 @@ mlx.overrideAttrs (old: {
           fi
         fi
       done
+
+      path="$(/usr/bin/xcrun -sdk macosx -find "$tool" 2>/dev/null || true)"
+      if [ -n "$path" ] && [ -x "$path" ] && "$path" --version >/dev/null 2>&1; then
+        printf '%s\n' "$path"
+        return 0
+      fi
 
       return 1
     }
