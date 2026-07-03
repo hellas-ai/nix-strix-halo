@@ -777,13 +777,16 @@
 
           darwinPackages =
             let
+              mlxNanobind = pkgs.python3Packages.callPackage ./pkgs/mlx/nanobind-2_13.nix { };
               mlxMetalBackend = pkgs.python3Packages.callPackage ./pkgs/mlx/metal.nix {
                 inherit (inputs) mlx-src;
+                nanobind = mlxNanobind;
                 pname = "mlx-metal";
                 buildStage = 2;
               };
               mlxMetal = pkgs.python3Packages.callPackage ./pkgs/mlx/metal.nix {
                 inherit (inputs) mlx-src;
+                nanobind = mlxNanobind;
                 pname = "mlx";
                 buildStage = 1;
                 backendPackage = mlxMetalBackend;

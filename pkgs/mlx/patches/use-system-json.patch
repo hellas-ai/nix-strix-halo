@@ -70,13 +70,14 @@ index 687d6e6..35d97c5 100644
 
  #include "mlx/backend/cpu/encoder.h"
 diff --git a/mlx/io/safetensors.cpp b/mlx/io/safetensors.cpp
-index 8035c3c..f59b13e 100644
+index 6fe366b..088a239 100644
 --- a/mlx/io/safetensors.cpp
 +++ b/mlx/io/safetensors.cpp
-@@ -1,5 +1,5 @@
- // Copyright © 2025 Apple Inc.
+@@ -1,6 +1,6 @@
+ // Copyright © 2023 Apple Inc.
 
 -#include <json.hpp>
 +#include <nlohmann/json.hpp>
-
  #include <memory>
+ #include <sstream>
+ #include <stack>

@@ -51,6 +51,7 @@ let
     "targets"
     suffix
   ];
+  mlxNanobind = final.python3Packages.callPackage ../pkgs/mlx/nanobind-2_13.nix { };
   finalHas = name: builtins.hasAttr name final;
 
   rocmProviderHasTherockAttrs = rocmProvider == "therock-bin" || rocmProvider == "therock-source";
@@ -243,6 +244,9 @@ let
 
       mlx-rocm = bigParallel (
         final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
+          mlx = final.python3Packages.mlx.override {
+            nanobind = mlxNanobind;
+          };
           inherit (inputs) mlx-src;
           pname = "mlx-rocm-${suffix}";
           rdma-core = final.rdma-core-usb4;
