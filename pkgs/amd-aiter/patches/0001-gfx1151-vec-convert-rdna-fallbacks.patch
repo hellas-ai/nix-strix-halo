@@ -1,0 +1,74 @@
+--- a/csrc/include/ck_tile/vec_convert.h
++++ b/csrc/include/ck_tile/vec_convert.h
+@@ -37,37 +37,69 @@ struct numeric_traits<fp8_t>
+     // maximum finite value
+     CK_TILE_HOST_DEVICE static constexpr fp32_t max() { return 6.0f; }
+ };
++
++// RDNA 3/3.5 lacks the CDNA packed FP32/FP8 conversion instructions used
++// below. Keep CDNA on the fast asm path and provide scalar fallbacks for
++// gfx11xx/gfx115x so AITER JIT modules compile on Strix Halo.
++#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
++    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) || \
++    defined(__gfx1152__) || defined(__gfx1153__)
++#define CK_TILE_RDNA3_NO_PK_FP8 1
++#endif
+ CK_TILE_DEVICE fp32x2_v amd_assembly_pk_mul_f32(fp32x2_v a, fp32x2_t b)
+ {
+     fp32x2_v c;
++#if defined(CK_TILE_RDNA3_NO_PK_FP8)
++    c[0] = a[0] * b[0];
++    c[1] = a[1] * b[1];
++#else
+     asm volatile("v_pk_mul_f32 %0, %1, %2" : "=v"(c) : "v"(a), "v"(b));
++#endif
+     return c;
+ }
+ CK_TILE_DEVICE fp8x2_v amd_assembly_cvt_pk_fp8_f32(fp32_t a, fp32_t b)
+ {
+-    int16x2_t c;
+     static constexpr bool is_e4m3_fnuz =
+         (numeric_traits<fp8_t>::f8_interpret == fp8_interpretation::E4M3_FNUZ);
+     static constexpr float d = is_e4m3_fnuz ? 240.0f : 448.0f;
+     static constexpr float e = is_e4m3_fnuz ? -240.0f : -448.0f;
++#if defined(CK_TILE_RDNA3_NO_PK_FP8)
++    a = __builtin_fminf(__builtin_fmaxf(a, e), d);
++    b = __builtin_fminf(__builtin_fmaxf(b, e), d);
++    fp8x2_v result;
++    result[0] = type_convert<fp8_t>(a);
++    result[1] = type_convert<fp8_t>(b);
++    return result;
++#else
++    int16x2_t c;
+     asm volatile("v_med3_f32 %1, %1, %3, %4\n"
+                  "v_med3_f32 %2, %2, %3, %4\n"
+                  "v_cvt_pk_fp8_f32 %0, %1, %2"
+                  : "=v"(c)
+                  : "v"(a), "v"(b), "v"(d), "v"(e));
+     return bit_cast<fp8x2_v>(c[0]);
++#endif
+ }
+ CK_TILE_DEVICE fp8x2_v amd_assembly_cvt_pk_bf8_f32(fp32_t a, fp32_t b)
+ {
+-    int16x2_t c;
+     static constexpr float d = 57344.0f;
+     static constexpr float e = -57344.0f;
++#if defined(CK_TILE_RDNA3_NO_PK_FP8)
++    a = __builtin_fminf(__builtin_fmaxf(a, e), d);
++    b = __builtin_fminf(__builtin_fmaxf(b, e), d);
++    fp8x2_v result;
++    result[0] = type_convert<fp8_t>(a);
++    result[1] = type_convert<fp8_t>(b);
++    return result;
++#else
++    int16x2_t c;
+     asm volatile("v_med3_f32 %1, %1, %3, %4\n"
+                  "v_med3_f32 %2, %2, %3, %4\n"
+                  "v_cvt_pk_bf8_f32 %0, %1, %2"
+                  : "=v"(c)
+                  : "v"(a), "v"(b), "v"(d), "v"(e));
+     return bit_cast<fp8x2_v>(c[0]);
++#endif
+ }
+ CK_TILE_DEVICE fp4x2_t amd_assembly_cvt_scalef32_pk_fp4_f32(fp32_t a, fp32_t b, fp32_t scale)
+ {

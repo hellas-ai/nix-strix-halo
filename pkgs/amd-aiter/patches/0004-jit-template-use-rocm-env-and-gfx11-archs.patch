@@ -1,0 +1,59 @@
+--- a/csrc/cpp_itfs/utils.py
++++ b/csrc/cpp_itfs/utils.py
+@@ -49,6 +49,23 @@
+     _make_writable(dst)
+ 
+ 
++def _rocm_tool(*parts):
++    root = os.environ.get("ROCM_HOME") or os.environ.get("ROCM_PATH") or "/opt/rocm"
++    return os.path.join(root, *parts)
++
++
++def _run_rocm_tool(*parts, args=()):
++    cmd = [_rocm_tool(*parts)] + list(args)
++    try:
++        return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
++    except FileNotFoundError:
++        fallback = [parts[-1]] + list(args)
++        try:
++            return subprocess.run(fallback, capture_output=True, text=True, check=False).stdout
++        except FileNotFoundError:
++            return ""
++
++
+ def get_git_commit_id_short():
+     """??? commit ID (?? 7 ???)"""
+     try:
+@@ -142,10 +159,11 @@
+ 
+ 
+ def get_hip_version():
+-    version = subprocess.run(
+-        "/opt/rocm/bin/hipconfig --version", shell=True, capture_output=True, text=True
+-    )
+-    return parse(version.stdout.split()[-1].rstrip("-").replace("-", "+"))
++    version = _run_rocm_tool("bin", "hipconfig", args=("--version",))
++    tokens = version.split()
++    if not tokens:
++        raise RuntimeError("hipconfig --version returned no output")
++    return parse(tokens[-1].rstrip("-").replace("-", "+"))
+ 
+ 
+ @lru_cache()
+@@ -168,6 +186,16 @@
+         "gfx940",
+         "gfx941",
+         "gfx942",
++        "gfx1100",
++        "gfx1101",
++        "gfx1102",
++        "gfx1103",
++        "gfx1150",
++        "gfx1151",
++        "gfx1152",
++        "gfx1153",
++        "gfx1200",
++        "gfx1201",
+         "gfx950",
+     ]
+ 

@@ -711,6 +711,7 @@
             "llama-cpp-rocm"
             "llama-cpp-vulkan"
             "mlx-rocm"
+            "sglang-rocm"
             "strix-halo-mes-firmware"
             "therock-amdsmi"
             "therock-python"
@@ -883,6 +884,7 @@
             mlx-lm-server =
               ap self.packages.${system}.mlx-lm "mlx_lm.server"
                 "Run the MLX LM HTTP server on ROCm";
+            sglang-rocm = ap pkgs.sglang-rocm "sglang" "Run SGLang with ROCm";
 
             live-iso-vm =
               let

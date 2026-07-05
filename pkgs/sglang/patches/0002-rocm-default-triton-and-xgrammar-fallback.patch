@@ -1,0 +1,56 @@
+diff --git a/sglang/srt/constrained/xgrammar_backend.py b/sglang/srt/constrained/xgrammar_backend.py
+index 67f701b..e3d6a01 100644
+--- a/sglang/srt/constrained/xgrammar_backend.py
++++ b/sglang/srt/constrained/xgrammar_backend.py
+@@ -41,7 +41,12 @@ _is_hip = is_hip()
+ 
+ if _is_hip:
+-    from sgl_kernel import apply_token_bitmask_inplace_cuda
++    try:
++        from sgl_kernel import apply_token_bitmask_inplace_cuda
++    except ImportError:
++        from sglang.srt.constrained.triton_ops.bitmask_ops import (
++            apply_token_bitmask_inplace_triton as apply_token_bitmask_inplace_cuda,
++        )
+ else:
+     from sglang.srt.constrained.triton_ops.bitmask_ops import (
+         apply_token_bitmask_inplace_triton,
+     )
+diff --git a/sglang/srt/server_args.py b/sglang/srt/server_args.py
+index b1ffdec..573ecb4 100644
+--- a/sglang/srt/server_args.py
++++ b/sglang/srt/server_args.py
+@@ -4445,7 +4445,10 @@ class ServerArgs:
+             ):
+                 return "trtllm_mha"
+             elif is_hip():
+-                return "aiter"
++                rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH") or os.environ.get("GPU_ARCHS", "")
++                if rocm_arch.startswith(("gfx11", "gfx12")):
++                    return "triton"
++                return "aiter"
+             elif is_mps():
+                 return "torch_native"
+             else:
+@@ -4459,13 +4462,15 @@ class ServerArgs:
+             elif is_sm100_supported():
+                 return "flashinfer"
+             elif is_hip():
+-                head_num = model_config.get_num_kv_heads(self.tp_size)
+-                # TODO current aiter only support head number 16 or 128 head number
+-                if head_num == 128 or head_num == 16:
+-                    return "aiter"
+-                else:
+-                    return "triton"
++                rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH") or os.environ.get("GPU_ARCHS", "")
++                if rocm_arch.startswith(("gfx11", "gfx12")):
++                    return "triton"
++                head_num = model_config.get_num_kv_heads(self.tp_size)
++                # TODO current aiter only support head number 16 or 128 head number
++                if head_num == 128 or head_num == 16:
++                    return "aiter"
++                return "triton"
+             elif is_mps():
+                 return "torch_native"
+             else:
+                 return "triton"

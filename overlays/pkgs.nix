@@ -288,6 +288,12 @@ let
       torch-rocm = final."torch-rocm-${suffix}";
     }
     // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython) {
+      sglang-rocm = prev.callPackage ../pkgs/sglang {
+        inherit (final) python312Packages;
+        rocmSdk = final."therock-rocm-${suffix}";
+        inherit (rocmTarget) packageSuffix;
+        hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+      };
       vllm-rocm = final."vllm-rocm-therock-${suffix}";
     }
   );
