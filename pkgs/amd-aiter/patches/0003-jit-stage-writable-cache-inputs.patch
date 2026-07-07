@@ -1,0 +1,59 @@
+--- a/csrc/cpp_itfs/utils.py
++++ b/csrc/cpp_itfs/utils.py
+@@ -18,6 +18,37 @@ import inspect
+ import json
+ 
+ 
++def _make_writable(path):
++    if not os.path.exists(path):
++        return
++
++    def chmod_owner_writable(target):
++        os.chmod(target, os.stat(target).st_mode | 0o200)
++
++    if os.path.isdir(path):
++        for root, dirs, files in os.walk(path):
++            chmod_owner_writable(root)
++            for name in dirs:
++                chmod_owner_writable(os.path.join(root, name))
++            for name in files:
++                chmod_owner_writable(os.path.join(root, name))
++    else:
++        chmod_owner_writable(path)
++
++
++def _copy_writable(src, dst):
++    if os.path.isdir(dst):
++        dst = os.path.join(dst, os.path.basename(src))
++    shutil.copyfile(src, dst)
++    _make_writable(dst)
++    return dst
++
++
++def _copytree_writable(src, dst):
++    shutil.copytree(src, dst, dirs_exist_ok=True, copy_function=_copy_writable)
++    _make_writable(dst)
++
++
+ def get_git_commit_id_short():
+     """??? commit ID (?? 7 ???)"""
+     try:
+@@ -170,14 +201,14 @@ def compile_lib(src_file, folder, includes=None, sources=None, cxxflags=None):
+ 
+         for include in includes + [f"{CK_DIR}/include"]:
+             if os.path.isdir(include):
+-                shutil.copytree(include, include_dir, dirs_exist_ok=True)
++                _copytree_writable(include, include_dir)
+             else:
+-                shutil.copy(include, include_dir)
++                _copy_writable(include, include_dir)
+         for source in sources:
+             if os.path.isdir(source):
+-                shutil.copytree(source, sub_build_dir, dirs_exist_ok=True)
++                _copytree_writable(source, sub_build_dir)
+             else:
+-                shutil.copy(source, sub_build_dir)
++                _copy_writable(source, sub_build_dir)
+         with open(f"{sub_build_dir}/{folder}.cpp", "w") as f:
+             f.write(src_file)
+ 

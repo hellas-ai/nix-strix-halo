@@ -1,0 +1,316 @@
+diff --git a/sglang/srt/mem_cache/hisparse_memory_pool.py b/sglang/srt/mem_cache/hisparse_memory_pool.py
+index 2d78f2e4..a5f91030 100644
+--- a/sglang/srt/mem_cache/hisparse_memory_pool.py
++++ b/sglang/srt/mem_cache/hisparse_memory_pool.py
+@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
+ _is_cuda = is_cuda()
+ _is_hip = is_hip()
+ if _is_cuda or _is_hip:
+-    from sgl_kernel.kvcacheio import transfer_kv_all_layer_mla
++    try:
++        from sgl_kernel.kvcacheio import transfer_kv_all_layer_mla
++    except ImportError:
++        transfer_kv_all_layer_mla = None
+ else:
+ 
+     def transfer_kv_all_layer_mla(*args, **kwargs):
+@@ -106,6 +109,11 @@ class HiSparseDSATokenToKVPool(DSATokenToKVPool):
+         return super().get_mla_kv_buffer(layer, loc, dst_dtype)
+ 
+     def transfer_values_on_device(self, dst_indices, src_indices):
++        if transfer_kv_all_layer_mla is None:
++            raise RuntimeError(
++                "HiSparse device KV transfer requires sgl_kernel.kvcacheio, "
++                "but sgl_kernel is not available in this ROCm build."
++            )
+         transfer_kv_all_layer_mla(
+             src_layers=self.data_ptrs,
+             dst_layers=self.data_ptrs,
+diff --git a/sglang/srt/mem_cache/memory_pool_host.py b/sglang/srt/mem_cache/memory_pool_host.py
+index aa301c0a..3588e5c2 100644
+--- a/sglang/srt/mem_cache/memory_pool_host.py
++++ b/sglang/srt/mem_cache/memory_pool_host.py
+@@ -49,21 +49,43 @@ _is_npu = is_npu()
+ _is_xpu = is_xpu()
+ _is_mps = is_mps()
+ if _is_cuda or _is_hip:
+-    from sgl_kernel.kvcacheio import (
+-        transfer_kv_all_layer,
+-        transfer_kv_all_layer_direct_lf_pf,
+-        transfer_kv_all_layer_lf_pf,
+-        transfer_kv_all_layer_lf_ph,
+-        transfer_kv_all_layer_mla,
+-        transfer_kv_all_layer_mla_lf_pf,
+-        transfer_kv_direct,
+-        transfer_kv_per_layer,
+-        transfer_kv_per_layer_direct_pf_lf,
+-        transfer_kv_per_layer_mla,
+-        transfer_kv_per_layer_mla_pf_lf,
+-        transfer_kv_per_layer_pf_lf,
+-        transfer_kv_per_layer_ph_lf,
+-    )
++    try:
++        from sgl_kernel.kvcacheio import (
++            transfer_kv_all_layer,
++            transfer_kv_all_layer_direct_lf_pf,
++            transfer_kv_all_layer_lf_pf,
++            transfer_kv_all_layer_lf_ph,
++            transfer_kv_all_layer_mla,
++            transfer_kv_all_layer_mla_lf_pf,
++            transfer_kv_direct,
++            transfer_kv_per_layer,
++            transfer_kv_per_layer_direct_pf_lf,
++            transfer_kv_per_layer_mla,
++            transfer_kv_per_layer_mla_pf_lf,
++            transfer_kv_per_layer_pf_lf,
++            transfer_kv_per_layer_ph_lf,
++        )
++    except ImportError:
++
++        def _missing_sgl_kernel_kvcacheio(*args, **kwargs):
++            raise RuntimeError(
++                "Host KV cache transfer requires sgl_kernel.kvcacheio, but "
++                "sglang-kernel is not available in this ROCm build."
++            )
++
++        transfer_kv_all_layer = _missing_sgl_kernel_kvcacheio
++        transfer_kv_all_layer_direct_lf_pf = _missing_sgl_kernel_kvcacheio
++        transfer_kv_all_layer_lf_pf = _missing_sgl_kernel_kvcacheio
++        transfer_kv_all_layer_lf_ph = _missing_sgl_kernel_kvcacheio
++        transfer_kv_all_layer_mla = _missing_sgl_kernel_kvcacheio
++        transfer_kv_all_layer_mla_lf_pf = _missing_sgl_kernel_kvcacheio
++        transfer_kv_direct = _missing_sgl_kernel_kvcacheio
++        transfer_kv_per_layer = _missing_sgl_kernel_kvcacheio
++        transfer_kv_per_layer_direct_pf_lf = _missing_sgl_kernel_kvcacheio
++        transfer_kv_per_layer_mla = _missing_sgl_kernel_kvcacheio
++        transfer_kv_per_layer_mla_pf_lf = _missing_sgl_kernel_kvcacheio
++        transfer_kv_per_layer_pf_lf = _missing_sgl_kernel_kvcacheio
++        transfer_kv_per_layer_ph_lf = _missing_sgl_kernel_kvcacheio
+ if _is_npu:
+     from sgl_kernel_npu.kvcacheio import TransferDirection, transfer_kv_dim_exchange
+ 
+diff --git a/sglang/srt/layers/activation.py b/sglang/srt/layers/activation.py
+index 292be3c..064bfbc 100644
+--- a/sglang/srt/layers/activation.py
++++ b/sglang/srt/layers/activation.py
+@@ -67,7 +67,10 @@ if _is_cuda:
+ elif _is_xpu:
+     from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+ elif _is_hip:
+-    from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
++    try:
++        from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
++    except ImportError:
++        gelu_and_mul = gelu_quick = gelu_tanh_and_mul = silu_and_mul = None
+ elif _is_musa:
+     from sglang.srt.utils.patch_torch import register_fake_if_exists
+ 
+@@ -106,6 +109,9 @@ class SiluAndMul(MultiPlatformOp):
+         silu_and_mul(x, out)
+         return out
+ 
++    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
++        return self.forward_native(x)
++
+     def forward_aiter(self, x: torch.Tensor, limit: float = 0.0) -> torch.Tensor:
+         d = x.shape[-1] // 2
+         output_shape = x.shape[:-1] + (d,)
+@@ -173,6 +179,9 @@ class GeluAndMul(MultiPlatformOp):
+     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+         return self._forward_impl(x)
+ 
++    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
++        return self.forward_native(x)
++
+     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+         return self._forward_impl(x)
+ 
+@@ -211,6 +220,9 @@ class ReLU2(MultiPlatformOp):
+     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+         return relu2(x)
+ 
++    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
++        return self.forward_native(x)
++
+ 
+ class QuickGELU(MultiPlatformOp):
+     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+@@ -220,6 +232,8 @@ class QuickGELU(MultiPlatformOp):
+         return self.forward_native(x)
+ 
+     def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
++        if gelu_quick is None:
++            return self.forward_native(x)
+         out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+         gelu_quick(x, out)
+         return out
+diff --git a/sglang/srt/layers/attention/flashattention_backend.py b/sglang/srt/layers/attention/flashattention_backend.py
+index 0a50f0d..f5eac4d 100644
+--- a/sglang/srt/layers/attention/flashattention_backend.py
++++ b/sglang/srt/layers/attention/flashattention_backend.py
+@@ -31,7 +31,15 @@ if TYPE_CHECKING:
+     from sglang.srt.layers.radix_attention import RadixAttention
+     from sglang.srt.model_executor.model_runner import ModelRunner
+ 
+-from sgl_kernel import merge_state_v2
++try:
++    from sgl_kernel import merge_state_v2
++except ImportError:
++
++    def merge_state_v2(*args, **kwargs):
++        raise RuntimeError(
++            "flashattention merge_state_v2 requires sglang-kernel, but "
++            "sglang-kernel is not available in this ROCm build."
++        )
+ 
+ from sglang.jit_kernel.flash_attention import (
+     flash_attn_varlen_func,
+diff --git a/sglang/srt/layers/attention/merge_state.py b/sglang/srt/layers/attention/merge_state.py
+index 245418a..df855e4 100644
+--- a/sglang/srt/layers/attention/merge_state.py
++++ b/sglang/srt/layers/attention/merge_state.py
+@@ -1,7 +1,10 @@
+ from typing import Optional, Tuple
+ 
+ import torch
+-from sgl_kernel import merge_state_v2
++try:
++    from sgl_kernel import merge_state_v2
++except ImportError:
++    merge_state_v2 = None
+ 
+ from sglang.srt.layers.attention.triton_ops.merge_state import merge_state_triton
+ from sglang.srt.utils import is_cuda
+@@ -33,6 +36,7 @@ def merge_state(
+ ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+     if (
+         _is_cuda
++        and merge_state_v2 is not None
+         and _supported_dtypes(prefix_output)
+         and _supported_headdim(prefix_output)
+     ):
+diff --git a/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py b/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
+index b92654f..f671609 100644
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
+@@ -59,7 +59,17 @@ if _is_cuda:
+ elif _is_cpu and _is_cpu_amx_available:
+     pass
+ elif _is_hip:
+-    from sgl_kernel import gelu_and_mul, silu_and_mul
++    try:
++        from sgl_kernel import gelu_and_mul, silu_and_mul
++    except ImportError:
++
++        def silu_and_mul(input: torch.Tensor, output: torch.Tensor) -> None:
++            d = input.shape[-1] // 2
++            output.copy_(F.silu(input[..., :d]) * input[..., d:])
++
++        def gelu_and_mul(input: torch.Tensor, output: torch.Tensor) -> None:
++            d = input.shape[-1] // 2
++            output.copy_(F.gelu(input[..., :d], approximate="tanh") * input[..., d:])
+ 
+     if _use_aiter:
+         try:
+diff --git a/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py b/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
+index 5d6f456..669afbe 100644
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
+@@ -16,7 +16,10 @@ _is_xpu = is_xpu()
+ _is_musa = is_musa()
+ 
+ if _is_cuda or _is_hip or _is_xpu or _is_musa:
+-    from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
++    try:
++        from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
++    except ImportError:
++        sgl_moe_align_block_size = None
+ 
+ 
+ def moe_align_block_size(
+@@ -83,7 +86,7 @@ def moe_align_block_size(
+         from sglang.srt.lora.trtllm_lora_temp.environ import lora_envs
+ 
+         use_jit_align = lora_envs.SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN.get()
+-    if use_jit_align:
++    if use_jit_align or sgl_moe_align_block_size is None:
+         from sglang.jit_kernel.moe_align import (
+             moe_align_block_size as jit_moe_align_block_size,
+         )
+diff --git a/sglang/srt/layers/moe/topk.py b/sglang/srt/layers/moe/topk.py
+index 4f504e2..9211c60 100644
+--- a/sglang/srt/layers/moe/topk.py
++++ b/sglang/srt/layers/moe/topk.py
+@@ -174,12 +174,20 @@ if _is_cuda:
+         pass
+ 
+ if _is_cuda or _is_hip or _is_xpu:
+-    from sgl_kernel import topk_softmax
++    try:
++        from sgl_kernel import topk_softmax
++    except ImportError:
++
++        def topk_softmax(*args, **kwargs):
++            raise RuntimeError(
++                "MoE top-k requires sgl_kernel.topk_softmax, but sglang-kernel "
++                "is not available in this ROCm build."
++            )
+ 
+     try:
+         from sgl_kernel import topk_sigmoid
+     except ImportError:
+-        pass
++        topk_sigmoid = None
+ if _use_aiter:
+     try:
+         from aiter import biased_grouped_topk as aiter_biased_grouped_topk
+diff --git a/sglang/srt/layers/rotary_embedding/base.py b/sglang/srt/layers/rotary_embedding/base.py
+index 945e3f8..eab26c1 100644
+--- a/sglang/srt/layers/rotary_embedding/base.py
++++ b/sglang/srt/layers/rotary_embedding/base.py
+@@ -111,7 +111,7 @@ class RotaryEmbedding(MultiPlatformOp):
+             if _is_cuda:
+                 from sglang.jit_kernel.rope import rotary_embedding
+             elif _is_hip:
+-                from sgl_kernel import rotary_embedding
++                rotary_embedding = None
+             else:
+                 from vllm._custom_ops import rotary_embedding
+ 
+@@ -434,6 +434,20 @@ class RotaryEmbedding(MultiPlatformOp):
+                 )
+         return query, key
+ 
++    def forward_hip(
++        self,
++        positions: torch.Tensor,
++        query: torch.Tensor,
++        key: torch.Tensor,
++        offsets: Optional[torch.Tensor] = None,
++        fused_set_kv_buffer_arg: Optional[Union[FusedSetKVBufferArg, dict]] = None,
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        if fused_set_kv_buffer_arg is not None:
++            return self.forward_cuda(
++                positions, query, key, offsets, fused_set_kv_buffer_arg
++            )
++        return self.forward_native(positions, query, key, offsets)
++
+     def extra_repr(self) -> str:
+         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
+         s += f", max_position_embeddings={self.max_position_embeddings}"
+diff --git a/sglang/srt/speculative/spec_utils.py b/sglang/srt/speculative/spec_utils.py
+index 312f366..c3936ae 100644
+--- a/sglang/srt/speculative/spec_utils.py
++++ b/sglang/srt/speculative/spec_utils.py
+@@ -64,7 +64,10 @@ if TYPE_CHECKING:
+ if _is_cuda:
+     from sgl_kernel import fast_topk
+ elif _is_hip:
+-    from sgl_kernel import fast_topk
++    try:
++        from sgl_kernel import fast_topk
++    except ImportError:
++        from sglang.srt.utils.common import fast_topk
+ else:
+     from sglang.srt.utils.common import fast_topk
+ 

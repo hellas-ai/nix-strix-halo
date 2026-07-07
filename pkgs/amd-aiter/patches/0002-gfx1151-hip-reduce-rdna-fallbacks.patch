@@ -1,0 +1,74 @@
+--- a/csrc/include/hip_reduce.h
++++ b/csrc/include/hip_reduce.h
+@@ -3,6 +3,15 @@
+ #include "hip_compat.h"
+ #include <rocprim/rocprim.hpp>
+ 
++// RDNA 3/3.5 lacks CDNA DPP row_bcast instructions. Use rocPRIM's swizzle
++// path for gfx11xx/gfx115x and keep the existing DPP code on CDNA.
++#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
++    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) || \
++    defined(__gfx1152__) || defined(__gfx1153__)
++#define AITER_RDNA_NO_DPP_BCAST 1
++#endif
++
++
+ template <typename T, typename F>
+ __device__ constexpr T wave_reduce_ds(T local, F reduce_op)
+ {
+@@ -112,14 +121,28 @@ __device__ constexpr T wave_reduce(T local, F reduce_op)
+ 
+     if constexpr(WarpSize > 16)
+     {
++#if defined(AITER_RDNA_NO_DPP_BCAST)
++        // RDNA wave32: row_bcast:15 is unavailable. This swizzle mirrors
++        // lane 0..15 into lane 16..31 after the row-local reduction.
++        local = reduce_op(rocprim::detail::warp_swizzle<T, 0x1e0>(local), local);
++#else
+         // row_bcast:15
+         local = reduce_op(rocprim::detail::warp_move_dpp<T, 0x142>(local), local);
++#endif
+     }
+ 
+     if constexpr(WarpSize > 32)
+     {
++#if defined(AITER_RDNA_NO_DPP_BCAST)
++        // RDNA is wave32-only. A 64-wide reduction on gfx11xx means the caller
++        // selected a CDNA-only kernel shape, so fail at compile time instead of
++        // emitting illegal DPP row_bcast instructions.
++        static_assert(WarpSize <= 32,
++                      "WarpSize > 32 is not supported on RDNA (wave32 only)");
++#else
+         // row_bcast:31
+         local = reduce_op(rocprim::detail::warp_move_dpp<T, 0x143>(local), local);
++#endif
+     }
+ 
+     if constexpr(threadBroadcast && WarpSize > 4)
+@@ -166,13 +189,18 @@ __device__ constexpr T multithread_reduce(T data, F reduce_op, int thread_num)
+         data = reduce_op(rocprim::detail::warp_move_dpp<T, 0x4e>(data), data);
+         data = reduce_op(rocprim::detail::warp_move_dpp<T, 0x124>(data), data);
+         data = reduce_op(rocprim::detail::warp_move_dpp<T, 0x128>(data), data);
++#if defined(AITER_RDNA_NO_DPP_BCAST)
++        data = reduce_op(rocprim::detail::warp_swizzle<T, 0x1e0>(data), data);
++#else
+         data = reduce_op(rocprim::detail::warp_move_dpp<T, 0x142, 0xa>(data), data);
++#endif
+         if constexpr(threadBroadcast)
+         {
+             data = rocprim::warp_shuffle(data, thread_num - 1, thread_num);
+             // data = thread_broadcast<T, 32, WarpSize>(data, thread_num - 1);
+         }
+     }
++#if !defined(AITER_RDNA_NO_DPP_BCAST)
+     else if(thread_num == 64)
+     {
+         data = reduce_op(rocprim::detail::warp_move_dpp<T, 0xb1>(data), data);
+@@ -187,6 +215,7 @@ __device__ constexpr T multithread_reduce(T data, F reduce_op, int thread_num)
+             // data = thread_broadcast<T, 64, WarpSize>(data, thread_num - 1);
+         }
+     }
++#endif
+ 
+     return data;
+ }
