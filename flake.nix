@@ -19,6 +19,16 @@
       flake = false;
     };
 
+    llama-cpp-spacemit = {
+      url = "github:spacemit-com/llama.cpp/v0.1.5";
+      flake = false;
+    };
+
+    spine-triton = {
+      url = "git+https://github.com/spacemit-com/spine-triton.git?ref=refs/tags/0.5.5&submodules=1";
+      flake = false;
+    };
+
     fastflowlm = {
       url = "github:FastFlowLM/FastFlowLM";
       flake = false;
@@ -387,6 +397,9 @@
       };
 
       thunderboltIbverbsOverlay = inputs.thunderbolt-ibverbs.overlays.default;
+      spacemitK3Overlay = import ./overlays/spacemit-k3.nix {
+        inherit inputs inputVersion;
+      };
 
       # Re-export thunderbolt-ibverbs flake packages under the names
       # downstream callers expect. The upstream package set uses
@@ -600,6 +613,7 @@
         python = self.lib.mkPythonOverlay {
           provider = "nixpkgs";
         };
+        spacemitK3 = spacemitK3Overlay;
       };
 
       # NixOS modules
@@ -648,9 +662,10 @@
       packages = perSystem (
         pkgs:
         let
+          system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
-          aiTools = inputs.nix-ai-tools.packages.${pkgs.stdenv.hostPlatform.system};
-          cudaPkgs = cudaPkgsFor pkgs.stdenv.hostPlatform.system;
+          aiTools = inputs.nix-ai-tools.packages.${system};
+          cudaPkgs = cudaPkgsFor system;
           packageRuntimeEnv = import ./lib/runtime-env.nix { inherit lib; };
           inherit (packageRuntimeEnv) wrapRuntimeEnv;
           jacclPackage = pkgs.callPackage ./pkgs/jaccl (
@@ -739,6 +754,25 @@
             jaccl = jacclPackage;
           };
 
+          spacemitK3Packages = lib.optionalAttrs (system == "x86_64-linux") (
+            let
+              spacemitPkgs = import nixpkgs {
+                inherit system;
+                config.allowUnfree = true;
+                overlays = [ spacemitK3Overlay ];
+              };
+            in
+            {
+              inherit (spacemitPkgs)
+                llama-cpp-spacemit
+                spacemit-k3-runtime
+                spacemit-k3-spine-mlir
+                spacemit-k3-toolchain
+                spine-triton-source
+                ;
+            }
+          );
+
           # Two-host vLLM transport-matrix driver. The driver only needs the
           # vLLM closure to expose both `vllm` and `ray`, so join the default
           # ROCm vLLM package with ray rather than baking ray into vllm-rocm.
@@ -805,6 +839,7 @@
             };
         in
         genericPackages
+        // spacemitK3Packages
         // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
         // lib.optionalAttrs pkgs.stdenv.isDarwin darwinPackages
       );

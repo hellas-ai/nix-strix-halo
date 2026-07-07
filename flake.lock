@@ -178,6 +178,23 @@
         "type": "github"
       }
     },
+    "llama-cpp-spacemit": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1783141934,
+        "narHash": "sha256-Z8APQR0Xp9/zm+izIW0ICY8NhD5RQbZC/G49z3j9bJE=",
+        "owner": "spacemit-com",
+        "repo": "llama.cpp",
+        "rev": "86d4ff230bdfef62de1cc4987783a8d29af66d49",
+        "type": "github"
+      },
+      "original": {
+        "owner": "spacemit-com",
+        "ref": "v0.1.5",
+        "repo": "llama.cpp",
+        "type": "github"
+      }
+    },
     "mlx-src": {
       "flake": false,
       "locked": {
@@ -243,9 +260,11 @@
         "ec-su-axb35": "ec-su-axb35",
         "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",
+        "llama-cpp-spacemit": "llama-cpp-spacemit",
         "mlx-src": "mlx-src",
         "nix-ai-tools": "nix-ai-tools",
         "nixpkgs": "nixpkgs",
+        "spine-triton": "spine-triton",
         "therock-src-7-13-gfx1151-base-half-011b45bd": "therock-src-7-13-gfx1151-base-half-011b45bd",
         "therock-src-7-13-gfx1151-base-rocm-cmake-ec512d84": "therock-src-7-13-gfx1151-base-rocm-cmake-ec512d84",
         "therock-src-7-13-gfx1151-compiler-amd-llvm-1e702164": "therock-src-7-13-gfx1151-compiler-amd-llvm-1e702164",
@@ -305,6 +324,25 @@
         "vllm-src": "vllm-src",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"
+      }
+    },
+    "spine-triton": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780563047,
+        "narHash": "sha256-z7t6hb+rQXqjDt0OwdcWkeDXosi4Vw+LsSQ9IYL1Zqw=",
+        "ref": "refs/tags/0.5.5",
+        "rev": "c62b11c5ea994ed6f7ce1d5ac881f14fc5e4aba4",
+        "revCount": 444,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/spacemit-com/spine-triton.git"
+      },
+      "original": {
+        "ref": "refs/tags/0.5.5",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/spacemit-com/spine-triton.git"
       }
     },
     "systems": {
