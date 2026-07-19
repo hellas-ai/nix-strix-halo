@@ -677,9 +677,12 @@
             }
           );
           mkMlxLm =
-            mlxPackage:
+            {
+              mlxPackage,
+              pythonPackages ? pkgs.python3Packages,
+            }:
             let
-              mlxLm = pkgs.python3Packages.mlx-lm.overridePythonAttrs (
+              mlxLm = pythonPackages.mlx-lm.overridePythonAttrs (
                 oldAttrs:
                 {
                   dependencies = lib.unique (
@@ -689,7 +692,7 @@
                     ++ [
                       mlxPackage
                     ]
-                    ++ lib.optional pkgs.stdenv.isLinux pkgs.python3Packages.sentencepiece
+                    ++ lib.optional pkgs.stdenv.isLinux pythonPackages.sentencepiece
                   );
                   meta = (oldAttrs.meta or { }) // {
                     mainProgram = "mlx_lm";
@@ -788,7 +791,7 @@
           linuxPackages =
             let
               mlxRocm = pkgs.mlx-rocm;
-              mlxLmRocm = mkMlxLm mlxRocm;
+              mlxLmRocm = mkMlxLm { mlxPackage = mlxRocm; };
             in
             lib.genAttrs (availableDerivationNames linuxLocalPackageNames) (name: pkgs.${name})
             // {
@@ -812,21 +815,27 @@
 
           darwinPackages =
             let
-              mlxNanobind = pkgs.python3Packages.callPackage ./pkgs/mlx/nanobind-2_13.nix { };
-              mlxMetalBackend = pkgs.python3Packages.callPackage ./pkgs/mlx/metal.nix {
+              # Python 3.14 currently aborts in libffi while building MLX's
+              # macOS wheel. Keep the complete Metal stack on Python 3.13.
+              mlxPythonPackages = pkgs.python313Packages;
+              mlxNanobind = mlxPythonPackages.callPackage ./pkgs/mlx/nanobind-2_13.nix { };
+              mlxMetalBackend = mlxPythonPackages.callPackage ./pkgs/mlx/metal.nix {
                 inherit (inputs) mlx-src;
                 nanobind = mlxNanobind;
                 pname = "mlx-metal";
                 buildStage = 2;
               };
-              mlxMetal = pkgs.python3Packages.callPackage ./pkgs/mlx/metal.nix {
+              mlxMetal = mlxPythonPackages.callPackage ./pkgs/mlx/metal.nix {
                 inherit (inputs) mlx-src;
                 nanobind = mlxNanobind;
                 pname = "mlx";
                 buildStage = 1;
                 backendPackage = mlxMetalBackend;
               };
-              mlxLm = mkMlxLm mlxMetal;
+              mlxLm = mkMlxLm {
+                mlxPackage = mlxMetal;
+                pythonPackages = mlxPythonPackages;
+              };
             in
             {
               ds4 = pkgs.callPackage ./pkgs/ds4 {
