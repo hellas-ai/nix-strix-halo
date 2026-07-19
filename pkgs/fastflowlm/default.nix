@@ -58,10 +58,13 @@ stdenv.mkDerivation (finalAttrs: {
     add_library(tokenizers_cpp STATIC IMPORTED)\
     set_target_properties(tokenizers_cpp PROPERTIES IMPORTED_LOCATION ''${TOKENIZERS_CPP_LIB_PATH} INTERFACE_INCLUDE_DIRECTORIES ''${TOKENIZERS_CPP_INCLUDE_PATH})' CMakeLists.txt
 
-        # The upstream install rule symlinks the binary into /usr/local/bin
-        # whenever the install prefix isn't there; that fails in the Nix
-        # sandbox even though we point CMAKE_INSTALL_PREFIX at $out.
-        sed -i 's/if(NOT WIN32 AND NOT CMAKE_INSTALL_PREFIX/if(FALSE AND NOT CMAKE_INSTALL_PREFIX/' CMakeLists.txt
+        # The upstream install rule adds a convenience symlink in
+        # /usr/local/bin for non-FHS prefixes. Keep installation confined to
+        # the Nix output instead.
+        substituteInPlace CMakeLists.txt \
+          --replace-fail \
+            'if(NOT WIN32 AND NOT FLM_PORTABLE_BUILD AND NOT CMAKE_INSTALL_PREFIX STREQUAL "/usr" AND NOT CMAKE_INSTALL_PREFIX STREQUAL "/usr/local")' \
+            'if(FALSE)'
   '';
 
   nativeBuildInputs = [
