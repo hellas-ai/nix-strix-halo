@@ -2,6 +2,7 @@
   lib,
   stdenv,
   gnumake,
+  lld,
   makeWrapper,
   coreutils,
   curl,
@@ -58,13 +59,20 @@ stdenv.mkDerivation {
   nativeBuildInputs = [
     gnumake
     makeWrapper
-  ];
+  ]
+  ++ lib.optional stdenv.hostPlatform.isDarwin lld;
 
   buildInputs = lib.optionals stdenv.hostPlatform.isDarwin [
     darwinSdk
   ];
 
   dontConfigure = true;
+
+  # cctools ld 956.6 traps in its stubs pass on macOS 27.
+  postPatch = lib.optionalString stdenv.hostPlatform.isDarwin ''
+    substituteInPlace Makefile \
+      --replace-fail '$(CC) $(CFLAGS) -o $@' '$(CC) $(CFLAGS) $(LDFLAGS) -o $@'
+  '';
 
   preBuild = lib.optionalString stdenv.hostPlatform.isDarwin ''
     ${optionalDarwinSdkRoot}
@@ -99,12 +107,12 @@ stdenv.mkDerivation {
     if [ -n "''${MACOSX_DEPLOYMENT_TARGET:-}" ]; then
       darwin_sdk_flags+=("-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET")
     fi
-
     make -j"$NIX_BUILD_CORES" \
       CC="$CC" \
       NATIVE_CPU_FLAG= \
       CFLAGS="-O3 -ffast-math -g -Wall -Wextra ''${darwin_sdk_flags[*]} -std=c99" \
-      OBJCFLAGS="-O3 -ffast-math -g -Wall -Wextra ''${darwin_sdk_flags[*]} -fobjc-arc"
+      OBJCFLAGS="-O3 -ffast-math -g -Wall -Wextra ''${darwin_sdk_flags[*]} -fobjc-arc" \
+      LDFLAGS="-fuse-ld=lld"
 
     runHook postBuild
   '';
