@@ -166,6 +166,7 @@ let
         sandboxPaths = [
           "/dev/accel"
           "/sys/class/accel"
+          resolvedModelRoot
         ];
       };
       metadata = lib.recursiveUpdate {
