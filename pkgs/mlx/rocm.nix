@@ -20,7 +20,6 @@ let
     src = mlx-src;
     patches = [
       ./rocm-include-rocblas.patch
-      ./rocm-can-reuse-alien-buffer.patch
     ];
   };
   gccCxxInclude = "${stdenv.cc.cc}/include/c++/${stdenv.cc.cc.version}";
@@ -330,8 +329,10 @@ mlx.overrideAttrs (old: {
 
           substituteInPlace mlx/backend/rocm/CMakeLists.txt \
             --replace-fail \
-              'if(arch MATCHES "^gfx1[12]")' \
-              'if(arch MATCHES "^gfx12" OR arch MATCHES "^gfx110[0-2]$" OR arch MATCHES "^gfx115[0-3]$")' \
+              'if(arch MATCHES "^gfx1[12]"' \
+              'if(arch MATCHES "^gfx12"
+       OR arch MATCHES "^gfx110[0-2]$"
+       OR arch MATCHES "^gfx115[0-3]$"' \
             --replace-fail \
               'message(STATUS "HIP include flags: ''${HIP_INCLUDE_FLAGS}")' \
               'list(APPEND HIP_INCLUDE_FLAGS "-I${rocmPackages.rocwmma}/include")
