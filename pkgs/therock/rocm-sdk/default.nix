@@ -2,6 +2,7 @@
   lib,
   stdenvNoCC,
   stdenv,
+  binutils,
   fetchurl,
   patchelf,
   libdrm,
@@ -22,6 +23,7 @@ stdenvNoCC.mkDerivation {
   };
 
   nativeBuildInputs = [
+    binutils
     patchelf
   ];
 
@@ -83,6 +85,22 @@ stdenvNoCC.mkDerivation {
 
         patch_elf() {
           local elf="$1"
+
+          # Some TheRock libraries put their program-header table in a late
+          # split-load segment. patchelf 0.15 moves that table to the start of
+          # the file and produces an invalid PT_PHDR virtual address. Their
+          # upstream $ORIGIN runpaths are already self-contained, so preserve
+          # those unusual files byte-for-byte.
+          if ! program_headers_offset=$(
+            readelf --file-header "$elf" 2>/dev/null \
+              | sed -n 's/^[[:space:]]*Start of program headers:[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+          ); then
+            program_headers_offset=
+          fi
+          if [ -n "$program_headers_offset" ] && [ "$program_headers_offset" -gt 4096 ]; then
+            return
+          fi
+
           if old_rpath=$(patchelf --print-rpath "$elf" 2>/dev/null); then
             new_rpath="$old_rpath"
             for runtime_path in "''${runtime_paths[@]}"; do

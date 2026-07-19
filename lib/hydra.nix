@@ -126,10 +126,24 @@ let
         llama-cpp-rocm-nixpkgs = nixpkgsRocmPkgs.llama-cpp-rocm;
       };
 
+      # Keep the PR gate hermetic: the full DS4 model benchmark remains in
+      # hydraBenchmarkJobs, while this smoke test proves that the ROCm runtime
+      # closure can load and execute without an 81+ GiB external GGUF fixture.
+      ds4RocmRuntimeSmoke =
+        pkgs.runCommand "ds4-rocm-runtime-smoke"
+          {
+            nativeBuildInputs = [ x86Packages.ds4-rocm ];
+            meta = maintainerMeta;
+          }
+          ''
+            ds4-bench --help > "$out"
+            grep -Fq "Measure prefill, decode, context growth" "$out"
+          '';
+
       smokeJobs = lib.optionalAttrs isGateSystem {
         ds4-metal = darwinBenchmarks.bench-deepseek-v4-flash-ds4-metal-smoke;
         ds4-pi-metal = darwinBenchmarks.bench-deepseek-v4-flash-ds4-metal-pi-smoke;
-        ds4-rocm = x86Benchmarks.bench-deepseek-v4-flash-ds4-rocm-gfx1151-smoke;
+        ds4-rocm = ds4RocmRuntimeSmoke;
         mlx-metal = darwinBenchmarks.bench-mlx-metal-gemm-smoke;
         mlx-rocm = x86Benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
         fastflowlm-npu = x86Benchmarks.bench-llama3-2-1b-fastflowlm-medium;
