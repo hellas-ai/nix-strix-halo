@@ -102,16 +102,21 @@ let
     let
       suffix = rocmTarget.packageSuffix;
       wheelSources = pythonWheelSourcesFor rocmTarget;
+      wheels = prev.callPackage ./python-wheels {
+        inherit therockPython therockPythonPackages wheelSources;
+      };
     in
     assert lib.assertMsg (wheelSources.pythonTag == therockPythonConfig.pythonTag)
       "TheRock wheel pin for ${suffix} uses ${wheelSources.pythonTag}, but Python config expects ${therockPythonConfig.pythonTag}";
     {
       "therock-python-${suffix}" = prev.callPackage ./python-env {
-        inherit therockPython therockPythonPackages wheelSources;
+        inherit
+          therockPython
+          wheels
+          wheelSources
+          ;
       };
-      "therock-python-wheels-${suffix}" = prev.callPackage ./python-wheels {
-        inherit therockPython therockPythonPackages wheelSources;
-      };
+      "therock-python-wheels-${suffix}" = wheels;
       "therock-amdsmi-${suffix}" = therockPythonPackages.callPackage ./amdsmi {
         wheels = final."therock-python-wheels-${suffix}";
       };

@@ -20,31 +20,44 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-BASE_URL = "https://rocm.nightlies.amd.com/v2"
+BASE_URL = "https://rocm.nightlies.amd.com/whl-multi-arch"
 DEFAULT_TARGET = "gfx1151"
-DEFAULT_SERIES = "7.13"
+DEFAULT_SERIES = "7.15"
 BASE_PACKAGES = [
     "rocm",
+    "rocm-bootstrap",
     "torch",
     "torchvision",
     "torchaudio",
     "triton",
     "rocm-sdk-core",
     "rocm-sdk-devel",
+    "rocm-sdk-libraries",
 ]
-TARGET_SLUGS = {
-    "gfx1010": "gfx101X-dgpu",
-    "gfx1036": "gfx103X-all",
-    "gfx1103": "gfx110X-all",
+TORCH_DEVICE_FAMILIES = {
+    "gfx1100": "gfx110x",
+    "gfx1101": "gfx110x",
+    "gfx1102": "gfx110x",
+    "gfx1103": "gfx110x",
+    "gfx1150": "gfx115x",
+    "gfx1151": "gfx115x",
+    "gfx1152": "gfx115x",
+    "gfx1153": "gfx115x",
+    "gfx1200": "gfx12-0",
+    "gfx1201": "gfx12-0",
 }
 
 
-def target_slug(target: str) -> str:
-    return TARGET_SLUGS.get(target, target)
-
-
 def default_packages(target: str) -> list[str]:
-    return BASE_PACKAGES + [f"rocm-sdk-libraries-{target_slug(target).lower()}"]
+    packages = BASE_PACKAGES + [
+        f"amd-torch-device-{target}",
+        f"amd-torchvision-device-{target}",
+        f"rocm-sdk-device-{target}",
+    ]
+    family = TORCH_DEVICE_FAMILIES.get(target)
+    if family is not None:
+        packages.append(f"amd-torch-device-{family}")
+    return packages
 
 
 @dataclass(frozen=True)
@@ -53,7 +66,7 @@ class Distribution:
     filename: str
     url: str
     package_version: str
-    rocm_version: str
+    rocm_version: str | None
     python_tag: str
     abi_tag: str
     platform_tag: str
@@ -106,15 +119,12 @@ def parse_distribution(project: str, href: str, index_url: str) -> Distribution 
     rocm_match = re.search(r"(?:\+|\.|-)rocm(7\.[^-+]+)", package_version)
     if rocm_match is None and (project.startswith("rocm-sdk") or project == "rocm"):
         rocm_match = re.search(r"^(7\.[^-+]+)$", package_version)
-    if rocm_match is None:
-        return None
-
     return Distribution(
         project=project,
         filename=filename,
         url=urllib.parse.urljoin(index_url, href),
         package_version=package_version,
-        rocm_version=rocm_match.group(1),
+        rocm_version=rocm_match.group(1) if rocm_match is not None else None,
         python_tag=python_tag,
         abi_tag=abi_tag,
         platform_tag=platform_tag,
@@ -123,8 +133,8 @@ def parse_distribution(project: str, href: str, index_url: str) -> Distribution 
 
 
 def list_distributions(target: str, project: str) -> list[Distribution]:
-    target_url = f"{BASE_URL}/{target_slug(target)}"
-    index_url = f"{target_url}/{project}/"
+    del target
+    index_url = f"{BASE_URL}/{project}/"
     text = fetch_index(index_url)
     hrefs = re.findall(r'href="([^"]+)"', text)
     distributions = [parse_distribution(project, href, index_url) for href in hrefs]
@@ -153,21 +163,34 @@ def package_version_key(version: str) -> tuple[tuple[int, int | str], ...]:
     )
 
 
+def public_package_version(version: str) -> str:
+    return version.split("+", 1)[0]
+
+
+def dist_matches_package_version(dist: Distribution, package_version: str | None) -> bool:
+    return package_version is None or public_package_version(dist.package_version) == package_version
+
+
 def choose_rocm_version(
     distributions_by_project: dict[str, list[Distribution]],
     *,
     series: str,
     python_tag: str,
+    package_versions: dict[str, str],
 ) -> str:
     common_versions: set[str] | None = None
     for project, distributions in distributions_by_project.items():
         versions = {
             dist.rocm_version
             for dist in distributions
-            if dist.rocm_version.startswith(series)
+            if dist.rocm_version is not None
+            and dist.rocm_version.startswith(series)
             and dist_matches_python(dist, python_tag)
             and dist_matches_platform(dist)
+            and dist_matches_package_version(dist, package_versions.get(normalize_project(project)))
         }
+        if not any(dist.rocm_version is not None for dist in distributions):
+            continue
         if not versions:
             raise SystemExit(
             f"no linux distribution found for {project} in ROCm series {series} "
@@ -190,13 +213,15 @@ def choose_distribution(
     *,
     rocm_version: str,
     python_tag: str,
+    package_version: str | None,
 ) -> Distribution:
     candidates = [
         dist
         for dist in distributions
-        if dist.rocm_version == rocm_version
+        if (dist.rocm_version is None or dist.rocm_version == rocm_version)
         and dist_matches_python(dist, python_tag)
         and dist_matches_platform(dist)
+        and dist_matches_package_version(dist, package_version)
     ]
     if not candidates:
         raise SystemExit(
@@ -282,6 +307,13 @@ def pinned_python_tag(sources: dict, target: str) -> str | None:
     return None
 
 
+def parse_package_version(value: str) -> tuple[str, str]:
+    project, separator, version = value.partition("=")
+    if not separator or not project or not version:
+        raise argparse.ArgumentTypeError("expected PROJECT=VERSION")
+    return normalize_project(project), version
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default=DEFAULT_TARGET)
@@ -292,6 +324,14 @@ def main() -> None:
     )
     parser.add_argument("--rocm-version", help="Exact ROCm wheel version to pin")
     parser.add_argument("--package", action="append", default=[], help="Project to pin")
+    parser.add_argument(
+        "--package-version",
+        action="append",
+        default=[],
+        type=parse_package_version,
+        metavar="PROJECT=VERSION",
+        help="Select an exact public package version; repeat for multiple projects",
+    )
     parser.add_argument("--output", default="pkgs/therock/sources/python-wheels.json")
     args = parser.parse_args()
     sources = load_sources(Path(args.output))
@@ -304,11 +344,26 @@ def main() -> None:
         print(f"series from current pin: {args.series}", file=sys.stderr)
 
     projects = args.package or default_packages(args.target)
+    package_versions = dict(args.package_version)
+
+    # Device wheels must match the Python frontend wheel exactly. Derive their
+    # constraints from the selected torch/torchvision versions so callers only
+    # need to name the public stack versions once.
+    torch_version = package_versions.get("torch")
+    torchvision_version = package_versions.get("torchvision")
+    for project in projects:
+        normalized = normalize_project(project)
+        if normalized.startswith("amd-torch-device-") and torch_version is not None:
+            package_versions.setdefault(normalized, torch_version)
+        if normalized.startswith("amd-torchvision-device-") and torchvision_version is not None:
+            package_versions.setdefault(normalized, torchvision_version)
+
     distributions_by_project = {project: list_distributions(args.target, project) for project in projects}
     rocm_version = args.rocm_version or choose_rocm_version(
         distributions_by_project,
         series=args.series,
         python_tag=python_tag,
+        package_versions=package_versions,
     )
 
     target_sources = {
@@ -316,7 +371,7 @@ def main() -> None:
         "series": args.series,
         "rocmVersion": rocm_version,
         "pythonTag": python_tag,
-        "index": f"{BASE_URL}/{target_slug(args.target)}/",
+        "index": f"{BASE_URL}/",
         "packages": {},
         "updated": datetime.now(timezone.utc).isoformat(),
     }
@@ -326,6 +381,7 @@ def main() -> None:
             distributions_by_project[project],
             rocm_version=rocm_version,
             python_tag=python_tag,
+            package_version=package_versions.get(normalize_project(project)),
         )
         print(f"prefetching {project}: {dist.filename}", file=sys.stderr)
         fetched = prefetch(dist.url)
@@ -334,7 +390,7 @@ def main() -> None:
             "hash": fetched["hash"],
             "filename": dist.filename,
             "packageVersion": dist.package_version,
-            "rocmVersion": dist.rocm_version,
+            "rocmVersion": dist.rocm_version or rocm_version,
             "pythonTag": dist.python_tag,
             "abiTag": dist.abi_tag,
             "platformTag": dist.platform_tag,

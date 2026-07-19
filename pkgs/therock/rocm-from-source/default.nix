@@ -994,7 +994,9 @@ stdenv.mkDerivation {
       # wrapper script invokes ROCm's clang++ which has its own
       # resource-dir bundled with its HIP runtime headers; pointing it
       # at the nixpkgs-clang one breaks the cmath/cstdlib lookup.
-      cc_cflags_before="$(cat ${gcc}/nix-support/cc-cflags-before 2>/dev/null || true)"
+      # GCC's Nix wrapper enables the x86 TLS dialect globally.  Clang's HIP
+      # driver forwards that option to amdgcn too, where it is invalid.
+      cc_cflags_before="$(sed -E 's/(^|[[:space:]])-mtls-dialect=[^[:space:]]+//g' ${gcc}/nix-support/cc-cflags-before 2>/dev/null || true)"
       cc_cflags="$(cat ${gcc}/nix-support/cc-cflags 2>/dev/null || true)"
       libc_cflags="$(cat ${gcc}/nix-support/libc-cflags 2>/dev/null || true)"
       libc_crt1_cflags="$(cat ${gcc}/nix-support/libc-crt1-cflags 2>/dev/null || true)"

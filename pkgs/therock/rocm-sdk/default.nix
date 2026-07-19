@@ -35,6 +35,9 @@ stdenvNoCC.mkDerivation {
   dontBuild = true;
   dontPatchELF = true;
   dontStrip = true;
+  # TheRock 7.15 intentionally ships both lib and lib64 content. Nix's generic
+  # move-lib64 hook cannot merge this split layout and leaves lib64 non-empty.
+  dontMoveLib64 = true;
 
   unpackPhase = ''
     runHook preUnpack
@@ -122,7 +125,9 @@ stdenvNoCC.mkDerivation {
           done < <(find "$dir" -maxdepth 1 -type f \( -name "*.so" -o -name "*.so.*" \) -print0)
         done
 
-        cc_cflags_before="$(cat ${stdenv.cc}/nix-support/cc-cflags-before)"
+        # GCC's Nix wrapper enables the x86 TLS dialect globally.  Clang's HIP
+        # driver forwards that option to amdgcn too, where it is invalid.
+        cc_cflags_before="$(sed -E 's/(^|[[:space:]])-mtls-dialect=[^[:space:]]+//g' ${stdenv.cc}/nix-support/cc-cflags-before)"
         cc_cflags="$(cat ${stdenv.cc}/nix-support/cc-cflags)"
         libc_cflags="$(cat ${stdenv.cc}/nix-support/libc-cflags)"
         libc_crt1_cflags="$(cat ${stdenv.cc}/nix-support/libc-crt1-cflags)"

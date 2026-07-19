@@ -5,6 +5,7 @@
   rocmTarget,
   rocmProvider ? "therock-bin",
   pythonProvider ? "therock-wheels",
+  therockPythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
   sources ? null,
 }:
 
@@ -289,7 +290,7 @@ let
     }
     // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython) {
       sglang-rocm = prev.callPackage ../pkgs/sglang {
-        inherit (final) python312Packages;
+        pythonPackages = final.${therockPythonConfig.packagesAttr};
         rocmSdk = final."therock-rocm-${suffix}";
         inherit (rocmTarget) packageSuffix;
         hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
