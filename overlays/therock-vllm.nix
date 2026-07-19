@@ -281,6 +281,15 @@ let
               "rust_extensions=rust_extensions," \
               "rust_extensions=[],"
 
+          # Model inspection starts a fresh Python interpreter. Upstream
+          # replaces its entire environment with PYTHONPATH, which strips the
+          # TheRock wheel runtime's LD_LIBRARY_PATH and makes torch fail to
+          # load libstdc++ before an architecture can even be inspected.
+          substituteInPlace vllm/model_executor/models/registry.py \
+            --replace-fail \
+              "env={'PYTHONPATH': ':'.join(sys.path)}," \
+              "env={**os.environ, 'PYTHONPATH': ':'.join(sys.path)},"
+
         '';
 
         env = (old.env or { }) // {
