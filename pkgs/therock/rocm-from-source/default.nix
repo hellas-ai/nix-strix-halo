@@ -856,9 +856,13 @@ stdenv.mkDerivation {
     ./patches/opencl-packaging-tolerate-missing-os-release.patch
     ./patches/rdc-packaging-avoid-host-os-release.patch
     ./patches/rocprofiler-sdk-declare-fmt-build-dep.patch
+    ./patches/rocprofiler-sdk-rocpd-include-sqlite.patch
     ./patches/rccl-device-linker-forward-cxx-driver-flags.patch
     ./patches/rocprofiler-systems-libiberty-allow-single-url.patch
+    ./patches/rocprofiler-systems-libunwind-forward-cmake-flags.patch
+    ./patches/rocprofiler-systems-tbb-forward-cmake-flags.patch
     ./patches/kpack-ccob-parser-accept-zlib.patch
+    ./patches/miopen-drop-ciso646.patch
   ];
 
   nativeBuildInputs = [
@@ -1173,7 +1177,9 @@ stdenv.mkDerivation {
         --replace-fail \
           '      -DROCPROFSYS_BUILD_LIBIBERTY=ON' \
           '      -DROCPROFSYS_BUILD_LIBIBERTY=ON
-      -DDYNINST_BINUTILS_DOWNLOAD_URL=file://${rocprofilerSysBinutilsArchive}'
+      -DDYNINST_BINUTILS_DOWNLOAD_URL=file://${rocprofilerSysBinutilsArchive}
+      -DTIMEMORY_BINUTILS_DOWNLOAD_URL=file://${rocprofilerSysBinutilsArchive}
+      -DROCPROFSYS_BINUTILS_C_FLAGS=-I${zlib.dev}/include'
     ''}
 
     patchShebangs .

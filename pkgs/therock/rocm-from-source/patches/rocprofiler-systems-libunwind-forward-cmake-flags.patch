@@ -1,0 +1,27 @@
+--- a/rocm-systems/projects/rocprofiler-systems/external/timemory/cmake/Modules/ConfigLibunwind.cmake
++++ b/rocm-systems/projects/rocprofiler-systems/external/timemory/cmake/Modules/ConfigLibunwind.cmake
+@@ -54,9 +54,10 @@ function(timemory_libunwind_configure)
+         -E
+         env
+         CC=${CMAKE_C_COMPILER}
+-        CFLAGS=-fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
++        CFLAGS=${CMAKE_C_FLAGS}\ -fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
+         CXX=${CMAKE_CXX_COMPILER}
+-        CXXFLAGS=-fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
++        CXXFLAGS=${CMAKE_CXX_FLAGS}\ -fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
++        LDFLAGS=${CMAKE_EXE_LINKER_FLAGS}
+         ./configure
+         --enable-shared=yes
+         --enable-static=no
+@@ -108,9 +109,10 @@ add_custom_target(
+     COMMAND
+         ${CMAKE_COMMAND} -E env CC=${CMAKE_C_COMPILER}
+-        CFLAGS=-fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
++        CFLAGS=${CMAKE_C_FLAGS}\ -fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
+         CXX=${CMAKE_CXX_COMPILER}
+-        CXXFLAGS=-fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
++        CXXFLAGS=${CMAKE_CXX_FLAGS}\ -fPIC\ -O3\ -Wno-unused-result\ -Wno-unused-but-set-variable\ -Wno-cpp
++        LDFLAGS=${CMAKE_EXE_LINKER_FLAGS}
+         ./configure --enable-shared=yes --enable-static=no
+         --prefix=${PROJECT_BINARY_DIR}/external/libunwind/install
+     COMMAND ${MAKE_EXE}
