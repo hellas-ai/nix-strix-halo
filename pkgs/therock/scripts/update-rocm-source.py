@@ -18,58 +18,9 @@ from typing import Any
 
 DEFAULT_URL = "https://github.com/ROCm/TheRock.git"
 DEFAULT_TARGET = "gfx1151"
-DEFAULT_SERIES = "7.13"
-DEFAULT_FETCH_ARGS: list[str] = [
-    "--nested-submodules",
-    "iree:third_party/flatcc,third_party/benchmark,third_party/llvm-project,third_party/torch-mlir",
-    (
-        "rocm-systems:"
-        "experimental/python/perfxpert/opencode,"
-        "projects/rocprofiler/perfetto,"
-        "projects/rocprofiler-sdk/external/googletest,"
-        "projects/rocprofiler-register/external/glog,"
-        "projects/rocprofiler-sdk/external/fmt,"
-        "projects/rocprofiler-register/external/fmt,"
-        "projects/rocprofiler-sdk/source/docs/doxygen-awesome-css,"
-        "projects/rocprofiler-sdk/external/ptl,"
-        "projects/rocprofiler-sdk/external/cereal,"
-        "projects/rocprofiler-sdk/external/filesystem,"
-        "projects/rocprofiler-sdk/external/perfetto,"
-        "projects/rocprofiler-sdk/external/elfio,"
-        "projects/rocprofiler-sdk/external/yaml-cpp,"
-        "projects/rocprofiler-sdk/external/json,"
-        "projects/rocprofiler-sdk/external/sqlite,"
-        "projects/rocprofiler-sdk/external/pybind11,"
-        "projects/rocprofiler-sdk/external/gotcha,"
-        "projects/rocprofiler-systems/external/timemory,"
-        "projects/rocprofiler-systems/external/perfetto,"
-        "projects/rocprofiler-systems/external/elfio,"
-        "projects/rocprofiler-systems/external/dyninst,"
-        "projects/rocprofiler-systems/external/kokkos,"
-        "projects/rocprofiler-systems/external/papi,"
-        "projects/rocprofiler-systems/external/pybind11,"
-        "projects/rocprofiler-systems/external/sqlite,"
-        "projects/rocprofiler-systems/examples/openmp/external/ompvv,"
-        "projects/rocprofiler-systems/external/googletest,"
-        "projects/rocprofiler-systems/external/filesystem,"
-        "projects/rocprofiler-systems/external/spdlog,"
-        "projects/rocprofiler-systems/external/json,"
-        "projects/rocprofiler-compute/src/vendored/pyyaml,"
-        "projects/rocprofiler-systems/external/onetbb,"
-        "projects/rocprofiler-sdk/external/abseil-cpp"
-    ),
-    "rocm-libraries:fin,HostLibraryTests/googletest",
-]
-DEFAULT_DEEP_NESTED_SUBMODULES: list[dict[str, object]] = [
-    {
-        "parent": "rocm-systems/projects/rocprofiler-systems/external/timemory",
-        "paths": [
-            "external/yaml-cpp",
-            "external/libunwind",
-            "external/gotcha",
-        ],
-    },
-]
+DEFAULT_SERIES = "7.15"
+DEFAULT_FETCH_ARGS: list[str] = []
+DEFAULT_DEEP_NESTED_SUBMODULES: list[dict[str, object]] = []
 
 
 def parse_deep_nested_submodule(value: str) -> dict[str, object]:

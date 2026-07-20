@@ -133,18 +133,6 @@ let
     esmiIbLibrarySource = prev.fetchgit {
       inherit (therockRocmThirdPartySources.esmiIbLibrary) url rev hash;
     };
-    ireeLibbacktraceSource = prev.fetchzip {
-      inherit
-        (therockRocmThirdPartySources.archives."libbacktrace-b9e40069c0b47a722286b94eb5231f7f05c08713.zip")
-        url
-        ;
-      hash = "sha512-vWfrdxHfNcfoh/SWh6dOTLRtqXcW0godukXv5ad6DqzfbwC7TOIbyw0Oke40oLRqFCLfg1M2f7bqnIrLnISmKw==";
-      stripRoot = true;
-    };
-    ireeAmdDeviceLibsArchive = prev.fetchurl {
-      url = "https://github.com/shark-infra/amdgpu-device-libs/releases/download/v20231101/amdgpu-device-libs-llvm-6086c272a3a59eb0b6b79dcbe00486bf4461856a.tgz";
-      hash = "sha256-M2NiQWxo/di7gDKPZcp+uqDBGeoZyV323zDIMqTfObk=";
-    };
     rocprofilerOtf2Archive = prev.fetchurl {
       url = "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/otf2-3.0.3.tar.gz";
       hash = "sha256-GKOQX3kXNAOH4+3I5XZvMasa9B9OzFZl2mx2nKIcTug=";
@@ -156,12 +144,6 @@ let
     spirvHeadersSource = prev.fetchzip {
       inherit (therockRocmThirdPartySources.spirvHeaders) url hash;
       stripRoot = true;
-    };
-    tracySource = prev.fetchFromGitHub {
-      owner = "wolfpld";
-      repo = "tracy";
-      rev = "5479a42ef9346b64e6d1b860ae58aa8abdb0c7f6";
-      hash = "sha256-4J8b+72k+xpeT6KsrkioF1xfWEBsGg2eLRg9iONxP/I=";
     };
   };
 
