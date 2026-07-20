@@ -160,14 +160,19 @@ let
       projectTargetUnexcludes = lib.optionalAttrs (builtins.elem suffix rocmTarget.buildTargets) {
         rocprofiler-compute = [ suffix ];
       };
+      sourceTreeInputs = lockedSourceTreeFor suffix;
+      compilerSourceTreeInputs = sourceTreeInputs // {
+        submodules = builtins.filter (
+          submodule: !(lib.hasPrefix "rocm-systems/projects/rocprofiler-sdk/external/" submodule.path)
+        ) sourceTreeInputs.submodules;
+      };
 
       mkLockedSource =
-        source:
+        source: lockedInputs:
         let
-          sourceTreeInputs = lockedSourceTreeFor suffix;
           installSubmodules = lib.concatMapStringsSep "\n" (submodule: ''
             install_source ${lib.escapeShellArg submodule.path} ${lib.escapeShellArg (toString submodule.source)}
-          '') sourceTreeInputs.submodules;
+          '') lockedInputs.submodules;
         in
         prev.runCommandLocal "therock-rocm-source-${suffix}-full-${builtins.substring 0 12 source.rev}"
           {
@@ -202,7 +207,7 @@ let
             }
 
             mkdir -p "$out"
-            cp -a --reflink=auto ${sourceTreeInputs.root}/. "$out/"
+            cp -a --reflink=auto ${lockedInputs.root}/. "$out/"
             chmod -R u+w "$out"
 
             ${installSubmodules}
@@ -212,7 +217,8 @@ let
             apply_project_patches rocm-libraries rocm-libraries
           '';
 
-      sourceTree = mkLockedSource source;
+      sourceTree = mkLockedSource source sourceTreeInputs;
+      compilerSourceTree = mkLockedSource source compilerSourceTreeInputs;
 
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;
@@ -220,7 +226,7 @@ let
         inherit (cmakeConfig) target amdgpuTargets distBundleName;
         inherit (source) version;
         profile = "compiler";
-        therockSource = sourceTree;
+        therockSource = compilerSourceTree;
         thirdPartySources = { };
         buildTargets = [ "artifact-amd-llvm" ];
         installMode = "prebuilt-stages";

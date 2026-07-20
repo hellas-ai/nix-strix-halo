@@ -121,6 +121,51 @@
       flake = false;
     };
 
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4" = {
+      url = "github:abseil/abseil-cpp/255c84dadd029fd8ad25c5efb5933e47beaa00c7";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93" = {
+      url = "github:jrmadsen/cereal/40a30defcb8874270a04836d316502b08904b2bc";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296" = {
+      url = "github:serge1/ELFIO/575bfdb12cd90fa8913660295103549f151d116a";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-filesystem-807165f4" = {
+      url = "github:gulrak/filesystem/8a2edd6d92ed820521d42c94d179462bf06b5ed3";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-gotcha-10fa2c98" = {
+      url = "github:ROCm/GOTCHA/b944da10ff9b3364ef2e4b12e02cb2464e05dd48";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-json-a3f85fd2" = {
+      url = "github:nlohmann/json/e41905fcb0938a7502d25ea5242c6b41396e21b0";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359" = {
+      url = "github:google/perfetto/eb5ef24c58d13cec289d733d03f0f3f0ed321b12";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0" = {
+      url = "github:jrmadsen/PTL/48df41625430d27ce43cf197fd467a8dda87cb45";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437" = {
+      url = "github:pybind/pybind11/914c06fb252b6cc3727d0eedab6736e88a3fcb01";
+      flake = false;
+    };
+
     "therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c" = {
       url = "github:ROCm/mesa-fork/22abfc06d7cf4c115ca2e368505d75ba4af174b4";
       flake = false;

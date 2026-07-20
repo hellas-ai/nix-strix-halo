@@ -42,6 +42,51 @@
         source = inputs."therock-src-7-15-gfx1151-debug-tools-rocgdb-source-e3322990";
       }
       {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/abseil-cpp";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/cereal";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/elfio";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/filesystem";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-filesystem-807165f4";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/gotcha";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-gotcha-10fa2c98";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/json";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-json-a3f85fd2";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/perfetto";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/ptl";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-sdk/external/pybind11";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437";
+      }
+      {
         path = "third-party/sysdeps/linux/amd-mesa/mesa-fork";
         source = inputs."therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c";
       }
