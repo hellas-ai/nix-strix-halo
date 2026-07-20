@@ -87,8 +87,78 @@
           inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437";
       }
       {
+        path = "rocm-systems/projects/rocprofiler-systems/external/dyninst";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/json";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/onetbb";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/papi";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/perfetto";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/pybind11";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/timemory";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf";
+      }
+      {
         path = "third-party/sysdeps/linux/amd-mesa/mesa-fork";
         source = inputs."therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-compute/src/vendored/pyyaml";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-compute/src/lib/external/fmt";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-fmt-db1fc275";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-compute/src/lib/external/json";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-json-c887b002";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/timemory/external/gotcha";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/timemory/external/libunwind";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/timemory/external/pybind11";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa";
+      }
+      {
+        path = "rocm-systems/projects/rocprofiler-systems/external/timemory/external/yaml-cpp";
+        source =
+          inputs."therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c";
       }
     ];
   };

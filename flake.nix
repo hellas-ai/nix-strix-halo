@@ -166,10 +166,87 @@
       flake = false;
     };
 
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976" = {
+      url = "github:ROCm/dyninst/5dff47bf6fb53e51cdc5e98c8ef6656080931ede";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e" = {
+      url = "github:nlohmann/json/55f93686c01528224f448c19128836e7df245f72";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3" = {
+      url = "github:uxlfoundation/oneTBB/f1862f38f83568d96e814e469ab61f88336cc595";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169" = {
+      url = "github:icl-utk-edu/papi/c27003e1642f1c151c9b18ef9e7610072b3c852d";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344" = {
+      url = "github:google/perfetto/35b3d9845c2f4017865c4dc93fafcf6d202f1651";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d" = {
+      url = "github:jrmadsen/pybind11/1a917f1852eb7819b671fc3fa862840f4c491a07";
+      flake = false;
+    };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf" = {
+      url = "github:ROCm/timemory/54ae9d214a63132da22c7cab21c5fb4b7b5049f8";
+      flake = false;
+    };
+
     "therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c" = {
       url = "github:ROCm/mesa-fork/22abfc06d7cf4c115ca2e368505d75ba4af174b4";
       flake = false;
     };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974" =
+      {
+        url = "github:yaml/pyyaml/49790e73684bebad1df05ef8d828fa12f685bffb";
+        flake = false;
+      };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-fmt-db1fc275" =
+      {
+        url = "github:fmtlib/fmt/407c905e45ad75fc29bf0f9bb7c5c2fd3475976f";
+        flake = false;
+      };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-json-c887b002" =
+      {
+        url = "github:nlohmann/json/98386eb08b609c172f9f4bf3e74c8d18c5ad583c";
+        flake = false;
+      };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531" =
+      {
+        url = "github:ROCm/GOTCHA/6ef1232a0acc99f3340c2ca4c5d23890e9b8a459";
+        flake = false;
+      };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f" =
+      {
+        url = "github:libunwind/libunwind/24947191d61dda869e039e0414fe97e9f594acd5";
+        flake = false;
+      };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa" =
+      {
+        url = "github:jrmadsen/pybind11/1a917f1852eb7819b671fc3fa862840f4c491a07";
+        flake = false;
+      };
+
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c" =
+      {
+        url = "github:jrmadsen/yaml-cpp/1b50109f7bea60bd382d8ea7befce3d2bd67da5f";
+        flake = false;
+      };
 
     # END generated TheRock source inputs
   };

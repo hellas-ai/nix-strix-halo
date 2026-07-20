@@ -248,6 +248,9 @@
         "therock-src-7-15-gfx1151-math-libs-libhipcxx-10b48ff4": "therock-src-7-15-gfx1151-math-libs-libhipcxx-10b48ff4",
         "therock-src-7-15-gfx1151-rocm-libraries-36c771f3": "therock-src-7-15-gfx1151-rocm-libraries-36c771f3",
         "therock-src-7-15-gfx1151-rocm-systems-9c0ec3e9": "therock-src-7-15-gfx1151-rocm-systems-9c0ec3e9",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-fmt-db1fc275": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-fmt-db1fc275",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-json-c887b002": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-json-c887b002",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974",
         "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4",
         "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93",
         "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296",
@@ -257,6 +260,17 @@
         "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359",
         "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0",
         "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf",
         "therock-src-7-15-gfx1151-root": "therock-src-7-15-gfx1151-root",
         "therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c",
         "thunderbolt-ibverbs": "thunderbolt-ibverbs",
@@ -452,6 +466,57 @@
         "type": "github"
       }
     },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-fmt-db1fc275": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1761748827,
+        "narHash": "sha256-ZmI1Dv0ZabPlxa02OpERI47jp7zFfjpeWCy1WyuPYZ0=",
+        "owner": "fmtlib",
+        "repo": "fmt",
+        "rev": "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "fmtlib",
+        "repo": "fmt",
+        "rev": "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-json-c887b002": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1777055253,
+        "narHash": "sha256-lQr/3uut38g00JEuBIXP4mLGPXiskbsz7r1XU448AQ8=",
+        "owner": "nlohmann",
+        "repo": "json",
+        "rev": "98386eb08b609c172f9f4bf3e74c8d18c5ad583c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nlohmann",
+        "repo": "json",
+        "rev": "98386eb08b609c172f9f4bf3e74c8d18c5ad583c",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1758834645,
+        "narHash": "sha256-jUooIBp80cLxvdU/zLF0X8Yjrf0Yp9peYeiFjuV8AHA=",
+        "owner": "yaml",
+        "repo": "pyyaml",
+        "rev": "49790e73684bebad1df05ef8d828fa12f685bffb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "yaml",
+        "repo": "pyyaml",
+        "rev": "49790e73684bebad1df05ef8d828fa12f685bffb",
+        "type": "github"
+      }
+    },
     "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4": {
       "flake": false,
       "locked": {
@@ -602,6 +667,193 @@
         "owner": "pybind",
         "repo": "pybind11",
         "rev": "914c06fb252b6cc3727d0eedab6736e88a3fcb01",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781671772,
+        "narHash": "sha256-Q0GMeeGp8GNLYw5ydrWTGeaiU7rI267EXrsrOtRUPww=",
+        "owner": "ROCm",
+        "repo": "dyninst",
+        "rev": "5dff47bf6fb53e51cdc5e98c8ef6656080931ede",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "dyninst",
+        "rev": "5dff47bf6fb53e51cdc5e98c8ef6656080931ede",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1744360948,
+        "narHash": "sha256-cECvDOLxgX7Q9R3IE86Hj9JJUxraDQvhoyPDF03B2CY=",
+        "owner": "nlohmann",
+        "repo": "json",
+        "rev": "55f93686c01528224f448c19128836e7df245f72",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nlohmann",
+        "repo": "json",
+        "rev": "55f93686c01528224f448c19128836e7df245f72",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1761737496,
+        "narHash": "sha256-HIHF6KHlEI4rgQ9Epe0+DmNe1y95K9iYa4V/wFnJfEU=",
+        "owner": "uxlfoundation",
+        "repo": "oneTBB",
+        "rev": "f1862f38f83568d96e814e469ab61f88336cc595",
+        "type": "github"
+      },
+      "original": {
+        "owner": "uxlfoundation",
+        "repo": "oneTBB",
+        "rev": "f1862f38f83568d96e814e469ab61f88336cc595",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773687226,
+        "narHash": "sha256-iII6W6HZXsHRgqniO5IH2GDjhl1JcwhYdhWuIE8Lymk=",
+        "owner": "icl-utk-edu",
+        "repo": "papi",
+        "rev": "c27003e1642f1c151c9b18ef9e7610072b3c852d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "icl-utk-edu",
+        "repo": "papi",
+        "rev": "c27003e1642f1c151c9b18ef9e7610072b3c852d",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1718298493,
+        "narHash": "sha256-L7RnOQmD74JFpa10mNwXcLV8YyyjaQ7qYx9eXJpizpw=",
+        "owner": "google",
+        "repo": "perfetto",
+        "rev": "35b3d9845c2f4017865c4dc93fafcf6d202f1651",
+        "type": "github"
+      },
+      "original": {
+        "owner": "google",
+        "repo": "perfetto",
+        "rev": "35b3d9845c2f4017865c4dc93fafcf6d202f1651",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1689348038,
+        "narHash": "sha256-r0b1Wr/PtTk4kHOVhgSy3gi/GLED774Ys49J1E7B7WQ=",
+        "owner": "jrmadsen",
+        "repo": "pybind11",
+        "rev": "1a917f1852eb7819b671fc3fa862840f4c491a07",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jrmadsen",
+        "repo": "pybind11",
+        "rev": "1a917f1852eb7819b671fc3fa862840f4c491a07",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1664927513,
+        "narHash": "sha256-MWdkZY255bVYLzUhV1BxMPb+LbM3dtDkg1M4AhrB2rQ=",
+        "owner": "jrmadsen",
+        "repo": "yaml-cpp",
+        "rev": "1b50109f7bea60bd382d8ea7befce3d2bd67da5f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jrmadsen",
+        "repo": "yaml-cpp",
+        "rev": "1b50109f7bea60bd382d8ea7befce3d2bd67da5f",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1690716675,
+        "narHash": "sha256-z5YCue0zadQnMEbGFniFvDjXNy6dSHQDQnXRXS6Uh/Y=",
+        "owner": "libunwind",
+        "repo": "libunwind",
+        "rev": "24947191d61dda869e039e0414fe97e9f594acd5",
+        "type": "github"
+      },
+      "original": {
+        "owner": "libunwind",
+        "repo": "libunwind",
+        "rev": "24947191d61dda869e039e0414fe97e9f594acd5",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1752612818,
+        "narHash": "sha256-KHTPiNCzYtIsGcSwjVwFSIgO+GZgdBkruMfv1HNxzYk=",
+        "owner": "ROCm",
+        "repo": "GOTCHA",
+        "rev": "6ef1232a0acc99f3340c2ca4c5d23890e9b8a459",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "GOTCHA",
+        "rev": "6ef1232a0acc99f3340c2ca4c5d23890e9b8a459",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1689348038,
+        "narHash": "sha256-r0b1Wr/PtTk4kHOVhgSy3gi/GLED774Ys49J1E7B7WQ=",
+        "owner": "jrmadsen",
+        "repo": "pybind11",
+        "rev": "1a917f1852eb7819b671fc3fa862840f4c491a07",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jrmadsen",
+        "repo": "pybind11",
+        "rev": "1a917f1852eb7819b671fc3fa862840f4c491a07",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780482623,
+        "narHash": "sha256-AAaBBfutxm0suCyJyTZK1vEEG9kAkeho2m6b0JGK4R8=",
+        "owner": "ROCm",
+        "repo": "timemory",
+        "rev": "54ae9d214a63132da22c7cab21c5fb4b7b5049f8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "timemory",
+        "rev": "54ae9d214a63132da22c7cab21c5fb4b7b5049f8",
         "type": "github"
       }
     },

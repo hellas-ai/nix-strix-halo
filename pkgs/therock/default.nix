@@ -163,7 +163,7 @@ let
       sourceTreeInputs = lockedSourceTreeFor suffix;
       compilerSourceTreeInputs = sourceTreeInputs // {
         submodules = builtins.filter (
-          submodule: !(lib.hasPrefix "rocm-systems/projects/rocprofiler-sdk/external/" submodule.path)
+          submodule: !(lib.hasPrefix "rocm-systems/projects/rocprofiler-" submodule.path)
         ) sourceTreeInputs.submodules;
       };
 

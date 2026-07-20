@@ -10,6 +10,9 @@
         {
           "parent": "rocm-systems",
           "paths": [
+            "projects/rocprofiler-compute/src/lib/external/fmt",
+            "projects/rocprofiler-compute/src/lib/external/json",
+            "projects/rocprofiler-compute/src/vendored/pyyaml",
             "projects/rocprofiler-sdk/external/abseil-cpp",
             "projects/rocprofiler-sdk/external/cereal",
             "projects/rocprofiler-sdk/external/elfio",
@@ -18,7 +21,23 @@
             "projects/rocprofiler-sdk/external/json",
             "projects/rocprofiler-sdk/external/perfetto",
             "projects/rocprofiler-sdk/external/ptl",
-            "projects/rocprofiler-sdk/external/pybind11"
+            "projects/rocprofiler-sdk/external/pybind11",
+            "projects/rocprofiler-systems/external/dyninst",
+            "projects/rocprofiler-systems/external/json",
+            "projects/rocprofiler-systems/external/onetbb",
+            "projects/rocprofiler-systems/external/papi",
+            "projects/rocprofiler-systems/external/perfetto",
+            "projects/rocprofiler-systems/external/pybind11",
+            "projects/rocprofiler-systems/external/timemory"
+          ]
+        },
+        {
+          "parent": "rocm-systems/projects/rocprofiler-systems/external/timemory",
+          "paths": [
+            "external/gotcha",
+            "external/libunwind",
+            "external/pybind11",
+            "external/yaml-cpp"
           ]
         }
       ],
