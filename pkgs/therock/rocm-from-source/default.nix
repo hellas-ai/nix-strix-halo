@@ -45,6 +45,8 @@
   numactl,
   libdrm,
   libcap,
+  libmnl,
+  libnl,
   pciutils,
   libpciaccess,
   elfutils,
@@ -763,6 +765,14 @@ let
         "-DROCGDB_GMP_LIBRARY_DIR=${gmp}/lib"
         "-DROCGDB_MPFR_INCLUDE_DIR=${mpfr.dev}/include"
         "-DROCGDB_MPFR_LIBRARY_DIR=${mpfr}/lib"
+        # ROCm 7.15 enables the experimental Rocjitsu GPU emulator and its
+        # Rust Mirage frontend as part of THEROCK_ENABLE_ALL. Neither is in
+        # the inference runtime path. Their upstream build also performs
+        # undeclared FetchContent/Cargo network downloads, which are not
+        # valid inside the Nix sandbox; keep them out of this SDK profile
+        # until they have standalone, fully vendored Nix packages.
+        "-DTHEROCK_ENABLE_ROCJITSU=OFF"
+        "-DTHEROCK_ENABLE_MIRAGE=OFF"
         # rocprofiler-systems compiles a tree of HIP-mode example programs
         # (examples/{roctx,openmp,unified-memory,…}) where clang's bundled
         # HIP runtime wrapper can't find the libstdc++ headers under the
@@ -885,6 +895,8 @@ stdenv.mkDerivation {
     sqlite.dev
     libcap.dev
     libcap.lib
+    libmnl
+    libnl
     libva
     libva.dev
     llvmPackages.openmp
