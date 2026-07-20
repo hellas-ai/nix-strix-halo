@@ -352,16 +352,31 @@ let
     zlib.out
   ];
 
-  nixToolchainRuntimeLinkerFlags = lib.concatStringsSep " " (
-    [
-      "-L${nixSysroot}/lib"
-      "-Wl,-rpath,${nixSysroot}/lib"
-      "-Wl,-rpath,${stdenv.cc.libc}/lib"
-      "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
-      "-Wl,-rpath,${gcc.cc.lib}/lib"
+  # AMD SMI 7.15 discovers these through pkg-config, but TheRock links its
+  # subprojects with the in-tree Clang rather than the Nix cc wrapper. Supply
+  # both the search paths and build-time RPATHs explicitly.
+  fullProfilePkgConfigLinkerFlags = lib.optionalString (profile == "full") (
+    " "
+    + lib.concatStringsSep " " [
+      "-L${lib.getLib libnl}/lib"
+      "-L${lib.getLib libmnl}/lib"
+      "-Wl,-rpath,${lib.getLib libnl}/lib"
+      "-Wl,-rpath,${lib.getLib libmnl}/lib"
     ]
-    ++ map (p: "-Wl,-rpath,${p}/lib") buildTimeToolRuntimeLibs
   );
+
+  nixToolchainRuntimeLinkerFlags =
+    lib.concatStringsSep " " (
+      [
+        "-L${nixSysroot}/lib"
+        "-Wl,-rpath,${nixSysroot}/lib"
+        "-Wl,-rpath,${stdenv.cc.libc}/lib"
+        "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
+        "-Wl,-rpath,${gcc.cc.lib}/lib"
+      ]
+      ++ map (p: "-Wl,-rpath,${p}/lib") buildTimeToolRuntimeLibs
+    )
+    + fullProfilePkgConfigLinkerFlags;
 
   nixToolchainExeLinkerFlags =
     nixToolchainRuntimeLinkerFlags + " -Wl,--dynamic-linker=${stdenv.cc.bintools.dynamicLinker}";
@@ -792,6 +807,9 @@ let
       throw "unknown TheRock ROCm profile: ${profile}";
 
   cmakeFlags = commonCmakeFlags ++ profileCmakeFlags;
+  rocgdbMakeJobsConfigureArg = lib.optionalString (
+    profile == "full"
+  ) " -DROCGDB_MAKE_JOBS=\"\${NIX_BUILD_CORES:-1}\"";
 in
 stdenv.mkDerivation {
   pname = "therock-rocm-from-source-${target}-${profile}${
@@ -1010,7 +1028,7 @@ stdenv.mkDerivation {
       chmod -R u+w build
     ''}
 
-    cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX="$out" ${lib.escapeShellArgs cmakeFlags}
+    cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX="$out" ${lib.escapeShellArgs cmakeFlags}${rocgdbMakeJobsConfigureArg}
     runHook postConfigure
   '';
 

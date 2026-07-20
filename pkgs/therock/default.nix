@@ -269,6 +269,7 @@ in
     prev.callPackage ./rocm-modules {
       therockSource = final."therock-rocm-source-${target.packageSuffix}";
       therockVersion = defaultSource.rocmVersion or (normalizeRocmVersion defaultSource.version);
+      inherit (therockFromSourceThirdPartyFetches) esmiIbLibrarySource;
     }
   );
 }
