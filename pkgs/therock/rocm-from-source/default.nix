@@ -47,6 +47,7 @@
   libcap,
   libmnl,
   libnl,
+  util-linux,
   pciutils,
   libpciaccess,
   elfutils,
@@ -415,6 +416,20 @@ let
     string(APPEND _toolchain_contents "set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL \"Do not allow FetchContent network access\" FORCE)\n")
   '';
 
+  primitiveBenchmarkDepsSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace cmake/therock_primlibs_benchmark_deps.cmake \
+      --replace-fail \
+        'if(NOT TARGET amd_smi)' \
+        'if((BUILD_BENCHMARK OR BUILD_BENCHMARKS) AND NOT TARGET amd_smi)'
+  '';
+
+  hipPlatformCacheSourcePatch = lib.optionalString (profile != "compiler") ''
+    substituteInPlace cmake/therock_subproject.cmake \
+      --replace-fail \
+        'string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\")\n")' \
+        'string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\" CACHE STRING \"HIP platform\" FORCE)\n")'
+  '';
+
   mediaLibCmakeArgs = lib.optionalString (profile == "full") ''
     -DLIBVA_INCLUDE_DIR=${libva.dev}/include
     -DLIBVA_LIBRARY=${libva.out}/lib/libva.so
@@ -576,6 +591,8 @@ let
   hipLanguageFlagsToolchainLine = lib.optionalString (profile != "compiler") ''
     string(APPEND _toolchain_contents "string(APPEND CMAKE_C_FLAGS_INIT \" -isystem ${numactl.dev}/include\")\n")
     string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" -isystem ${numactl.dev}/include\")\n")
+    string(APPEND _toolchain_contents "string(APPEND CMAKE_C_FLAGS_INIT \" -isystem ${util-linux.dev}/include\")\n")
+    string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" -isystem ${util-linux.dev}/include\")\n")
     string(APPEND _toolchain_contents "string(APPEND CMAKE_HIP_FLAGS_INIT \" ${nixToolchainDriverFlags} --hip-path=@_hip_dist_dir@ --hip-device-lib-path=@_amd_llvm_device_lib_path@\")\n")
     string(APPEND _toolchain_contents "set(CMAKE_CXX_LINK_FLAGS \"${nixToolchainDriverFlags} ${nixToolchainExeLinkerFlags}\" CACHE STRING \"Nix CXX linker flags for HIP link helpers\" FORCE)\n")
     string(APPEND _toolchain_contents "set(HIP_HIPCC_FLAGS \"--sysroot=${nixSysroot};--gcc-toolchain=${nixSysroot}/usr;-B${nixSysroot}/lib\" CACHE STRING \"Nix HIP compiler flags\" FORCE)\n")
@@ -915,6 +932,8 @@ stdenv.mkDerivation {
     libcap.lib
     libmnl
     libnl
+    util-linux.dev
+    util-linux.lib
     libva
     libva.dev
     llvmPackages.openmp
@@ -1078,7 +1097,7 @@ stdenv.mkDerivation {
             string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\")\n")
         ${hipLanguageFlagsToolchainLine}'
 
-                ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
+                ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}${primitiveBenchmarkDepsSourcePatch}${hipPlatformCacheSourcePatch}
                 ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}${rocmStdcxxFsSourcePatch}${hipsolverLapackSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
