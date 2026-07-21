@@ -154,6 +154,42 @@ let
     system: if lib.hasSuffix "-darwin" system then "/Users/Shared/models" else "/models";
 
   defaultModelsRoot = pkgs: defaultModelsRootFor pkgs.stdenv.hostPlatform.system;
+
+  # KFD's gfx_target_version encoding (e.g. gfx1151 -> 110501) as it appears
+  # in /sys/class/kfd/kfd/topology/nodes/*/properties.
+  gfxTargetVersionFor =
+    runtimeArch:
+    let
+      digits = lib.removePrefix "gfx" runtimeArch;
+      len = builtins.stringLength digits;
+      major = lib.toInt (builtins.substring 0 (len - 2) digits);
+      minor = lib.toInt (builtins.substring (len - 2) 1 digits);
+      step = lib.toInt (builtins.substring (len - 1) 1 digits);
+    in
+    toString (major * 10000 + minor * 100 + step);
+
+  # Shell snippet selecting (via HIP_VISIBLE_DEVICES) the GPU whose KFD
+  # gfx_target_version matches runtimeArch. On hybrid-GPU builders (e.g. a
+  # dGPU next to the Strix Halo APU) HIP device 0 can be a different arch
+  # than the benchmark was built for, and kernels then fail to load with
+  # "device kernel image is invalid". GPU node order matches the HIP device
+  # enumeration. No-op when no matching node exists.
+  hipArchGuard = runtimeArch: ''
+    _want=${gfxTargetVersionFor runtimeArch}
+    _hip_idx=-1
+    _gpu_idx=0
+    for _props in /sys/class/kfd/kfd/topology/nodes/*/properties; do
+      _ver=$(grep -s '^gfx_target_version' "$_props" | awk '{print $2}')
+      [ -n "''${_ver:-}" ] && [ "$_ver" != "0" ] || continue
+      if [ "$_ver" = "$_want" ]; then _hip_idx=$_gpu_idx; break; fi
+      _gpu_idx=$((_gpu_idx + 1))
+    done
+    if [ "$_hip_idx" -ge 0 ]; then
+      echo "hipArchGuard: restricting to HIP device $_hip_idx (gfx_target_version=$_want)"
+      export HIP_VISIBLE_DEVICES=$_hip_idx
+    fi
+    unset _want _hip_idx _gpu_idx _props _ver
+  '';
 in
 rec {
   inherit
@@ -161,6 +197,8 @@ rec {
     defaultModelsRootFor
     emptyRequirements
     envExports
+    gfxTargetVersionFor
+    hipArchGuard
     mergeRequirements
     modelPath
     normalizeRequirements

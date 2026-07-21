@@ -25,7 +25,7 @@
   xz,
   numactl,
   fmt,
-  glog,
+  abseil-cpp,
   gtest,
   fetchpatch,
   yaml-cpp,
@@ -92,7 +92,7 @@ stdenv.mkDerivation (finalAttrs: {
     xz
     numactl
     fmt
-    glog
+    abseil-cpp
     gtest
     yaml-cpp
     elfio
@@ -100,6 +100,18 @@ stdenv.mkDerivation (finalAttrs: {
     rccl
     python3Packages.pybind11
   ];
+
+  # The sql/rocpd output sources #include <sqlite3.h> but no target wires
+  # the sqlite include dir to them (upstream relies on FHS /usr/include;
+  # only rocprofiler-sdk-tool links the sqlite3 interface target). Pass the
+  # flags via cmake: the rocm-toolchain compiler wrapper ignores
+  # NIX_CFLAGS_COMPILE.
+  preConfigure = ''
+    cmakeFlagsArray+=(
+      "-DCMAKE_C_FLAGS=-I${lib.getDev sqlite}/include"
+      "-DCMAKE_CXX_FLAGS=-I${lib.getDev sqlite}/include"
+    )
+  '';
 
   patches = [
     (fetchpatch {
@@ -156,7 +168,8 @@ stdenv.mkDerivation (finalAttrs: {
   cmakeFlags = [
     (lib.cmakeBool "ROCPROFILER_BUILD_GHC_FS" false)
     (lib.cmakeBool "ROCPROFILER_BUILD_FMT" false)
-    (lib.cmakeBool "ROCPROFILER_BUILD_GLOG" false)
+    # 7.15 replaced glog with abseil logging (ROCPROFILER_BUILD_GLOG is gone)
+    (lib.cmakeBool "ROCPROFILER_BUILD_ABSEIL" false)
     (lib.cmakeBool "ROCPROFILER_BUILD_GTEST" false)
     (lib.cmakeBool "ROCPROFILER_BUILD_PYBIND11" false)
     (lib.cmakeBool "ROCPROFILER_BUILD_YAML_CPP" false)

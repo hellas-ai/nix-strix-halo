@@ -6,11 +6,13 @@ Subject: [PATCH] [rocprofiler-sdk] add missing stl headers
 These missing includes became apparent when building with
 ROCPROFILER_BUILD_GHC_FS=OFF.
 ---
- source/lib/att-tool/att_lib_wrapper.hpp         | 2 ++
- source/lib/rocprofiler-sdk-rocpd/sql.cpp        | 1 +
- source/lib/rocprofiler-sdk/counters/metrics.cpp | 1 +
- source/lib/rocprofiler-sdk/tests/status.cpp     | 1 +
- 4 files changed, 5 insertions(+)
+ source/lib/att-tool/att_lib_wrapper.hpp             | 2 ++
+ source/lib/rocprofiler-sdk-rocattach/auxv.cpp         | 1 +
+ source/lib/rocprofiler-sdk-rocattach/symbol_lookup.cpp | 1 +
+ source/lib/rocprofiler-sdk-rocpd/sql.cpp              | 1 +
+ source/lib/rocprofiler-sdk/counters/metrics.cpp       | 1 +
+ source/lib/rocprofiler-sdk/tests/status.cpp           | 1 +
+ 6 files changed, 7 insertions(+)
 
 diff --git a/source/lib/att-tool/att_lib_wrapper.hpp b/source/lib/att-tool/att_lib_wrapper.hpp
 index 575c3c3..5421b26 100644
@@ -66,4 +68,25 @@ index a5a4921..b01f511 100644
  TEST(rocprofiler_lib, error_string)
 -- 
 2.43.0
-
+diff --git a/source/lib/rocprofiler-sdk-rocattach/auxv.cpp b/source/lib/rocprofiler-sdk-rocattach/auxv.cpp
+--- a/source/lib/rocprofiler-sdk-rocattach/auxv.cpp
++++ b/source/lib/rocprofiler-sdk-rocattach/auxv.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "auxv.hpp"
+ 
++#include <fstream>
+ #include <vector>
+ 
+ namespace fs = rocprofiler::common::filesystem;
+diff --git a/source/lib/rocprofiler-sdk-rocattach/symbol_lookup.cpp b/source/lib/rocprofiler-sdk-rocattach/symbol_lookup.cpp
+--- a/source/lib/rocprofiler-sdk-rocattach/symbol_lookup.cpp
++++ b/source/lib/rocprofiler-sdk-rocattach/symbol_lookup.cpp
+@@ -34,6 +34,7 @@
+ #include <dlfcn.h>
+ #include <link.h>
+ 
++#include <fstream>
+ #include <optional>
+ #include <sstream>
+ #include <unordered_map>

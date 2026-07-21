@@ -77,6 +77,7 @@ let
     export XDG_CACHE_HOME="$TMPDIR/cache"
     export PYTHONNOUSERSITE=1
 
+    ${lib.optionalString (!isMetal) (benchLib.hipArchGuard target.runtimeArch)}
     ${python}/bin/python - <<'PY'
     import json
     import math
