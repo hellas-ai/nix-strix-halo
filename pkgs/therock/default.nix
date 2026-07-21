@@ -102,16 +102,21 @@ let
     let
       suffix = rocmTarget.packageSuffix;
       wheelSources = pythonWheelSourcesFor rocmTarget;
+      wheels = prev.callPackage ./python-wheels {
+        inherit therockPython therockPythonPackages wheelSources;
+      };
     in
     assert lib.assertMsg (wheelSources.pythonTag == therockPythonConfig.pythonTag)
       "TheRock wheel pin for ${suffix} uses ${wheelSources.pythonTag}, but Python config expects ${therockPythonConfig.pythonTag}";
     {
       "therock-python-${suffix}" = prev.callPackage ./python-env {
-        inherit therockPython therockPythonPackages wheelSources;
+        inherit
+          therockPython
+          wheels
+          wheelSources
+          ;
       };
-      "therock-python-wheels-${suffix}" = prev.callPackage ./python-wheels {
-        inherit therockPython therockPythonPackages wheelSources;
-      };
+      "therock-python-wheels-${suffix}" = wheels;
       "therock-amdsmi-${suffix}" = therockPythonPackages.callPackage ./amdsmi {
         wheels = final."therock-python-wheels-${suffix}";
       };
@@ -128,18 +133,6 @@ let
     esmiIbLibrarySource = prev.fetchgit {
       inherit (therockRocmThirdPartySources.esmiIbLibrary) url rev hash;
     };
-    ireeLibbacktraceSource = prev.fetchzip {
-      inherit
-        (therockRocmThirdPartySources.archives."libbacktrace-b9e40069c0b47a722286b94eb5231f7f05c08713.zip")
-        url
-        ;
-      hash = "sha512-vWfrdxHfNcfoh/SWh6dOTLRtqXcW0godukXv5ad6DqzfbwC7TOIbyw0Oke40oLRqFCLfg1M2f7bqnIrLnISmKw==";
-      stripRoot = true;
-    };
-    ireeAmdDeviceLibsArchive = prev.fetchurl {
-      url = "https://github.com/shark-infra/amdgpu-device-libs/releases/download/v20231101/amdgpu-device-libs-llvm-6086c272a3a59eb0b6b79dcbe00486bf4461856a.tgz";
-      hash = "sha256-M2NiQWxo/di7gDKPZcp+uqDBGeoZyV323zDIMqTfObk=";
-    };
     rocprofilerOtf2Archive = prev.fetchurl {
       url = "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/otf2-3.0.3.tar.gz";
       hash = "sha256-GKOQX3kXNAOH4+3I5XZvMasa9B9OzFZl2mx2nKIcTug=";
@@ -151,12 +144,6 @@ let
     spirvHeadersSource = prev.fetchzip {
       inherit (therockRocmThirdPartySources.spirvHeaders) url hash;
       stripRoot = true;
-    };
-    tracySource = prev.fetchFromGitHub {
-      owner = "wolfpld";
-      repo = "tracy";
-      rev = "5479a42ef9346b64e6d1b860ae58aa8abdb0c7f6";
-      hash = "sha256-4J8b+72k+xpeT6KsrkioF1xfWEBsGg2eLRg9iONxP/I=";
     };
   };
 
@@ -173,14 +160,19 @@ let
       projectTargetUnexcludes = lib.optionalAttrs (builtins.elem suffix rocmTarget.buildTargets) {
         rocprofiler-compute = [ suffix ];
       };
+      sourceTreeInputs = lockedSourceTreeFor suffix;
+      compilerSourceTreeInputs = sourceTreeInputs // {
+        submodules = builtins.filter (
+          submodule: !(lib.hasPrefix "rocm-systems/projects/rocprofiler-" submodule.path)
+        ) sourceTreeInputs.submodules;
+      };
 
       mkLockedSource =
-        source:
+        source: lockedInputs:
         let
-          sourceTreeInputs = lockedSourceTreeFor suffix;
           installSubmodules = lib.concatMapStringsSep "\n" (submodule: ''
             install_source ${lib.escapeShellArg submodule.path} ${lib.escapeShellArg (toString submodule.source)}
-          '') sourceTreeInputs.submodules;
+          '') lockedInputs.submodules;
         in
         prev.runCommandLocal "therock-rocm-source-${suffix}-full-${builtins.substring 0 12 source.rev}"
           {
@@ -215,7 +207,7 @@ let
             }
 
             mkdir -p "$out"
-            cp -a --reflink=auto ${sourceTreeInputs.root}/. "$out/"
+            cp -a --reflink=auto ${lockedInputs.root}/. "$out/"
             chmod -R u+w "$out"
 
             ${installSubmodules}
@@ -225,7 +217,8 @@ let
             apply_project_patches rocm-libraries rocm-libraries
           '';
 
-      sourceTree = mkLockedSource source;
+      sourceTree = mkLockedSource source sourceTreeInputs;
+      compilerSourceTree = mkLockedSource source compilerSourceTreeInputs;
 
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;
@@ -233,7 +226,7 @@ let
         inherit (cmakeConfig) target amdgpuTargets distBundleName;
         inherit (source) version;
         profile = "compiler";
-        therockSource = sourceTree;
+        therockSource = compilerSourceTree;
         thirdPartySources = { };
         buildTargets = [ "artifact-amd-llvm" ];
         installMode = "prebuilt-stages";
@@ -282,6 +275,7 @@ in
     prev.callPackage ./rocm-modules {
       therockSource = final."therock-rocm-source-${target.packageSuffix}";
       therockVersion = defaultSource.rocmVersion or (normalizeRocmVersion defaultSource.version);
+      inherit (therockFromSourceThirdPartyFetches) esmiIbLibrarySource;
     }
   );
 }

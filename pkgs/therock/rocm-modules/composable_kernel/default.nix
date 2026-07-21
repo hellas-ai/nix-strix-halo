@@ -6,6 +6,17 @@
 
 let
   inherit (composable_kernel_base) miOpenReqLibsOnly;
+  # Since ROCm 7.15 the grouped conv instance libraries are split by data
+  # layout: there is no device_<op>_instance target anymore, each op builds
+  # device_<op>_<layout>_instance per layout subdirectory. Layouts that are
+  # not required by MIOpen only exist when MIOPEN_REQ_LIBS_ONLY=OFF.
+  # See library/src/tensor_operation_instance/gpu/CMakeLists.txt (layout_split_ops)
+  # and the per-op <op>/<layout>/CMakeLists.txt files.
+  convLayoutTargets =
+    op: requiredLayouts: optionalLayouts:
+    map (layout: "device_${op}_${layout}_instance") (
+      requiredLayouts ++ lib.optionals (!miOpenReqLibsOnly) optionalLayouts
+    );
   parts = {
     _mha = {
       enabled = !miOpenReqLibsOnly;
@@ -44,56 +55,86 @@ let
       ];
     };
     grouped_conv_bwd = {
-      targets = [
-        "device_grouped_conv1d_bwd_weight_instance"
-        "device_grouped_conv2d_bwd_data_instance"
-        "device_grouped_conv2d_bwd_weight_instance"
-      ];
+      targets =
+        # nwgc is excluded: its only instances are DL kernels, so
+        # device_grouped_conv1d_bwd_weight_nwgc_instance is never created
+        # while we build with DL_KERNELS=OFF
+        convLayoutTargets "grouped_conv1d_bwd_weight" [ ] [ "gnwc" ]
+        ++
+          convLayoutTargets "grouped_conv2d_bwd_data"
+            [ "nhwgc" ]
+            [
+              "gnhwc"
+              "ngchw"
+            ]
+        ++
+          convLayoutTargets "grouped_conv2d_bwd_weight"
+            [ "nhwgc" ]
+            [
+              "gnhwc"
+              "ngchw"
+            ];
     };
     grouped_conv_fwd = {
-      targets = [
-        "device_grouped_conv1d_fwd_instance"
-        "device_grouped_conv2d_fwd_instance"
-        "device_grouped_conv2d_fwd_bias_bnorm_clamp_instance"
-        "device_grouped_conv2d_fwd_bias_clamp_instance"
-        "device_grouped_conv2d_fwd_clamp_instance"
-        "device_grouped_conv2d_fwd_dynamic_op_instance"
-      ];
+      targets =
+        convLayoutTargets "grouped_conv1d_fwd" [ ] [ "gnwc" ]
+        ++
+          convLayoutTargets "grouped_conv2d_fwd"
+            [ "nhwgc" ]
+            [
+              "gnhwc"
+              "ngchw"
+            ]
+        ++ convLayoutTargets "grouped_conv2d_fwd_bias_bnorm_clamp" [ "nhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv2d_fwd_bias_clamp" [ "nhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv2d_fwd_clamp" [ "nhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv2d_fwd_dynamic_op" [ "nhwgc" ] [ ];
     };
     grouped_conv_bwd_3d1 = {
-      targets = [
-        "device_grouped_conv3d_bwd_data_instance"
-        "device_grouped_conv3d_bwd_data_bilinear_instance"
-        "device_grouped_conv3d_bwd_data_scale_instance"
-      ];
+      targets =
+        convLayoutTargets "grouped_conv3d_bwd_data"
+          [ "ndhwgc" ]
+          [
+            "gndhwc"
+            "ngcdhw"
+          ]
+        ++ convLayoutTargets "grouped_conv3d_bwd_data_bilinear" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_bwd_data_scale" [ "ndhwgc" ] [ ];
     };
     grouped_conv_bwd_3d2 = {
-      targets = [
-        "device_grouped_conv3d_bwd_weight_instance"
-        "device_grouped_conv3d_bwd_weight_bilinear_instance"
-        "device_grouped_conv3d_bwd_weight_scale_instance"
-      ];
+      targets =
+        convLayoutTargets "grouped_conv3d_bwd_weight"
+          [ "ndhwgc" ]
+          [
+            "gndhwc"
+            "ngcdhw"
+          ]
+        ++ convLayoutTargets "grouped_conv3d_bwd_weight_bilinear" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_bwd_weight_scale" [ "ndhwgc" ] [ ];
     };
     grouped_conv_fwd_3d1 = {
-      targets = [
-        "device_grouped_conv3d_fwd_instance"
-        "device_grouped_conv3d_fwd_clamp_instance"
-        "device_grouped_conv3d_fwd_bias_bnorm_clamp_instance"
-        "device_grouped_conv3d_fwd_bias_clamp_instance"
-        "device_grouped_conv3d_fwd_bilinear_instance"
-        "device_grouped_conv3d_fwd_convinvscale_instance"
-        "device_grouped_conv3d_fwd_convscale_instance"
-        "device_grouped_conv3d_fwd_convscale_add_instance"
-      ];
+      targets =
+        convLayoutTargets "grouped_conv3d_fwd"
+          [ "ndhwgc" ]
+          [
+            "gndhwc"
+            "ngcdhw"
+          ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_clamp" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_bias_bnorm_clamp" [ "ndhwgc" ] [ "nhwgc" ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_bias_clamp" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_bilinear" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_convinvscale" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_convscale" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_convscale_add" [ "ndhwgc" ] [ ];
     };
     grouped_conv_fwd_3d2 = {
-      targets = [
-        "device_grouped_conv3d_fwd_convscale_relu_instance"
-        "device_grouped_conv3d_fwd_dynamic_op_instance"
-        "device_grouped_conv3d_fwd_scale_instance"
-        "device_grouped_conv3d_fwd_scaleadd_ab_instance"
-        "device_grouped_conv3d_fwd_scaleadd_scaleadd_relu_instance"
-      ];
+      targets =
+        convLayoutTargets "grouped_conv3d_fwd_convscale_relu" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_dynamic_op" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_scale" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_scaleadd_ab" [ "ndhwgc" ] [ ]
+        ++ convLayoutTargets "grouped_conv3d_fwd_scaleadd_scaleadd_relu" [ "ndhwgc" ] [ ];
     };
     grouped_conv_fwd_nd = {
       targets = [
@@ -134,9 +175,10 @@ let
     };
     gemm_universal2 = {
       enabled = !miOpenReqLibsOnly;
+      # device_gemm_universal_streamk_instance was removed in ROCm 7.15
+      # (streamk instances dropped from CK upstream)
       targets = [
         "device_gemm_universal_reduce_instance"
-        "device_gemm_universal_streamk_instance"
       ];
     };
     gemm_other1 = {
@@ -164,7 +206,6 @@ let
         "device_gemm_multiply_add_instance"
         "device_gemm_reduce_instance"
         "device_gemm_splitk_instance"
-        "device_gemm_streamk_instance"
       ];
     };
     conv = {

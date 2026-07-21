@@ -29,7 +29,7 @@ ROCPROF_BUILD_WERROR is set to ON (default), behavior is the same as before this
  14 files changed, 31 insertions(+), 33 deletions(-)
 
 diff --git a/tests/bin/attachment-test/CMakeLists.txt b/tests/bin/attachment-test/CMakeLists.txt
-index 332f5e551a..50c644942d 100644
+index 332f5e5..50c6449 100644
 --- a/tests/bin/attachment-test/CMakeLists.txt
 +++ b/tests/bin/attachment-test/CMakeLists.txt
 @@ -42,8 +42,8 @@ find_package(rocprofiler-sdk-roctx REQUIRED)
@@ -45,7 +45,7 @@ index 332f5e551a..50c644942d 100644
 +    attachment-test PRIVATE Threads::Threads rocprofiler-sdk-roctx::rocprofiler-sdk-roctx
 +                            rocprofiler-sdk::tests-build-flags)
 diff --git a/tests/bin/hip-graph/CMakeLists.txt b/tests/bin/hip-graph/CMakeLists.txt
-index e4d984b68a..dfa9233097 100644
+index e4d984b..dfa9233 100644
 --- a/tests/bin/hip-graph/CMakeLists.txt
 +++ b/tests/bin/hip-graph/CMakeLists.txt
 @@ -35,10 +35,11 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -63,7 +63,7 @@ index e4d984b68a..dfa9233097 100644
  # find_package(rocprofiler-sdk-roctx REQUIRED) target_link_libraries(hip-graph PRIVATE
  # rocprofiler-sdk-roctx::rocprofiler-sdk-roctx)
 diff --git a/tests/bin/hip-in-libraries/CMakeLists.txt b/tests/bin/hip-in-libraries/CMakeLists.txt
-index d908704604..5f5d92b80a 100644
+index d908704..5f5d92b 100644
 --- a/tests/bin/hip-in-libraries/CMakeLists.txt
 +++ b/tests/bin/hip-in-libraries/CMakeLists.txt
 @@ -11,8 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -87,7 +87,7 @@ index d908704604..5f5d92b80a 100644
  if(TRANSPOSE_USE_MPI)
      find_package(MPI REQUIRED)
 diff --git a/tests/bin/hsa-code-object/CMakeLists.txt b/tests/bin/hsa-code-object/CMakeLists.txt
-index 2e11314509..099606dc26 100644
+index 2e11314..099606d 100644
 --- a/tests/bin/hsa-code-object/CMakeLists.txt
 +++ b/tests/bin/hsa-code-object/CMakeLists.txt
 @@ -72,7 +72,6 @@ add_custom_target(generate_hsaco_targets_code_object DEPENDS ${HSACO_TARGET_LIST
@@ -99,7 +99,7 @@ index 2e11314509..099606dc26 100644
  find_package(Threads REQUIRED)
  target_link_libraries(hsa_code_object_testapp PRIVATE stdc++fs Threads::Threads)
 diff --git a/tests/bin/hsa-memory-allocation/CMakeLists.txt b/tests/bin/hsa-memory-allocation/CMakeLists.txt
-index 485b866209..b0d12490b6 100644
+index 485b866..b0d1249 100644
 --- a/tests/bin/hsa-memory-allocation/CMakeLists.txt
 +++ b/tests/bin/hsa-memory-allocation/CMakeLists.txt
 @@ -35,8 +35,7 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -113,7 +113,7 @@ index 485b866209..b0d12490b6 100644
  find_package(Threads REQUIRED)
  target_link_libraries(hsa-memory-allocation PRIVATE Threads::Threads hsa-runtime64
 diff --git a/tests/bin/hsa-queue-dependency/CMakeLists.txt b/tests/bin/hsa-queue-dependency/CMakeLists.txt
-index 6753da98f2..e02b57f802 100644
+index 6753da9..e02b57f 100644
 --- a/tests/bin/hsa-queue-dependency/CMakeLists.txt
 +++ b/tests/bin/hsa-queue-dependency/CMakeLists.txt
 @@ -49,7 +49,6 @@ add_custom_target(generate_hsaco_targets DEPENDS ${HSACO_TARGET_LIST})
@@ -125,7 +125,7 @@ index 6753da98f2..e02b57f802 100644
  find_package(Threads REQUIRED)
  target_link_libraries(multiqueue_testapp PRIVATE stdc++fs Threads::Threads)
 diff --git a/tests/bin/multistream/CMakeLists.txt b/tests/bin/multistream/CMakeLists.txt
-index 13ef8dee31..37c837976d 100644
+index 13ef8de..37c8379 100644
 --- a/tests/bin/multistream/CMakeLists.txt
 +++ b/tests/bin/multistream/CMakeLists.txt
 @@ -35,7 +35,8 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -140,23 +140,23 @@ index 13ef8dee31..37c837976d 100644
 +target_link_libraries(multistream PRIVATE Threads::Threads
 +                                          rocprofiler-sdk::tests-build-flags)
 diff --git a/tests/bin/pc-sampling/exec-mask-manipulation/CMakeLists.txt b/tests/bin/pc-sampling/exec-mask-manipulation/CMakeLists.txt
-index 1e84318f63..aa5d9c88a0 100644
+index fca792a..7006271 100644
 --- a/tests/bin/pc-sampling/exec-mask-manipulation/CMakeLists.txt
 +++ b/tests/bin/pc-sampling/exec-mask-manipulation/CMakeLists.txt
-@@ -36,8 +36,8 @@ set_source_files_properties(exec_mask_manipulation.cpp PROPERTIES LANGUAGE HIP)
- add_executable(exec-mask-manipulation)
- target_sources(exec-mask-manipulation PRIVATE exec_mask_manipulation.cpp)
- # debug symbols required for PC sampling decoding validation
--target_compile_options(exec-mask-manipulation PRIVATE -W -Wall -Wextra -Wpedantic
+@@ -40,8 +40,8 @@ target_sources(exec-mask-manipulation PRIVATE exec_mask_manipulation.cpp)
+ # vector rather than scalar, causing assembly errors. -O2 ensures the compiler correctly
+ # resolves these operands as scalar registers. Debug symbols (-g) are still required for
+ # PC sampling decoding validation.
+-target_compile_options(exec-mask-manipulation PRIVATE -O2 -W -Wall -Wextra -Wpedantic
 -                                                      -Wshadow -Werror -g)
-+target_compile_options(exec-mask-manipulation PRIVATE -Wpedantic)
++target_compile_options(exec-mask-manipulation PRIVATE -O2 -Wpedantic -g)
  
  find_package(Threads REQUIRED)
 -target_link_libraries(exec-mask-manipulation PRIVATE Threads::Threads)
 +target_link_libraries(exec-mask-manipulation PRIVATE Threads::Threads
 +                                                     rocprofiler-sdk::tests-build-flags)
 diff --git a/tests/bin/reproducible-dispatch-count/CMakeLists.txt b/tests/bin/reproducible-dispatch-count/CMakeLists.txt
-index df10dd7e3f..40fd04cdfc 100644
+index df10dd7..40fd04c 100644
 --- a/tests/bin/reproducible-dispatch-count/CMakeLists.txt
 +++ b/tests/bin/reproducible-dispatch-count/CMakeLists.txt
 @@ -42,15 +42,15 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -180,7 +180,7 @@ index df10dd7e3f..40fd04cdfc 100644
  if(REPRODUCIBLE_DISPATCH_COUNT_USE_MPI)
      find_package(MPI REQUIRED)
 diff --git a/tests/bin/reproducible-runtime/CMakeLists.txt b/tests/bin/reproducible-runtime/CMakeLists.txt
-index 721b1e190b..4a65e9d60d 100644
+index 721b1e1..4a65e9d 100644
 --- a/tests/bin/reproducible-runtime/CMakeLists.txt
 +++ b/tests/bin/reproducible-runtime/CMakeLists.txt
 @@ -41,15 +41,15 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -204,7 +204,7 @@ index 721b1e190b..4a65e9d60d 100644
  if(REPRODUCIBLE_RUNTIME_USE_MPI)
      find_package(MPI REQUIRED)
 diff --git a/tests/bin/scratch-memory/CMakeLists.txt b/tests/bin/scratch-memory/CMakeLists.txt
-index 06ba7ddadb..419830ec51 100644
+index 06ba7dd..419830e 100644
 --- a/tests/bin/scratch-memory/CMakeLists.txt
 +++ b/tests/bin/scratch-memory/CMakeLists.txt
 @@ -35,8 +35,7 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -218,7 +218,7 @@ index 06ba7ddadb..419830ec51 100644
  find_package(Threads REQUIRED)
  target_link_libraries(scratch-memory PRIVATE Threads::Threads hsa-runtime64
 diff --git a/tests/bin/simple-transpose/CMakeLists.txt b/tests/bin/simple-transpose/CMakeLists.txt
-index 41f4954e79..6370289c4a 100644
+index 41f4954..6370289 100644
 --- a/tests/bin/simple-transpose/CMakeLists.txt
 +++ b/tests/bin/simple-transpose/CMakeLists.txt
 @@ -35,12 +35,12 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -239,7 +239,7 @@ index 41f4954e79..6370289c4a 100644
 +    simple-transpose PRIVATE rocprofiler-sdk-roctx::rocprofiler-sdk-roctx
 +                             rocprofiler-sdk::tests-build-flags)
 diff --git a/tests/bin/transpose/CMakeLists.txt b/tests/bin/transpose/CMakeLists.txt
-index 7d85195a9a..8c98307329 100644
+index 7d85195..8c98307 100644
 --- a/tests/bin/transpose/CMakeLists.txt
 +++ b/tests/bin/transpose/CMakeLists.txt
 @@ -40,7 +40,7 @@ function(transpose_build_target _NAME _COMPILE_DEFS _LINK_TARGETS)
@@ -252,7 +252,7 @@ index 7d85195a9a..8c98307329 100644
          ${_NAME} PRIVATE Threads::Threads rocprofiler-sdk::tests-build-flags
                           ${_LINK_TARGETS})
 diff --git a/tests/bin/vector-operations/CMakeLists.txt b/tests/bin/vector-operations/CMakeLists.txt
-index efd16ab04d..9fa1d8fb96 100644
+index efd16ab..9fa1d8f 100644
 --- a/tests/bin/vector-operations/CMakeLists.txt
 +++ b/tests/bin/vector-operations/CMakeLists.txt
 @@ -35,7 +35,7 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)

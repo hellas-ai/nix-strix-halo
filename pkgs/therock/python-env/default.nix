@@ -1,24 +1,10 @@
 {
   lib,
   stdenv,
-  fetchurl,
   makeWrapper,
-  autoPatchelfHook,
   therockPython,
-  therockPythonPackages,
   bashInteractive,
-  zlib,
-  zstd,
-  ncurses,
-  numactl,
-  libffi,
-  openssl,
-  libxml2,
-  expat,
-  libxcrypt,
-  libdrm,
-  pciutils,
-  ocl-icd,
+  wheels,
   wheelSources,
 }:
 
@@ -40,15 +26,8 @@ let
       typing-extensions
     ]
   );
-
-  wheels = lib.mapAttrsToList (project: source: {
-    filename = source.filename or "${project}.whl";
-    src = fetchurl {
-      inherit (source) url hash;
-      name = source.filename or "${project}.whl";
-    };
-  }) wheelSources.packages;
-  rocGdbPythonBinary = "rocgdb-py${lib.versions.majorMinor therockPython.version}";
+  runtimeLibraryPath = wheels.passthru.rocmRuntimeEnv.LD_LIBRARY_PATH;
+  site = "${wheels}/${therockPython.sitePackages}";
 in
 stdenv.mkDerivation {
   pname = "therock-python-${wheelSources.target}";
@@ -57,65 +36,24 @@ stdenv.mkDerivation {
   dontUnpack = true;
   dontConfigure = true;
   dontBuild = true;
+  dontFixup = true;
 
-  nativeBuildInputs = [
-    autoPatchelfHook
-    makeWrapper
-    therockPythonPackages.pip
-    therockPythonPackages.setuptools
-    therockPythonPackages.wheel
-  ];
-
-  buildInputs = [
-    stdenv.cc.cc.lib
-    zlib
-    zstd
-    ncurses
-    numactl
-    libffi
-    openssl
-    libxml2
-    expat
-    libxcrypt
-    libdrm
-    pciutils
-    ocl-icd
-  ];
+  nativeBuildInputs = [ makeWrapper ];
 
   installPhase = ''
     runHook preInstall
 
-    site="$out/${therockPython.sitePackages}"
-    wheelhouse="$TMPDIR/therock-wheels"
-    mkdir -p "$site" "$out/bin" "$wheelhouse"
+    mkdir -p "$out/bin"
 
-    ${lib.concatMapStringsSep "\n" (wheel: ''
-      cp ${wheel.src} "$wheelhouse/${wheel.filename}"
-    '') wheels}
-
-    export HOME="$TMPDIR"
-    python -m pip install \
-      --no-index \
-      --no-deps \
-      --no-build-isolation \
-      --disable-pip-version-check \
-      --target "$site" \
-      "$wheelhouse"/*
-
-    find "$site" -path "*/_rocm_sdk_core/bin/rocgdb-py3.*" \
-      ! -name "${rocGdbPythonBinary}" -delete
-
-    chmod -R u+w "$out"
-
-    lib_path="$(find "$out" -type d \( -name lib -o -name lib64 \) -print | paste -sd:)"
-    bin_path="$(find "$out" -type d -name bin -print | paste -sd:)"
+    lib_path="${runtimeLibraryPath}:$(find ${lib.escapeShellArg site} -type d \( -name lib -o -name lib64 \) -print | paste -sd:)"
+    bin_path="$(find ${lib.escapeShellArg site} -type d -name bin -print | paste -sd:)"
 
     makeWrapper "${basePython}/bin/python" "$out/bin/therock-python" \
-      --set ROCM_HOME "$site" \
-      --set ROCM_PATH "$site" \
+      --set ROCM_HOME ${lib.escapeShellArg site} \
+      --set ROCM_PATH ${lib.escapeShellArg site} \
       --set HIP_PLATFORM amd \
       --set PYTHONNOUSERSITE 1 \
-      --prefix PYTHONPATH : "$site" \
+      --prefix PYTHONPATH : ${lib.escapeShellArg site} \
       --prefix PATH : "$bin_path" \
       --prefix LD_LIBRARY_PATH : "$lib_path"
 
@@ -123,11 +61,11 @@ stdenv.mkDerivation {
 
     cat > "$out/bin/therock-python-env" <<EOF
     #!${stdenv.shell}
-    export ROCM_HOME="$site"
-    export ROCM_PATH="$site"
+    export ROCM_HOME=${lib.escapeShellArg site}
+    export ROCM_PATH=${lib.escapeShellArg site}
     export HIP_PLATFORM=amd
     export PYTHONNOUSERSITE=1
-    export PYTHONPATH="$site\''${PYTHONPATH:+:\$PYTHONPATH}"
+    export PYTHONPATH=${lib.escapeShellArg site}\''${PYTHONPATH:+:\$PYTHONPATH}
     export PATH="$bin_path\''${PATH:+:\$PATH}"
     export LD_LIBRARY_PATH="$lib_path\''${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
     if [ "\$#" -eq 0 ]; then
@@ -141,9 +79,10 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit basePython wheelSources;
+    inherit basePython wheelSources wheels;
     pythonModule = therockPython;
-    sitePackages = "${placeholder "out"}/${therockPython.sitePackages}";
+    sitePackages = site;
+    rocmRuntimeEnv.LD_LIBRARY_PATH = runtimeLibraryPath;
   };
 
   meta = {

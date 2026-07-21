@@ -3,19 +3,27 @@
   stdenv,
   fetchurl,
   autoPatchelfHook,
+  cargo,
   gnumake,
   makeWrapper,
+  openssl,
   patchelf,
+  pkg-config,
+  rustPlatform,
+  rustc,
   symlinkJoin,
-  python312Packages,
+  pythonPackages,
   rocmSdk,
   packageSuffix ? "rocm",
   hsaOverrideGfxVersion ? null,
 }:
 
 let
-  pythonSitePackages = python312Packages.python.sitePackages;
-  rocmSitePackages = python312Packages.torch.passthru.sitePackages or null;
+  pythonSitePackages = pythonPackages.python.sitePackages;
+  pythonTag = builtins.replaceStrings [ "." ] [ "" ] pythonPackages.python.pythonVersion;
+  rocmSitePackages = pythonPackages.torch.passthru.sitePackages or null;
+  rocmRuntimeLibraryPath =
+    (pythonPackages.torch.passthru.rocmRuntimeEnv or { }).LD_LIBRARY_PATH or "";
   gpuArch = if lib.hasPrefix "gfx" packageSuffix then packageSuffix else null;
   rocmSdkForJit = symlinkJoin {
     name = "${rocmSdk.name or "rocm-sdk"}-sglang-jit";
@@ -38,33 +46,54 @@ let
       chmod 755 "$out/bin/hipcc"
     '';
   };
-  tvmFfiLibDir = "${python312Packages.apache-tvm-ffi}/${pythonSitePackages}/tvm_ffi/lib";
-  outlines-core_0_1_26 = python312Packages.buildPythonPackage rec {
+  tvmFfiLibDir = "${pythonPackages.apache-tvm-ffi}/${pythonSitePackages}/tvm_ffi/lib";
+  outlinesCoreCargoLock = ./outlines-core-0_1_26-Cargo.lock;
+  outlines-core_0_1_26 = pythonPackages.buildPythonPackage rec {
     pname = "outlines-core";
     version = "0.1.26";
-    format = "wheel";
+    pyproject = true;
 
     src = fetchurl {
-      url = "https://files.pythonhosted.org/packages/e2/1d/a36292b6198986bd9c3ff8c24355deb82ed5475403379ee40b5b5473e2e3/outlines_core-${version}-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl";
-      hash = "sha256-6GobtGrcXL9t/Xp/5BBeDipMbgQXMqBTEmtBxSGh8iM=";
+      url = "https://files.pythonhosted.org/packages/d3/f3/274d07f4702728b43581235a77e545ec602b25f9b0098b288a0f3052521d/outlines_core-${version}.tar.gz";
+      hash = "sha256-SBxDATQed8yPGDLWFnhK201GG0/sZYeOfA0sunFjoYk=";
     };
 
+    cargoDeps = rustPlatform.importCargoLock {
+      lockFile = outlinesCoreCargoLock;
+    };
+
+    postPatch = ''
+      cp --no-preserve=mode ${outlinesCoreCargoLock} Cargo.lock
+    '';
+
     nativeBuildInputs = [
-      autoPatchelfHook
+      cargo
+      pkg-config
+      rustPlatform.cargoSetupHook
+      rustc
     ];
 
-    buildInputs = [
-      stdenv.cc.cc.lib
+    buildInputs = [ openssl.dev ];
+
+    # onig_sys 69.8.1 vendors C code that predates C23's strict function
+    # prototypes. GCC 15 defaults to gnu23, so keep this one C dependency on
+    # the language version it supports.
+    env.CFLAGS = "-std=gnu17";
+
+    build-system = with pythonPackages; [
+      setuptools-rust
+      setuptools-scm
     ];
 
-    dependencies = with python312Packages; [
+    dependencies = with pythonPackages; [
       interegular
       jsonschema
     ];
 
+    doCheck = false;
     pythonImportsCheck = [ "outlines_core" ];
   };
-  outlines_0_1_11 = python312Packages.buildPythonPackage rec {
+  outlines_0_1_11 = pythonPackages.buildPythonPackage rec {
     pname = "outlines";
     version = "0.1.11";
     format = "wheel";
@@ -74,7 +103,7 @@ let
       hash = "sha256-9aXyJC7ZgC06q3qSeJv0AI1zTFdr6SWMwKKX9pASRyc=";
     };
 
-    dependencies = with python312Packages; [
+    dependencies = with pythonPackages; [
       airportsdata
       cloudpickle
       diskcache
@@ -96,19 +125,22 @@ let
 
     pythonImportsCheck = [ "outlines" ];
   };
-  torchaoNoChecks = python312Packages.torchao.overridePythonAttrs (old: {
+  torchaoNoChecks = pythonPackages.torchao.overridePythonAttrs (old: {
     doCheck = false;
     nativeCheckInputs = [ ];
     pythonImportsCheck = old.pythonImportsCheck or [ "torchao" ];
   });
-  xgrammar_0_2_1 = python312Packages.buildPythonPackage rec {
+  modelscopeWithCompatibleSetuptools = pythonPackages.modelscope.override {
+    setuptools = pythonPackages.setuptools_80;
+  };
+  xgrammar_0_2_1 = pythonPackages.buildPythonPackage rec {
     pname = "xgrammar";
     version = "0.2.1";
     format = "wheel";
 
     src = fetchurl {
-      url = "https://files.pythonhosted.org/packages/96/4b/327b3cf702b685a2be28d15490faa4beeac00c4fbcf9bb2d7db0fda32931/xgrammar-${version}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
-      hash = "sha256-y8YBTcHJL8MXsUUZEhyBY/41/ZNBeeWkXYP3gP8jGCY=";
+      url = "https://files.pythonhosted.org/packages/32/75/25ddd211f073a9db8299bdfec4534874d5d5d5f69499bb0c2ce9bf75f483/xgrammar-${version}-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
+      hash = "sha256-ugJAJKRU8x08uIZ5obBz66ATOGDxRSXx9YVvpG3sUig=";
     };
 
     nativeBuildInputs = [
@@ -117,7 +149,7 @@ let
     ];
 
     buildInputs = [
-      python312Packages.apache-tvm-ffi
+      pythonPackages.apache-tvm-ffi
       stdenv.cc.cc.lib
     ];
 
@@ -125,7 +157,7 @@ let
       "libtvm_ffi.so"
     ];
 
-    dependencies = with python312Packages; [
+    dependencies = with pythonPackages; [
       apache-tvm-ffi
       numpy
       pydantic
@@ -146,14 +178,14 @@ in
 assert lib.assertMsg (
   rocmSitePackages != null
 ) "sglang-rocm requires the TheRock torch wheel package with passthru.sitePackages";
-python312Packages.buildPythonApplication rec {
+pythonPackages.buildPythonApplication rec {
   pname = "sglang-rocm-${packageSuffix}";
   version = "0.5.14";
   format = "wheel";
 
   src = fetchurl {
-    url = "https://files.pythonhosted.org/packages/1a/f8/49727c6252937cd8b97aade22c7c0c6be86ea53b4a7f64eebb8cbf8accdd/sglang-${version}-cp312-cp312-manylinux_2_34_x86_64.whl";
-    hash = "sha256-RXOqx3QEW6kmurL376qtexIOT4RpXM8nxZ0nb4Vt7Kg=";
+    url = "https://files.pythonhosted.org/packages/45/72/276c6252abfe5a0c893ab7b975253c73ae73f69d1fe7746e168bbefa2fcc/sglang-${version}-cp313-cp313-manylinux_2_34_x86_64.whl";
+    hash = "sha256-LSLmoX9sc1gK7yXSJPMWKh47yc1QQ7QCLYSXXF6WoM0=";
   };
 
   nativeBuildInputs = [
@@ -167,7 +199,7 @@ python312Packages.buildPythonApplication rec {
 
   dontUseNinjaBuild = true;
 
-  dependencies = with python312Packages; [
+  dependencies = with pythonPackages; [
     aiohttp
     amd-aiter
     anthropic
@@ -185,8 +217,8 @@ python312Packages.buildPythonApplication rec {
     ipython
     kernels
     llguidance
-    python312Packages."mistral-common"
-    modelscope
+    pythonPackages."mistral-common"
+    modelscopeWithCompatibleSetuptools
     msgspec
     ninja
     numpy
@@ -271,6 +303,7 @@ python312Packages.buildPythonApplication rec {
 
     rocm_site=${lib.escapeShellArg rocmSitePackages}
     rocm_lib_path="$(find "$rocm_site" -type d \( -name lib -o -name lib64 \) -print | paste -sd:)"
+    rocm_lib_path=${lib.escapeShellArg rocmRuntimeLibraryPath}:"$rocm_lib_path"
 
     wrap_args=(
       --set HIP_PLATFORM amd
@@ -279,14 +312,14 @@ python312Packages.buildPythonApplication rec {
       --set HIP_PATH ${lib.escapeShellArg rocmSdkForJit}
       --set CC ${lib.escapeShellArg "${stdenv.cc}/bin/cc"}
       --set CXX ${lib.escapeShellArg "${rocmSdkForJit}/bin/therock-hip-clang++"}
-      --run 'if [ -z "''${AITER_JIT_DIR:-}" ]; then export AITER_JIT_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/aiter/sglang-${version}-${packageSuffix}-py312/jit"; fi'
-      --run 'if [ -z "''${AITER_ROOT_DIR:-}" ]; then export AITER_ROOT_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/aiter/sglang-${version}-${packageSuffix}-py312/root"; fi'
+      --run 'if [ -z "''${AITER_JIT_DIR:-}" ]; then export AITER_JIT_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/aiter/sglang-${version}-${packageSuffix}-py${pythonTag}/jit"; fi'
+      --run 'if [ -z "''${AITER_ROOT_DIR:-}" ]; then export AITER_ROOT_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/aiter/sglang-${version}-${packageSuffix}-py${pythonTag}/root"; fi'
       --prefix PATH : ${
         lib.escapeShellArg (
           lib.makeBinPath [
             rocmSdkForJit
             gnumake
-            python312Packages.ninja
+            pythonPackages.ninja
           ]
         )
       }

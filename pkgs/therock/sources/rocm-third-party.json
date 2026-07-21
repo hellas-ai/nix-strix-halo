@@ -16,10 +16,6 @@
       "hash": "sha256-zjmyjUA4oJwU8h4CxmRAG+c8DLlqkZhBjWqYp9tzolk=",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/SuiteSparse-7.8.3.tar.gz"
     },
-    "boost_1_87_0-1.tar.bz2": {
-      "hash": "sha256-C6QIWgvrO5xX+mF9CREMeel3qZRHUM2T+xfYKAeoxkw=",
-      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/boost_1_87_0-1.tar.bz2"
-    },
     "bzip2-1.0.8.tar.gz": {
       "hash": "sha512-CD9eZ11z8yM8eTDr4gQlpTP+7eqqnYzIaDExKmWBzvvm7Q0I0vqJvoEILypavavKizwIC/lyGKG9WdwRijC58w==",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/bzip2-1.0.8.tar.gz"
@@ -32,9 +28,9 @@
       "hash": "sha512-E+xr4fjuPX3JbU/xQdPBmdrNgYRwwNkCQDIVVxzj2Ziv6ecajGTg5pz7hqR5R1LZPi5AYCX0gS5JnlG2cgHiPA==",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/elfio-3.12.tar.gz"
     },
-    "elfutils-0.192.tar.bz2": {
-      "hash": "sha512-VDGI9fLP5bx5Vah4QWxfJS7f+ZJnVOXeDGxXsTLyHZKFybKeQSgek7qtEdSufvu/k1gMEUV5wYIQNWX+mb05CQ==",
-      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/elfutils-0.192.tar.bz2"
+    "elfutils-0.195.tar.bz2": {
+      "hash": "sha512-4eH99Pf3K/Ug3rAQO7j9II3CR7qxSvEAxvtW04wO9sbVT/W9FbhOT3DisupIHlmZ/qKEI2D4kyqGESLfebX8jw==",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/elfutils-0.195.tar.bz2"
     },
     "expat-2.7.5.tar.xz": {
       "hash": "sha256-EDLf70/xf3BGSCfaooNpsg9lhNEIvDbxerFnbh7dL5E=",
@@ -59,10 +55,6 @@
     "gmp-6.3.0.tar.xz": {
       "hash": "sha512-6FoNq1GViJlIo0YhifDgWY0zHTRXYS4tM1B5nbouJEMW0lb4Fh31IZU46wA+S1ND+YmqoA+WMhVZBj7YyPKf0g==",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/gmp-6.3.0.tar.xz"
-    },
-    "googletest-1.16.0.tar.gz": {
-      "hash": "sha256-eMZ2/GOIFSm/l7+dRZSNkFpmgz+/pTGOos10eMuY85k=",
-      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/googletest-1.16.0.tar.gz"
     },
     "googletest-1.17.0.tar.gz": {
       "hash": "sha256-Zfq3AdmCnTjLd8FKzcQx0hCL/b+JeeQOuK5Wft8Qsnw=",
@@ -92,9 +84,9 @@
       "hash": "sha256-c66RDEzb2oI7ffLB4OHnQnRk68Q/x3Cxowu1mMtwP0k=",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libdivide-5.2.0.tar.gz"
     },
-    "libdrm-libdrm-2.4.127.tar.bz2": {
-      "hash": "sha256-OhFlSQXFlfyigl1uJZqAhtBKRI3OIVtMsDpJMg2SWew=",
-      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libdrm-libdrm-2.4.127.tar.bz2"
+    "libdrm-libdrm-2.4.134.tar.bz2": {
+      "hash": "sha256-135a8za2SR+eJCc3gkSRLvUpXDwDSvdoRsD8/+Lrhpw=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/libdrm-libdrm-2.4.134.tar.bz2"
     },
     "libmnl-1.0.5.tar.bz2": {
       "hash": "sha256-J0ubkZ7zFSv7PaOhPJUN1g1uK81UIw/+yimNA7QNBSU=",
@@ -140,6 +132,10 @@
       "hash": "sha256-rLHm9dgySEv20ytoHoWMOK3Ysqzf1CrF3yS4r7RlUrQ=",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/sqlite-amalgamation-3510300.zip"
     },
+    "util-linux-2.42.1.tar.gz": {
+      "hash": "sha256-E4o72QSa+l7u6nPx6cDte93z5Vuk7CmSSWWpMuxzjwE=",
+      "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/util-linux-2.42.1.tar.gz"
+    },
     "xz-5.8.1.tar.bz2": {
       "hash": "sha256-WWXGksTIgAzUszzm0PasmsnWqyJ7F8UStlYbzk8I1H4=",
       "url": "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/xz-5.8.1.tar.bz2"
@@ -158,14 +154,14 @@
     }
   },
   "esmiIbLibrary": {
-    "hash": "sha256-I09JTi6I6Ny2Oso7Uitu6EgrtkTEfHmH45jYWdr1cpk=",
-    "ref": "refs/tags/esmi_pkg_ver-5.1.1",
-    "rev": "6cf2435dd15519ab4148c36751de7a9efc27d8dc",
+    "hash": "sha256-StSYzyIujaH8UJIRpfJC0lf+oVT9fWflJgQONvRqu70=",
+    "ref": "refs/tags/esmi_pkg_ver-5.2.1.1",
+    "rev": "d494a3194ceb4cc4dbb2debf9fcbe8773c6d3bef",
     "url": "https://github.com/amd/esmi_ib_library.git"
   },
   "spirvHeaders": {
-    "hash": "sha256-NECkIWUCrMdsmMfzmAT6i11h3rLSZeDcItKaSuqPXhw=",
-    "rev": "9268f3057354a2cb65991ba5f38b16d81e803692",
-    "url": "https://github.com/KhronosGroup/SPIRV-Headers/archive/9268f3057354a2cb65991ba5f38b16d81e803692.tar.gz"
+    "hash": "sha256-JjunFDBwTV4qMCrXcCEHPxtEvaj6vqpvkWnImF+LM5A=",
+    "rev": "5c50cbd25a40f8b60e44a2ccc2f1ba3c9e0d0299",
+    "url": "https://github.com/KhronosGroup/SPIRV-Headers/archive/5c50cbd25a40f8b60e44a2ccc2f1ba3c9e0d0299.tar.gz"
   }
 }

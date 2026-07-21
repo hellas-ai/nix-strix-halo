@@ -43,14 +43,18 @@ class SourceEntry:
 
 
 def run(args: list[str], *, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    result = subprocess.run(
         args,
         cwd=cwd,
-        check=check,
+        check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
+    if check and result.returncode != 0:
+        command = shlex.join(args)
+        raise RuntimeError(f"command failed ({result.returncode}): {command}\n{result.stdout}")
+    return result
 
 
 def nix_string(value: str) -> str:
@@ -104,14 +108,16 @@ def git_rev(url: str, ref: str) -> str:
 
 def resolve_source(source: dict[str, object]) -> dict[str, object]:
     resolved = dict(source)
-    ref = resolved.get("ref")
-    if ref is None:
+    if resolved.get("rev") is not None:
         return resolved
 
+    ref = resolved.get("ref")
+    if ref is None:
+        raise RuntimeError("TheRock source requires either a rev or a ref")
+
     rev = git_rev(str(resolved["url"]), str(ref))
-    if resolved.get("rev") != rev:
-        resolved["rev"] = rev
-        resolved["updated"] = datetime.now(timezone.utc).isoformat()
+    resolved["rev"] = rev
+    resolved["updated"] = datetime.now(timezone.utc).isoformat()
     return resolved
 
 

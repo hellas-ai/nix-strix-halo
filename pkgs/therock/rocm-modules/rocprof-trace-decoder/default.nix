@@ -5,7 +5,7 @@
   rocmPackages,
   cmake,
   python3,
-  nlohmann_json,
+  python3Packages,
   gtest,
 }:
 
@@ -27,12 +27,6 @@ stdenv.mkDerivation (finalAttrs: {
 
   sourceRoot = "${finalAttrs.src.name}/projects/rocprof-trace-decoder";
 
-  patches = [
-    ./use-system-dependencies.patch
-    # https://github.com/ROCm/rocm-systems/pull/3800
-    ./fix-test-dependency.patch
-  ];
-
   strictDeps = true;
 
   nativeBuildInputs = [ cmake ];
@@ -46,12 +40,14 @@ stdenv.mkDerivation (finalAttrs: {
     (lib.cmakeBool "BUILD_TESTS" finalAttrs.doCheck)
   ];
 
+  # 7.15 replaced the C++ att-tool with python/att_tool.py, which needs
+  # pyelftools for the ATT integration tests (probed at configure time).
   nativeCheckInputs = [
     python3
+    python3Packages.pyelftools
   ];
 
   checkInputs = [
-    nlohmann_json
     gtest
   ];
 

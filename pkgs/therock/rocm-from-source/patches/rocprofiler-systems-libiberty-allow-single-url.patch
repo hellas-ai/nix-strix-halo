@@ -1,17 +1,16 @@
 CMake 4.x strips the "file://" prefix from URLs *before* validating an
 ExternalProject_Add URL list, which means a file:// entry becomes a bare
 path and the list validation rejects it with "At least one entry of URL
-is a path (invalid in a list)". When DYNINST_BINUTILS_DOWNLOAD_URL is a
-file:// URL (the offline case in this nix package), restrict the URL list
-to that single entry so ExternalProject_Add treats it as a path and
-accepts it. Otherwise keep the original mirror list for online builds.
+is a path (invalid in a list)". When a local binutils URL is configured,
+restrict each download to that single entry; otherwise retain the mirrors.
+
+The nested Autoconf builds also bypass CMake's toolchain unless its compile
+and link flags are forwarded explicitly. Allow the parent build to supply
+extra C flags for dependencies such as a system zlib.
 
 --- a/rocm-systems/projects/rocprofiler-systems/cmake/DyninstLibIberty.cmake
 +++ b/rocm-systems/projects/rocprofiler-systems/cmake/DyninstLibIberty.cmake
-@@ -89,14 +89,20 @@
-         set(_ROCPROFSYS_LIBIBERTY_MAKEINFO_NOOP /usr/bin/true)
-     endif()
-
+@@ -92,9 +92,15 @@
 +    if(DYNINST_BINUTILS_DOWNLOAD_URL)
 +        set(_li_binutils_urls "${DYNINST_BINUTILS_DOWNLOAD_URL}")
 +    else()
@@ -31,5 +30,51 @@ accepts it. Otherwise keep the original mirror list for online builds.
 -            https://mirrors.kernel.org/sourceware/binutils/releases/binutils-2.46.0.tar.gz
 +        URL ${_li_binutils_urls}
          BUILD_IN_SOURCE 1
+@@ -101,6 +107,10 @@
          CONFIGURE_COMMAND
-             ${CMAKE_COMMAND} -E env CC=${CMAKE_C_COMPILER} CFLAGS=-fPIC\ -O3\ -Wno-error
+-            ${CMAKE_COMMAND} -E env CC=${CMAKE_C_COMPILER} CFLAGS=-fPIC\ -O3\ -Wno-error
+-            CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=-fPIC\ -O3\ -Wno-error
++            ${CMAKE_COMMAND} -E env
++            CC=${CMAKE_C_COMPILER}\ ${CMAKE_C_FLAGS}\ ${ROCPROFSYS_BINUTILS_C_FLAGS}
++            CFLAGS=-fPIC\ -O3\ -Wno-error
++            CPPFLAGS=${CMAKE_C_FLAGS}\ ${ROCPROFSYS_BINUTILS_C_FLAGS}
++            CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${CMAKE_CXX_FLAGS}\ -fPIC\ -O3\ -Wno-error
++            LDFLAGS=${CMAKE_EXE_LINKER_FLAGS}
+             MAKEINFO=${_ROCPROFSYS_LIBIBERTY_MAKEINFO_NOOP} <SOURCE_DIR>/configure
+             --prefix=${_li_root}
+         BUILD_COMMAND make MAKEINFO=${_ROCPROFSYS_LIBIBERTY_MAKEINFO_NOOP} all-libiberty
+--- a/rocm-systems/projects/rocprofiler-systems/external/timemory/cmake/Modules/ConfigBinutils.cmake
++++ b/rocm-systems/projects/rocprofiler-systems/external/timemory/cmake/Modules/ConfigBinutils.cmake
+@@ -74,8 +74,14 @@
++if(TIMEMORY_BINUTILS_DOWNLOAD_URL)
++    set(_timemory_binutils_urls "${TIMEMORY_BINUTILS_DOWNLOAD_URL}")
++else()
++    set(_timemory_binutils_urls
++        https://ftpmirror.gnu.org/gnu/binutils/binutils-2.46.0.tar.gz
++        https://mirrors.kernel.org/sourceware/binutils/releases/binutils-2.46.0.tar.gz)
++endif()
++
+ include(ExternalProject)
+ externalproject_add(
+     binutils-external
+     PREFIX ${PROJECT_BINARY_DIR}/external/binutils
+-    URL ${TIMEMORY_BINUTILS_DOWNLOAD_URL}
+-        https://ftpmirror.gnu.org/gnu/binutils/binutils-2.46.0.tar.gz
+-        https://mirrors.kernel.org/sourceware/binutils/releases/binutils-2.46.0.tar.gz
++    URL ${_timemory_binutils_urls}
+     BUILD_IN_SOURCE 1
+@@ -82,8 +88,11 @@
+     CONFIGURE_COMMAND
+-        ${CMAKE_COMMAND} -E env CC=${CMAKE_C_COMPILER}
++        ${CMAKE_COMMAND} -E env
+-        CFLAGS=-fPIC\ -O3\ -Wno-error
++        CC=${CMAKE_C_COMPILER}\ ${CMAKE_C_FLAGS}\ ${ROCPROFSYS_BINUTILS_C_FLAGS}
++        CFLAGS=-fPIC\ -O3\ -Wno-error
++        CPPFLAGS=${CMAKE_C_FLAGS}\ ${ROCPROFSYS_BINUTILS_C_FLAGS}
+         CXX=${CMAKE_CXX_COMPILER}
+-        CXXFLAGS=-fPIC\ -O3\ -Wno-error
++        CXXFLAGS=${CMAKE_CXX_FLAGS}\ -fPIC\ -O3\ -Wno-error
++        LDFLAGS=${CMAKE_EXE_LINKER_FLAGS}
+         MAKEINFO=${_TIMEMORY_BINUTILS_MAKEINFO_NOOP}
+         <SOURCE_DIR>/configure --prefix=${TPL_STAGING_PREFIX} ${_binutils_CONFIG_FLAGS}
+     BUILD_COMMAND

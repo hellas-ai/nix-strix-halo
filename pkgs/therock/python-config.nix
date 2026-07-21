@@ -1,7 +1,7 @@
 _:
 
 let
-  pythonVersion = "3.12";
+  pythonVersion = "3.13";
   pythonDigits = builtins.replaceStrings [ "." ] [ "" ] pythonVersion;
 in
 {

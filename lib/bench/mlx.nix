@@ -26,7 +26,7 @@ let
   isMetal = accelerator == "metal";
   backend = accelerator;
   packageRole = if isMetal then "mlx" else "mlx-rocm-${target.packageSuffix}";
-  python = pkgs.python3.withPackages (_: [ package ]);
+  python = package.pythonModule.withPackages (_: [ package ]);
   caseName = if isMetal then "metal-gemm-smoke" else "rocm-${target.packageSuffix}-gemm-smoke";
   derivationName = "mlx-${caseName}";
   metaPlatforms = if isMetal then [ "aarch64-darwin" ] else [ "x86_64-linux" ];
@@ -77,6 +77,7 @@ let
     export XDG_CACHE_HOME="$TMPDIR/cache"
     export PYTHONNOUSERSITE=1
 
+    ${lib.optionalString (!isMetal) (benchLib.hipArchGuard target.runtimeArch)}
     ${python}/bin/python - <<'PY'
     import json
     import math

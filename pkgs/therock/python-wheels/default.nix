@@ -2,7 +2,6 @@
   lib,
   stdenv,
   fetchurl,
-  autoPatchelfHook,
   therockPython,
   therockPythonPackages,
   zlib,
@@ -22,18 +21,43 @@
 }:
 
 let
-  defaultPackageNames = [
-    "rocm"
-    "torch"
-    "torchaudio"
-    "torchvision"
-    "triton"
-    "rocm-sdk-core"
-    "rocm-sdk-devel"
-  ]
-  ++ builtins.filter (name: lib.hasPrefix "rocm-sdk-libraries-" name) (
-    builtins.attrNames wheelSources.packages
-  );
+  runtimeLibraries = [
+    stdenv.cc.cc.lib
+    zlib
+    zstd
+    ncurses
+    numactl
+    libffi
+    openssl
+    libxml2
+    expat
+    libxcrypt
+    libdrm
+    pciutils
+    ocl-icd
+  ];
+  runtimeLibraryPath = lib.makeLibraryPath runtimeLibraries;
+  wheelRuntimeLibraryPath =
+    site:
+    lib.concatStringsSep ":" (
+      [ runtimeLibraryPath ]
+      ++ map (path: "${site}/${path}") [
+        "_rocm_sdk_core/lib"
+        "_rocm_sdk_core/lib64"
+        "_rocm_sdk_core/lib/host-math/lib"
+        "_rocm_sdk_core/lib/llvm/lib"
+        "_rocm_sdk_core/lib/rocm_sysdeps/lib"
+        "_rocm_sdk_libraries/lib"
+        "torch/lib"
+        "torchaudio/lib"
+        "triton/backends/amd/lib"
+      ]
+    );
+
+  # The pin file is already a deliberately curated closure. Installing every
+  # pinned wheel keeps split device packages from the unified multi-arch index
+  # together with their Python frontends.
+  defaultPackageNames = builtins.attrNames wheelSources.packages;
   selectedPackageNames = if packageNames == null then defaultPackageNames else packageNames;
 
   wheels =
@@ -58,28 +82,22 @@ therockPythonPackages.buildPythonPackage (finalAttrs: {
   dontBuild = true;
   doCheck = false;
 
+  # The unified TheRock wheels are a self-contained, $ORIGIN-linked SDK.
+  # patchelf 0.15 cannot grow the RPATH on several of its unusual split-load
+  # ELF files without breaking their segment alignment.
+  dontPatchELF = true;
+  dontAutoPatchelf = true;
+  dontStrip = true;
+
   nativeBuildInputs = [
-    autoPatchelfHook
     therockPythonPackages.pip
     therockPythonPackages.setuptools
     therockPythonPackages.wheel
   ];
 
-  buildInputs = [
-    stdenv.cc.cc.lib
-    zlib
-    zstd
-    ncurses
-    numactl
-    libffi
-    openssl
-    libxml2
-    expat
-    libxcrypt
-    libdrm
-    pciutils
-    ocl-icd
-  ];
+  buildInputs = runtimeLibraries;
+
+  env.LD_LIBRARY_PATH = runtimeLibraryPath;
 
   propagatedBuildInputs = with therockPythonPackages; [
     filelock
@@ -92,7 +110,7 @@ therockPythonPackages.buildPythonPackage (finalAttrs: {
     packaging
     pillow
     pyyaml
-    setuptools
+    setuptools_80
     sympy
     typing-extensions
   ];
@@ -135,6 +153,14 @@ therockPythonPackages.buildPythonPackage (finalAttrs: {
     find "$site" -path "*/_rocm_sdk_core/bin/rocgdb-py3.*" \
       ! -name "rocgdb-py${lib.versions.majorMinor therockPython.version}" -delete
 
+    # Python packages commonly import torch in their build-time checks. Export
+    # the split wheel SDK's library closure to those consumers just like a
+    # conventional Nix ROCm package exports its compiler/runtime setup.
+    mkdir -p "$out/nix-support"
+    cat > "$out/nix-support/setup-hook" <<EOF
+    export LD_LIBRARY_PATH="${wheelRuntimeLibraryPath "$out/${therockPython.sitePackages}"}\''${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+    EOF
+
     runHook postInstall
   '';
 
@@ -152,6 +178,7 @@ therockPythonPackages.buildPythonPackage (finalAttrs: {
     gpuTargetString = wheelSources.target;
     cudaSupport = false;
     rocmSupport = true;
+    rocmRuntimeEnv.LD_LIBRARY_PATH = wheelRuntimeLibraryPath "${finalAttrs.finalPackage}/${therockPython.sitePackages}";
     inherit stdenv;
   };
 

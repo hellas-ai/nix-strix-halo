@@ -1,0 +1,15 @@
+MIOpen's serializable helper includes ciso646 solely for the alternative
+operator tokens. Those tokens are built into C++, and ciso646 was removed from
+the standard in C++20. GCC 15 consequently diagnoses the include, which becomes
+a build failure under MIOpen's -Werror.
+
+--- a/rocm-libraries/projects/miopen/src/include/miopen/serializable.hpp
++++ b/rocm-libraries/projects/miopen/src/include/miopen/serializable.hpp
+@@ -27,7 +27,6 @@
+ #ifndef GUARD_MLOPEN_SERIALIZABLE_HPP
+ #define GUARD_MLOPEN_SERIALIZABLE_HPP
+ 
+-#include <ciso646>
+ #include <miopen/config.h>
+ #include <iostream>
+ #include <sstream>

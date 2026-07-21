@@ -5,6 +5,7 @@
   rocmTarget,
   rocmProvider ? "therock-bin",
   pythonProvider ? "therock-wheels",
+  therockPythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
   sources ? null,
 }:
 
@@ -100,9 +101,36 @@ let
       ];
     });
 
+  normalizeLlamaRpcAlias =
+    drv:
+    drv.overrideAttrs (old: {
+      postInstall =
+        lib.replaceStrings
+          [ "cp bin/rpc-server $out/bin/llama-rpc-server" ]
+          [
+            ''
+              rpc_server_bin=
+              for bin in bin/rpc-server bin/llama-rpc-server bin/ggml-rpc-server; do
+                if [ -x "$bin" ]; then
+                  rpc_server_bin="$bin"
+                  break
+                fi
+              done
+              if [ -z "$rpc_server_bin" ]; then
+                echo "could not find llama.cpp RPC server binary" >&2
+                exit 1
+              fi
+              cp "$rpc_server_bin" "$out/bin/llama-rpc-server"
+            ''
+          ]
+          (old.postInstall or "");
+    });
+
   localLlamaCpp =
     args:
-    georgewhewellMaintained (fixDarwinLlamaRpcAlias (withoutLlamaUi (prev.llama-cpp.override args)));
+    georgewhewellMaintained (
+      fixDarwinLlamaRpcAlias (normalizeLlamaRpcAlias (withoutLlamaUi (prev.llama-cpp.override args)))
+    );
 
   llamaCpp = localLlamaCpp { rpcSupport = true; };
 
@@ -120,26 +148,6 @@ let
     preConfigure = ''
       prependToVar cmakeFlags "-DLLAMA_BUILD_COMMIT:STRING=${masterRev}"
     '';
-    postInstall =
-      lib.replaceStrings
-        [ "cp bin/rpc-server $out/bin/llama-rpc-server" ]
-        [
-          ''
-            rpc_server_bin=
-            for bin in bin/rpc-server bin/llama-rpc-server bin/ggml-rpc-server; do
-              if [ -x "$bin" ]; then
-                rpc_server_bin="$bin"
-                break
-              fi
-            done
-            if [ -z "$rpc_server_bin" ]; then
-              echo "could not find llama.cpp RPC server binary" >&2
-              exit 1
-            fi
-            cp "$rpc_server_bin" "$out/bin/llama-rpc-server"
-          ''
-        ]
-        (old.postInstall or "");
     cmakeFlags = (old.cmakeFlags or [ ]) ++ [
       (lib.cmakeFeature "LLAMA_BUILD_NUMBER" "0")
     ];
@@ -289,7 +297,7 @@ let
     }
     // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython) {
       sglang-rocm = prev.callPackage ../pkgs/sglang {
-        inherit (final) python312Packages;
+        pythonPackages = final.${therockPythonConfig.packagesAttr};
         rocmSdk = final."therock-rocm-${suffix}";
         inherit (rocmTarget) packageSuffix;
         hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;

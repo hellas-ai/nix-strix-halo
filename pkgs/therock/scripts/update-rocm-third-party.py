@@ -16,9 +16,9 @@ from pathlib import Path
 
 
 DEFAULT_OUTPUT = "pkgs/therock/sources/rocm-third-party.json"
-SPIRV_HEADERS_HASH = "sha256-NECkIWUCrMdsmMfzmAT6i11h3rLSZeDcItKaSuqPXhw="
+SPIRV_HEADERS_HASH = "sha256-JjunFDBwTV4qMCrXcCEHPxtEvaj6vqpvkWnImF+LM5A="
 ESMI_IB_LIBRARY_URL = "https://github.com/amd/esmi_ib_library.git"
-ESMI_IB_LIBRARY_HASH = "sha256-I09JTi6I6Ny2Oso7Uitu6EgrtkTEfHmH45jYWdr1cpk="
+ESMI_IB_LIBRARY_HASH = "sha256-StSYzyIujaH8UJIRpfJC0lf+oVT9fWflJgQONvRqu70="
 
 
 def sri(algo: str, hex_digest: str) -> str:

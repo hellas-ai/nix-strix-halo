@@ -91,6 +91,10 @@ stdenv.mkDerivation (finalAttrs: {
     "-DCMAKE_MODULE_PATH=${clr}/lib/cmake/hip"
     "-DHIP_ROOT_DIR=${clr}"
     "-DGPU_TARGETS=${lib.concatStringsSep ";" gpuTargets}"
+    # 7.15 defaults the perfetto plugin to ON, but it git-clones the
+    # perfetto SDK at configure time (no network in the sandbox; the
+    # submodule checkout below is already stubbed out).
+    (lib.cmakeBool "ROCPROFILER_BUILD_PLUGIN_PERFETTO" false)
     # Manually define CMAKE_INSTALL_<DIR>
     # See: https://github.com/NixOS/nixpkgs/pull/197838
     "-DCMAKE_INSTALL_BINDIR=bin"
