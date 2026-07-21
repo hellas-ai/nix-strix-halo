@@ -5,6 +5,7 @@
   rocmUpdateScript,
   pkg-config,
   cmake,
+  python3,
   xxd,
   rocm-device-libs,
   rocprofiler-register,
@@ -38,6 +39,9 @@ stdenv.mkDerivation (finalAttrs: {
   nativeBuildInputs = [
     pkg-config
     cmake
+    # 7.15 replaced create_trap_handler_header.sh with a Python generator
+    # (trap_handler/CMakeLists.txt does find_package(Python3 REQUIRED)).
+    python3
     xxd # used by create_hsaco_ascii_file.sh
     llvm.rocm-toolchain
   ];
@@ -65,14 +69,12 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   postPatch = ''
+    # 7.15 replaced the trap_handler/blit_shaders header generators with
+    # Python scripts (invoked via Python3_EXECUTABLE); only the blit_src
+    # generator still has a shell variant.
     patchShebangs --build \
-      runtime/hsa-runtime/core/runtime/trap_handler/create_trap_handler_header.sh \
-      runtime/hsa-runtime/core/runtime/blit_shaders/create_blit_shader_header.sh \
       runtime/hsa-runtime/image/blit_src/create_hsaco_ascii_file.sh
-    patchShebangs --host image core runtime
-
-    substituteInPlace CMakeLists.txt \
-      --replace 'hsa/include/hsa' 'include/hsa'
+    patchShebangs --host runtime
 
     substituteInPlace runtime/hsa-runtime/image/blit_src/CMakeLists.txt \
       --replace-fail 'COMMAND clang' "COMMAND ${llvm.rocm-toolchain}/bin/clang"

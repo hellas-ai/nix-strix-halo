@@ -39,7 +39,7 @@ let
     PY
     )"
 
-    echo "ds4-pi-smoke: host=$(hostname) port=$port lock=$DS4_LOCK_FILE" >&2
+    echo "ds4-pi-smoke: host=$(${pkgs.coreutils}/bin/uname -n) port=$port lock=$DS4_LOCK_FILE" >&2
 
     server_log="$out/ds4-server.log"
     ${ds4Package}/bin/ds4-server \

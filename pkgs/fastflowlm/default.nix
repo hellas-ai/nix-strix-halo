@@ -58,10 +58,13 @@ stdenv.mkDerivation (finalAttrs: {
     add_library(tokenizers_cpp STATIC IMPORTED)\
     set_target_properties(tokenizers_cpp PROPERTIES IMPORTED_LOCATION ''${TOKENIZERS_CPP_LIB_PATH} INTERFACE_INCLUDE_DIRECTORIES ''${TOKENIZERS_CPP_INCLUDE_PATH})' CMakeLists.txt
 
-        # The upstream install rule symlinks the binary into /usr/local/bin
-        # whenever the install prefix isn't there; that fails in the Nix
-        # sandbox even though we point CMAKE_INSTALL_PREFIX at $out.
-        sed -i 's/if(NOT WIN32 AND NOT CMAKE_INSTALL_PREFIX/if(FALSE AND NOT CMAKE_INSTALL_PREFIX/' CMakeLists.txt
+        # The upstream install rule adds a convenience symlink in
+        # /usr/local/bin for non-FHS prefixes. Keep installation confined to
+        # the Nix output instead.
+        substituteInPlace CMakeLists.txt \
+          --replace-fail \
+            'if(NOT WIN32 AND NOT FLM_PORTABLE_BUILD AND NOT CMAKE_INSTALL_PREFIX STREQUAL "/usr" AND NOT CMAKE_INSTALL_PREFIX STREQUAL "/usr/local")' \
+            'if(FALSE)'
   '';
 
   nativeBuildInputs = [
@@ -94,6 +97,7 @@ stdenv.mkDerivation (finalAttrs: {
     (lib.cmakeFeature "TOKENIZERS_C_LIB_PATH" "${tokenizers-cpp.tokenizers-c}/lib/libtokenizers_c.a")
     (lib.cmakeFeature "FLM_VERSION" finalAttrs.version)
     (lib.cmakeFeature "NPU_VERSION" npuVersion)
+    (lib.cmakeFeature "CMAKE_XCLBIN_PREFIX" "${placeholder "out"}/share/flm")
     (lib.cmakeFeature "XRT_INCLUDE_DIR" "${xrt.xdna}/include")
     (lib.cmakeFeature "XRT_LIB_DIR" "${xrt.xdna}/lib")
   ];
@@ -110,12 +114,14 @@ stdenv.mkDerivation (finalAttrs: {
   '';
 
   postFixup = ''
-    # The bundled NPU runtime shared libs ($out/lib/flm/*.so) are
-    # prebuilt blobs that bypass cc-wrapper, so cc-wrapper's RPATH
-    # doesn't reach libgomp or the XRT plugin libs.
-    for lib in $out/lib/flm/*.so; do
-      patchelf --add-rpath ${stdenv.cc.cc.lib}/lib:${xrt.xdna}/lib "$lib" || true
-    done
+    # The bundled NPU runtime shared libs are prebuilt blobs that bypass
+    # cc-wrapper, so cc-wrapper's RPATH doesn't reach libgomp or the XRT
+    # plugin libs. Upstream has used both lib/ and lib/flm/ for these.
+    while IFS= read -r -d "" runtime_lib; do
+      if patchelf --print-rpath "$runtime_lib" >/dev/null 2>&1; then
+        patchelf --add-rpath ${stdenv.cc.cc.lib}/lib:${xrt.xdna}/lib "$runtime_lib"
+      fi
+    done < <(find "$out/lib" -maxdepth 2 -type f \( -name "*.so" -o -name "*.so.*" \) -print0)
 
     # CMake bakes INSTALL_RPATH using "$ORIGIN/../''${CMAKE_INSTALL_LIBDIR}/flm",
     # and Nix's CMake sets CMAKE_INSTALL_LIBDIR to an absolute path,
@@ -126,8 +132,6 @@ stdenv.mkDerivation (finalAttrs: {
     fixed_rpath=$(echo "$current_rpath" | tr ':' '\n' | grep -v '..//nix/store' | paste -sd:)
     patchelf --set-rpath "\$ORIGIN/../lib/flm:${xrt.xdna}/lib:$fixed_rpath" $out/bin/flm
 
-    # flm resolves xclbins relative to its own bin/ directory.
-    ln -sf ../share/flm/xclbins $out/bin/xclbins
   '';
 
   meta = {

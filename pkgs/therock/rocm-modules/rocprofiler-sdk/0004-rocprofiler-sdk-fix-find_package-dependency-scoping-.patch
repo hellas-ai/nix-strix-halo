@@ -22,7 +22,7 @@ same problem in rocprofiler-register.
  3 files changed, 6 insertions(+), 6 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 25f335afb3..0d86e05170 100644
+index a522958..3daa8a3 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1,4 +1,4 @@
@@ -32,10 +32,10 @@ index 25f335afb3..0d86e05170 100644
  if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR AND CMAKE_CURRENT_SOURCE_DIR STREQUAL
                                                    CMAKE_SOURCE_DIR)
 diff --git a/external/CMakeLists.txt b/external/CMakeLists.txt
-index cab59c07bd..fcc872d118 100644
+index a86f0ec..8155979 100644
 --- a/external/CMakeLists.txt
 +++ b/external/CMakeLists.txt
-@@ -64,7 +64,7 @@ if(ROCPROFILER_BUILD_TESTS)
+@@ -65,7 +65,7 @@ if(ROCPROFILER_BUILD_TESTS)
          mark_as_advanced(BUILD_GMOCK)
          mark_as_advanced(GTEST_HAS_ABSL)
      else()
@@ -44,16 +44,16 @@ index cab59c07bd..fcc872d118 100644
          target_link_libraries(rocprofiler-sdk-gtest INTERFACE GTest::gtest)
      endif()
  endif()
-@@ -90,7 +90,7 @@ if(ROCPROFILER_BUILD_GLOG)
-         INTERFACE $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/external/glog>
-                   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/external/glog/src>)
+@@ -93,7 +93,7 @@ if(ROCPROFILER_BUILD_ABSEIL)
+                   $<BUILD_INTERFACE:absl::vlog_is_on>
+                   $<BUILD_INTERFACE:absl::failure_signal_handler>)
  else()
--    find_package(glog REQUIRED)
-+    find_package(glog REQUIRED GLOBAL)
-     target_link_libraries(rocprofiler-sdk-glog INTERFACE glog::glog)
- endif()
- 
-@@ -111,7 +111,7 @@ if(ROCPROFILER_BUILD_FMT)
+-    find_package(absl REQUIRED)
++    find_package(absl REQUIRED GLOBAL)
+     target_link_libraries(
+         rocprofiler-sdk-abseil
+         INTERFACE absl::log absl::log_initialize absl::check absl::log_globals
+@@ -118,7 +118,7 @@ if(ROCPROFILER_BUILD_FMT)
          rocprofiler-sdk-fmt SYSTEM
          INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/external/fmt/include>)
  else()
@@ -62,7 +62,7 @@ index cab59c07bd..fcc872d118 100644
      target_link_libraries(rocprofiler-sdk-fmt INTERFACE fmt::fmt)
  endif()
  
-@@ -147,7 +147,7 @@ if(ROCPROFILER_BUILD_YAML_CPP)
+@@ -154,7 +154,7 @@ if(ROCPROFILER_BUILD_YAML_CPP)
          rocprofiler-sdk-yaml-cpp
          INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/external/yaml-cpp/include>)
  else()
@@ -72,7 +72,7 @@ index cab59c07bd..fcc872d118 100644
  endif()
  
 diff --git a/requirements.txt b/requirements.txt
-index de7421da0d..3eb60c088b 100644
+index 511ce85..0b89317 100644
 --- a/requirements.txt
 +++ b/requirements.txt
 @@ -1,7 +1,7 @@

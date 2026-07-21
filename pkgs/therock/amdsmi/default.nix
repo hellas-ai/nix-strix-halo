@@ -15,6 +15,10 @@ buildPythonPackage {
   dontBuild = true;
   doCheck = false;
 
+  # amdsmi uses ctypes to open libamd_smi.so by basename, so unlike the
+  # extension modules it cannot rely on the wheels' relative ELF RPATHs.
+  env.LD_LIBRARY_PATH = wheels.passthru.rocmRuntimeEnv.LD_LIBRARY_PATH;
+
   installPhase = ''
     runHook preInstall
 

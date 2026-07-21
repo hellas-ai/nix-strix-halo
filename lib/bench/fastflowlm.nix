@@ -64,6 +64,7 @@ let
       tag = "llama3.2:1b";
       description = "Llama 3.2 1B FastFlowLM NPU model";
       cases = [
+        { promptKey = "short"; }
         { promptKey = "medium"; }
         {
           promptKey = "long";
@@ -166,6 +167,7 @@ let
         sandboxPaths = [
           "/dev/accel"
           "/sys/class/accel"
+          resolvedModelRoot
         ];
       };
       metadata = lib.recursiveUpdate {

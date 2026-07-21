@@ -45,6 +45,9 @@
   numactl,
   libdrm,
   libcap,
+  libmnl,
+  libnl,
+  util-linux,
   pciutils,
   libpciaccess,
   elfutils,
@@ -55,11 +58,8 @@
   thirdPartySources ? { },
   spirvHeadersSource ? null,
   esmiIbLibrarySource ? null,
-  ireeLibbacktraceSource ? null,
-  ireeAmdDeviceLibsArchive ? null,
   rocprofilerOtf2Archive ? null,
   rocprofilerSysBinutilsArchive ? null,
-  tracySource ? null,
   buildJobs ? null,
   buildTargets ? [ ],
   installMode ? "rocm-install",
@@ -353,16 +353,31 @@ let
     zlib.out
   ];
 
-  nixToolchainRuntimeLinkerFlags = lib.concatStringsSep " " (
-    [
-      "-L${nixSysroot}/lib"
-      "-Wl,-rpath,${nixSysroot}/lib"
-      "-Wl,-rpath,${stdenv.cc.libc}/lib"
-      "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
-      "-Wl,-rpath,${gcc.cc.lib}/lib"
+  # AMD SMI 7.15 discovers these through pkg-config, but TheRock links its
+  # subprojects with the in-tree Clang rather than the Nix cc wrapper. Supply
+  # both the search paths and build-time RPATHs explicitly.
+  fullProfilePkgConfigLinkerFlags = lib.optionalString (profile == "full") (
+    " "
+    + lib.concatStringsSep " " [
+      "-L${lib.getLib libnl}/lib"
+      "-L${lib.getLib libmnl}/lib"
+      "-Wl,-rpath,${lib.getLib libnl}/lib"
+      "-Wl,-rpath,${lib.getLib libmnl}/lib"
     ]
-    ++ map (p: "-Wl,-rpath,${p}/lib") buildTimeToolRuntimeLibs
   );
+
+  nixToolchainRuntimeLinkerFlags =
+    lib.concatStringsSep " " (
+      [
+        "-L${nixSysroot}/lib"
+        "-Wl,-rpath,${nixSysroot}/lib"
+        "-Wl,-rpath,${stdenv.cc.libc}/lib"
+        "-Wl,-rpath,${stdenv.cc.cc.lib}/lib"
+        "-Wl,-rpath,${gcc.cc.lib}/lib"
+      ]
+      ++ map (p: "-Wl,-rpath,${p}/lib") buildTimeToolRuntimeLibs
+    )
+    + fullProfilePkgConfigLinkerFlags;
 
   nixToolchainExeLinkerFlags =
     nixToolchainRuntimeLinkerFlags + " -Wl,--dynamic-linker=${stdenv.cc.bintools.dynamicLinker}";
@@ -397,27 +412,22 @@ let
     "${zlib.dev}/share/pkgconfig"
   ];
 
-  ireeVendoredSourceCmakeArgs = ''
-            -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-    ${
-      lib.optionalString (ireeLibbacktraceSource != null) ''
-        -DFETCHCONTENT_SOURCE_DIR_LIBBACKTRACE_SRC=''${CMAKE_CURRENT_SOURCE_DIR}/iree/third_party/libbacktrace-src
-      ''
-    }${
-      lib.optionalString (ireeAmdDeviceLibsArchive != null) ''
-        -DIREE_TARGET_BACKEND_ROCM_DEVICE_BC_PATH=''${CMAKE_CURRENT_SOURCE_DIR}/iree/third_party/amdgpu-device-libs
-      ''
-    }'';
-
-  ireeCommonCmakeArgs = ''
-          -DHAVE_STD_REGEX=ON
-          -DIREE_ENABLE_RUNTIME_TRACING=ON
-          -DIREE_ENABLE_COMPILER_TRACING=ON
-          -DIREE_LINK_COMPILER_SHARED_LIBRARY=OFF
-    ${ireeVendoredSourceCmakeArgs}'';
-
   fetchContentToolchainLine = lib.optionalString (profile != "compiler") ''
     string(APPEND _toolchain_contents "set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL \"Do not allow FetchContent network access\" FORCE)\n")
+  '';
+
+  primitiveBenchmarkDepsSourcePatch = lib.optionalString (profile == "full") ''
+    substituteInPlace cmake/therock_primlibs_benchmark_deps.cmake \
+      --replace-fail \
+        'if(NOT TARGET amd_smi)' \
+        'if((BUILD_BENCHMARK OR BUILD_BENCHMARKS) AND NOT TARGET amd_smi)'
+  '';
+
+  hipPlatformCacheSourcePatch = lib.optionalString (profile != "compiler") ''
+    substituteInPlace cmake/therock_subproject.cmake \
+      --replace-fail \
+        'string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\")\n")' \
+        'string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\" CACHE STRING \"HIP platform\" FORCE)\n")'
   '';
 
   mediaLibCmakeArgs = lib.optionalString (profile == "full") ''
@@ -498,8 +508,8 @@ let
   hipblasltMatrixTransformSourcePatch = lib.optionalString (profile == "full") ''
     substituteInPlace rocm-libraries/projects/hipblaslt/device-library/matrix-transform/CMakeLists.txt \
       --replace-fail \
-        'COMMAND ''${CMAKE_CXX_COMPILER} -x hip ''${matrix_transform_cpp} --offload-arch=''${arch} -c --offload-device-only' \
-        'COMMAND ''${CMAKE_CXX_COMPILER} --sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib -x hip ''${matrix_transform_cpp} --offload-arch=''${arch} -c --offload-device-only'
+        'COMMAND ''${CMAKE_CXX_COMPILER} -x hip ''${matrix_transform_cpp} --offload-arch=''${offload_arch} -c --offload-device-only' \
+        'COMMAND ''${CMAKE_CXX_COMPILER} --sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib -x hip ''${matrix_transform_cpp} --offload-arch=''${offload_arch} -c --offload-device-only'
   '';
 
   # Tensile (hipBLASLt's kernel generator) invokes clang++ -x hip directly
@@ -578,30 +588,11 @@ let
       | xargs -0 perl -pi -e 's/-lstdc\+\+fs//g; s/(?<!-l)\bstdc\+\+fs\b//g;'
   '';
 
-  ireeTracingAndSourcePatch = lib.optionalString (profile == "full") ''
-        substituteInPlace iree-libs/CMakeLists.txt \
-          --replace-fail \
-            '      -DIREE_USE_SYSTEM_DEPS=ON
-          # In this targeted build, several submodules' \
-            '      -DIREE_USE_SYSTEM_DEPS=ON
-    ${ireeCommonCmakeArgs}      # In this targeted build, several submodules' \
-          --replace-fail \
-            '      -DIREE_USE_SYSTEM_DEPS=ON
-      )' \
-            '      -DIREE_USE_SYSTEM_DEPS=ON
-    ${ireeCommonCmakeArgs}  )' \
-          --replace-fail \
-            '      -DIREE_USE_SYSTEM_DEPS=ON
-          -DHIP_PLATFORM=amd
-        COMPILER_TOOLCHAIN' \
-            '      -DIREE_USE_SYSTEM_DEPS=ON
-    ${ireeCommonCmakeArgs}      -DHIP_PLATFORM=amd
-        COMPILER_TOOLCHAIN'
-  '';
-
   hipLanguageFlagsToolchainLine = lib.optionalString (profile != "compiler") ''
     string(APPEND _toolchain_contents "string(APPEND CMAKE_C_FLAGS_INIT \" -isystem ${numactl.dev}/include\")\n")
     string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" -isystem ${numactl.dev}/include\")\n")
+    string(APPEND _toolchain_contents "string(APPEND CMAKE_C_FLAGS_INIT \" -isystem ${util-linux.dev}/include\")\n")
+    string(APPEND _toolchain_contents "string(APPEND CMAKE_CXX_FLAGS_INIT \" -isystem ${util-linux.dev}/include\")\n")
     string(APPEND _toolchain_contents "string(APPEND CMAKE_HIP_FLAGS_INIT \" ${nixToolchainDriverFlags} --hip-path=@_hip_dist_dir@ --hip-device-lib-path=@_amd_llvm_device_lib_path@\")\n")
     string(APPEND _toolchain_contents "set(CMAKE_CXX_LINK_FLAGS \"${nixToolchainDriverFlags} ${nixToolchainExeLinkerFlags}\" CACHE STRING \"Nix CXX linker flags for HIP link helpers\" FORCE)\n")
     string(APPEND _toolchain_contents "set(HIP_HIPCC_FLAGS \"--sysroot=${nixSysroot};--gcc-toolchain=${nixSysroot}/usr;-B${nixSysroot}/lib\" CACHE STRING \"Nix HIP compiler flags\" FORCE)\n")
@@ -723,10 +714,6 @@ let
         or die "failed to add Nix driver flags to rocSHMEM device bitcode compile\n";
     ' rocm-systems/projects/rocshmem/cmake/DeviceBitcode.cmake
 
-    substituteInPlace rocm-systems/projects/rocshmem/src/gda/numa_wrapper.cpp \
-      --replace-fail \
-        'dlopen("libnuma.so", RTLD_NOW)' \
-        'dlopen("${numactl.out}/lib/libnuma.so", RTLD_NOW)'
   '';
 
   compilerBuiltinsSourcePatch = ''
@@ -793,7 +780,6 @@ let
         "-DTHEROCK_ENABLE_ML_LIBS=OFF"
         "-DTHEROCK_ENABLE_DEBUG_TOOLS=OFF"
         "-DTHEROCK_ENABLE_DC_TOOLS=OFF"
-        "-DTHEROCK_ENABLE_IREE_LIBS=OFF"
         "-DTHEROCK_ENABLE_MEDIA_LIBS=OFF"
         "-DTHEROCK_ENABLE_PROFILER=OFF"
         "-DTHEROCK_ENABLE_OCL_ICD=OFF"
@@ -811,6 +797,14 @@ let
         "-DROCGDB_GMP_LIBRARY_DIR=${gmp}/lib"
         "-DROCGDB_MPFR_INCLUDE_DIR=${mpfr.dev}/include"
         "-DROCGDB_MPFR_LIBRARY_DIR=${mpfr}/lib"
+        # ROCm 7.15 enables the experimental Rocjitsu GPU emulator and its
+        # Rust Mirage frontend as part of THEROCK_ENABLE_ALL. Neither is in
+        # the inference runtime path. Their upstream build also performs
+        # undeclared FetchContent/Cargo network downloads, which are not
+        # valid inside the Nix sandbox; keep them out of this SDK profile
+        # until they have standalone, fully vendored Nix packages.
+        "-DTHEROCK_ENABLE_ROCJITSU=OFF"
+        "-DTHEROCK_ENABLE_MIRAGE=OFF"
         # rocprofiler-systems compiles a tree of HIP-mode example programs
         # (examples/{roctx,openmp,unified-memory,…}) where clang's bundled
         # HIP runtime wrapper can't find the libstdc++ headers under the
@@ -830,6 +824,9 @@ let
       throw "unknown TheRock ROCm profile: ${profile}";
 
   cmakeFlags = commonCmakeFlags ++ profileCmakeFlags;
+  rocgdbMakeJobsConfigureArg = lib.optionalString (
+    profile == "full"
+  ) " -DROCGDB_MAKE_JOBS=\"\${NIX_BUILD_CORES:-1}\"";
 in
 stdenv.mkDerivation {
   pname = "therock-rocm-from-source-${target}-${profile}${
@@ -859,10 +856,13 @@ stdenv.mkDerivation {
     ./patches/opencl-packaging-tolerate-missing-os-release.patch
     ./patches/rdc-packaging-avoid-host-os-release.patch
     ./patches/rocprofiler-sdk-declare-fmt-build-dep.patch
+    ./patches/rocprofiler-sdk-rocpd-include-sqlite.patch
     ./patches/rccl-device-linker-forward-cxx-driver-flags.patch
     ./patches/rocprofiler-systems-libiberty-allow-single-url.patch
-    ./patches/fusilli-provider-honor-skip-tests.patch
+    ./patches/rocprofiler-systems-libunwind-forward-cmake-flags.patch
+    ./patches/rocprofiler-systems-tbb-forward-cmake-flags.patch
     ./patches/kpack-ccob-parser-accept-zlib.patch
+    ./patches/miopen-drop-ciso646.patch
   ];
 
   nativeBuildInputs = [
@@ -934,6 +934,10 @@ stdenv.mkDerivation {
     sqlite.dev
     libcap.dev
     libcap.lib
+    libmnl
+    libnl
+    util-linux.dev
+    util-linux.lib
     libva
     libva.dev
     llvmPackages.openmp
@@ -980,7 +984,7 @@ stdenv.mkDerivation {
       patchelf --set-rpath "$new" "$f" 2>/dev/null || true
     done < <(find "$out" -type f -print0 2>/dev/null)
 
-    ${lib.optionalString (profile == "full") ''
+    ${lib.optionalString (profile == "full" && installMode == "rocm-install") ''
       # Install $out/bin/therock-hip-clang++ — a thin wrapper that calls
       # the ROCm-bundled clang++ with the Nix sysroot / gcc-toolchain
       # plumbing baked in. Downstream consumers (vllm overlay etc.) set
@@ -994,7 +998,9 @@ stdenv.mkDerivation {
       # wrapper script invokes ROCm's clang++ which has its own
       # resource-dir bundled with its HIP runtime headers; pointing it
       # at the nixpkgs-clang one breaks the cmath/cstdlib lookup.
-      cc_cflags_before="$(cat ${gcc}/nix-support/cc-cflags-before 2>/dev/null || true)"
+      # GCC's Nix wrapper enables the x86 TLS dialect globally.  Clang's HIP
+      # driver forwards that option to amdgcn too, where it is invalid.
+      cc_cflags_before="$(sed -E 's/(^|[[:space:]])-mtls-dialect=[^[:space:]]+//g' ${gcc}/nix-support/cc-cflags-before 2>/dev/null || true)"
       cc_cflags="$(cat ${gcc}/nix-support/cc-cflags 2>/dev/null || true)"
       libc_cflags="$(cat ${gcc}/nix-support/libc-cflags 2>/dev/null || true)"
       libc_crt1_cflags="$(cat ${gcc}/nix-support/libc-crt1-cflags 2>/dev/null || true)"
@@ -1045,7 +1051,7 @@ stdenv.mkDerivation {
       chmod -R u+w build
     ''}
 
-    cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX="$out" ${lib.escapeShellArgs cmakeFlags}
+    cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX="$out" ${lib.escapeShellArgs cmakeFlags}${rocgdbMakeJobsConfigureArg}
     runHook postConfigure
   '';
 
@@ -1095,7 +1101,7 @@ stdenv.mkDerivation {
             string(APPEND _toolchain_contents "set(CMAKE_HIP_PLATFORM \"amd\")\n")
         ${hipLanguageFlagsToolchainLine}'
 
-                ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}
+                ${hipRuntimeSourcePatch}${nixLiveLinkerFlagsSourcePatch}${primitiveBenchmarkDepsSourcePatch}${hipPlatformCacheSourcePatch}
                 ${roctracerSourcePatch}${rocshmemSourcePatch}${rocfftSourcePatch}${hipblasltNanobindSourcePatch}${hipblasltMatrixTransformSourcePatch}${hipblasltTensileSourcePatch}${rocblasVirtualenvSourcePatch}${sharedTensileSourcePatch}${rocmStdcxxFsSourcePatch}${hipsolverLapackSourcePatch}
 
                 substituteInPlace media-libs/CMakeLists.txt \
@@ -1130,7 +1136,6 @@ stdenv.mkDerivation {
 
                 ${explicitParallelSourcePatch}
                 ${compilerBuiltinsSourcePatch}
-                ${ireeTracingAndSourcePatch}
   ''
   + lib.optionalString (profile != "compiler") ''
     substituteInPlace dctools/CMakeLists.txt \
@@ -1158,96 +1163,30 @@ stdenv.mkDerivation {
     perl -0pi -e 's|    if\(NOT EXISTS \''${PROJECT_SOURCE_DIR}/esmi_ib_library/src\).*?    endif\(\)\n\n    # Make sure|    if(NOT EXISTS \''${PROJECT_SOURCE_DIR}/esmi_ib_library/src)\n        message(FATAL_ERROR "vendored esmi_ib_library is missing")\n    else()\n        message(STATUS "Using vendored esmi_ib_library")\n    endif()\n\n    # Make sure|s or die "failed to patch amdsmi esmi_ib_library network clone\n";' \
       rocm-systems/projects/amdsmi/CMakeLists.txt
   ''
-  + lib.optionalString (ireeLibbacktraceSource != null) ''
-    rm -rf iree-libs/iree/third_party/libbacktrace-src
-    mkdir -p iree-libs/iree/third_party/libbacktrace-src
-    cp -a ${ireeLibbacktraceSource}/. iree-libs/iree/third_party/libbacktrace-src/
-    chmod -R u+w iree-libs/iree/third_party/libbacktrace-src
-  ''
-  + lib.optionalString (ireeAmdDeviceLibsArchive != null) ''
-    rm -rf iree-libs/iree/third_party/amdgpu-device-libs
-    mkdir -p iree-libs/iree/third_party/amdgpu-device-libs
-    tar -xzf ${ireeAmdDeviceLibsArchive} -C iree-libs/iree/third_party/amdgpu-device-libs
-    chmod -R u+w iree-libs/iree/third_party/amdgpu-device-libs
-  ''
-  + lib.optionalString (tracySource != null) ''
-    rm -rf iree-libs/iree/third_party/tracy
-    mkdir -p iree-libs/iree/third_party/tracy
-    cp -a ${tracySource}/. iree-libs/iree/third_party/tracy/
-    chmod -R u+w iree-libs/iree/third_party/tracy
-  ''
   + ''
-          BOOST_SHELL=${lib.escapeShellArg stdenv.shell} perl -0pi -e '
-            my $cmd = q{      bash "-c" "find . -type f -exec sed -i -e \"1s@^#!/usr/bin/env bash@#!__BOOST_SHELL__@\" -e \"1s@^#!/usr/bin/env sh@#!__BOOST_SHELL__@\" {} +"
-        COMMAND
-    };
-            $cmd =~ s/__BOOST_SHELL__/$ENV{BOOST_SHELL}/g;
-            s/(else\(\)\n  # The unix bootstrap script.*?set\(_bootstrap_commands\n    COMMAND\n)/$1$cmd/s
-              or die "failed to patch boost bootstrap commands\n";
-          ' third-party/boost/cmake_project/CMakeLists.txt
+    perl -0pi -e 's/(therock_cmake_subproject_declare\(rocprofiler-register.*?BACKGROUND_BUILD\n)/$1    CMAKE_ARGS\n      -DROCPROFILER_REGISTER_BUILD_GLOG=OFF\n      -DROCPROFILER_REGISTER_BUILD_FMT=OFF\n/s' base/CMakeLists.txt
 
-          ${lib.optionalString (profile == "full") ''
-                      substituteInPlace third-party/boost/CMakeLists.txt \
-                        --replace-fail \
-                          'atomic,filesystem,multi_index,system' \
-                          'atomic,chrono,date_time,filesystem,multi_index,system,thread,timer'
+    substituteInPlace profiler/CMakeLists.txt \
+      --replace-fail \
+        "      -DROCPROFILER_BUILD_CI=ON" \
+        "      -DROCPROFILER_BUILD_CI=ON
+      -DROCPROFILER_BUILD_FMT=OFF"
 
-                      substituteInPlace third-party/boost/cmake_project/CMakeLists.txt \
-                        --replace-fail \
-                          'set(B2_NJOBS "1")
-            if(PROCESSOR_COUNT GREATER 8)
-              set(B2_NJOBS "8")
-            endif()' \
-                          'set(B2_NJOBS "''${PROCESSOR_COUNT}")'
+    ${lib.optionalString (profile == "full" && rocprofilerSysBinutilsArchive != null) ''
+      substituteInPlace profiler/CMakeLists.txt \
+        --replace-fail \
+          '      -DROCPROFSYS_BUILD_LIBIBERTY=ON' \
+          '      -DROCPROFSYS_BUILD_LIBIBERTY=ON
+      -DDYNINST_BINUTILS_DOWNLOAD_URL=file://${rocprofilerSysBinutilsArchive}
+      -DTIMEMORY_BINUTILS_DOWNLOAD_URL=file://${rocprofilerSysBinutilsArchive}
+      -DROCPROFSYS_BINUTILS_C_FLAGS=-I${zlib.dev}/include'
+    ''}
 
-                      substituteInPlace third-party/boost/CMakeLists.txt \
-                        --replace-fail \
-                          'therock_cmake_subproject_provide_package(therock-boost boost_atomic "lib/cmake/boost_atomic-''${_boost_version}")' \
-                          'therock_cmake_subproject_provide_package(therock-boost boost_atomic "lib/cmake/boost_atomic-''${_boost_version}")
-            therock_cmake_subproject_provide_package(therock-boost boost_chrono "lib/cmake/boost_chrono-''${_boost_version}")
-            therock_cmake_subproject_provide_package(therock-boost boost_date_time "lib/cmake/boost_date_time-''${_boost_version}")'
-
-                      substituteInPlace third-party/boost/CMakeLists.txt \
-                        --replace-fail \
-                          'therock_cmake_subproject_provide_package(therock-boost boost_system "lib/cmake/boost_system-''${_boost_version}")' \
-                          'therock_cmake_subproject_provide_package(therock-boost boost_system "lib/cmake/boost_system-''${_boost_version}")
-            therock_cmake_subproject_provide_package(therock-boost boost_thread "lib/cmake/boost_thread-''${_boost_version}")
-            therock_cmake_subproject_provide_package(therock-boost boost_timer "lib/cmake/boost_timer-''${_boost_version}")'
-          ''}
-
-          perl -0pi -e 's/(therock_cmake_subproject_declare\(rocprofiler-register.*?BACKGROUND_BUILD\n)/$1    CMAKE_ARGS\n      -DROCPROFILER_REGISTER_BUILD_GLOG=OFF\n      -DROCPROFILER_REGISTER_BUILD_FMT=OFF\n/s' base/CMakeLists.txt
-
-          substituteInPlace profiler/CMakeLists.txt \
-            --replace-fail \
-              "      -DROCPROFILER_BUILD_CI=ON" \
-              "      -DROCPROFILER_BUILD_CI=ON
-            -DROCPROFILER_BUILD_FMT=OFF"
-
-          ${lib.optionalString (profile == "full") ''
-            substituteInPlace profiler/CMakeLists.txt \
-              --replace-fail \
-                '      -DROCPROFSYS_BUILD_BOOST=ON' \
-                '      -DROCPROFSYS_BUILD_BOOST=OFF'
-
-            ${lib.optionalString (rocprofilerSysBinutilsArchive != null) ''
-                    substituteInPlace profiler/CMakeLists.txt \
-                      --replace-fail \
-                        '      -DROCPROFSYS_BUILD_LIBIBERTY=ON' \
-                        '      -DROCPROFSYS_BUILD_LIBIBERTY=ON
-              -DDYNINST_BINUTILS_DOWNLOAD_URL=file://${rocprofilerSysBinutilsArchive}'
-            ''}
-
-            perl -0pi -e 's/(therock_cmake_subproject_declare\(rocprofiler-systems.*?BUILD_DEPS.*?therock-fmt\n)(\s+RUNTIME_DEPS)/$1      therock-boost\n$2/s or die "failed to add therock-boost build dep to rocprofiler-systems\n";' profiler/CMakeLists.txt
-          ''}
-
-          patchShebangs .
+    patchShebangs .
   '';
 
   buildPhase = ''
     runHook preBuild
-    if [ -d build/third-party/boost/source ]; then
-      patchShebangs build/third-party/boost/source
-    fi
     ${lib.optionalString (buildJobs != null) ''
       export CMAKE_BUILD_PARALLEL_LEVEL=${toString buildJobs}
     ''}

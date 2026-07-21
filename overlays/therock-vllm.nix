@@ -41,12 +41,24 @@ let
   tritonKernels = prev.fetchFromGitHub {
     owner = "triton-lang";
     repo = "triton";
-    tag = "v3.6.0";
-    hash = "sha256-JFSpQn+WsNnh7CAPlcpOcUp0nyKXNbJEANdXqmkt4Tc=";
+    rev = "0263a6a6203cf27c441c57a6c808ea87ffb8f654";
+    hash = "sha256-BBlgFPScG2Zkk5o1Jf/0eCodZoL3Vf6jfOHoUZoPscM=";
   };
-  setuptoolsRustForSetup = py.setuptools-rust.overrideAttrs (_old: {
+  withSetuptools80 =
+    pkg:
+    (pkg.overridePythonAttrs (old: {
+      build-system = dropNamedDeps [ "setuptools" ] (old.build-system or [ ]) ++ [ py.setuptools_80 ];
+      dependencies = dropNamedDeps [ "setuptools" ] (old.dependencies or [ ]) ++ [ py.setuptools_80 ];
+      propagatedBuildInputs = dropNamedDeps [ "setuptools" ] (old.propagatedBuildInputs or [ ]) ++ [
+        py.setuptools_80
+      ];
+    }));
+  grpcioToolsForSetup = withSetuptools80 py.grpcio-tools;
+  setuptoolsScmForSetup = withSetuptools80 py.setuptools-scm;
+  setuptoolsRustForSetup = (withSetuptools80 py.setuptools-rust).overrideAttrs (_old: {
     setupHook = null;
   });
+  rocmRuntimeLibraryPath = (py.torch.passthru.rocmRuntimeEnv or { }).LD_LIBRARY_PATH or "";
 
   therockRocmPackages = {
     clr = sdk;
@@ -254,21 +266,29 @@ let
               "import pynvml"
 
           substituteInPlace pyproject.toml \
-            --replace-fail '"torch == 2.11.0"' '"torch"' \
-            --replace-fail "setuptools>=77.0.3,<81.0.0" "setuptools"
+            --replace-fail '"torch == 2.11.0"' '"torch"'
 
           substituteInPlace CMakeLists.txt \
             --replace-fail \
               'set(PYTHON_SUPPORTED_VERSIONS' \
               'set(PYTHON_SUPPORTED_VERSIONS "${therockPythonConfig.pythonVersion}"'
 
-          # vLLM 0.22's Rust frontend is optional. Keep this local build on
+          # vLLM 0.25's Rust frontend is optional. Keep this local build on
           # the existing Python/C++/HIP surface until the Cargo deps are
           # vendored for Nix.
           substituteInPlace setup.py \
             --replace-fail \
               "rust_extensions=rust_extensions," \
               "rust_extensions=[],"
+
+          # Model inspection starts a fresh Python interpreter. Upstream
+          # replaces its entire environment with PYTHONPATH, which strips the
+          # TheRock wheel runtime's LD_LIBRARY_PATH and makes torch fail to
+          # load libstdc++ before an architecture can even be inspected.
+          substituteInPlace vllm/model_executor/models/registry.py \
+            --replace-fail \
+              "env={'PYTHONPATH': ':'.join(sys.path)}," \
+              "env={**os.environ, 'PYTHONPATH': ':'.join(sys.path)},"
 
         '';
 
@@ -287,7 +307,12 @@ let
             # the package's overlay context — there's nothing to detect.
             "-DCMAKE_HIP_ARCHITECTURES=${prev.lib.concatStringsSep ";" vllmGpuTargets}"
           ];
+          LD_LIBRARY_PATH = rocmRuntimeLibraryPath;
         };
+
+        makeWrapperArgs = (old.makeWrapperArgs or [ ]) ++ [
+          "--prefix LD_LIBRARY_PATH : ${rocmRuntimeLibraryPath}"
+        ];
 
         # vllm-rocm compiles a few hundred HIP kernels through the TheRock
         # toolchain — heavy enough to need a big-parallel builder. Pair with
@@ -298,6 +323,17 @@ let
         nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
           final.pkg-config
         ];
+        build-system =
+          dropNamedDeps [
+            "grpcio-tools"
+            "setuptools"
+            "setuptools-scm"
+          ] (old.build-system or [ ])
+          ++ [
+            grpcioToolsForSetup
+            py.setuptools_80
+            setuptoolsScmForSetup
+          ];
         # rocm_smi-config.cmake (pulled in by torch's LoadHIP.cmake
         # during vllm's configure) does pkg_check_modules(libdrm REQUIRED).
         # The source-built SDK uses nixpkgs' libdrm via buildInputs and

@@ -6,23 +6,14 @@
   cmake,
   pkg-config,
   libdrm,
+  libmnl,
+  libnl,
+  esmiIbLibrarySource,
   python,
   wrapPython,
   autoPatchelfHook,
 }:
 
-let
-  # ROCm 7.13's amdsmi tracks the v5.x esmi API (e.g. the *_pstate_range_get,
-  # *_pwr_efficiency_mode_set arity changes); pinning v4.2 here causes
-  # "too many arguments" / "not declared in this scope" build errors.
-  # The pin is the same rev TheRock uses for its esmiIbLibrary submodule.
-  esmi_ib_src = fetchFromGitHub {
-    owner = "amd";
-    repo = "esmi_ib_library";
-    rev = "esmi_pkg_ver-5.1.1";
-    hash = "sha256-I09JTi6I6Ny2Oso7Uitu6EgrtkTEfHmH45jYWdr1cpk=";
-  };
-in
 stdenv.mkDerivation (finalAttrs: {
   pname = "amdsmi";
   version = "7.2.2";
@@ -40,20 +31,21 @@ stdenv.mkDerivation (finalAttrs: {
 
   postPatch = ''
     substituteInPlace goamdsmi_shim/CMakeLists.txt \
-      --replace-fail "amd_smi)" ${"'"}''${AMD_SMI_TARGET})' \
-      --replace-fail 'target_link_libraries(''${GOAMDSMI_SHIM_TARGET} -L' '#'
+      --replace-fail "amd_smi)" ${"'"}''${AMD_SMI_TARGET})'
     substituteInPlace CMakeLists.txt \
       --replace-fail "if(NOT latest_esmi_tag STREQUAL current_esmi_tag)" "if(OFF)"
 
-    # Manually unpack esmi_ib_src and add amd_hsmp.h so execute-process git clone doesn't run
-    cp -rf --no-preserve=mode ${esmi_ib_src} ./esmi_ib_library
+    # Vendor the exact ESMI revision from TheRock's generated third-party
+    # manifest so AMD SMI never runs its configure-time git clone.
+    cp -rf --no-preserve=mode ${esmiIbLibrarySource} ./esmi_ib_library
     mkdir -p ./esmi_ib_library/include/asm
     cp ./include/amd_smi/impl/amd_hsmp.h ./esmi_ib_library/include/asm/amd_hsmp.h
   '';
 
-  # ./drm-struct-redefinition-fix.patch targets include/amd_smi/impl/
+  # The old drm-struct-redefinition-fix.patch targeted include/amd_smi/impl/
   # amdgpu_drm.h, which 7.13 moved to include/libdrm/amdgpu_drm.h. The
-  # drm_color_ctm_3x4 struct it was deleting is no longer present anyway.
+  # drm_color_ctm_3x4 struct it was deleting is no longer present anywhere
+  # in amdsmi's vendored headers, so the patch was dropped entirely.
   patches = [ ];
 
   nativeBuildInputs = [
@@ -65,6 +57,8 @@ stdenv.mkDerivation (finalAttrs: {
 
   buildInputs = [
     libdrm
+    libmnl
+    libnl
   ];
 
   cmakeFlags = [
