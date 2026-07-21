@@ -27,12 +27,6 @@ stdenv.mkDerivation (finalAttrs: {
 
   sourceRoot = "${finalAttrs.src.name}/projects/rocprof-trace-decoder";
 
-  patches = [
-    ./use-system-dependencies.patch
-    # https://github.com/ROCm/rocm-systems/pull/3800
-    ./fix-test-dependency.patch
-  ];
-
   strictDeps = true;
 
   nativeBuildInputs = [ cmake ];

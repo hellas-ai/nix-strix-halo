@@ -2,12 +2,11 @@ libhsa-amd-aqlprofile64 library is unfree
 Bug: https://github.com/ROCm/ROCm/issues/1781
 --- a/runtime/hsa-runtime/core/runtime/amd_gpu_agent.cpp
 +++ b/runtime/hsa-runtime/core/runtime/amd_gpu_agent.cpp
-@@ -1333,11 +1333,6 @@ hsa_status_t GpuAgent::GetInfo(hsa_agent_info_t attribute, void* value) const {
+@@ -2263,10 +2263,6 @@ hsa_status_t GpuAgent::GetInfo(hsa_agent_info_t attribute, void* value) const {
          setFlag(HSA_EXTENSION_AMD_PC_SAMPLING);
        }
  
--      if (os::LibHandle lib = os::LoadLib(kAqlProfileLib)) {
--        os::CloseLib(lib);
+-      if (core::Runtime::runtime_singleton_->AqlProfileAvailable()) {
 -        setFlag(HSA_EXTENSION_AMD_AQLPROFILE);
 -      }
 -
@@ -16,7 +15,7 @@ Bug: https://github.com/ROCm/ROCm/issues/1781
        break;
 --- a/runtime/hsa-runtime/core/runtime/hsa.cpp
 +++ b/runtime/hsa-runtime/core/runtime/hsa.cpp
-@@ -490,7 +490,7 @@ hsa_status_t hsa_system_get_major_extension_table(uint16_t extension, uint16_t v
+@@ -496,7 +496,7 @@ hsa_status_t hsa_system_get_major_extension_table(uint16_t extension, uint16_t v
      return HSA_STATUS_SUCCESS;
    }
  

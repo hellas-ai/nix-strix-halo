@@ -42,9 +42,10 @@ stdenv.mkDerivation (finalAttrs: {
     cp ./include/amd_smi/impl/amd_hsmp.h ./esmi_ib_library/include/asm/amd_hsmp.h
   '';
 
-  # ./drm-struct-redefinition-fix.patch targets include/amd_smi/impl/
+  # The old drm-struct-redefinition-fix.patch targeted include/amd_smi/impl/
   # amdgpu_drm.h, which 7.13 moved to include/libdrm/amdgpu_drm.h. The
-  # drm_color_ctm_3x4 struct it was deleting is no longer present anyway.
+  # drm_color_ctm_3x4 struct it was deleting is no longer present anywhere
+  # in amdsmi's vendored headers, so the patch was dropped entirely.
   patches = [ ];
 
   nativeBuildInputs = [
