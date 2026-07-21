@@ -5,6 +5,7 @@
   rocmUpdateScript,
   pkg-config,
   cmake,
+  python3,
   xxd,
   rocm-device-libs,
   rocprofiler-register,
@@ -38,6 +39,9 @@ stdenv.mkDerivation (finalAttrs: {
   nativeBuildInputs = [
     pkg-config
     cmake
+    # 7.15 replaced create_trap_handler_header.sh with a Python generator
+    # (trap_handler/CMakeLists.txt does find_package(Python3 REQUIRED)).
+    python3
     xxd # used by create_hsaco_ascii_file.sh
     llvm.rocm-toolchain
   ];
