@@ -33,23 +33,23 @@ let
   sourcePinsByTarget = therockRocmSourcePins.targets;
 
   sourceFor =
-    suffix:
-    if builtins.hasAttr suffix sourcePinsByTarget then
-      sourcePinsByTarget.${suffix}
+    rocmTarget:
+    if builtins.hasAttr rocmTarget.therockSourceTarget sourcePinsByTarget then
+      sourcePinsByTarget.${rocmTarget.therockSourceTarget}
     else
-      throw "missing TheRock source pin for ${suffix}";
+      throw "missing TheRock source pin for ${rocmTarget.packageSuffix}";
 
-  defaultSource = sourceFor target.packageSuffix;
+  defaultSource = sourceFor target;
 
   lockedSourceTreeFor =
-    suffix:
+    rocmTarget:
     let
-      sourceTree = therockRocmSourceTrees.${suffix};
+      sourceTree = therockRocmSourceTrees.${rocmTarget.therockSourceTarget};
     in
-    if !(builtins.hasAttr suffix therockRocmSourceTrees) then
-      throw "missing locked TheRock source tree inputs for ${suffix}"
+    if !(builtins.hasAttr rocmTarget.therockSourceTarget therockRocmSourceTrees) then
+      throw "missing locked TheRock source tree inputs for ${rocmTarget.packageSuffix}"
     else if !(builtins.isAttrs sourceTree && sourceTree ? root && sourceTree ? submodules) then
-      throw "invalid locked TheRock source tree inputs for ${suffix}"
+      throw "invalid locked TheRock source tree inputs for ${rocmTarget.packageSuffix}"
     else
       sourceTree;
 
@@ -151,7 +151,7 @@ let
     rocmTarget:
     let
       suffix = rocmTarget.packageSuffix;
-      source = sourceFor suffix;
+      source = sourceFor rocmTarget;
       cmakeConfig = {
         target = suffix;
         amdgpuTargets = rocmTarget.buildTargets;
@@ -160,7 +160,7 @@ let
       projectTargetUnexcludes = lib.optionalAttrs (builtins.elem suffix rocmTarget.buildTargets) {
         rocprofiler-compute = [ suffix ];
       };
-      sourceTreeInputs = lockedSourceTreeFor suffix;
+      sourceTreeInputs = lockedSourceTreeFor rocmTarget;
       compilerSourceTreeInputs = sourceTreeInputs // {
         submodules = builtins.filter (
           submodule: !(lib.hasPrefix "rocm-systems/projects/rocprofiler-" submodule.path)
@@ -263,7 +263,7 @@ let
     };
 
   therockFromSourceTargets = builtins.filter (
-    rocmTarget: builtins.hasAttr rocmTarget.packageSuffix sourcePinsByTarget
+    rocmTarget: builtins.hasAttr rocmTarget.therockSourceTarget sourcePinsByTarget
   ) rocmTargets;
 
   therockFromSourcePerArch = lib.foldl' lib.recursiveUpdate { } (

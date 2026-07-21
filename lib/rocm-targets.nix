@@ -8,6 +8,7 @@
       systemFeature ? runtimeArch,
       hsaOverride ? null,
       therockTarget ? packageSuffix,
+      therockSourceTarget ? packageSuffix,
       description ? packageSuffix,
     }:
     {
@@ -19,6 +20,7 @@
         systemFeature
         hsaOverride
         therockTarget
+        therockSourceTarget
         description
         ;
     };

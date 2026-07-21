@@ -9,6 +9,14 @@ let
       description = "gfx1010 ROCm target";
     };
 
+    gfx1030 = mkRocmTarget {
+      packageSuffix = "gfx1030";
+      therockTarget = "gfx103X-all";
+      # The source checkout is architecture-independent; share its lock graph.
+      therockSourceTarget = "gfx1151";
+      description = "Radeon Pro V620 (gfx1030) ROCm target";
+    };
+
     gfx1036 = mkRocmTarget {
       packageSuffix = "gfx1036";
       runtimeArch = "gfx1036";
@@ -50,6 +58,7 @@ in
   defaultRocmGpuTargets = defaultRocmTarget.rocmGpuTargets;
   rocmTargets = [
     rocmTargetsBySuffix.gfx1010
+    rocmTargetsBySuffix.gfx1030
     rocmTargetsBySuffix.gfx1036
     rocmTargetsBySuffix.gfx1103
     rocmTargetsBySuffix.gfx1151
