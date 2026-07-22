@@ -9,6 +9,7 @@
       hsaOverride ? null,
       therockTarget ? packageSuffix,
       therockSourceTarget ? packageSuffix,
+      supportsRocWmma ? true,
       description ? packageSuffix,
     }:
     {
@@ -21,6 +22,7 @@
         hsaOverride
         therockTarget
         therockSourceTarget
+        supportsRocWmma
         description
         ;
     };

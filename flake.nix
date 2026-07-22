@@ -921,6 +921,7 @@
               assert !(self.packages.${system} ? vllm-rocm-therock-gfx1151);
               assert !(self.legacyPackages.${system}.gfx1103 ? ds4-rocm);
               assert !(self.legacyPackages.${system}.gfx1103 ? vllm-rocm);
+              assert !(self.legacyPackages.${system}.gfx1030 ? ds4-rocm);
               assert self.legacyPackages.${system}.gfx1030 ? vllm-rocm;
               pkgs.runCommandLocal "ci-package-surface"
                 {

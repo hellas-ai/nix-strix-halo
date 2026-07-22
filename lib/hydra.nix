@@ -128,7 +128,6 @@ let
 
         # V620 builders consume these binary gfx1030 artifacts. Keep runtime
         # smoke tests on gfx1151 until the Hydra fleet has V620 hardware.
-        gfx1030-ds4-rocm = gfx1030Packages.ds4-rocm;
         gfx1030-llama-cpp-rocm = gfx1030Packages.llama-cpp-rocm;
         gfx1030-llama-cpp-master-rocm = gfx1030Packages.llama-cpp-master-rocm;
         gfx1030-mlx-rocm = gfx1030Packages.mlx-rocm;

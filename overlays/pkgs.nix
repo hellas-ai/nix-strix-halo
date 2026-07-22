@@ -187,6 +187,15 @@ let
       ];
     });
 
+  # llama.cpp otherwise prefers a host /opt/rocm when one is visible. Apart
+  # from making the build impure, that can mix a host HIP runtime with the
+  # target-narrowed nixpkgs ROCm libraries selected above.
+  withHermeticRocm =
+    drv:
+    drv.overrideAttrs (_: {
+      env.ROCM_PATH = final.rocmPackages.clr;
+    });
+
   # macOS 26 exposes Apple Thunderbolt RDMA through the SDK's infiniband
   # headers and umbrella librdma.dylib. This is only for Darwin builds; Linux
   # continues to use rdma-core-usb4 above.
@@ -248,28 +257,19 @@ let
       };
 
       llama-cpp-rocm = bigParallel (
-        setPname "llama-cpp-rocm-${suffix}" (withRdmaRpc (localLlamaCpp rocmOverride))
+        setPname "llama-cpp-rocm-${suffix}" (withRdmaRpc (withHermeticRocm (localLlamaCpp rocmOverride)))
       );
       llama-cpp-vulkan = withRdmaRpc (localLlamaCpp vulkanOverride);
       llama-cpp-cuda = localLlamaCpp cudaOverride;
       llama-cpp-master-rocm = bigParallel (
-        setPname "llama-cpp-master-rocm-${suffix}" (withRdmaRpc (llamaCppMaster.override rocmOverride))
+        setPname "llama-cpp-master-rocm-${suffix}" (
+          withRdmaRpc (withHermeticRocm (llamaCppMaster.override rocmOverride))
+        )
       );
       llama-cpp-master-vulkan = withRdmaRpc (llamaCppMaster.override vulkanOverride);
       llama-cpp-master-cuda = llamaCppMaster.override cudaOverride;
     }
     // lib.optionalAttrs supportsTherockRocm {
-      ds4-rocm = bigParallel (
-        prev.callPackage ../pkgs/ds4-rocm {
-          src = inputs.ds4-hip;
-          rocmSdk = final."therock-rocm-${suffix}";
-          version = inputVersion "experimental" inputs.ds4-hip;
-          inherit (rocmTarget) packageSuffix;
-          offloadArch = firstBuildTarget;
-          hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
-        }
-      );
-
       mlx-rocm = bigParallel (
         final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
           mlx = final.python3Packages.mlx.override {
@@ -288,6 +288,18 @@ let
       # package set's target is fixed (which it is per pkgsFor invocation).
       therock-rocm = final."therock-rocm-${suffix}";
       therock-rocm-env = final."therock-rocm-${suffix}-env";
+    }
+    // lib.optionalAttrs (supportsTherockRocm && rocmTarget.supportsRocWmma) {
+      ds4-rocm = bigParallel (
+        prev.callPackage ../pkgs/ds4-rocm {
+          src = inputs.ds4-hip;
+          rocmSdk = final."therock-rocm-${suffix}";
+          version = inputVersion "experimental" inputs.ds4-hip;
+          inherit (rocmTarget) packageSuffix;
+          offloadArch = firstBuildTarget;
+          hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+        }
+      );
     }
     // lib.optionalAttrs supportsTherockPython {
       therock-python = final."therock-python-${suffix}";
