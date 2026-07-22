@@ -251,6 +251,16 @@ let
       };
       xrt-amdxdna = final.xrt.xdna;
 
+      # MLIR-AIE / Peano (llvm-aie) toolchain for hand-writing AMD Ryzen AI NPU
+      # (XDNA2) kernels: aiecc/aie-opt/aie-translate + the IRON python API, wired
+      # against this flake's XRT. `mlir-aie-env` is the combined compile env.
+      mlirAiePackages = prev.callPackage ../pkgs/mlir-aie {
+        inherit (final) xrt;
+      };
+      llvm-aie = final.mlirAiePackages.llvm-aie;
+      mlir-aie = final.mlirAiePackages.mlir-aie;
+      mlir-aie-env = final.mlirAiePackages.mlir-aie-env;
+
       fastflowlm = prev.callPackage ../pkgs/fastflowlm {
         inherit (final) tokenizers-cpp xrt;
         src = inputs.fastflowlm;

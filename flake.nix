@@ -632,6 +632,9 @@
             "tokenizers-cpp"
             "torch-rocm"
             "vllm-rocm"
+            "llvm-aie"
+            "mlir-aie"
+            "mlir-aie-env"
             "xrt"
             "xrt-amdxdna"
           ];
