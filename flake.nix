@@ -921,6 +921,8 @@
               assert !(self.packages.${system} ? vllm-rocm-therock-gfx1151);
               assert !(self.legacyPackages.${system}.gfx1103 ? ds4-rocm);
               assert !(self.legacyPackages.${system}.gfx1103 ? vllm-rocm);
+              assert !(self.legacyPackages.${system}.gfx1030 ? ds4-rocm);
+              assert self.legacyPackages.${system}.gfx1030 ? vllm-rocm;
               pkgs.runCommandLocal "ci-package-surface"
                 {
                   meta.maintainers = with lib.maintainers; [ georgewhewell ];
@@ -930,6 +932,7 @@
                   default llama-cpp-rocm: ${plain self.packages.${system}.llama-cpp-rocm.drvPath}
                   legacy gfx1151 llama-cpp-rocm: ${plain self.legacyPackages.${system}.gfx1151.llama-cpp-rocm.drvPath}
                   legacy gfx1103 llama-cpp-rocm: ${plain self.legacyPackages.${system}.gfx1103.llama-cpp-rocm.drvPath}
+                  legacy gfx1030 vllm-rocm: ${plain self.legacyPackages.${system}.gfx1030.vllm-rocm.drvPath}
                   default vllm-rocm: ${plain self.packages.${system}.vllm-rocm.drvPath}
                   EOF
                 '';

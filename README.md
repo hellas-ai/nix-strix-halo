@@ -169,12 +169,16 @@ Per-target packages (default providers) are available under
 
 ```bash
 nix build .#legacyPackages.x86_64-linux.gfx1103.llama-cpp-rocm
+nix build .#legacyPackages.x86_64-linux.gfx1030.vllm-rocm # Radeon Pro V620
 ```
 
 Only targets with matching TheRock binary/Python source pins expose
 TheRock-shaped packages such as `therock-rocm`, `ds4-rocm`, `mlx-rocm`, and
-`vllm-rocm`. At the moment those pins exist for `gfx1151`; `llama-cpp-rocm`
-is available for every target listed in `pkgs/therock/targets.nix`.
+`vllm-rocm`. At the moment those pins exist for `gfx1030` (Radeon Pro V620) and
+`gfx1151`. Package availability may be narrower where an architecture lacks a
+required feature: `ds4-rocm` requires rocWMMA and is not exposed for `gfx1030`.
+`llama-cpp-rocm` is available for every target listed in
+`pkgs/therock/targets.nix`.
 
 For non-default providers compose your own overlays with `lib.mkRocmOverlay`,
 `lib.mkPythonOverlay`, and `lib.mkPkgsOverlay`. Add a new target by

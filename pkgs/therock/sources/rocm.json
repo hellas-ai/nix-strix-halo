@@ -6,6 +6,13 @@
       "version": "7.15.0a20260719",
       "filename": "therock-dist-linux-gfx1151-7.15.0a20260719.tar.gz",
       "updated": "2026-07-19T15:05:53.258172+00:00"
+    },
+    "gfx1030": {
+      "url": "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-gfx103X-all-7.15.0a20260719.tar.gz",
+      "hash": "sha256-XqhekKNqQaIgCx5/3/fgZdRvE4wVIkeiBrV1uebKn9E=",
+      "version": "7.15.0a20260719",
+      "filename": "therock-dist-linux-gfx103X-all-7.15.0a20260719.tar.gz",
+      "updated": "2026-07-21T17:01:40.257051+00:00"
     }
   }
 }
