@@ -621,6 +621,9 @@
             "llama-cpp-master-vulkan"
             "llama-cpp-rocm"
             "llama-cpp-vulkan"
+            "llvm-aie"
+            "mlir-aie"
+            "mlir-aie-env"
             "mlx-rocm"
             "sglang-rocm"
             "strix-halo-mes-firmware"
@@ -638,6 +641,7 @@
 
           genericPackages = {
             default = pkgs.llama-cpp;
+            npu-toolchain = pkgs.mlir-aie-env;
             pi-wrap = pkgs.callPackage ./pkgs/pi-wrap {
               inherit (aiTools) pi;
             };
