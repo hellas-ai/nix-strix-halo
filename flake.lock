@@ -85,11 +85,11 @@
     "fastflowlm": {
       "flake": false,
       "locked": {
-        "lastModified": 1784320030,
-        "narHash": "sha256-kSOZvOqiiIMIRwcLivbRJwcBhkzr0fpeC8w3Q4iTj+M=",
+        "lastModified": 1784663835,
+        "narHash": "sha256-XV/8CQl9Dfc+QQ4YLo1d+jY/DI0XxTh2OYYTiE+7/TM=",
         "owner": "FastFlowLM",
         "repo": "FastFlowLM",
-        "rev": "fd371409897d7c0abb4de4dbc5098b9b43c094ff",
+        "rev": "7032b3c58373f7ebf41f8e01188ba1770a923ba2",
         "type": "github"
       },
       "original": {
