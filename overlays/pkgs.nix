@@ -251,6 +251,13 @@ let
       };
       xrt-amdxdna = final.xrt.xdna;
 
+      mlirAiePackages = prev.callPackage ../pkgs/mlir-aie {
+        inherit (final) xrt;
+      };
+      llvm-aie = final.mlirAiePackages.llvm-aie;
+      mlir-aie = final.mlirAiePackages.mlir-aie;
+      mlir-aie-env = final.mlirAiePackages.mlir-aie-env;
+
       fastflowlm = prev.callPackage ../pkgs/fastflowlm {
         inherit (final) tokenizers-cpp xrt;
         src = inputs.fastflowlm;
