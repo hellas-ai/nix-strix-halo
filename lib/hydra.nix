@@ -130,7 +130,6 @@ let
         # smoke tests on gfx1151 until the Hydra fleet has V620 hardware.
         gfx1030-llama-cpp-rocm = gfx1030Packages.llama-cpp-rocm;
         gfx1030-llama-cpp-master-rocm = gfx1030Packages.llama-cpp-master-rocm;
-        gfx1030-mlx-rocm = gfx1030Packages.mlx-rocm;
         gfx1030-sglang-rocm = gfx1030Packages.sglang-rocm;
         gfx1030-therock-python = gfx1030Packages.therock-python;
         gfx1030-therock-python-wheels = gfx1030Packages.therock-python-wheels;
