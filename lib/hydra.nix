@@ -45,6 +45,7 @@ let
       system = pkgs.stdenv.hostPlatform.system;
       isGateSystem = system == "x86_64-linux";
       x86Packages = self.packages.x86_64-linux;
+      gfx1030Packages = self.legacyPackages.x86_64-linux.gfx1030;
       x86Benchmarks = self.benchmarks.x86_64-linux;
       darwinPackages = self.packages.aarch64-darwin;
       darwinBenchmarks = self.benchmarks.aarch64-darwin;
@@ -124,6 +125,16 @@ let
         therock-rocm-from-source = fromSourcePkgs.therock-rocm;
         llama-cpp-rocm-from-source = fromSourcePkgs.llama-cpp-rocm;
         llama-cpp-rocm-nixpkgs = nixpkgsRocmPkgs.llama-cpp-rocm;
+
+        # V620 builders consume these binary gfx1030 artifacts. Keep runtime
+        # smoke tests on gfx1151 until the Hydra fleet has V620 hardware.
+        gfx1030-llama-cpp-rocm = gfx1030Packages.llama-cpp-rocm;
+        gfx1030-llama-cpp-master-rocm = gfx1030Packages.llama-cpp-master-rocm;
+        gfx1030-sglang-rocm = gfx1030Packages.sglang-rocm;
+        gfx1030-therock-python = gfx1030Packages.therock-python;
+        gfx1030-therock-python-wheels = gfx1030Packages.therock-python-wheels;
+        gfx1030-therock-rocm = gfx1030Packages.therock-rocm;
+        gfx1030-vllm-rocm = gfx1030Packages.vllm-rocm;
       };
 
       # Keep the PR gate hermetic: full DS4 model and Pi integration benchmarks

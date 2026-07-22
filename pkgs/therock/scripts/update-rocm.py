@@ -20,6 +20,7 @@ from pathlib import Path
 BASE_URL = "https://rocm.nightlies.amd.com/tarball-multi-arch/"
 TARGET_SLUGS = {
     "gfx1010": "gfx101X-dgpu",
+    "gfx1030": "gfx103X-all",
     "gfx1036": "gfx103X-all",
     "gfx1103": "gfx110X-all",
     "gfx110X": "gfx110X-dgpu",
@@ -103,7 +104,12 @@ def main() -> None:
     targets = args.target or ["gfx1151"]
     index = "" if args.version else fetch_index()
 
-    sources = {"linux": {}}
+    output = Path(args.output)
+    try:
+        sources = json.loads(output.read_text())
+    except FileNotFoundError:
+        sources = {"linux": {}}
+    sources.setdefault("linux", {})
     for target in targets:
         version = args.version or find_version(index, target, args.series)
         slug = target_slug(target)
@@ -119,7 +125,7 @@ def main() -> None:
             "updated": datetime.now(timezone.utc).isoformat(),
         }
 
-    Path(args.output).write_text(json.dumps(sources, indent=2) + "\n")
+    output.write_text(json.dumps(sources, indent=2) + "\n")
 
 
 if __name__ == "__main__":
