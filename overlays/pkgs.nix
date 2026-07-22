@@ -238,6 +238,8 @@ let
       };
     in
     {
+      amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
+
       ec-su-axb35 = ecPackages.kernelModule;
       ec-su-axb35-monitor = ecPackages.monitor;
       strix-halo-mes-firmware = prev.callPackage ../pkgs/strix-halo-mes-firmware.nix { };
