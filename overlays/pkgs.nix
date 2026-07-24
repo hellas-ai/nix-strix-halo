@@ -239,6 +239,7 @@ let
     in
     {
       amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
+      llm-inference-bench = final.callPackage ../pkgs/llm-inference-bench { };
 
       ec-su-axb35 = ecPackages.kernelModule;
       ec-su-axb35-monitor = ecPackages.monitor;

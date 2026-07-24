@@ -622,6 +622,7 @@
             "llama-cpp-master-vulkan"
             "llama-cpp-rocm"
             "llama-cpp-vulkan"
+            "llm-inference-bench"
             "llvm-aie"
             "mlir-aie"
             "mlir-aie-env"
