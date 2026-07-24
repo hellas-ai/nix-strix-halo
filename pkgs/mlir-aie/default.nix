@@ -138,13 +138,13 @@ in
     ];
     nativeBuildInputs = [ makeWrapper ];
     postBuild = ''
-      mkdir -p "$out/nix-support"
-      cat > "$out/nix-support/setup-hook" <<EOF
-export PEANO_INSTALL_DIR=${llvm-aie}/${python.sitePackages}/llvm-aie
-export MLIR_AIE_INSTALL_DIR=${mlir-aie}/${python.sitePackages}/mlir_aie
-export XILINX_XRT=${xrt.xdna}
-export PATH=${llvm-aie}/${python.sitePackages}/llvm-aie/bin:${mlir-aie}/bin:\$PATH
-EOF
+            mkdir -p "$out/nix-support"
+            cat > "$out/nix-support/setup-hook" <<EOF
+      export PEANO_INSTALL_DIR=${llvm-aie}/${python.sitePackages}/llvm-aie
+      export MLIR_AIE_INSTALL_DIR=${mlir-aie}/${python.sitePackages}/mlir_aie
+      export XILINX_XRT=${xrt.xdna}
+      export PATH=${llvm-aie}/${python.sitePackages}/llvm-aie/bin:${mlir-aie}/bin:\$PATH
+      EOF
     '';
     meta = {
       description = "Combined MLIR-AIE and Peano environment for AMD Ryzen AI NPU development";
