@@ -525,6 +525,7 @@
         ec-su-axb35 = import ./modules/ec-su-axb35.nix;
         fastflowlm = import ./modules/fastflowlm.nix;
         smu-exporter = import ./modules/smu-exporter.nix;
+        npu-exporter = import ./modules/npu-exporter.nix;
         ryzenadj = import ./modules/ryzenadj.nix;
         tuning = import ./modules/tuning.nix;
         thunderbolt-ibverbs = inputs.thunderbolt-ibverbs.nixosModules.default;
@@ -614,6 +615,8 @@
             names: lib.filter (name: builtins.hasAttr name pkgs && lib.isDerivation pkgs.${name}) names;
 
           linuxLocalPackageNames = [
+            "amd-npu-exporter"
+            "amdgpu-smu-exporter"
             "amdtop"
             "ds4-rocm"
             "ec-su-axb35"
