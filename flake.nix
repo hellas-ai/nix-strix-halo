@@ -614,6 +614,7 @@
             names: lib.filter (name: builtins.hasAttr name pkgs && lib.isDerivation pkgs.${name}) names;
 
           linuxLocalPackageNames = [
+            "amdtop"
             "ds4-rocm"
             "ec-su-axb35"
             "ec-su-axb35-monitor"

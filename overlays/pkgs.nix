@@ -240,6 +240,11 @@ let
     {
       amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
 
+      # Interactive counterpart to the exporters: a btop-style TUI over the
+      # same amdgpu/XDNA telemetry, useful on a Strix Halo box where the APU
+      # and the NPU both matter.
+      amdtop = prev.callPackage ../pkgs/amdtop { };
+
       ec-su-axb35 = ecPackages.kernelModule;
       ec-su-axb35-monitor = ecPackages.monitor;
       strix-halo-mes-firmware = prev.callPackage ../pkgs/strix-halo-mes-firmware.nix { };

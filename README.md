@@ -25,6 +25,7 @@ TheRock-published Python wheels.
 | `fastflowlm` | XDNA2 NPU CLI (`flm`) |
 | `strix-halo-vllm-pair-bench-gfx1151` | two-host vLLM transport-matrix bench driver |
 | `therock-rocm`, `therock-python`, `torch-rocm` | TheRock binary SDK + wheels |
+| `amdtop` | btop/nvitop-style TUI for AMD CPU, GPU and XDNA NPU telemetry |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
 | Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
