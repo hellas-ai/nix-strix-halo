@@ -239,6 +239,7 @@ let
     in
     {
       amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
+      amd-npu-exporter = prev.callPackage ../pkgs/amd-npu-exporter { };
 
       # Interactive counterpart to the exporters: a btop-style TUI over the
       # same amdgpu/XDNA telemetry, useful on a Strix Halo box where the APU
