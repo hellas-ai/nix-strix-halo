@@ -1,0 +1,146 @@
+gfx1030 boot/launch fixes, extracted from the in-place edits on the serving
+closure hx22r2fa7m6axpixv9lyklqhvbp7r80v-sglang-rocm-gfx1030-0.5.14:
+
+  * quantization/__init__.py: skip the quark imports on ROCm gfx10 -- quark's
+    module-level imports probe AITER, which has no gfx10 implementation.
+  * quantization/mxfp4.py: gate the aiter shuffle imports on _use_aiter
+    instead of _is_hip.
+  * batch_invariant_ops.py: RDNA2-sized tiles (64 KiB LDS) for the
+    batch-invariant persistent matmul on HIP.
+  * triton_ops/extend_attention.py: _is_gfx10 detection and a
+    BLOCK_M=16/BLOCK_N=32/num_warps=4 tile for gfx10 (the generic HIP
+    BLOCK_M=64 tile cannot launch within 64 KiB LDS at large Lv).
+
+--- a/sglang/srt/layers/quantization/__init__.py
++++ b/sglang/srt/layers/quantization/__init__.py
+@@ -5,6 +5,7 @@
+ 
+ import builtins
+ import inspect
++import os
+ from typing import TYPE_CHECKING, Dict, Optional, Type
+ 
+ import torch
+@@ -47,8 +48,6 @@
+ from sglang.srt.layers.quantization.nvfp4_online import NvFp4OnlineConfig
+ from sglang.srt.layers.quantization.petit import PetitNvFp4Config
+ from sglang.srt.layers.quantization.qoq import QoQConfig
+-from sglang.srt.layers.quantization.quark.quark import QuarkConfig
+-from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
+ from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
+ from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
+ from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
+@@ -65,6 +64,16 @@
+ 
+ _is_mxfp_supported = mxfp_supported()
+ 
++# AITER has no gfx10 implementation. Quark's module-level imports otherwise
++# probe AITER even when this process is loading an unrelated FP8 checkpoint.
++_rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH") or os.environ.get(
++    "GPU_ARCHS", ""
++)
++_quark_available = not (is_hip() and _rocm_arch.startswith("gfx10"))
++if _quark_available:
++    from sglang.srt.layers.quantization.quark.quark import QuarkConfig
++    from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
++
+ if TYPE_CHECKING:
+     from sglang.srt.layers.moe.topk import TopKOutput
+ 
+@@ -92,11 +101,8 @@
+     "w4afp8": W4AFp8Config,
+     "petit_nvfp4": PetitNvFp4Config,
+     "fbgemm_fp8": FBGEMMFp8Config,
+-    "quark": QuarkConfig,
+-    "quark_mxfp4": QuarkConfig,
+     "auto-round": AutoRoundConfig,
+     "modelslim": ModelSlimConfig,
+-    "quark_int4fp8_moe": QuarkInt4Fp8Config,
+ }
+ 
+ 
+--- a/sglang/srt/layers/quantization/mxfp4.py
++++ b/sglang/srt/layers/quantization/mxfp4.py
+@@ -149,7 +149,7 @@
+ _is_shuffle_moe_mxfp4 = is_gfx95_supported()
+ _is_cpu_amx_available = cpu_has_amx_support()
+ 
+-if _is_hip:
++if _use_aiter:
+     # import aiter
+     try:
+         from aiter.ops.shuffle import (
+--- a/sglang/srt/batch_invariant_ops/batch_invariant_ops.py
++++ b/sglang/srt/batch_invariant_ops/batch_invariant_ops.py
+@@ -222,6 +222,36 @@
+             "num_warps": 8,
+         },
+     }
++    if torch.version.hip is not None:
++        # The CUDA-oriented 128x128, three-stage tiles above request 112 KiB
++        # of shared memory, while gfx1030 exposes 64 KiB. Fixed smaller tiles
++        # preserve the batch-invariant reduction order and fit RDNA2.
++        configs = {
++            torch.bfloat16: {
++                "BLOCK_SIZE_M": 64,
++                "BLOCK_SIZE_N": 64,
++                "BLOCK_SIZE_K": 32,
++                "GROUP_SIZE_M": 8,
++                "num_stages": 2,
++                "num_warps": 4,
++            },
++            torch.float16: {
++                "BLOCK_SIZE_M": 64,
++                "BLOCK_SIZE_N": 64,
++                "BLOCK_SIZE_K": 32,
++                "GROUP_SIZE_M": 8,
++                "num_stages": 2,
++                "num_warps": 4,
++            },
++            torch.float32: {
++                "BLOCK_SIZE_M": 64,
++                "BLOCK_SIZE_N": 64,
++                "BLOCK_SIZE_K": 16,
++                "GROUP_SIZE_M": 8,
++                "num_stages": 2,
++                "num_warps": 4,
++            },
++        }
+     # print(a.device, b.device, c.device)
+     matmul_kernel_persistent[grid](
+         a,
+--- a/sglang/srt/layers/attention/triton_ops/extend_attention.py
++++ b/sglang/srt/layers/attention/triton_ops/extend_attention.py
+@@ -33,6 +33,16 @@
+ _is_gfx95 = _is_hip and is_gfx95_supported()
+ 
+ 
++def _is_gfx10_device() -> bool:
++    if not _is_hip:
++        return False
++    arch = getattr(torch.cuda.get_device_properties(0), "gcnArchName", "")
++    return arch.split(":", maxsplit=1)[0].startswith("gfx10")
++
++
++_is_gfx10 = _is_gfx10_device()
++
++
+ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
+     """
+     Get block sizes and configuration for extend attention kernels.
+@@ -62,7 +72,14 @@
+ 
+     # Determine BLOCK_M, BLOCK_N, and num_warps based on hardware
+     if _is_hip:
+-        if _is_gfx95 and 128 < Lq <= 256:
++        if _is_gfx10:
++            # gfx1030 exposes 64 KiB LDS. With GLM DSA's Lv=512 the generic
++            # BLOCK_M=64 accumulator alone requests 128 KiB, so verification
++            # cannot launch. A 16-row tile keeps the same reduction and mask
++            # semantics while fitting the hardware.
++            BLOCK_M, BLOCK_N = (16, 32)
++            num_warps = 4
++        elif _is_gfx95 and 128 < Lq <= 256:
+             # gfx950 (CDNA4), 128 < head_dim <= 256: a larger query tile halves KV bytes
+             # streamed per call (each workgroup reads the whole prefix); 8 warps
+             # hide the loads. Measured on MI350X head_dim 256: -36% kernel time,
