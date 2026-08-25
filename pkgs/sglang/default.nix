@@ -300,6 +300,15 @@ pythonPackages.buildPythonApplication rec {
     for patch_file in ${./patches}/*.patch; do
       patch -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
     done
+  ''
+  + lib.optionalString (gpuArch != null) ''
+    arch_patch_dir=${lib.escapeShellArg "${./patches}/${gpuArch}"}
+    if [ -d "$arch_patch_dir" ]; then
+      for patch_file in "$arch_patch_dir"/*.patch; do
+        [ -e "$patch_file" ] || continue
+        patch -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
+      done
+    fi
   '';
 
   postFixup = ''
