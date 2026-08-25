@@ -4,3 +4,5 @@
 /result-*
 /out-*/
 /gcroots/
+/.bench-artifacts/
+/torch_compile_debug/
