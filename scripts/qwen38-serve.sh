@@ -38,7 +38,11 @@ MEM_FRAC="${MEM_FRAC:-0.85}"
 # sglang 0.5.14's tool-call parser registry maps "qwen" to Qwen25Detector,
 # which is correct for this model family's <tool_call> JSON format. Set to
 # "" to disable tool-call parsing.
-TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen}"
+# qwen3_coder, not qwen: the chat template emits the XML-ish
+# <function=name><parameter=k>v</parameter></function> form, which the qwen25
+# JSON parser detects (finish_reason=tool_calls) but cannot extract -- it
+# returns an empty tool_calls array. Verified against the live model 2026-08-26.
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
 # The chat template emits <think> blocks; sglang 0.5.14's reasoning parser
 # registry (srt/parser/reasoning_parser.py, DetectorMap) has a "qwen3" entry
 # for them. Set to "" to disable reasoning parsing.
