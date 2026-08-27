@@ -149,6 +149,48 @@ nix build -o result-vllm-metal-smoke \
   -c 'import mlx.core, mlx_lm, ray, vllm, vllm_metal'
 ```
 
+The flake also exports `darwinModules.vllm-metal`. This example matches the
+correctness-first Qwen3.8 deployment tested on a 128 GiB Mac: it binds only to
+localhost, leaves speculative decoding off, admits one sequence, and reserves
+55% of unified memory for a 262,144-token context window.
+
+```nix
+{
+  imports = [ inputs.nix-strix-halo.darwinModules.vllm-metal ];
+
+  services.vllm-metal = {
+    enable = true;
+    model = "root4k/Huihui-Qwen3.8-27B-abliterated-oQ4e-mtp";
+    revision = "1412e811e6e4e42a4c2d0bbc268dead30d7ca9f1";
+    servedModelName = "qwen38-fast";
+    user = "grw";
+    workingDirectory = "/Users/grw";
+    environment = {
+      HOME = "/Users/grw";
+      HF_HOME = "/Users/grw/.cache/huggingface";
+    };
+    maxModelLen = 262144;
+    maxNumSeqs = 1;
+    gpuMemoryUtilization = 0.55;
+    enablePrefixCaching = true;
+    reasoningParser = "qwen3";
+    enableAutoToolChoice = true;
+    toolCallParser = "qwen3_coder";
+  };
+}
+```
+
+The model is an external runtime input rather than part of the Nix closure.
+The example pins the exact Hugging Face snapshot used in the test; its 4-bit
+MLX weights occupy 16 GiB on disk. vLLM downloads it into `HF_HOME` when the
+snapshot is not already present.
+
+The prompt and completion share `maxModelLen`; the server does not impose a
+separate 8K completion ceiling. A client may advertise a 262,144-token maximum,
+but a request still needs to leave room for its system prompt, tools, history,
+and at least one generated token. Keep the default localhost bind and reach it
+through an authenticated SSH tunnel unless deliberate LAN exposure is needed.
+
 The Metal compiler is an Apple host component and cannot currently be placed
 in the Nix sandbox. A builder needs macOS 26.2 or newer, the flake's macOS 26 SDK, and a
 working `metal`/`metallib` toolchain. Install the latter once with
@@ -159,7 +201,8 @@ Apple Metal toolchains.
 For two-host MLX tensor parallelism, assign IPv4 addresses to every direct
 Thunderbolt interface used by JACCL. JACCL selects the resulting IPv4-mapped
 GID dynamically and reports a clear error when none exists. A dual-link
-hostfile has this shape (device names are host-specific):
+hostfile has this shape (device names are host-specific); the same lab
+configuration is available as `examples/jaccl-ring-dual.json`:
 
 ```json
 {
@@ -173,6 +216,20 @@ hostfile has this shape (device names are host-specific):
   ]
 }
 ```
+
+Before loading a model, validate the data path with the included 4 KiB exact
+all-reduce. The Python executable and script must exist at the same paths on
+both hosts.
+
+```bash
+./result-vllm-metal/bin/mlx.launch \
+  --hostfile examples/jaccl-ring-dual.json -- \
+  ./result-vllm-metal/bin/python examples/mlx-jaccl-allreduce.py
+```
+
+For a larger transport sanity check, append for example
+`--elements 67108864 --warmup 3 --iterations 20`. The reported
+`payload_gib_s` is application payload per rank, not physical link line rate.
 
 Keep the two data cables in distinct `/30` subnets. Bridging both without STP
 creates an L2 loop. For example, use `10.56.1.1/30` and `10.56.2.1/30` on the

@@ -571,8 +571,15 @@
         live-iso = mkLiveIsoConfiguration { };
       };
 
-      darwinModules = {
+      darwinModules = rec {
         benchmark-executor = import ./modules/benchmark-executor.nix;
+        vllm-metal =
+          { lib, ... }:
+          {
+            imports = [ ./modules/vllm-metal.nix ];
+            services.vllm-metal.package = lib.mkDefault self.packages.aarch64-darwin.vllm-metal;
+          };
+        default = vllm-metal;
       };
     }
     // {
@@ -1144,6 +1151,73 @@
                   strix-halo-vllm-pair-bench-ci --scenario qwen-peak --dry-run | tee "$out"
                   grep -q "dry-run: not invoking" "$out"
                 '';
+          }
+        )
+        // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "aarch64-darwin") (
+          let
+            fakeVllmMetal = pkgs.writeShellScriptBin "vllm" ''
+              exit 0
+            '';
+            evalService =
+              serviceConfig:
+              lib.evalModules {
+                specialArgs = { inherit pkgs; };
+                modules = [
+                  self.darwinModules.vllm-metal
+                  {
+                    options = {
+                      assertions = lib.mkOption {
+                        type = lib.types.listOf lib.types.attrs;
+                        default = [ ];
+                      };
+                      launchd.daemons = lib.mkOption {
+                        type = lib.types.attrsOf lib.types.anything;
+                        default = { };
+                      };
+                    };
+                    config.services.vllm-metal = {
+                      enable = true;
+                      package = lib.mkForce fakeVllmMetal;
+                      model = "example/Qwen";
+                      user = "vllm-test";
+                    }
+                    // serviceConfig;
+                  }
+                ];
+              };
+            good = evalService {
+              environment.HF_HOME = "/Users/vllm-test/.cache/huggingface";
+              workingDirectory = "/Users/vllm-test";
+              speculativeConfig = {
+                method = "mtp";
+                num_speculative_tokens = 1;
+              };
+            };
+            badMtp = evalService {
+              maxNumSeqs = 2;
+              speculativeConfig.method = "mtp";
+            };
+            failedAssertions =
+              configuration: lib.filter (item: !item.assertion) configuration.config.assertions;
+            service = good.config.launchd.daemons.vllm-metal;
+          in
+          {
+            vllm-metal-module =
+              assert failedAssertions good == [ ];
+              assert failedAssertions badMtp != [ ];
+              assert good.config.services.vllm-metal.host == "127.0.0.1";
+              assert good.config.services.vllm-metal.maxModelLen == 262144;
+              assert service.environment.HF_HOME == "/Users/vllm-test/.cache/huggingface";
+              assert service.serviceConfig.UserName == "vllm-test";
+              assert service.serviceConfig.WorkingDirectory == "/Users/vllm-test";
+              assert service.serviceConfig.KeepAlive.SuccessfulExit == false;
+              pkgs.runCommandLocal "ci-vllm-metal-module" { } ''
+                grep -F -- '--host 127.0.0.1' ${service.command}
+                grep -F -- '--max-model-len 262144' ${service.command}
+                grep -F -- '--speculative-config' ${service.command}
+                grep -F -- '"method":"mtp"' ${service.command}
+                touch "$out"
+              '';
           }
         )
       );
