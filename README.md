@@ -231,6 +231,29 @@ For a larger transport sanity check, append for example
 `--elements 67108864 --warmup 3 --iterations 20`. The reported
 `payload_gib_s` is application payload per rank, not physical link line rate.
 
+`vllm-metal` does not currently expose cross-host tensor parallelism. To test
+the same checkpoint with MLX-LM's tensor-parallel weight sharding over JACCL,
+put the model at the same path on both hosts and run:
+
+```bash
+./result-vllm-metal/bin/mlx.launch \
+  --hostfile examples/jaccl-ring-dual.json -- \
+  ./result-vllm-metal/bin/python examples/mlx-lm-tp-generate.py \
+  --model /absolute/path/on/both/hosts/model
+```
+
+Each rank constructs the model but `sharded_load` partitions supported layers
+before evaluating their weights. This is a separate MLX-LM execution path, not
+distributed vLLM serving, disaggregated prefill, or a Ray deployment. The
+current MLX-LM Qwen3.5 loader discards checkpoint MTP tensors, so this probe
+uses ordinary target-model decoding rather than MTP speculation.
+
+Treat a successful process exit as transport evidence only: compare greedy
+output against an identical single-host run before serving the model. In the
+tested MLX 0.32.0 stack, TP=2 diverged from the single-host greedy output for
+both the Qwen3.8 checkpoint and a Llama 3.2 1B control, despite exact JACCL
+all-reduce. Cross-host MLX-LM TP is therefore not enabled for serving here.
+
 Keep the two data cables in distinct `/30` subnets. Bridging both without STP
 creates an L2 loop. For example, use `10.56.1.1/30` and `10.56.2.1/30` on the
 first host, and `.2/30` on the corresponding interfaces of the second host:
