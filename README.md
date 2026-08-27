@@ -28,7 +28,7 @@ TheRock-published Python wheels.
 | `amdtop` | btop/nvitop-style TUI for AMD CPU, GPU and XDNA NPU telemetry |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
-| Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
+| Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `vllm-metal`, `ds4`, `jaccl` | cross-platform / Metal |
 
 Apps mirror the package names — `apps.x86_64-linux.llama-cli-rocm`,
 `llama-rpc-server`, `flm`, `therock-python`, `live-iso-vm`, etc.
@@ -133,6 +133,92 @@ client per process with `GGML_RPC_SERVER_ONE_SHOT=1`; pair it with systemd
 for comparison runs, or override pieces explicitly with
 `GGML_RPC_RDMA_SEND_FRAME_ACK`, `GGML_RPC_RDMA_WAIT_FRAME_ACK`,
 `GGML_RPC_RDMA_ACK_TIMEOUT_US`, and `GGML_RPC_RDMA_ACK_RETRIES`.
+
+### Darwin vLLM Metal and JACCL
+
+`packages.aarch64-darwin.vllm-metal` combines the upstream, version-matched
+vLLM 0.28 and vLLM-Metal release wheels with MLX 0.32 and MLX-LM 0.31.3 built
+from pinned source. The MLX build links this flake's JACCL package instead of
+its bundled copy. Build and perform the model-free regression check with:
+
+```bash
+nix build -o result-vllm-metal .#packages.aarch64-darwin.vllm-metal
+nix build -o result-vllm-metal-smoke \
+  .#packages.aarch64-darwin.vllm-metal.tests.imports
+./result-vllm-metal/bin/python \
+  -c 'import mlx.core, mlx_lm, ray, vllm, vllm_metal'
+```
+
+The Metal compiler is an Apple host component and cannot currently be placed
+in the Nix sandbox. A builder needs macOS 26.2 or newer, the flake's macOS 26 SDK, and a
+working `metal`/`metallib` toolchain. Install the latter once with
+`xcodebuild -downloadComponent MetalToolchain`. The MLX derivation deliberately
+uses `__noChroot`; do not claim bit-reproducibility across different installed
+Apple Metal toolchains.
+
+For two-host MLX tensor parallelism, assign IPv4 addresses to every direct
+Thunderbolt interface used by JACCL. JACCL selects the resulting IPv4-mapped
+GID dynamically and reports a clear error when none exists. A dual-link
+hostfile has this shape (device names are host-specific):
+
+```json
+{
+  "backend": "jaccl-ring",
+  "envs": ["MLX_METAL_FAST_SYNCH=1"],
+  "hosts": [
+    {"ssh": "10.55.0.1", "ips": ["10.55.0.1"],
+     "rdma": [null, ["rdma_en1", "rdma_en2"]]},
+    {"ssh": "10.55.0.2", "ips": [],
+     "rdma": [["rdma_en3", "rdma_en5"], null]}
+  ]
+}
+```
+
+Keep the two data cables in distinct `/30` subnets. Bridging both without STP
+creates an L2 loop. For example, use `10.56.1.1/30` and `10.56.2.1/30` on the
+first host, and `.2/30` on the corresponding interfaces of the second host:
+
+```bash
+sudo ifconfig en1 inet 10.56.1.1/30 up
+sudo ifconfig en2 inet 10.56.2.1/30 up
+# second host: en3 -> 10.56.1.2/30; en5 -> 10.56.2.2/30
+```
+
+The model configuration supplies its 262,144-token context window. Launch an
+MLX-LM server with a 262,144-token default generation ceiling and a 4 GiB
+retained prompt-cache budget per rank as follows:
+
+```bash
+./result/bin/mlx.launch --hostfile jaccl-ring-dual.json -- \
+  ./result/bin/python -m mlx_lm server \
+  --model mlx-community/Qwen3.8-27B-8bit \
+  --host 0.0.0.0 --port 8081 --max-tokens 262144 \
+  --prompt-cache-size 8 --prompt-cache-bytes 4294967296
+```
+
+In the measured MBP/Goblin lab pair, either 80 Gbit/s cable sustained about 62.5
+Gbit/s of JACCL collective traffic and both sustained 103.6 Gbit/s. The full
+closure is 3.7 GiB. Qwen3.8-27B 8-bit weights occupy roughly 28 GiB on disk;
+TP=2 shards those weights, while active KV state and cache allocations remain
+per-rank costs. A 131,017-token prefill on ordinary MLX-LM did not finish in 1
+hour 49 minutes, so 256K is an accepted window, not a demonstrated useful
+throughput target for this backend.
+
+| Capability | Verified result |
+|---|---|
+| MLX/JACCL TP=2 over two Thunderbolt links | Works |
+| Exact-prefix reuse | Works; 44.913 s cold became 0.277 s warm |
+| Ray import and single-node task | Works |
+| Ray multi-node macOS control plane | Unsupported upstream; worker lost GCS after 60 s |
+| MTP in `mlx-community/Qwen3.8-27B-8bit` | Unavailable; the checkpoint has no MTP tensors |
+| Distributed oMLX MTP/speculation | Unavailable; oMLX rejects it in distributed mode |
+
+Agent clients can use the OpenAI-compatible endpoint
+`http://<mbp>:8081/v1`, a 262,144-token context declaration, and a practical
+65,536-token output cap. The server itself is not capped at 8K. Prompt and
+completion share the same context window, and a 256K completion would leave no
+room for the system prompt, tools, or conversation, so the client cap is an
+operational policy rather than a backend limit.
 
 ### Two-host vLLM pair benchmark
 

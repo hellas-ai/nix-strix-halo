@@ -119,6 +119,7 @@ let
         inherit (darwinPackages)
           mlx
           mlx-metal
+          vllm-metal
           ;
 
         vllm-rocm-from-source = fromSourcePkgs.vllm-rocm;
@@ -154,6 +155,7 @@ let
       smokeJobs = lib.optionalAttrs isGateSystem {
         ds4-rocm = ds4RocmRuntimeSmoke;
         mlx-metal = darwinBenchmarks.bench-mlx-metal-gemm-smoke;
+        vllm-metal = darwinPackages.vllm-metal.tests.imports;
         mlx-rocm = x86Benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
         fastflowlm-npu = x86Benchmarks.bench-llama3-2-1b-fastflowlm-short;
         vllm-rocm =

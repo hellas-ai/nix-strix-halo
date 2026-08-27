@@ -1,0 +1,27 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0017674..ce698c9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -357,8 +357,7 @@ if(MLX_BUILD_CPU
+    AND ${CMAKE_SYSTEM_NAME} MATCHES "Darwin"
+    AND DEFINED MACOS_SDK_VERSION
+    AND MACOS_SDK_VERSION GREATER_EQUAL 26.2)
+-  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/mlx/distributed/jaccl/lib
+-                   ${CMAKE_BINARY_DIR}/jaccl)
++  find_package(jaccl CONFIG REQUIRED)
+ endif()
+
+ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/mlx)
+diff --git a/mlx/distributed/jaccl/CMakeLists.txt b/mlx/distributed/jaccl/CMakeLists.txt
+index 0b0147f..5a64709 100644
+--- a/mlx/distributed/jaccl/CMakeLists.txt
++++ b/mlx/distributed/jaccl/CMakeLists.txt
+@@ -3,7 +3,7 @@ if(MLX_BUILD_JACCL
+    AND MACOS_SDK_VERSION VERSION_GREATER_EQUAL 26.2
+    AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_GREATER_EQUAL 26.2)
+   target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/jaccl.cpp)
+-  target_link_libraries(mlx PRIVATE jaccl)
++  target_link_libraries(mlx PRIVATE jaccl::jaccl)
+ else()
+   target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/no_jaccl.cpp)
+ endif()

@@ -164,7 +164,8 @@ let
 
       src.local_id = port_attr.lid;' \
           '  ibv_gid gid = {};
-      int gid_index = -1;
+      int gid_index = 0;
+      bool have_gid = false;
       for (int i = 0; i < port_attr.gid_tbl_len; i++) {
         ibv_gid tmp;
         if (ibv().query_gid(ctx, 1, i, &tmp) == 0) {
@@ -172,14 +173,16 @@ let
               *(uint16_t*)&tmp.raw[10] == 0xffff) {
             gid = tmp;
             gid_index = i;
+            have_gid = true;
             break;
           }
         }
       }
-      if (gid_index < 0) {
-        throw std::runtime_error("[jaccl] No IPv4-mapped GID found for RDMA device");
+      if (!have_gid) {
+        throw std::runtime_error(
+            "[jaccl] RDMA device has no IPv4-mapped GID; assign an IPv4 "
+            "address to its Thunderbolt interface");
       }
-
       src.local_id = port_attr.lid;'
         replace_if_present "$out/jaccl/rdma.cpp" \
           '  src.packet_sequence_number = 7;
@@ -322,6 +325,12 @@ stdenv.mkDerivation {
     fi
     export SDKROOT=${lib.escapeShellArg darwinSdkRoot}
     export MACOSX_DEPLOYMENT_TARGET=${lib.escapeShellArg darwinDeploymentTarget}
+  '';
+
+  postInstall = ''
+    cat > "$out/lib/cmake/jaccl/jacclConfig.cmake" <<'EOF'
+    include("''${CMAKE_CURRENT_LIST_DIR}/jacclTargets.cmake")
+    EOF
   '';
 
   meta = with lib; {
