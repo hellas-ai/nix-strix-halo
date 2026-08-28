@@ -290,6 +290,7 @@
       };
 
       thunderboltIbverbsOverlay = inputs.thunderbolt-ibverbs.overlays.default;
+      multikernelOverlay = import ./overlays/multikernel.nix;
       spacemitK3Overlay = import ./overlays/spacemit-k3.nix {
         inherit inputs inputVersion;
       };
@@ -351,6 +352,7 @@
         [
           thunderboltIbverbsOverlay
           thunderboltRenamesOverlay
+          multikernelOverlay
           (import ./overlays/rocm.nix {
             inherit lib therockPythonConfig;
             provider = rocmProvider;
@@ -506,6 +508,7 @@
         python = self.lib.mkPythonOverlay {
           provider = "nixpkgs";
         };
+        multikernel = multikernelOverlay;
         spacemitK3 = spacemitK3Overlay;
       };
 
@@ -526,6 +529,7 @@
         fastflowlm = import ./modules/fastflowlm.nix;
         smu-exporter = import ./modules/smu-exporter.nix;
         npu-exporter = import ./modules/npu-exporter.nix;
+        multikernel = import ./modules/multikernel.nix;
         ryzenadj = import ./modules/ryzenadj.nix;
         tuning = import ./modules/tuning.nix;
         thunderbolt-ibverbs = inputs.thunderbolt-ibverbs.nixosModules.default;
@@ -622,6 +626,8 @@
             "ec-su-axb35"
             "ec-su-axb35-monitor"
             "fastflowlm"
+            "kerf-init"
+            "kerf-multikernel"
             "llama-cpp-master-rocm"
             "llama-cpp-master-vulkan"
             "llama-cpp-rocm"
@@ -629,7 +635,9 @@
             "llvm-aie"
             "mlir-aie"
             "mlir-aie-env"
+            "linux-multikernel"
             "mlx-rocm"
+            "multikernel-demo-initrd"
             "sglang-rocm"
             "strix-halo-mes-firmware"
             "therock-amdsmi"
@@ -1053,6 +1061,121 @@
               vllmPackage = fakeVllmEnv;
               packageSuffix = "ci";
             };
+
+            multikernelEval = lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.multikernel
+                {
+                  nixpkgs.pkgs = pkgs;
+                  system.stateVersion = "26.05";
+                  boot.loader.grub.enable = false;
+                  fileSystems."/" = {
+                    device = "/dev/null";
+                    fsType = "ext4";
+                  };
+                  boot.multikernel = {
+                    enable = true;
+                    pool = {
+                      cpus = "12-15,28-31";
+                      memory = "8GB";
+                    };
+                    instances.blue = {
+                      id = 1;
+                      cpus = "12-13,28-29";
+                      memory = "2GB";
+                    };
+                  };
+                }
+              ];
+            };
+
+            multikernelModule =
+              let
+                plain = builtins.unsafeDiscardStringContext;
+                poolScript = plain multikernelEval.config.systemd.services.multikernel-pool.script;
+                instanceScript = plain multikernelEval.config.systemd.services.multikernel-instance-blue.script;
+                controller = lib.findFirst (
+                  package: lib.getName package == "multikernelctl"
+                ) null multikernelEval.config.environment.systemPackages;
+              in
+              pkgs.runCommandLocal "ci-multikernel-module"
+                {
+                  nativeBuildInputs = [ pkgs.gnugrep ];
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  cat > pool.sh <<'EOF'
+                  ${poolScript}
+                  EOF
+                  cat > instance.sh <<'EOF'
+                  ${instanceScript}
+                  EOF
+                  grep -F -- "--cpus=12-15,28-31" pool.sh
+                  grep -F -- "--memory=8GB" pool.sh
+                  grep -F -- "kerf create blue" instance.sh
+                  grep -F -- "--id=1" instance.sh
+                  grep -F -- "console=mktty0" instance.sh
+                  grep -F -- "multikernel.demo.name=blue" instance.sh
+                  grep -F -- 'systemctl stop "multikernel-instance-$instance.service"' ${controller}/bin/multikernelctl
+                  grep -F -- 'systemctl stop multikernel-pool.service' ${controller}/bin/multikernelctl
+                  touch "$out"
+                '';
+
+            multikernelKernelConfig =
+              pkgs.runCommandLocal "ci-multikernel-kernel-config"
+                {
+                  nativeBuildInputs = [ pkgs.gnugrep ];
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  config=${pkgs.linux-multikernel.configfile}
+                  for symbol in \
+                    KEXEC_FILE KEXEC_HANDOVER KEXEC_HANDOVER_ENABLE_DEFAULT \
+                    MULTIKERNEL MKTTY SMP HOTPLUG_CPU MEMORY_HOTPLUG \
+                    MEMORY_HOTREMOVE DAXFS VSOCKETS; do
+                    grep -qx "CONFIG_$symbol=y" "$config"
+                  done
+                  grep -qx '# CONFIG_DEFERRED_STRUCT_PAGE_INIT is not set' "$config"
+                  grep -qx '# CONFIG_MULTIKERNEL_VSOCKETS is not set' "$config"
+                  cp "$config" "$out"
+                '';
+
+            multikernelInitrd =
+              pkgs.runCommandLocal "ci-multikernel-demo-initrd"
+                {
+                  nativeBuildInputs = [
+                    pkgs.cpio
+                    pkgs.gnugrep
+                    pkgs.zstd
+                  ];
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  mkdir unpack
+                  cd unpack
+                  zstd -dc ${pkgs.multikernel-demo-initrd}/initrd | cpio -id
+                  find . -printf '%P\n' | sort > "$out"
+                  grep -qx init "$out"
+                  grep -qx bin/sh "$out"
+                  grep -qx bin/busybox "$out"
+                  grep -qx bin/multikernel-demo "$out"
+                  demo=$(find nix/store -maxdepth 1 -type f -name '*-multikernel-demo')
+                  grep -Fq '/sys/devices/system/cpu/online' "$demo"
+                  grep -Fq 'physical APIC' "$demo"
+                '';
+
+            multikernelKerf =
+              pkgs.runCommandLocal "ci-multikernel-kerf"
+                {
+                  nativeBuildInputs = [ pkgs.kerf-multikernel ];
+                  meta.maintainers = with lib.maintainers; [ georgewhewell ];
+                }
+                ''
+                  kerf --help > "$out"
+                  grep -q 'Multikernel Management System' "$out"
+                  kerf create --help | grep -q 'Use physical APIC'
+                '';
           in
           {
             deadnix = runSourceCheck "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
@@ -1061,6 +1184,10 @@
               pkgs.nixfmt-tree
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
             cuda-host-driver-runtime = cudaHostDriverRuntime;
+            multikernel-demo-initrd = multikernelInitrd;
+            multikernel-kerf = multikernelKerf;
+            multikernel-kernel-config = multikernelKernelConfig;
+            multikernel-module = multikernelModule;
             package-surface = packageSurface;
             vllm-pair-bench-dry-run =
               pkgs.runCommandLocal "ci-vllm-pair-bench-dry-run"
