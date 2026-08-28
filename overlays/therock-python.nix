@@ -89,6 +89,14 @@ final: prev: {
               "tests/test_optim.py"
             ];
           });
+          # TorchAO enables its ROCm swizzle extension when the substituted
+          # PyTorch reports HIP support.  Its nixpkgs expression does not know
+          # about TheRock, so make the SDK headers and libraries visible to
+          # that extension build explicitly.
+          torchao = pyprev.torchao.overridePythonAttrs (old: {
+            nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ rocmSdk ];
+            buildInputs = (old.buildInputs or [ ]) ++ [ rocmSdk ];
+          });
           "mistral-common" = (disablePythonChecks pyprev."mistral-common").overridePythonAttrs (old: {
             pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [
               "numpy"
