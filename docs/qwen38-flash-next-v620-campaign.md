@@ -33,9 +33,15 @@ As of 2026-08-28:
   102,466,171,160 bytes to about half that size. Gathered PLE values are
   converted back to the model dtype before computation;
 - live serving is qualified on four V620s with the ROCm 10 stack:
-  an externally observed short completion returned HTTP 200, and a second
-  48-token prompt generated 146 coherent tokens at 14.01--14.13 tok/s warm
-  decode. Constructor or load completion alone is not counted as a result.
+  the exact packaged closure returned the requested short completion and a
+  59-token prompt generated 140 coherent tokens at up to 13.93 tok/s warm
+  decode. Six earlier stateful requests plus a post-idle request passed with
+  the same safety settings. Constructor or load completion alone is not counted
+  as a result;
+- the qualified launcher disables scheduler overlap because this experimental
+  QSA path mutates shared ring buffers without SGLang's CUDA-only default WAR
+  barrier, and it makes `/health` passive rather than generating from raw token
+  ID zero.
 
 The hardware recovery gate remains explicit: firmware **PCI Hot-Plug -> PCI
 Buses Padding = 5**, remove independent PEX-board power until its LEDs are dark,
@@ -386,38 +392,41 @@ Where an older per-experiment note disagrees with those indexes, the index wins.
 
 ## First qualified launch
 
-Resolve the closure, select the published W4 snapshot, and start eagerly:
+Build the package, select the published W4 snapshot, and start eagerly. The
+packaged launcher resolves its own immutable closure:
 
 ```console
-export SGLANG_QWEN38_FLASH_NEXT_CLOSURE="$(readlink -f \
-  .bench-artifacts/closures/sglang-qwen4-exp-gfx1030-pr-73a2552)"
+closure="$(nix build --no-link --print-out-paths \
+  .#legacyPackages.x86_64-linux.gfx1030.sglang-qwen38-flash-next-rocm)"
 export MODEL=/mnt/trex-models-fabric/Qwen3.8-Flash-Next-W4A16-G32
 export CUDA_GRAPH=0
-bash scripts/qwen38-flash-next-serve.sh
+"$closure/bin/qwen38-flash-next-serve.sh"
 ```
 
 The launcher forces TP4, FP16, FP32 SSM state, FP16 GDN convolution state,
 language-model-only loading, PLE host offload, Triton attention/linear
 attention/MoE, Torch dense GEMM, durable caches, and V620-only visibility. It
-also disables the unavailable custom all-reduce extension and drops checkpoint
-page cache after loading. It does not enable MXFP4, FP8 compute, AITER,
-FlashInfer, TileLang, CuTe, or speculation by accident. The model pathname above
-records the campaign mount; a persistent deployment may use another read-only
-mount only after passing the same inventory and fabric-counter gates.
+also disables the unavailable custom all-reduce extension, scheduler overlap,
+and model-generating health checks, then drops checkpoint page cache after
+loading. It does not enable MXFP4, FP8 compute, AITER, FlashInfer, TileLang,
+CuTe, or speculation by accident. `OVERLAP_SCHEDULE=1` is an unqualified
+experiment that enables SGLang's coarse HIP WAR barrier. The model pathname
+above records the campaign mount; a persistent deployment may use another
+read-only mount only after passing the same inventory and fabric-counter gates.
 
 ### Live qualification evidence
 
-The first complete ROCm 10 qualification used TP4 unit
-`codex-qwen38-flash-next-tp4-v26.service`, exact closure
-`/nix/store/m5k617a9fx8w5rv66nnnkznhyb334px2-sglang-rocm-gfx1030-0.5.17.dev0+qwen4exp.73a2552`,
+The final ROCm 10 qualification used TP4 unit
+`codex-qwen38-flash-next-tp4-v29.service`, exact packaged closure
+`/nix/store/816iqv6ikd913gzbkqz1gy605rszfz7m-sglang-rocm-gfx1030-0.5.17.dev0+qwen4exp.73a2552`,
 and log
-`.bench-artifacts/serve/serve-20260828-220237.log` on strix-2. A compact,
+`.bench-artifacts/serve/serve-20260828-222635.log` on strix-2. A compact,
 tracked extract is available in
 [`qwen38-flash-next-v620-20260828.md`](evidence/qwen38-flash-next-v620-20260828.md).
 The immutable checkpoint was published read-only at
 `/mnt/trex-models-fabric/Qwen3.8-Flash-Next-W4A16-G32`.
 
-The first external request returned HTTP 200 in 7.523 seconds with 23 prompt
+The first external request returned HTTP 200 in 5.272 seconds with 23 prompt
 tokens, eight completion tokens, and the exact response:
 
 ```text
@@ -425,9 +434,9 @@ V620 FLASH WORKS
 ```
 
 The immediately following warm request exercised the previously failing
-64-token Triton prefill tile. It returned HTTP 200 in 10.790 seconds with 48
-prompt tokens and 146 completion tokens. SGLang reported 9.43 input tok/s and
-14.01--14.13 generation tok/s. The answer correctly described sparse expert
+64-token Triton prefill tile. It returned HTTP 200 in 11.075 seconds with 59
+prompt tokens and 140 completion tokens. SGLang reported 56.23 input tok/s and
+up to 13.93 generation tok/s. The answer correctly described sparse expert
 routing, top-k selection, and the separation between total parameter capacity
 and per-token compute.
 
@@ -436,6 +445,16 @@ gfx1030 launch failure on the longer prompt: QSA's upstream two-stage prefill
 configuration requested 67,584 bytes of LDS against the V620's 65,536-byte
 limit. The qualified closure retains the upstream tile and warp count but uses
 one software-pipeline stage on ROCm. Both the short decode and longer prefill
-were repeated after that fix. At qualification time, v26 was left live at
-`http://strix-2:30800/v1`; endpoint lifetime is operational state rather than
-part of this immutable evidence record.
+were repeated after that fix.
+
+The first two v26 responses were not accepted as final qualification: all four
+ranks subsequently reported an asynchronous PyTorch gather hardware exception
+while SGLang was using its overlap event loop. A v27 serial-scheduler run then
+showed that the default `/health` endpoint itself performs a raw one-token model
+probe. The qualified launcher closes both hazards by disabling overlap and
+making `/health` passive. v28 passed seven requests in total, including a
+post-idle exact response, with passive health checks between the preceding
+requests. v29 repeated the acceptance set from the packaged closure and
+returned exact `STILL PACKAGED` after its own idle interval. At qualification
+time, v29 was left live at `http://strix-2:30800/v1`; endpoint lifetime is
+operational state rather than part of this immutable evidence record.

@@ -18,6 +18,11 @@ REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 # The unmerged QSA HIP path first needs eager-vs-graph token parity.  Promote
 # CUDA_GRAPH=1 only after that gate passes on the exact production closure.
 CUDA_GRAPH="${CUDA_GRAPH:-0}"
+# The QSA ring buffers in the pinned experimental SGLang branch are not safe
+# under the overlap scheduler on HIP yet.  In particular, SGLang only enables
+# its default write-after-read barrier when torch.version.cuda is present.
+# Keep the qualified path serial; OVERLAP_SCHEDULE=1 is an explicit experiment.
+OVERLAP_SCHEDULE="${OVERLAP_SCHEDULE:-0}"
 
 ART="${ART:-/mnt/Home/src/nix-strix-halo-qwen38-flash-next/.bench-artifacts}"
 LOGDIR="$ART/serve"
@@ -48,6 +53,10 @@ export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-lo}"
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
 export SGLANG_USE_AITER=0
 export SGLANG_MAMBA_CONV_DTYPE="${SGLANG_MAMBA_CONV_DTYPE:-$DTYPE}"
+# Upstream /health generates from the raw token id [0] by default.  That probe
+# bypasses the chat template and is not a valid Qwen4-Exp readiness request.
+# Keep /health passive; qualification sends a real chat completion separately.
+export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION="${SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION:-false}"
 
 if [[ "$TP" != 4 ]]; then
   echo "error: the qualified V620 topology is TP=4, got TP=$TP" >&2
@@ -66,11 +75,18 @@ if [[ ! -f "$MODEL/config.json" ]]; then
   exit 2
 fi
 
-# Require the reviewed, source-built Qwen4-Exp closure.  A real store path is
-# deliberate: relinking a result symlink under a running server is unsafe.
+# Prefer an explicit immutable closure for a worktree invocation.  The packaged
+# launcher can discover its own closure, which makes the flake output directly
+# executable without a result symlink or an out-of-band environment variable.
 if [[ -z "${SGLANG_QWEN38_FLASH_NEXT_CLOSURE:-}" ]]; then
-  echo "error: set SGLANG_QWEN38_FLASH_NEXT_CLOSURE to the resolved Nix store path" >&2
-  exit 2
+  launcher_path="$(readlink -f "$0")"
+  launcher_closure="$(dirname "$(dirname "$launcher_path")")"
+  if [[ -x "$launcher_closure/bin/sglang" ]]; then
+    SGLANG_QWEN38_FLASH_NEXT_CLOSURE="$launcher_closure"
+  else
+    echo "error: set SGLANG_QWEN38_FLASH_NEXT_CLOSURE to the resolved Nix store path" >&2
+    exit 2
+  fi
 fi
 if [[ -L "$SGLANG_QWEN38_FLASH_NEXT_CLOSURE" ]]; then
   echo "error: SGLANG_QWEN38_FLASH_NEXT_CLOSURE must not be a symlink" >&2
@@ -109,6 +125,17 @@ elif [[ "$CUDA_GRAPH" != 1 ]]; then
   echo "error: CUDA_GRAPH must be 0 or 1" >&2
   exit 2
 fi
+if [[ "$OVERLAP_SCHEDULE" == 0 ]]; then
+  ARGS+=(--disable-overlap-schedule)
+elif [[ "$OVERLAP_SCHEDULE" == 1 ]]; then
+  # This opt-in is deliberately not part of the qualified production path.
+  # Give HIP the barrier that SGLang otherwise enables only for CUDA.
+  export SGLANG_ENABLE_WAR_BARRIER="${SGLANG_ENABLE_WAR_BARRIER:-true}"
+  export SGLANG_FORCE_COARSE_WAR_BARRIER="${SGLANG_FORCE_COARSE_WAR_BARRIER:-true}"
+else
+  echo "error: OVERLAP_SCHEDULE must be 0 or 1" >&2
+  exit 2
+fi
 if [[ -n "$TOOL_CALL_PARSER" ]]; then
   ARGS+=(--tool-call-parser "$TOOL_CALL_PARSER")
 fi
@@ -121,8 +148,9 @@ fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOGDIR/serve-$STAMP.log"
-printf 'launching: model=%s tp=%s dtype=%s ctx=%s graph=%s devices=%s\n' \
-  "$MODEL" "$TP" "$DTYPE" "$CTX" "$CUDA_GRAPH" "$HIP_VISIBLE_DEVICES"
+printf 'launching: model=%s tp=%s dtype=%s ctx=%s graph=%s overlap=%s devices=%s\n' \
+  "$MODEL" "$TP" "$DTYPE" "$CTX" "$CUDA_GRAPH" "$OVERLAP_SCHEDULE" \
+  "$HIP_VISIBLE_DEVICES"
 printf 'log: %s\n' "$LOG"
 cd "$RUNDIR"
 exec "$SGLANG" serve "${ARGS[@]}" 2>&1 | tee "$LOG"

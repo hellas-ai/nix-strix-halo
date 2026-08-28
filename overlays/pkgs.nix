@@ -378,6 +378,7 @@ let
           ../scripts/qwen38-flash-next-quantize-experts.py
           ../scripts/qwen38-flash-next-qsa-aot.py
           ../scripts/qwen38-flash-next-runtime-smoke.py
+          ../scripts/qwen38-flash-next-serve.sh
         ];
         sglangRunChecks = false;
         # The PR advertises optional CUDA and gfx95-only extras that are
