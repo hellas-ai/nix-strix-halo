@@ -232,9 +232,16 @@ For a larger transport sanity check, append for example
 `--elements 67108864 --warmup 3 --iterations 20`. The reported
 `payload_gib_s` is application payload per rank, not physical link line rate.
 
-`vllm-metal` does not currently expose cross-host tensor parallelism. To test
-the same checkpoint with MLX-LM's tensor-parallel weight sharding over JACCL,
-put the model at the same path on both hosts and run:
+`vllm-metal` does not currently expose cross-host tensor parallelism. The
+included MLX-LM harness can compare a single-host greedy reference with
+tensor-parallel weight sharding over JACCL. First capture the reference:
+
+```bash
+./result-vllm-metal/bin/python examples/mlx-lm-tp-generate.py \
+  --reference --model /absolute/path/to/model
+```
+
+Then put the checkpoint at the same path on both hosts and run:
 
 ```bash
 ./result-vllm-metal/bin/mlx.launch \
@@ -243,17 +250,18 @@ put the model at the same path on both hosts and run:
   --model /absolute/path/on/both/hosts/model
 ```
 
-Each rank constructs the model but `sharded_load` partitions supported layers
-before evaluating their weights. This is a separate MLX-LM execution path, not
-distributed vLLM serving, disaggregated prefill, or a Ray deployment. The
-current MLX-LM Qwen3.5 loader discards checkpoint MTP tensors, so this probe
-uses ordinary target-model decoding rather than MTP speculation.
+Both commands emit JSON containing the generated token IDs. Each rank
+constructs the model, but `sharded_load` partitions supported layers before
+evaluating their weights. This is a correctness harness for MLX-LM, not a
+distributed vLLM server, disaggregated prefill, or Ray deployment.
 
-Treat a successful process exit as transport evidence only: compare greedy
-output against an identical single-host run before serving the model. In the
-tested MLX 0.32.0 stack, TP=2 diverged from the single-host greedy output for
-both the Qwen3.8 checkpoint and a Llama 3.2 1B control, despite exact JACCL
-all-reduce. Cross-host MLX-LM TP is therefore not enabled for serving here.
+With MLX 0.32.0, TP=2 over JACCL matched the single-host greedy tokens exactly
+for the unquantized `Qwen/Qwen3.5-0.8B` checkpoint. The unquantized
+`Qwen/Qwen3.8-27B` run did not produce its first token within ten minutes on a
+128 GiB/36 GiB host pair because the smaller host was swapping heavily. It is
+therefore not presented as a serving configuration. The current MLX-LM loader
+also discards this checkpoint's MTP tensors, so the harness uses ordinary
+target-model decoding rather than MTP speculation.
 
 Keep the two data cables in distinct `/30` subnets. Bridging both without STP
 creates an L2 loop. For example, use `10.56.1.1/30` and `10.56.2.1/30` on the
@@ -263,18 +271,6 @@ first host, and `.2/30` on the corresponding interfaces of the second host:
 sudo ifconfig en1 inet 10.56.1.1/30 up
 sudo ifconfig en2 inet 10.56.2.1/30 up
 # second host: en3 -> 10.56.1.2/30; en5 -> 10.56.2.2/30
-```
-
-The model configuration supplies its 262,144-token context window. Launch an
-MLX-LM server with a 262,144-token default generation ceiling and a 4 GiB
-retained prompt-cache budget per rank as follows:
-
-```bash
-./result/bin/mlx.launch --hostfile jaccl-ring-dual.json -- \
-  ./result/bin/python -m mlx_lm server \
-  --model Qwen/Qwen3.8-27B \
-  --host 0.0.0.0 --port 8081 --max-tokens 262144 \
-  --prompt-cache-size 8 --prompt-cache-bytes 4294967296
 ```
 
 In the measured MBP/Goblin lab pair, either 80 Gbit/s cable sustained about 62.5
@@ -288,18 +284,18 @@ throughput target for this backend.
 
 | Capability | Verified result |
 |---|---|
-| MLX/JACCL TP=2 over two Thunderbolt links | Works |
+| JACCL exact all-reduce over two Thunderbolt links | Works |
+| MLX-LM TP=2 greedy correctness | Exact match for unquantized Qwen3.5-0.8B |
+| MLX-LM TP=2 Qwen3.8-27B serving | Not viable on the tested 36 GiB worker |
 | Exact-prefix reuse | Works; 44.913 s cold became 0.277 s warm |
 | Ray import and single-node task | Works |
 | Ray multi-node macOS control plane | Unsupported upstream; worker lost GCS after 60 s |
 | MTP in `Qwen/Qwen3.8-27B` | Unavailable on this path; MLX-LM discards the checkpoint's MTP tensors |
 | Distributed oMLX MTP/speculation | Unavailable; oMLX rejects it in distributed mode |
 
-Do not expose this MLX-LM TP probe as an agent endpoint until its greedy output
-matches the single-host reference. The single-host vLLM service above is the
-validated OpenAI-compatible path. Its prompt and completion share the 262,144-
-token context window; clients may advertise the same output ceiling, but each
-request must leave room for the system prompt, tools, and conversation.
+The single-host vLLM service above is the validated OpenAI-compatible path. Its
+prompt and completion share the 262,144-token context window; each request must
+leave room for the system prompt, tools, and conversation.
 
 ### Two-host vLLM pair benchmark
 
