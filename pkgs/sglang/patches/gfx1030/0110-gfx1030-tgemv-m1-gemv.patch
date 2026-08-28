@@ -1,0 +1,659 @@
+gfx1030: Triton small-M GEMV replacing rocBLAS for skinny decode GEMMs
+
+At batch-1 decode the model is a chain of M=1 fp16 GEMVs; rocBLAS/Tensile
+picks prefill macro-tiles for them and reads weights at ~212 GB/s against
+~350-430 GB/s achievable on gfx1030 (Radeon Pro V620).  This patch adds
+sglang/srt/layers/tgemv.py (Triton kernels + tuned per-shape config table)
+and routes three decode paths through it when M <= 8:
+
+  * UnquantizedLinearMethod.apply        (all dense linears)
+  * LogitsProcessor._compute_lm_head     (the 3.3x lm_head win)
+  * Qwen3_5GatedDeltaNet in_proj         (bit-exact column-concat of
+                                          in_proj_ba onto in_proj_qkvz)
+
+Prefill (M > 8) falls through to the original rocBLAS paths bit-identically.
+Measured on the Qwen3.8 27B campaign: 12.68 -> 20.674 tok/s decode.
+
+Kill switches (read once at import of tgemv.py, default enabled), kept for
+A/B attribution: QWEN38_GEMV=0 disables everything; QWEN38_GEMV_LINEAR /
+_LMHEAD / _CONCAT disable individual sites.  The graft's off-by-default
+SiluAndMul MLP fusion (QWEN38_GEMV_SILU) measured slower and is not ported.
+
+diff -ruN a/sglang/srt/layers/logits_processor.py b/sglang/srt/layers/logits_processor.py
+--- a/sglang/srt/layers/logits_processor.py	2026-08-25 23:52:55.644476863 +0200
++++ b/sglang/srt/layers/logits_processor.py	2026-08-25 23:54:29.779810366 +0200
+@@ -25,6 +25,7 @@
+     tensor_model_parallel_all_gather,
+ )
+ from sglang.srt.environ import envs
++from sglang.srt.layers import tgemv
+ from sglang.srt.layers.dp_attention import (
+     DpPaddingMode,
+     attn_tp_all_gather,
+@@ -877,6 +878,33 @@
+         lm_head: VocabParallelEmbedding,
+         embedding_bias: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
++        # Triton GEMV for the decode lm_head (M <= tgemv.MAX_M): the [vocab, K]
++        # matmul is the single largest decode GEMM and rocBLAS reads it at a
++        # fraction of the achievable bandwidth at M=1.  Prefill and every
++        # special lm_head flavour (LoRA, fp32, rl_on_policy_target, bias) fall
++        # through below bit-identically.
++        w = getattr(lm_head, "weight", None)
++        if (
++            tgemv.LMHEAD
++            and w is not None
++            and embedding_bias is None
++            and not self.use_fp32_lm_head
++            and not hasattr(lm_head, "set_lora")
++            and get_global_server_args().rl_on_policy_target is None
++            and w.dtype is torch.float16
++            and w.dim() == 2
++            and w.stride(1) == 1
++            and hidden_states.dim() == 2
++            and hidden_states.shape[0] <= tgemv.MAX_M
++            and hidden_states.shape[1] == w.shape[1]
++            and hidden_states.is_cuda
++        ):
++            h = hidden_states.to(torch.float16)
++            if not h.is_contiguous():
++                h = h.contiguous()
++            tgemv.STATS["lmhead"] += 1
++            return tgemv.gemv(h, w)
++
+         if hasattr(lm_head, "set_lora") and hasattr(lm_head, "apply_lora"):
+             # This is a LoRA-wrapped module, use its forward method
+             logits = lm_head(hidden_states)
+diff -ruN a/sglang/srt/layers/quantization/unquant.py b/sglang/srt/layers/quantization/unquant.py
+--- a/sglang/srt/layers/quantization/unquant.py	2026-08-25 23:52:55.650135474 +0200
++++ b/sglang/srt/layers/quantization/unquant.py	2026-08-25 23:54:15.201829666 +0200
+@@ -10,6 +10,7 @@
+ from torch.nn.parameter import Parameter
+ 
+ from sglang.srt.environ import envs
++from sglang.srt.layers import tgemv
+ from sglang.srt.layers.amx_utils import (
+     CPUQuantMethod,
+     _amx_process_weight_after_loading,
+@@ -142,6 +143,20 @@
+         x: torch.Tensor,
+         bias: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
++        # Triton GEMV for skinny decode GEMMs (M <= tgemv.MAX_M): rocBLAS picks
++        # prefill macro-tiles at M=1 and leaves ~40% of the achievable weight
++        # bandwidth on the table.  Prefill (large M) must fall through below
++        # bit-identically -- rocBLAS is compute-bound and faster there.
++        w = getattr(layer, "weight", None)
++        if (
++            tgemv.LINEAR
++            and w is not None
++            and type(w.data) is torch.Tensor
++            and tgemv.supported(x, w)
++        ):
++            tgemv.STATS["linear"] += 1
++            return tgemv.gemv(x, w, bias)
++
+         if use_intel_amx_backend(layer):
+             x_shapes = x.shape
+             if len(x_shapes) == 3:
+diff -ruN a/sglang/srt/layers/tgemv_config.json b/sglang/srt/layers/tgemv_config.json
+--- a/sglang/srt/layers/tgemv_config.json	1970-01-01 01:00:00.000000000 +0100
++++ b/sglang/srt/layers/tgemv_config.json	2026-08-25 23:54:01.877880861 +0200
+@@ -0,0 +1,194 @@
++{
++ "1,5120,8704": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "1,4352,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 256,
++  "num_warps": 2,
++  "num_stages": 1
++ },
++ "1,5120,4096": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "1,5120,62080": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "1,1536,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "1,5120,3584": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "1,5120,24": {
++  "BLOCK_N": 32,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "1,5120,4120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "2,5120,8704": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "4,5120,8704": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "8,5120,8704": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "2,4352,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 256,
++  "num_warps": 2,
++  "num_stages": 1
++ },
++ "4,4352,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 256,
++  "num_warps": 2,
++  "num_stages": 1
++ },
++ "8,4352,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "2,5120,4096": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "4,5120,4096": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "8,5120,4096": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "2,5120,62080": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "4,5120,62080": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "8,5120,62080": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 2,
++  "num_stages": 1
++ },
++ "2,1536,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "4,1536,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "8,1536,5120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 2,
++  "num_stages": 1
++ },
++ "2,5120,3584": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "4,5120,3584": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "8,5120,3584": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "2,5120,24": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "4,5120,24": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "8,5120,24": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ },
++ "2,5120,4120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "4,5120,4120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 8,
++  "num_stages": 1
++ },
++ "8,5120,4120": {
++  "BLOCK_N": 8,
++  "BLOCK_K": 512,
++  "num_warps": 4,
++  "num_stages": 1
++ }
++}
+\ No newline at end of file
+diff -ruN a/sglang/srt/layers/tgemv.py b/sglang/srt/layers/tgemv.py
+--- a/sglang/srt/layers/tgemv.py	1970-01-01 01:00:00.000000000 +0100
++++ b/sglang/srt/layers/tgemv.py	2026-08-25 23:53:58.031895641 +0200
+@@ -0,0 +1,221 @@
++"""Triton small-M GEMV/GEMM for gfx1030 (Radeon Pro V620), fp16.
++
++Why this exists: rocBLAS/Tensile picks prefill macro-tiles for M=1 problems and
++delivers ~212 GB/s aggregate against ~350-430 GB/s achievable on this part.  At
++batch 1 decode the whole model is one long chain of M=1 GEMVs, so that shortfall
++*is* the token rate.  Dispatch is capped at M <= MAX_M (8): beyond that rocBLAS
++is compute-bound and already good (30.17 TFLOP/s at prefill sizes), so prefill
++must fall through to it untouched.
++
++Layout contract: torch stores nn.Linear weights as W[N, K] row-major, and
++F.linear(x, W) computes x @ W.T.  So the *reduction* axis K is the contiguous
++one and each output column n owns a contiguous K-element row.  A program
++therefore claims BLOCK_N whole rows and streams them; every byte of the weight
++is read exactly once, coalesced, with no transpose and no split-K bookkeeping.
++
++Numerics: accumulation is fp32 in a fixed order (ascending k, BLOCK_K at a
++time), independent of BLOCK_N, of the program id, and of how many output
++columns the matrix has.  That last property is what makes the in_proj_qkvz +
++in_proj_ba column-concatenation bit-exact rather than merely close.
++
++Kill switches, read once at import time (default enabled).  A/B attribution
++against the rocBLAS baseline is how every number in this campaign was
++validated, so keep them working:
++
++  QWEN38_GEMV=0          disable everything
++  QWEN38_GEMV_LINEAR=0   leave UnquantizedLinearMethod.apply alone
++  QWEN38_GEMV_LMHEAD=0   leave LogitsProcessor._compute_lm_head alone
++  QWEN38_GEMV_CONCAT=0   do not column-concat in_proj_ba into in_proj_qkvz
++"""
++
++import json
++import os
++from typing import Optional
++
++import torch
++import triton
++import triton.language as tl
++
++
++def _flag(name, default):
++    return os.environ.get(name, "1" if default else "0") not in ("0", "false", "False", "")
++
++
++ENABLED = _flag("QWEN38_GEMV", True)
++LINEAR = ENABLED and _flag("QWEN38_GEMV_LINEAR", True)
++LMHEAD = ENABLED and _flag("QWEN38_GEMV_LMHEAD", True)
++CONCAT = ENABLED and _flag("QWEN38_GEMV_CONCAT", True)
++
++STATS = {"linear": 0, "lmhead": 0, "concat_layers": 0}
++
++# --------------------------------------------------------------------------
++# config table
++# --------------------------------------------------------------------------
++_CFG_PATH = os.environ.get(
++    "TGEMV_CONFIG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tgemv_config.json")
++)
++_TABLE = {}
++if os.path.exists(_CFG_PATH):
++    try:
++        with open(_CFG_PATH) as f:
++            _TABLE = json.load(f)
++    except Exception:  # a broken table must degrade to heuristics, never crash a server
++        _TABLE = {}
++
++
++def _heuristic(M: int, K: int, N: int):
++    """Fallback when the shape is not in the tuned table."""
++    if N <= 64:
++        bn = 16 if N <= 16 else 32
++        return {"BLOCK_N": bn, "BLOCK_K": 256, "num_warps": 4, "num_stages": 1}
++    if N <= 1024:
++        return {"BLOCK_N": 32, "BLOCK_K": 128, "num_warps": 4, "num_stages": 1}
++    return {"BLOCK_N": 64, "BLOCK_K": 128, "num_warps": 4, "num_stages": 1}
++
++
++_OVERRIDE = None  # set by the tuner while sweeping candidates
++
++
++def get_config(M: int, K: int, N: int):
++    if _OVERRIDE is not None:
++        return _OVERRIDE
++    c = _TABLE.get(f"{M},{K},{N}")
++    if c is None:
++        # An untuned M reuses the M=1 tile for the same matrix before falling
++        # back to heuristics: the tile choice is driven by the weight stream,
++        # which is identical, not by M.
++        c = _TABLE.get(f"1,{K},{N}")
++    if c is None:
++        c = _heuristic(M, K, N)
++    return c
++
++
++# --------------------------------------------------------------------------
++# kernels
++# --------------------------------------------------------------------------
++@triton.jit
++def _gemv_m1_kernel(
++    X, W, Y, BIAS,
++    K, N,
++    stride_wn,
++    HAS_BIAS: tl.constexpr,
++    EVEN_N: tl.constexpr,
++    EVEN_K: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++):
++    """y[0, n] = sum_k x[0, k] * W[n, k]   for BLOCK_N consecutive n."""
++    pid = tl.program_id(0)
++    offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
++    if EVEN_N:
++        mask_n = offs_n < offs_n + 1  # all-true, keeps the type uniform
++    else:
++        mask_n = offs_n < N
++    wptr = W + offs_n[:, None] * stride_wn
++    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
++    for k0 in range(0, K, BLOCK_K):
++        offs_k = k0 + tl.arange(0, BLOCK_K)
++        if EVEN_K:
++            x = tl.load(X + offs_k)
++            w = tl.load(wptr + offs_k[None, :], mask=mask_n[:, None], other=0.0)
++        else:
++            mk = offs_k < K
++            x = tl.load(X + offs_k, mask=mk, other=0.0)
++            w = tl.load(wptr + offs_k[None, :], mask=mask_n[:, None] & mk[None, :], other=0.0)
++        acc += tl.sum(w.to(tl.float32) * x.to(tl.float32)[None, :], axis=1)
++    if HAS_BIAS:
++        acc += tl.load(BIAS + offs_n, mask=mask_n, other=0.0).to(tl.float32)
++    tl.store(Y + offs_n, acc.to(Y.dtype.element_ty), mask=mask_n)
++
++
++@triton.jit
++def _gemm_smallm_kernel(
++    X, W, Y, BIAS,
++    M, K, N,
++    stride_xm, stride_wn, stride_ym,
++    HAS_BIAS: tl.constexpr,
++    EVEN_N: tl.constexpr,
++    EVEN_K: tl.constexpr,
++    BLOCK_M: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++):
++    """Same, for 1 < M <= BLOCK_M.  The weight tile is loaded once and reused
++    across the M rows, which is the whole point: if decode is bandwidth-bound,
++    M=8 must cost what M=1 costs."""
++    pid = tl.program_id(0)
++    offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_m = tl.arange(0, BLOCK_M)
++    mask_n = offs_n < N if not EVEN_N else offs_n < offs_n + 1
++    mask_m = offs_m < M
++    wptr = W + offs_n[:, None] * stride_wn
++    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
++    for k0 in range(0, K, BLOCK_K):
++        offs_k = k0 + tl.arange(0, BLOCK_K)
++        if EVEN_K:
++            w = tl.load(wptr + offs_k[None, :], mask=mask_n[:, None], other=0.0)
++            x = tl.load(X + offs_m[:, None] * stride_xm + offs_k[None, :],
++                        mask=mask_m[:, None], other=0.0)
++        else:
++            mk = offs_k < K
++            w = tl.load(wptr + offs_k[None, :], mask=mask_n[:, None] & mk[None, :], other=0.0)
++            x = tl.load(X + offs_m[:, None] * stride_xm + offs_k[None, :],
++                        mask=mask_m[:, None] & mk[None, :], other=0.0)
++        acc += tl.sum(x.to(tl.float32)[:, None, :] * w.to(tl.float32)[None, :, :], axis=2)
++    if HAS_BIAS:
++        acc += tl.load(BIAS + offs_n, mask=mask_n, other=0.0).to(tl.float32)[None, :]
++    tl.store(Y + offs_m[:, None] * stride_ym + offs_n[None, :],
++             acc.to(Y.dtype.element_ty), mask=mask_m[:, None] & mask_n[None, :])
++
++
++# --------------------------------------------------------------------------
++# python entry points
++# --------------------------------------------------------------------------
++MAX_M = int(os.environ.get("TGEMV_MAX_M", "8"))
++
++
++def supported(x: torch.Tensor, w: torch.Tensor) -> bool:
++    return (
++        x.dtype == torch.float16
++        and w.dtype == torch.float16
++        and x.dim() == 2
++        and w.dim() == 2
++        and x.shape[0] <= MAX_M
++        and x.shape[1] == w.shape[1]
++        and w.stride(1) == 1
++        and x.is_contiguous()
++        and x.is_cuda
++    )
++
++
++def gemv(x: torch.Tensor, w: torch.Tensor, bias: Optional[torch.Tensor] = None,
++         out: Optional[torch.Tensor] = None) -> torch.Tensor:
++    """x: [M, K] fp16 contiguous.  w: [N, K] fp16, w.stride(1)==1.  -> [M, N]."""
++    M, K = x.shape
++    N = w.shape[0]
++    if out is None:
++        out = torch.empty((M, N), dtype=x.dtype, device=x.device)
++    cfg = get_config(M, K, N)
++    BLOCK_N = cfg["BLOCK_N"]
++    BLOCK_K = cfg["BLOCK_K"]
++    grid = (triton.cdiv(N, BLOCK_N),)
++    even_n = (N % BLOCK_N) == 0
++    even_k = (K % BLOCK_K) == 0
++    if M == 1:
++        _gemv_m1_kernel[grid](
++            x, w, out, bias if bias is not None else x,
++            K, N, w.stride(0),
++            HAS_BIAS=bias is not None, EVEN_N=even_n, EVEN_K=even_k,
++            BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
++            num_warps=cfg["num_warps"], num_stages=cfg["num_stages"],
++        )
++    else:
++        BLOCK_M = triton.next_power_of_2(M)
++        _gemm_smallm_kernel[grid](
++            x, w, out, bias if bias is not None else x,
++            M, K, N, x.stride(0), w.stride(0), out.stride(0),
++            HAS_BIAS=bias is not None, EVEN_N=even_n, EVEN_K=even_k,
++            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
++            num_warps=cfg["num_warps"], num_stages=cfg["num_stages"],
++        )
++    return out
+diff -ruN a/sglang/srt/models/qwen3_5.py b/sglang/srt/models/qwen3_5.py
+--- a/sglang/srt/models/qwen3_5.py	2026-08-25 23:52:55.665135416 +0200
++++ b/sglang/srt/models/qwen3_5.py	2026-08-25 23:55:35.703520536 +0200
+@@ -37,6 +37,7 @@
+ from sglang.srt.distributed import get_pp_group
+ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+ from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
++from sglang.srt.layers import tgemv
+ 
+ # Layers - Attention
+ from sglang.srt.layers.attention.fla.layernorm_gated import RMSNorm as RMSNormGated
+@@ -456,7 +457,60 @@
+ 
+         return query, key, value, z, b, a
+ 
++    def _fuse_in_proj_gemv(self) -> bool:
++        """Column-concat in_proj_ba [24, K] onto in_proj_qkvz [4096, K].
++
++        The two projections are GEMVs over the same input vector, so fusing
++        them halves the launch count and makes the 24-column matrix -- which
++        rocBLAS read at 4.3 GB/s, 53.9 us for 245 KB -- effectively free.
++        Because the tgemv kernel reduces over K in a fixed order that depends
++        neither on N nor on the program id, the split of the fused output is
++        BIT-IDENTICAL to the two separate GEMVs.
++        """
++        if getattr(self, "_gemv_fused_w", None) is not None:
++            return False
++        wq = getattr(getattr(self, "in_proj_qkvz", None), "weight", None)
++        wb = getattr(getattr(self, "in_proj_ba", None), "weight", None)
++        if wq is None or wb is None:
++            return False
++        if (
++            wq.dtype is not torch.float16
++            or wb.dtype is not torch.float16
++            or wq.dim() != 2
++            or wb.dim() != 2
++            or wq.shape[1] != wb.shape[1]
++            or type(wq.data) is not torch.Tensor
++            or type(wb.data) is not torch.Tensor
++        ):
++            return False
++        nq = wq.shape[0]
++        fused = torch.cat([wq.data, wb.data], dim=0).contiguous()
++        # Re-point the original parameters at views of the fused buffer so
++        # the un-fused path stays correct and no memory is duplicated.
++        self.in_proj_qkvz.weight.data = fused[:nq]
++        self.in_proj_ba.weight.data = fused[nq:]
++        self._gemv_fused_w = fused
++        self._gemv_nq = nq
++        tgemv.STATS["concat_layers"] += 1
++        return True
++
+     def _forward_input_proj(self, hidden_states: torch.Tensor):
++        # Decode (M <= tgemv.MAX_M) takes the fused single-GEMV path; prefill
++        # falls through to the original two projections.
++        w = getattr(self, "_gemv_fused_w", None)
++        if (
++            w is not None
++            and hidden_states.dim() == 2
++            and hidden_states.shape[0] <= tgemv.MAX_M
++            and hidden_states.dtype is torch.float16
++            and hidden_states.shape[1] == w.shape[1]
++        ):
++            x = hidden_states
++            if not x.is_contiguous():
++                x = x.contiguous()
++            out = tgemv.gemv(x, w)
++            nq = self._gemv_nq
++            return out[:, :nq], out[:, nq:]
+         if (
+             _is_cpu
+             or _is_npu
+@@ -561,6 +615,32 @@
+         return output
+ 
+ 
++def _fuse_gdn_in_proj_gemv(model: nn.Module) -> None:
++    """Fuse in_proj weights on every GatedDeltaNet layer for the tgemv path.
++
++    Called at the end of load_weights, before the KV pool is sized, so the
++    transient extra copy from the cat is paid out of free memory rather than
++    out of the graph pool.
++    """
++    if not tgemv.CONCAT:
++        return
++    try:
++        n = 0
++        for m in model.modules():
++            if isinstance(m, Qwen3_5GatedDeltaNet):
++                n += bool(m._fuse_in_proj_gemv())
++        if n:
++            logger.info(
++                "tgemv: column-concatenated in_proj_ba into in_proj_qkvz "
++                "on %d GatedDeltaNet layers",
++                n,
++            )
++    except Exception:  # never take the server down over an optimisation
++        logger.exception(
++            "tgemv: in_proj concat failed, falling back to the unfused path"
++        )
++
++
+ class Qwen3_5LinearDecoderLayer(nn.Module):
+     """Qwen3.5 Decoder Layer with Linear Attention (GatedDeltaNet)."""
+ 
+@@ -1358,6 +1438,7 @@
+                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                 weight_loader(param, loaded_weight)
+             loaded_params.add(name)
++        _fuse_gdn_in_proj_gemv(self)
+         return loaded_params
+ 
+     @classmethod
+@@ -1576,6 +1657,7 @@
+                         logger.warning(f"Parameter {name} not found in params_dict")
+             loaded_params.add(name)
+ 
++        _fuse_gdn_in_proj_gemv(self)
+         return loaded_params
+ 
+ 
+@@ -1728,6 +1810,7 @@
+                     )
+                     weight_loader(param_lm_head, loaded_weight)
+             loaded_params.add(name)
++        _fuse_gdn_in_proj_gemv(self)
+         return loaded_params
+ 
+ 
+@@ -2101,6 +2184,7 @@
+             }
+         )
+ 
++        _fuse_gdn_in_proj_gemv(self)
+         return loaded_params
+ 
+     @property
