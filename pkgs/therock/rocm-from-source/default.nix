@@ -58,6 +58,7 @@
   thirdPartySources ? { },
   spirvHeadersSource ? null,
   esmiIbLibrarySource ? null,
+  esmiIbLibraryRev ? null,
   rocprofilerOtf2Archive ? null,
   rocprofilerSysBinutilsArchive ? null,
   buildJobs ? null,
@@ -228,7 +229,7 @@ let
         done
       }
 
-      for includeRoot in ${libcap.dev}/include; do
+      for includeRoot in ${libcap.dev}/include ${libdrm.dev}/include; do
         [ -d "$includeRoot" ] || continue
         (cd "$includeRoot"
          while IFS= read -r -d ''' path; do
@@ -353,7 +354,7 @@ let
     zlib.out
   ];
 
-  # AMD SMI 7.15 discovers these through pkg-config, but TheRock links its
+  # AMD SMI discovers these through pkg-config, but TheRock links its
   # subprojects with the in-tree Clang rather than the Nix cc wrapper. Supply
   # both the search paths and build-time RPATHs explicitly.
   fullProfilePkgConfigLinkerFlags = lib.optionalString (profile == "full") (
@@ -797,12 +798,16 @@ let
         "-DROCGDB_GMP_LIBRARY_DIR=${gmp}/lib"
         "-DROCGDB_MPFR_INCLUDE_DIR=${mpfr.dev}/include"
         "-DROCGDB_MPFR_LIBRARY_DIR=${mpfr}/lib"
-        # ROCm 7.15 enables the experimental Rocjitsu GPU emulator and its
-        # Rust Mirage frontend as part of THEROCK_ENABLE_ALL. Neither is in
+        # TheRock enables the experimental Rocjitsu GPU emulator and its Rust
+        # Mirage frontend as part of THEROCK_ENABLE_ALL. ROCm 10 also groups
+        # both behind THEROCK_ENABLE_EMULATION, which must be disabled before
+        # its feature resolver runs; the leaf switches alone are re-enabled as
+        # implicit features. Neither is in
         # the inference runtime path. Their upstream build also performs
         # undeclared FetchContent/Cargo network downloads, which are not
         # valid inside the Nix sandbox; keep them out of this SDK profile
         # until they have standalone, fully vendored Nix packages.
+        "-DTHEROCK_ENABLE_EMULATION=OFF"
         "-DTHEROCK_ENABLE_ROCJITSU=OFF"
         "-DTHEROCK_ENABLE_MIRAGE=OFF"
         # rocprofiler-systems compiles a tree of HIP-mode example programs
@@ -858,6 +863,10 @@ stdenv.mkDerivation {
     ./patches/rocprofiler-sdk-declare-fmt-build-dep.patch
     ./patches/rocprofiler-sdk-rocpd-include-sqlite.patch
     ./patches/rccl-device-linker-forward-cxx-driver-flags.patch
+    ./patches/rocprofiler-systems-use-bundled-profiler-hub.patch
+    ./patches/profiler-hub-use-system-sqlite.patch
+    ./patches/profiler-hub-use-therock-fmt.patch
+    ./patches/profiler-hub-use-therock-nlohmann-json.patch
     ./patches/rocprofiler-systems-libiberty-allow-single-url.patch
     ./patches/rocprofiler-systems-libunwind-forward-cmake-flags.patch
     ./patches/rocprofiler-systems-tbb-forward-cmake-flags.patch
@@ -1159,9 +1168,22 @@ stdenv.mkDerivation {
     mkdir -p rocm-systems/projects/amdsmi/esmi_ib_library
     cp -a ${esmiIbLibrarySource}/. rocm-systems/projects/amdsmi/esmi_ib_library/
     chmod -R u+w rocm-systems/projects/amdsmi/esmi_ib_library
+    test -f rocm-systems/projects/amdsmi/esmi_ib_library/src/e_smi.c
 
-    perl -0pi -e 's|    if\(NOT EXISTS \''${PROJECT_SOURCE_DIR}/esmi_ib_library/src\).*?    endif\(\)\n\n    # Make sure|    if(NOT EXISTS \''${PROJECT_SOURCE_DIR}/esmi_ib_library/src)\n        message(FATAL_ERROR "vendored esmi_ib_library is missing")\n    else()\n        message(STATUS "Using vendored esmi_ib_library")\n    endif()\n\n    # Make sure|s or die "failed to patch amdsmi esmi_ib_library network clone\n";' \
-      rocm-systems/projects/amdsmi/CMakeLists.txt
+    if grep -q 'set(ESMI_GIT_HASH ' rocm-systems/projects/amdsmi/CMakeLists.txt; then
+      ${lib.optionalString (esmiIbLibraryRev != null) ''
+        grep -Fq 'set(ESMI_GIT_HASH "${esmiIbLibraryRev}")' \
+          rocm-systems/projects/amdsmi/CMakeLists.txt \
+          || { echo "amdsmi ESMI pin does not match the vendored source" >&2; exit 1; }
+      ''}
+      :
+    elif grep -q 'set(current_esmi_tag ' rocm-systems/projects/amdsmi/CMakeLists.txt; then
+      perl -0pi -e 's|    if\(NOT EXISTS \''${PROJECT_SOURCE_DIR}/esmi_ib_library/src\).*?    endif\(\)\n\n    # Make sure|    if(NOT EXISTS \''${PROJECT_SOURCE_DIR}/esmi_ib_library/src)\n        message(FATAL_ERROR "vendored esmi_ib_library is missing")\n    else()\n        message(STATUS "Using vendored esmi_ib_library")\n    endif()\n\n    # Make sure|s or die "failed to patch amdsmi esmi_ib_library network clone\n";' \
+        rocm-systems/projects/amdsmi/CMakeLists.txt
+    else
+      echo "unsupported amdsmi ESMI source declaration" >&2
+      exit 1
+    fi
   ''
   + ''
     perl -0pi -e 's/(therock_cmake_subproject_declare\(rocprofiler-register.*?BACKGROUND_BUILD\n)/$1    CMAKE_ARGS\n      -DROCPROFILER_REGISTER_BUILD_GLOG=OFF\n      -DROCPROFILER_REGISTER_BUILD_FMT=OFF\n/s' base/CMakeLists.txt

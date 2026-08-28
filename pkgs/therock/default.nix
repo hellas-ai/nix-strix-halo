@@ -133,6 +133,7 @@ let
     esmiIbLibrarySource = prev.fetchgit {
       inherit (therockRocmThirdPartySources.esmiIbLibrary) url rev hash;
     };
+    esmiIbLibraryRev = therockRocmThirdPartySources.esmiIbLibrary.rev;
     rocprofilerOtf2Archive = prev.fetchurl {
       url = "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/otf2-3.0.3.tar.gz";
       hash = "sha256-GKOQX3kXNAOH4+3I5XZvMasa9B9OzFZl2mx2nKIcTug=";
@@ -223,6 +224,11 @@ let
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;
         llvmPackages = prev.llvmPackages_21;
+        # Unbounded LLVM/Flang parallelism can consume well over 100 GiB on a
+        # 128-thread builder and trip the fleet's early-OOM guard. Thirty-two
+        # jobs keeps the heavyweight build parallel without making it fragile
+        # when the builder is doing other work.
+        buildJobs = 32;
         inherit (cmakeConfig) target amdgpuTargets distBundleName;
         inherit (source) version;
         profile = "compiler";
@@ -239,6 +245,7 @@ let
           llvmPackages = prev.llvmPackages_21;
           inherit (cmakeConfig) target amdgpuTargets distBundleName;
           inherit (source) version;
+          buildJobs = 32;
           profile = "full";
           therockSource = sourceTree;
           prebuiltStageTree = amdLlvm;
@@ -275,7 +282,7 @@ in
     prev.callPackage ./rocm-modules {
       therockSource = final."therock-rocm-source-${target.packageSuffix}";
       therockVersion = defaultSource.rocmVersion or (normalizeRocmVersion defaultSource.version);
-      inherit (therockFromSourceThirdPartyFetches) esmiIbLibrarySource;
+      inherit (therockFromSourceThirdPartyFetches) esmiIbLibrarySource esmiIbLibraryRev;
     }
   );
 }

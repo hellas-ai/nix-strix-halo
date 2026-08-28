@@ -2,7 +2,7 @@
 +++ b/ggml/src/ggml-rpc/transport.cpp
 @@ -19,0 +20 @@
 +#include <atomic>
-@@ -136,6 +136,28 @@ static enum ibv_mtu rdma_path_mtu(enum ibv_mtu active_mtu) {
+@@ -121,4 +121,26 @@ static enum ibv_mtu rdma_path_mtu(enum ibv_mtu active_mtu) {
      }
  }
 
@@ -28,9 +28,7 @@
 +    return psn == 0 ? 1 : psn;
 +}
 +
- #ifdef __APPLE__
- static bool rdma_darwin_leak_on_close() {
-     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+ struct rdma_conn {
 @@ -470,10 +486,10 @@ bool socket_t::impl::rdma_probe() {
      if (ibv_query_gid(ibctx, ib_port, gid_idx, &local_gid) != 0) return rdma_probe_fail("ibv_query_gid");
 

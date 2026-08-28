@@ -18,6 +18,15 @@ let
     localGpuTargets = vllmGpuTargets;
     gpuTargets = vllmGpuTargets;
   };
+  # PyTorch's LoadHIP.cmake replaces CMAKE_HIP_COMPILER with
+  # $HIP_CLANG_PATH/clang++. Point that conventional name back at TheRock's
+  # Nix-aware wrapper so HIP compilation retains libc/libstdc++ search paths.
+  vllmHipClangPath = final.linkFarm "therock-vllm-hip-clang-${s}" [
+    {
+      name = "clang++";
+      path = "${sdk}/bin/therock-hip-clang++";
+    }
+  ];
   py = final.${therockPythonConfig.packagesAttr};
   vllmSrcWithTag = vllmSrc // {
     tag = vllmSrc.tag or "v${vllmVersion}";
@@ -294,6 +303,7 @@ let
 
         env = (old.env or { }) // {
           VLLM_VERSION_OVERRIDE = vllmVersion;
+          HIP_CLANG_PATH = "${vllmHipClangPath}";
           HIP_PATH = "${sdk}";
           HIP_PLATFORM = "amd";
           TRITON_KERNELS_SRC_DIR = "${tritonKernels}/python/triton_kernels/triton_kernels";

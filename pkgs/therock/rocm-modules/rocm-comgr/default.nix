@@ -53,10 +53,18 @@ stdenv.mkDerivation (finalAttrs: {
     ''
     # Bake LLVM root for cfg/includes or HIPRTC can't find C++ stdlib headers (e.g. <type_traits>).
     + ''
-      substituteInPlace src/comgr-env.cpp \
-        --replace-fail \
-          'return EnvLLVMPath;' \
-          'return EnvLLVMPath ? EnvLLVMPath : "${llvm.rocm-toolchain}";'
+      if grep -Fq 'return EnvLLVMPath;' src/comgr-env.cpp; then
+        substituteInPlace src/comgr-env.cpp \
+          --replace-fail \
+            'return EnvLLVMPath;' \
+            'return EnvLLVMPath ? EnvLLVMPath : "${llvm.rocm-toolchain}";'
+      else
+        # ROCm 10 made an unset LLVM_PATH explicitly return an empty string.
+        substituteInPlace src/comgr-env.cpp \
+          --replace-fail \
+            'return EnvLLVMPath ? EnvLLVMPath : "";' \
+            'return EnvLLVMPath ? EnvLLVMPath : "${llvm.rocm-toolchain}";'
+      fi
     '';
 
   nativeBuildInputs = [

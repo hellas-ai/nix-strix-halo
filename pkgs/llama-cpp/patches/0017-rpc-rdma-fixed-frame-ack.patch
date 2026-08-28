@@ -65,7 +65,7 @@
  static enum ibv_qp_type rdma_qp_type() {
      const char * env = std::getenv("GGML_RDMA_QP_TYPE");
      if (env && (strcmp(env, "UC") == 0 || strcmp(env, "uc") == 0)) {
-@@ -212,19 +260,39 @@
+@@ -212,17 +260,37 @@
             (uint32_t)src[3];
  }
 
@@ -104,9 +104,7 @@
 +    return payload_size == RDMA_FRAME_ACK;
 +}
 +
- #ifdef __APPLE__
- static bool rdma_darwin_leak_on_close() {
-     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+ struct rdma_conn {
 @@ -243,6 +311,10 @@
      struct ibv_mr * tx_mr  = nullptr;
      int             tx_depth = 1;
@@ -118,17 +116,15 @@
 
      void          * rx_buf = nullptr; // rx_depth slots of chunk_size bytes
      struct ibv_mr * rx_mr  = nullptr;
-@@ -341,6 +413,10 @@
-     bool rdma_activate(uint32_t remote_qpn, uint32_t remote_psn, const uint8_t * remote_gid);
+@@ -393,4 +465,8 @@
      void rdma_reset_for_fallback(const char * reason);
      bool rdma_poll(struct ibv_cq * cq, struct ibv_wc * wc);
 +    bool rdma_poll_timeout(struct ibv_cq * cq, struct ibv_wc * wc, uint64_t timeout_us, bool * timed_out);
 +    bool rdma_post_fixed_frame(uint8_t * frame, size_t wire_chunk);
 +    bool rdma_send_fixed_ack(uint64_t seq);
 +    bool rdma_wait_fixed_ack(uint64_t seq, uint8_t * frame, size_t wire_chunk);
-     bool rdma_send(const void * data, size_t size);
-     bool rdma_recv(void * data, size_t size);
 
+     std::unique_ptr<rdma_conn> rdma;
 @@ -600,6 +676,9 @@
      const size_t rx_bytes = static_cast<size_t>(rdma->rx_depth) * rdma->chunk_size;
      const int default_tx_depth = rdma->rx_depth < 8192 ? 8192 : rdma->rx_depth;

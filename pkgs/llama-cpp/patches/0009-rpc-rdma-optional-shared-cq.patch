@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
-@@ -158,6 +158,11 @@ static bool rdma_trace_io() {
+@@ -153,4 +153,9 @@ static bool rdma_trace_io() {
      return env && strcmp(env, "0") != 0;
  }
 
@@ -9,9 +9,7 @@
 +    return env && strcmp(env, "0") != 0;
 +}
 +
- #ifdef __APPLE__
- static bool rdma_darwin_leak_on_close() {
-     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+ struct rdma_conn {
 @@ -199,7 +204,9 @@ struct rdma_conn {
          free(rx_buf);
          if (qp)  ibv_destroy_qp(qp);
