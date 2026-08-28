@@ -12,7 +12,7 @@ Workspace flake for Hellas- libraries and applications from ML ecosystem, packag
 
 ## What's in it
 
-Default outputs target gfx1151 with the binary TheRock ROCm SDK and the
+Default outputs target gfx1151 with AMD's stable ROCm 10 TheRock SDK and
 TheRock-published Python wheels.
 
 | Output (under `packages.x86_64-linux.*`) | What |

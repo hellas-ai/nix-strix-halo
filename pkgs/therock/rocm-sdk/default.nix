@@ -10,7 +10,7 @@
   rdma-core,
   target,
   version,
-  url ? "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-${target}-${version}.tar.gz",
+  url ? "https://stable.repo.amd.com/rocm/core/tarball/therock-dist-linux-${target}-${version}.tar.gz",
   hash,
 }:
 
@@ -37,7 +37,7 @@ stdenvNoCC.mkDerivation {
   dontBuild = true;
   dontPatchELF = true;
   dontStrip = true;
-  # TheRock 7.15 intentionally ships both lib and lib64 content. Nix's generic
+  # TheRock binary SDK ships both lib and lib64 content. Nix's generic
   # move-lib64 hook cannot merge this split layout and leaves lib64 non-empty.
   dontMoveLib64 = true;
 
