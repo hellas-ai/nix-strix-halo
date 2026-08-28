@@ -152,7 +152,8 @@ nix build -o result-vllm-metal-smoke \
 The flake also exports `darwinModules.vllm-metal`. This example matches the
 correctness-first Qwen3.8 deployment tested on a 128 GiB Mac: it binds only to
 localhost, leaves speculative decoding off, admits one sequence, and reserves
-55% of unified memory for a 262,144-token context window.
+85% of unified memory for the official BF16 weights and a 262,144-token context
+window.
 
 ```nix
 {
@@ -160,9 +161,9 @@ localhost, leaves speculative decoding off, admits one sequence, and reserves
 
   services.vllm-metal = {
     enable = true;
-    model = "root4k/Huihui-Qwen3.8-27B-abliterated-oQ4e-mtp";
-    revision = "1412e811e6e4e42a4c2d0bbc268dead30d7ca9f1";
-    servedModelName = "qwen38-fast";
+    model = "Qwen/Qwen3.8-27B";
+    revision = "706cebd746c4b6f2b1d1f892630867acfdfd3df8";
+    servedModelName = "qwen38-dense";
     user = "grw";
     workingDirectory = "/Users/grw";
     environment = {
@@ -171,7 +172,7 @@ localhost, leaves speculative decoding off, admits one sequence, and reserves
     };
     maxModelLen = 262144;
     maxNumSeqs = 1;
-    gpuMemoryUtilization = 0.55;
+    gpuMemoryUtilization = 0.85;
     enablePrefixCaching = true;
     reasoningParser = "qwen3";
     enableAutoToolChoice = true;
@@ -181,9 +182,9 @@ localhost, leaves speculative decoding off, admits one sequence, and reserves
 ```
 
 The model is an external runtime input rather than part of the Nix closure.
-The example pins the exact Hugging Face snapshot used in the test; its 4-bit
-MLX weights occupy 16 GiB on disk. vLLM downloads it into `HF_HOME` when the
-snapshot is not already present.
+The example pins the exact Hugging Face snapshot used in the test; its BF16
+weights occupy roughly 52 GiB on disk. vLLM downloads it into `HF_HOME` when
+the snapshot is not already present.
 
 The prompt and completion share `maxModelLen`; the server does not impose a
 separate 8K completion ceiling. A client may advertise a 262,144-token maximum,
@@ -271,17 +272,18 @@ retained prompt-cache budget per rank as follows:
 ```bash
 ./result/bin/mlx.launch --hostfile jaccl-ring-dual.json -- \
   ./result/bin/python -m mlx_lm server \
-  --model mlx-community/Qwen3.8-27B-8bit \
+  --model Qwen/Qwen3.8-27B \
   --host 0.0.0.0 --port 8081 --max-tokens 262144 \
   --prompt-cache-size 8 --prompt-cache-bytes 4294967296
 ```
 
 In the measured MBP/Goblin lab pair, either 80 Gbit/s cable sustained about 62.5
 Gbit/s of JACCL collective traffic and both sustained 103.6 Gbit/s. The full
-closure is 3.7 GiB. Qwen3.8-27B 8-bit weights occupy roughly 28 GiB on disk;
-TP=2 shards those weights, while active KV state and cache allocations remain
-per-rank costs. A 131,017-token prefill on ordinary MLX-LM did not finish in 1
-hour 49 minutes, so 256K is an accepted window, not a demonstrated useful
+closure is 3.7 GiB. The official Qwen3.8-27B BF16 weights occupy roughly 52 GiB
+on disk. TP=2 shards supported layers in memory, while the checkpoint must
+still be readable by both ranks and active KV state and cache allocations
+remain per-rank costs. A 131,017-token prefill on ordinary MLX-LM did not finish
+in 1 hour 49 minutes, so 256K is an accepted window, not a demonstrated useful
 throughput target for this backend.
 
 | Capability | Verified result |
@@ -290,15 +292,14 @@ throughput target for this backend.
 | Exact-prefix reuse | Works; 44.913 s cold became 0.277 s warm |
 | Ray import and single-node task | Works |
 | Ray multi-node macOS control plane | Unsupported upstream; worker lost GCS after 60 s |
-| MTP in `mlx-community/Qwen3.8-27B-8bit` | Unavailable; the checkpoint has no MTP tensors |
+| MTP in `Qwen/Qwen3.8-27B` | Unavailable on this path; MLX-LM discards the checkpoint's MTP tensors |
 | Distributed oMLX MTP/speculation | Unavailable; oMLX rejects it in distributed mode |
 
-Agent clients can use the OpenAI-compatible endpoint
-`http://<mbp>:8081/v1`, a 262,144-token context declaration, and a practical
-65,536-token output cap. The server itself is not capped at 8K. Prompt and
-completion share the same context window, and a 256K completion would leave no
-room for the system prompt, tools, or conversation, so the client cap is an
-operational policy rather than a backend limit.
+Do not expose this MLX-LM TP probe as an agent endpoint until its greedy output
+matches the single-host reference. The single-host vLLM service above is the
+validated OpenAI-compatible path. Its prompt and completion share the 262,144-
+token context window; clients may advertise the same output ceiling, but each
+request must leave room for the system prompt, tools, and conversation.
 
 ### Two-host vLLM pair benchmark
 

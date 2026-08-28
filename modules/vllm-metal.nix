@@ -60,7 +60,7 @@ in
 
     model = lib.mkOption {
       type = lib.types.nonEmptyStr;
-      example = "mlx-community/Qwen3.8-27B-4bit";
+      example = "Qwen/Qwen3.8-27B";
       description = ''
         Local model directory or Hugging Face model identifier. This is a
         string rather than a Nix path so local model weights are not copied
@@ -71,7 +71,7 @@ in
     revision = lib.mkOption {
       type = lib.types.nullOr lib.types.nonEmptyStr;
       default = null;
-      example = "1412e811e6e4e42a4c2d0bbc268dead30d7ca9f1";
+      example = "706cebd746c4b6f2b1d1f892630867acfdfd3df8";
       description = "Model repository revision; null selects the repository default.";
     };
 
