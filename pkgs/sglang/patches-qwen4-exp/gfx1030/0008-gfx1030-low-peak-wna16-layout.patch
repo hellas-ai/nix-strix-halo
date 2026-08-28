@@ -6,12 +6,14 @@ layouts and needs up to another 200 MiB.  Qwen3.8-Flash-Next TP4 has only about
 Perform the one-time layout conversion through host memory.  Removing the old
 registered parameter and releasing its cached segment before copying the new
 layout back makes the GPU peak equal to the larger of the two layouts instead
-of their sum.  The tensors are identical byte-for-byte after the same
+of their sum.  Explicit synchronization brackets the free/reallocate boundary
+because ROCm otherwise occasionally faults an in-flight H2D copy on this very
+tight residency path.  The tensors are identical byte-for-byte after the same
 transpose/contiguous/view operations; only the temporary location changes.
 
 --- a/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16_moe.py
 +++ b/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16_moe.py
-@@ -508,26 +508,35 @@ class CompressedTensorsWNA16TritonMoE(CompressedTensorsWNA16MoE):
+@@ -508,26 +508,38 @@ class CompressedTensorsWNA16TritonMoE(CompressedTensorsWNA16MoE):
          if getattr(layer, "is_triton_converted", False):
              return
 
@@ -19,7 +21,9 @@ transpose/contiguous/view operations; only the temporary location changes.
 +        def transpose_parameter_on_host(name: str, view_uint8: bool = False) -> None:
 +            parameter = getattr(layer, name)
 +            device = parameter.device
-+            host_tensor = parameter.detach().cpu()
++            torch.cuda.synchronize(device)
++            host_tensor = parameter.detach().to(device="cpu", non_blocking=False)
++            torch.cuda.synchronize(device)
 
 -        # Convert w13 weights: [E, K//8, N] int32 -> [E, N, K//2] uint8
 -        w13 = layer.w13_weight_packed.data
@@ -40,7 +44,8 @@ transpose/contiguous/view operations; only the temporary location changes.
 +            host_tensor = host_tensor.transpose(1, 2).contiguous()
 +            if view_uint8:
 +                host_tensor = host_tensor.view(torch.uint8)
-+            converted = host_tensor.to(device=device)
++            converted = host_tensor.to(device=device, non_blocking=False)
++            torch.cuda.synchronize(device)
 +            setattr(
 +                layer,
 +                name,

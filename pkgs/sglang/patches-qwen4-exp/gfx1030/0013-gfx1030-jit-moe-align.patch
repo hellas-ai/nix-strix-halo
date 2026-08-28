@@ -16,7 +16,7 @@ that unused EP contract rather than silently changing its semantics.
      from sglang.kernels.ops.moe import moe_align_block_size as sgl_moe_align_block_size
 +elif _is_hip:
 +    from sglang.kernels.ops.moe.moe_align import (
-+        moe_align_block_size as jit_moe_align_block_size,
++        moe_align_block_size as hip_jit_moe_align_block_size,
 +    )
 
  if _is_cuda:
@@ -31,7 +31,7 @@ that unused EP contract rather than silently changing its semantics.
 +                raise NotImplementedError(
 +                    "HIP JIT MoE alignment does not support ignore_invalid_expert"
 +                )
-+            jit_moe_align_block_size(
++            hip_jit_moe_align_block_size(
 +                topk_ids,
 +                num_experts + 1,
 +                block_size,

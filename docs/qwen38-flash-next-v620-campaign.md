@@ -32,9 +32,10 @@ As of 2026-08-28:
   FP8 host embedding storage at load time, reducing its payload from
   102,466,171,160 bytes to about half that size. Gathered PLE values are
   converted back to the model dtype before computation;
-- live serving qualification is in progress. Constructor or load completion is
-  not a serving result; the gate remains an externally observed generated-token
-  response.
+- live serving is qualified on four V620s with the ROCm 10 stack:
+  an externally observed short completion returned HTTP 200, and a second
+  48-token prompt generated 146 coherent tokens at 14.01--14.13 tok/s warm
+  decode. Constructor or load completion alone is not counted as a result.
 
 The hardware recovery gate remains explicit: firmware **PCI Hot-Plug -> PCI
 Buses Padding = 5**, remove independent PEX-board power until its LEDs are dark,
@@ -109,10 +110,12 @@ FP16 range audit.
 
 ## Immutable inputs and reproduction
 
-The campaign worktree is `/mnt/Home/src/nix-strix-halo-qwen38-flash-next` on
-`feat/qwen38-flash-next-v620`, forked from the final corrected Qwen3.8 V620
-campaign at `4a6ae1a4`. The main `npu-exporter` worktree and the dirty
-`nixos-config` worktree are deliberately untouched.
+The clean PR worktree is
+`/mnt/Home/src/nix-strix-halo-qwen38-flash-next-clean` on
+`feat/qwen38-flash-next-v620-clean`, stacked on the ROCm 10 source-provider PR
+#165 at `2329fc1b` (itself based on the merged stable update at `e24b2efc`).
+The historical campaign worktree remains separate. The main `npu-exporter`
+worktree and the dirty `nixos-config` worktree are deliberately untouched.
 
 Pinned inputs:
 
@@ -401,3 +404,38 @@ page cache after loading. It does not enable MXFP4, FP8 compute, AITER,
 FlashInfer, TileLang, CuTe, or speculation by accident. The model pathname above
 records the campaign mount; a persistent deployment may use another read-only
 mount only after passing the same inventory and fabric-counter gates.
+
+### Live qualification evidence
+
+The first complete ROCm 10 qualification used TP4 unit
+`codex-qwen38-flash-next-tp4-v26.service`, exact closure
+`/nix/store/m5k617a9fx8w5rv66nnnkznhyb334px2-sglang-rocm-gfx1030-0.5.17.dev0+qwen4exp.73a2552`,
+and log
+`.bench-artifacts/serve/serve-20260828-220237.log` on strix-2. A compact,
+tracked extract is available in
+[`qwen38-flash-next-v620-20260828.md`](evidence/qwen38-flash-next-v620-20260828.md).
+The immutable checkpoint was published read-only at
+`/mnt/trex-models-fabric/Qwen3.8-Flash-Next-W4A16-G32`.
+
+The first external request returned HTTP 200 in 7.523 seconds with 23 prompt
+tokens, eight completion tokens, and the exact response:
+
+```text
+V620 FLASH WORKS
+```
+
+The immediately following warm request exercised the previously failing
+64-token Triton prefill tile. It returned HTTP 200 in 10.790 seconds with 48
+prompt tokens and 146 completion tokens. SGLang reported 9.43 input tok/s and
+14.01--14.13 generation tok/s. The answer correctly described sparse expert
+routing, top-k selection, and the separation between total parameter capacity
+and per-token compute.
+
+An earlier v24 run had already produced real tokens, then exposed a precise
+gfx1030 launch failure on the longer prompt: QSA's upstream two-stage prefill
+configuration requested 67,584 bytes of LDS against the V620's 65,536-byte
+limit. The qualified closure retains the upstream tile and warp count but uses
+one software-pipeline stage on ROCm. Both the short decode and longer prefill
+were repeated after that fix. At qualification time, v26 was left live at
+`http://strix-2:30800/v1`; endpoint lifetime is operational state rather than
+part of this immutable evidence record.

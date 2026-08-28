@@ -44,6 +44,7 @@ assert "def sparse_gqa_decode_physical_triton(" in sparse_source
 assert "scores = torch.empty(" in sparse_source
 assert "accumulator = tl.zeros([BLOCK_D], tl.float32)" in sparse_source
 assert "has_values = next_max > -float(\"inf\")" in sparse_source
+assert "if torch.version.hip is not None:\n        stages = 1" in sparse_source
 
 # The CUDA implementation remains available for supported NVIDIA systems; the
 # patch must not pretend that FA2/FA4 itself became portable.
@@ -79,9 +80,12 @@ wna16_source = (
     / "compressed_tensors/schemes/compressed_tensors_wNa16_moe.py"
 ).read_text(encoding="utf-8")
 assert "def transpose_parameter_on_host(" in wna16_source
+assert 'to(device="cpu", non_blocking=False)' in wna16_source
 assert "parameter.data = parameter.data.new_empty(0)" in wna16_source
 assert 'setattr(layer, name, None)' in wna16_source
 assert "torch.cuda.empty_cache()" in wna16_source
+assert wna16_source.count("torch.cuda.synchronize(device)") == 3
+assert "to(device=device, non_blocking=False)" in wna16_source
 assert 'transpose_parameter_on_host("w13_weight_packed", view_uint8=True)' in wna16_source
 assert 'transpose_parameter_on_host("w2_weight_scale")' in wna16_source
 
@@ -150,7 +154,9 @@ expected["w13_weight_packed"] = expected["w13_weight_packed"].view(torch.uint8)
 expected["w2_weight_packed"] = expected["w2_weight_packed"].view(torch.uint8)
 
 empty_cache = torch.cuda.empty_cache
+synchronize = torch.cuda.synchronize
 torch.cuda.empty_cache = lambda: None
+torch.cuda.synchronize = lambda _device: None
 try:
     scheme = wna16_namespace["_PatchedWNA16Scheme"]()
     scheme.process_weights_after_loading(layer)
@@ -158,6 +164,7 @@ try:
     scheme.process_weights_after_loading(layer)
 finally:
     torch.cuda.empty_cache = empty_cache
+    torch.cuda.synchronize = synchronize
 
 assert layer.is_triton_converted
 for name in names:
@@ -208,9 +215,16 @@ moe_align_source = (
 ).read_text(encoding="utf-8")
 assert "if _is_cuda or _is_xpu or _is_musa:" in moe_align_source
 assert "elif _is_hip:" in moe_align_source
-assert "moe_align_block_size as jit_moe_align_block_size" in moe_align_source
+assert "moe_align_block_size as hip_jit_moe_align_block_size" in moe_align_source
 assert "if ignore_invalid_expert:" in moe_align_source
-assert "jit_moe_align_block_size(" in moe_align_source
+assert "hip_jit_moe_align_block_size(" in moe_align_source
+
+moe_align_kernel_source = (
+    root / "sglang/kernels/jit/csrc/moe/moe_align_kernel.cu"
+).read_text(encoding="utf-8")
+assert "using warp_mask_t = unsigned long long;" in moe_align_kernel_source
+assert "using warp_mask_t = unsigned;" in moe_align_kernel_source
+assert "warp_mask_t mask = ~warp_mask_t{0}" in moe_align_kernel_source
 
 eagle_source = (root / "sglang/srt/speculative/eagle_utils.py").read_text(
     encoding="utf-8"
