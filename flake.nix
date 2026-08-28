@@ -1180,6 +1180,9 @@
           {
             deadnix = runSourceCheck "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
             statix = runSourceCheck "statix" [ pkgs.statix ] "statix check .";
+            therock-updater-tests = runSourceCheck "therock-updater-tests" [
+              pkgs.python3
+            ] "python3 -m unittest discover -s pkgs/therock/scripts -p 'test_*.py'";
             nixfmt = runSourceCheck "nixfmt" [
               pkgs.nixfmt-tree
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
