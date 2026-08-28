@@ -638,6 +638,7 @@
             "linux-multikernel"
             "mlx-rocm"
             "multikernel-demo-initrd"
+            "sglang-qwen38-flash-next-rocm"
             "sglang-rocm"
             "strix-halo-mes-firmware"
             "therock-amdsmi"

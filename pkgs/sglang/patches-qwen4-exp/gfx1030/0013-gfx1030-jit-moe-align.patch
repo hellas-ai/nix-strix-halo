@@ -1,0 +1,57 @@
+The generic Triton MoE runner selects the prebuilt sgl_kernel align op on HIP.
+That extension is not available in the gfx1030 package, but SGLang ships the
+same HIP-compatible kernel through its runtime JIT loader.  Select that
+implementation on HIP while leaving the released CUDA/XPU/MUSA paths alone.
+
+The JIT wrapper does not implement ignore_invalid_expert.  Fail explicitly for
+that unused EP contract rather than silently changing its semantics.
+
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
+@@ -15,7 +15,11 @@ _is_xpu = is_xpu()
+ _is_musa = is_musa()
+
+-if _is_cuda or _is_hip or _is_xpu or _is_musa:
++if _is_cuda or _is_xpu or _is_musa:
+     from sglang.kernels.ops.moe import moe_align_block_size as sgl_moe_align_block_size
++elif _is_hip:
++    from sglang.kernels.ops.moe.moe_align import (
++        moe_align_block_size as jit_moe_align_block_size,
++    )
+
+ if _is_cuda:
+     from sglang.kernels.ops.moe.moe_align_small_numel import (
+@@ -148,15 +152,32 @@ def moe_align_block_size(
+         )
+     # ===== END TO BE REFACTORED ====
+     else:
+-        sgl_moe_align_block_size(
++        if _is_hip:
++            if ignore_invalid_expert:
++                raise NotImplementedError(
++                    "HIP JIT MoE alignment does not support ignore_invalid_expert"
++                )
++            jit_moe_align_block_size(
++                topk_ids,
++                num_experts + 1,
++                block_size,
++                sorted_ids,
++                expert_ids,
++                num_tokens_post_pad,
++                cumsum_buffer,
++                True,
++            )
++        else:
++            sgl_moe_align_block_size(
+             topk_ids,
+             num_experts + 1,
+             block_size,
+             sorted_ids,
+             expert_ids,
+             num_tokens_post_pad,
+             cumsum_buffer,
+             True,
+             ignore_invalid_expert,
+         )
++
+     return sorted_ids, expert_ids, num_tokens_post_pad
