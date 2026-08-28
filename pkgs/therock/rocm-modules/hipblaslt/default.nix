@@ -228,9 +228,16 @@ stdenv.mkDerivation (finalAttrs: {
     # Move binaries to appropriate outputs and delete leftover /bin
     + ''
       mkdir -p $benchmark/bin
-      # 7.13 ships a new hipblaslt-perf driver alongside the bench/api
-      # binaries — include it in the benchmark output so rmdir succeeds.
-      mv $out/bin/hipblaslt-{api-overhead,bench*,perf} $out/bin/*.yaml $out/bin/*.py $benchmark/bin
+      # Keep every hipBLASLt command-line driver in the benchmark output.
+      # New releases add drivers (for example perf and cotenant) without a
+      # stable filename list, while the library output must not retain /bin.
+      mv $out/bin/hipblaslt-* $out/bin/*.yaml $out/bin/*.py $benchmark/bin
+      # hipblaslt-perf resolves these modules relative to its own prefix.
+      if [[ -d $out/share/hipblaslt/performance ]]; then
+        mkdir -p $benchmark/share/hipblaslt
+        mv $out/share/hipblaslt/performance $benchmark/share/hipblaslt/
+        rmdir $out/share/hipblaslt
+      fi
       ${lib.optionalString buildTests ''
         mkdir -p $test/bin
         mv $out/bin/hipblas-test $test/bin

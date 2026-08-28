@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
-@@ -91,6 +91,23 @@ static const char * rdma_qp_type_name(enum ibv_qp_type qp_type) {
+@@ -68,4 +68,21 @@ static const char * rdma_qp_type_name(enum ibv_qp_type qp_type) {
      return qp_type == IBV_QPT_UC ? "UC" : "RC";
  }
 
@@ -21,9 +21,7 @@
 +    return static_cast<uint16_t>(parsed);
 +}
 +
- #ifdef __APPLE__
- static bool rdma_darwin_leak_on_close() {
-     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+ struct rdma_conn {
 @@ -443,7 +460,9 @@ bool socket_t::impl::rdma_probe() {
  bool socket_t::impl::rdma_activate(uint32_t remote_qpn, uint32_t remote_psn, const uint8_t * remote_gid) {
      const bool use_uc = rdma->qp_type == IBV_QPT_UC;
