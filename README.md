@@ -26,6 +26,8 @@ TheRock-published Python wheels.
 | `strix-halo-vllm-pair-bench-gfx1151` | two-host vLLM transport-matrix bench driver |
 | `therock-rocm`, `therock-python`, `torch-rocm` | TheRock binary SDK + wheels |
 | `amdtop` | btop/nvitop-style TUI for AMD CPU, GPU and XDNA NPU telemetry |
+| `linux-multikernel`, `kerf-multikernel` | pinned Linux 7.0-mk2 host/spawn kernel and lifecycle manager |
+| `multikernel-demo-initrd` | tiny interactive spawn initramfs for bare-metal isolation demos |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
 | Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
@@ -194,6 +196,12 @@ the tag in `lib/providers.nix`.
 - `nixosModules.fastflowlm` — FastFlowLM OpenAI-compatible server (XDNA2)
 - `nixosModules.benchmark-runner` / `benchmark-executor` — local + remote bench infra
 - `nixosModules.ec-su-axb35`, `ryzenadj`, `tuning` — Strix Halo hardware modules
+- `nixosModules.multikernel` — declarative bare-metal kernel pools and spawn instances
+
+The multikernel package builds the complete upstream `v7.0-mk2` tree, not a
+patch stack replayed onto the current nixpkgs kernel. See
+[docs/multikernel.md](docs/multikernel.md) for the module, local-source override,
+hardware bring-up, rollback, and panic-isolation demonstration.
 
 Example RDMA RPC server instance:
 
