@@ -9,6 +9,28 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        pyproject-nix.follows = "pyproject-nix";
+      };
+    };
+
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        pyproject-nix.follows = "pyproject-nix";
+        uv2nix.follows = "uv2nix";
+      };
+    };
+
     ec-su-axb35 = {
       url = "github:cmetz/ec-su_axb35-linux";
       flake = false;
@@ -51,6 +73,20 @@
 
     mlx-src = {
       url = "github:NripeshN/mlx/rocm-support";
+      flake = false;
+    };
+
+    mlx-metal-src = {
+      url = "github:ml-explore/mlx/v0.32.0";
+      flake = false;
+    };
+
+    mlx-lm-metal-src = {
+      # vLLM-Metal declares another 0.31.3 source revision in its wheel
+      # metadata. The Darwin stack pins this API-compatible revision because
+      # it retains the state-machine interface used by the Metal model loaders.
+      # The package smoke test imports the resulting combined environment.
+      url = "github:ml-explore/mlx-lm/ab1806e8f5d6aa035973af194a1b9198ab4754dc";
       flake = false;
     };
 
@@ -539,8 +575,15 @@
         live-iso = mkLiveIsoConfiguration { };
       };
 
-      darwinModules = {
+      darwinModules = rec {
         benchmark-executor = import ./modules/benchmark-executor.nix;
+        vllm-metal =
+          { lib, ... }:
+          {
+            imports = [ ./modules/vllm-metal.nix ];
+            services.vllm-metal.package = lib.mkDefault self.packages.aarch64-darwin.vllm-metal;
+          };
+        default = vllm-metal;
       };
     }
     // {
@@ -569,10 +612,13 @@
           inherit (packageRuntimeEnv) wrapRuntimeEnv;
           jacclPackage = pkgs.callPackage ./pkgs/jaccl (
             {
-              inherit (inputs) mlx-src;
+              mlx-src = if pkgs.stdenv.hostPlatform.isDarwin then inputs.mlx-metal-src else inputs.mlx-src;
             }
             // lib.optionalAttrs pkgs.stdenv.isLinux {
               rdma-core = pkgs.rdma-core-usb4;
+            }
+            // lib.optionalAttrs pkgs.stdenv.isDarwin {
+              darwinDeploymentTarget = "26.2";
             }
           );
           mkMlxLm =
@@ -725,26 +771,50 @@
 
           darwinPackages =
             let
+              mkMlxMetalStack =
+                pythonPackages:
+                let
+                  mlxNanobind = pythonPackages.callPackage ./pkgs/mlx/nanobind-2_13.nix { };
+                  mlxMetalBackend = pythonPackages.callPackage ./pkgs/mlx/metal.nix {
+                    mlx-src = inputs.mlx-metal-src;
+                    jaccl = jacclPackage;
+                    nanobind = mlxNanobind;
+                    pname = "mlx-metal";
+                    buildStage = 2;
+                    darwinDeploymentTarget = "26.2";
+                  };
+                  mlxMetal = pythonPackages.callPackage ./pkgs/mlx/metal.nix {
+                    mlx-src = inputs.mlx-metal-src;
+                    jaccl = jacclPackage;
+                    nanobind = mlxNanobind;
+                    pname = "mlx";
+                    buildStage = 1;
+                    backendPackage = mlxMetalBackend;
+                    darwinDeploymentTarget = "26.2";
+                  };
+                in
+                {
+                  inherit mlxMetal mlxMetalBackend;
+                };
+
               # Python 3.14 currently aborts in libffi while building MLX's
               # macOS wheel. Keep the complete Metal stack on Python 3.13.
               mlxPythonPackages = pkgs.python313Packages;
-              mlxNanobind = mlxPythonPackages.callPackage ./pkgs/mlx/nanobind-2_13.nix { };
-              mlxMetalBackend = mlxPythonPackages.callPackage ./pkgs/mlx/metal.nix {
-                inherit (inputs) mlx-src;
-                nanobind = mlxNanobind;
-                pname = "mlx-metal";
-                buildStage = 2;
-              };
-              mlxMetal = mlxPythonPackages.callPackage ./pkgs/mlx/metal.nix {
-                inherit (inputs) mlx-src;
-                nanobind = mlxNanobind;
-                pname = "mlx";
-                buildStage = 1;
-                backendPackage = mlxMetalBackend;
-              };
+              inherit (mkMlxMetalStack mlxPythonPackages) mlxMetal mlxMetalBackend;
               mlxLm = mkMlxLm {
                 mlxPackage = mlxMetal;
                 pythonPackages = mlxPythonPackages;
+              };
+              vllmMlxStack = mkMlxMetalStack pkgs.python312Packages;
+              vllmMetal = pkgs.callPackage ./pkgs/vllm-metal {
+                inherit (inputs)
+                  pyproject-build-systems
+                  pyproject-nix
+                  uv2nix
+                  ;
+                mlx-lm-src = inputs.mlx-lm-metal-src;
+                mlxPackage = vllmMlxStack.mlxMetal;
+                mlxMetalPackage = vllmMlxStack.mlxMetalBackend;
               };
             in
             {
@@ -756,6 +826,7 @@
               mlx = mlxMetal;
               mlx-lm = mlxLm;
               mlx-metal = mlxMetalBackend;
+              vllm-metal = vllmMetal;
             };
         in
         genericPackages
@@ -875,6 +946,7 @@
             let
               ds4 = ap self.packages.${system}.ds4;
               mlxLm = self.packages.${system}.mlx-lm;
+              vllmMetal = self.packages.${system}.vllm-metal;
             in
             {
               ds4 = ds4 "ds4" "Run DwarfStar 4 with Metal";
@@ -893,6 +965,7 @@
               mlx-lm-generate = ap mlxLm "mlx_lm.generate" "Generate text with MLX LM";
               mlx-lm-chat = ap mlxLm "mlx_lm.chat" "Run the MLX LM chat CLI";
               mlx-lm-server = ap mlxLm "mlx_lm.server" "Run the MLX LM HTTP server";
+              vllm-metal = ap vllmMetal "vllm" "Run vLLM with the Apple Silicon Metal plugin";
             };
         in
         genericApps
@@ -1205,6 +1278,73 @@
                   strix-halo-vllm-pair-bench-ci --scenario qwen-peak --dry-run | tee "$out"
                   grep -q "dry-run: not invoking" "$out"
                 '';
+          }
+        )
+        // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "aarch64-darwin") (
+          let
+            fakeVllmMetal = pkgs.writeShellScriptBin "vllm" ''
+              exit 0
+            '';
+            evalService =
+              serviceConfig:
+              lib.evalModules {
+                specialArgs = { inherit pkgs; };
+                modules = [
+                  self.darwinModules.vllm-metal
+                  {
+                    options = {
+                      assertions = lib.mkOption {
+                        type = lib.types.listOf lib.types.attrs;
+                        default = [ ];
+                      };
+                      launchd.daemons = lib.mkOption {
+                        type = lib.types.attrsOf lib.types.anything;
+                        default = { };
+                      };
+                    };
+                    config.services.vllm-metal = {
+                      enable = true;
+                      package = lib.mkForce fakeVllmMetal;
+                      model = "example/Qwen";
+                      user = "vllm-test";
+                    }
+                    // serviceConfig;
+                  }
+                ];
+              };
+            good = evalService {
+              environment.HF_HOME = "/Users/vllm-test/.cache/huggingface";
+              workingDirectory = "/Users/vllm-test";
+              speculativeConfig = {
+                method = "mtp";
+                num_speculative_tokens = 1;
+              };
+            };
+            badMtp = evalService {
+              maxNumSeqs = 2;
+              speculativeConfig.method = "mtp";
+            };
+            failedAssertions =
+              configuration: lib.filter (item: !item.assertion) configuration.config.assertions;
+            service = good.config.launchd.daemons.vllm-metal;
+          in
+          {
+            vllm-metal-module =
+              assert failedAssertions good == [ ];
+              assert failedAssertions badMtp != [ ];
+              assert good.config.services.vllm-metal.host == "127.0.0.1";
+              assert good.config.services.vllm-metal.maxModelLen == 262144;
+              assert service.environment.HF_HOME == "/Users/vllm-test/.cache/huggingface";
+              assert service.serviceConfig.UserName == "vllm-test";
+              assert service.serviceConfig.WorkingDirectory == "/Users/vllm-test";
+              assert service.serviceConfig.KeepAlive.SuccessfulExit == false;
+              pkgs.runCommandLocal "ci-vllm-metal-module" { } ''
+                grep -F -- '--host 127.0.0.1' ${service.command}
+                grep -F -- '--max-model-len 262144' ${service.command}
+                grep -F -- '--speculative-config' ${service.command}
+                grep -F -- '"method":"mtp"' ${service.command}
+                touch "$out"
+              '';
           }
         )
       );

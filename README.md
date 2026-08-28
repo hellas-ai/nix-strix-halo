@@ -30,7 +30,7 @@ TheRock-published Python wheels.
 | `multikernel-demo-initrd` | tiny interactive spawn initramfs for bare-metal isolation demos |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
-| Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
+| Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `vllm-metal`, `ds4`, `jaccl` | cross-platform / Metal |
 
 Apps mirror the package names — `apps.x86_64-linux.llama-cli-rocm`,
 `llama-rpc-server`, `flm`, `therock-python`, `live-iso-vm`, etc.
@@ -135,6 +135,169 @@ client per process with `GGML_RPC_SERVER_ONE_SHOT=1`; pair it with systemd
 for comparison runs, or override pieces explicitly with
 `GGML_RPC_RDMA_SEND_FRAME_ACK`, `GGML_RPC_RDMA_WAIT_FRAME_ACK`,
 `GGML_RPC_RDMA_ACK_TIMEOUT_US`, and `GGML_RPC_RDMA_ACK_RETRIES`.
+
+### Darwin vLLM Metal and JACCL
+
+`packages.aarch64-darwin.vllm-metal` combines the upstream, version-matched
+vLLM 0.28 and vLLM-Metal release wheels with MLX 0.32 and MLX-LM 0.31.3 built
+from pinned source. The MLX build links this flake's JACCL package instead of
+its bundled copy. Build and perform the model-free regression check with:
+
+```bash
+nix build -o result-vllm-metal .#packages.aarch64-darwin.vllm-metal
+nix build -o result-vllm-metal-smoke \
+  .#packages.aarch64-darwin.vllm-metal.tests.imports
+./result-vllm-metal/bin/python \
+  -c 'import mlx.core, mlx_lm, ray, vllm, vllm_metal'
+```
+
+The flake also exports `darwinModules.vllm-metal`. This example matches the
+correctness-first Qwen3.8 deployment tested on a 128 GiB Mac: it binds only to
+localhost, leaves speculative decoding off, admits one sequence, and reserves
+85% of unified memory for the official BF16 weights and a 262,144-token context
+window.
+
+```nix
+{
+  imports = [ inputs.nix-strix-halo.darwinModules.vllm-metal ];
+
+  services.vllm-metal = {
+    enable = true;
+    model = "Qwen/Qwen3.8-27B";
+    revision = "706cebd746c4b6f2b1d1f892630867acfdfd3df8";
+    servedModelName = "qwen38-dense";
+    user = "grw";
+    workingDirectory = "/Users/grw";
+    environment = {
+      HOME = "/Users/grw";
+      HF_HOME = "/Users/grw/.cache/huggingface";
+    };
+    maxModelLen = 262144;
+    maxNumSeqs = 1;
+    gpuMemoryUtilization = 0.85;
+    enablePrefixCaching = true;
+    reasoningParser = "qwen3";
+    enableAutoToolChoice = true;
+    toolCallParser = "qwen3_coder";
+  };
+}
+```
+
+The model is an external runtime input rather than part of the Nix closure.
+The example pins the exact Hugging Face snapshot used in the test; its BF16
+weights occupy roughly 52 GiB on disk. vLLM downloads it into `HF_HOME` when
+the snapshot is not already present.
+
+The prompt and completion share `maxModelLen`; the server does not impose a
+separate 8K completion ceiling. A client may advertise a 262,144-token maximum,
+but a request still needs to leave room for its system prompt, tools, history,
+and at least one generated token. Keep the default localhost bind and reach it
+through an authenticated SSH tunnel unless deliberate LAN exposure is needed.
+
+The Metal compiler is an Apple host component and cannot currently be placed
+in the Nix sandbox. A builder needs macOS 26.2 or newer, the flake's macOS 26 SDK, and a
+working `metal`/`metallib` toolchain. Install the latter once with
+`xcodebuild -downloadComponent MetalToolchain`. The MLX derivation deliberately
+uses `__noChroot`; do not claim bit-reproducibility across different installed
+Apple Metal toolchains.
+
+For two-host MLX tensor parallelism, assign IPv4 addresses to every direct
+Thunderbolt interface used by JACCL. JACCL selects the resulting IPv4-mapped
+GID dynamically and reports a clear error when none exists. A dual-link
+hostfile has this shape (device names are host-specific); the same lab
+configuration is available as `examples/jaccl-ring-dual.json`:
+
+```json
+{
+  "backend": "jaccl-ring",
+  "envs": ["MLX_METAL_FAST_SYNCH=1"],
+  "hosts": [
+    {"ssh": "10.55.0.1", "ips": ["10.55.0.1"],
+     "rdma": [null, ["rdma_en1", "rdma_en2"]]},
+    {"ssh": "10.55.0.2", "ips": [],
+     "rdma": [["rdma_en3", "rdma_en5"], null]}
+  ]
+}
+```
+
+Before loading a model, validate the data path with the included 4 KiB exact
+all-reduce. The Python executable and script must exist at the same paths on
+both hosts.
+
+```bash
+./result-vllm-metal/bin/mlx.launch \
+  --hostfile examples/jaccl-ring-dual.json -- \
+  ./result-vllm-metal/bin/python examples/mlx-jaccl-allreduce.py
+```
+
+For a larger transport sanity check, append for example
+`--elements 67108864 --warmup 3 --iterations 20`. The reported
+`payload_gib_s` is application payload per rank, not physical link line rate.
+
+`vllm-metal` does not currently expose cross-host tensor parallelism. The
+included MLX-LM harness can compare a single-host greedy reference with
+tensor-parallel weight sharding over JACCL. First capture the reference:
+
+```bash
+./result-vllm-metal/bin/python examples/mlx-lm-tp-generate.py \
+  --reference --model /absolute/path/to/model
+```
+
+Then put the checkpoint at the same path on both hosts and run:
+
+```bash
+./result-vllm-metal/bin/mlx.launch \
+  --hostfile examples/jaccl-ring-dual.json -- \
+  ./result-vllm-metal/bin/python examples/mlx-lm-tp-generate.py \
+  --model /absolute/path/on/both/hosts/model
+```
+
+Both commands emit JSON containing the generated token IDs. Each rank
+constructs the model, but `sharded_load` partitions supported layers before
+evaluating their weights. This is a correctness harness for MLX-LM, not a
+distributed vLLM server, disaggregated prefill, or Ray deployment.
+
+With MLX 0.32.0, TP=2 over JACCL matched the single-host greedy tokens exactly
+for the unquantized `Qwen/Qwen3.5-0.8B` checkpoint. The unquantized
+`Qwen/Qwen3.8-27B` run did not produce its first token within ten minutes on a
+128 GiB/36 GiB host pair because the smaller host was swapping heavily. It is
+therefore not presented as a serving configuration. The current MLX-LM loader
+also discards this checkpoint's MTP tensors, so the harness uses ordinary
+target-model decoding rather than MTP speculation.
+
+Keep the two data cables in distinct `/30` subnets. Bridging both without STP
+creates an L2 loop. For example, use `10.56.1.1/30` and `10.56.2.1/30` on the
+first host, and `.2/30` on the corresponding interfaces of the second host:
+
+```bash
+sudo ifconfig en1 inet 10.56.1.1/30 up
+sudo ifconfig en2 inet 10.56.2.1/30 up
+# second host: en3 -> 10.56.1.2/30; en5 -> 10.56.2.2/30
+```
+
+In the measured MBP/Goblin lab pair, either 80 Gbit/s cable sustained about 62.5
+Gbit/s of JACCL collective traffic and both sustained 103.6 Gbit/s. The full
+closure is 3.7 GiB. The official Qwen3.8-27B BF16 weights occupy roughly 52 GiB
+on disk. TP=2 shards supported layers in memory, while the checkpoint must
+still be readable by both ranks and active KV state and cache allocations
+remain per-rank costs. A 131,017-token prefill on ordinary MLX-LM did not finish
+in 1 hour 49 minutes, so 256K is an accepted window, not a demonstrated useful
+throughput target for this backend.
+
+| Capability | Verified result |
+|---|---|
+| JACCL exact all-reduce over two Thunderbolt links | Works |
+| MLX-LM TP=2 greedy correctness | Exact match for unquantized Qwen3.5-0.8B |
+| MLX-LM TP=2 Qwen3.8-27B serving | Not viable on the tested 36 GiB worker |
+| Exact-prefix reuse | Works; 44.913 s cold became 0.277 s warm |
+| Ray import and single-node task | Works |
+| Ray multi-node macOS control plane | Unsupported upstream; worker lost GCS after 60 s |
+| MTP in `Qwen/Qwen3.8-27B` | Unavailable on this path; MLX-LM discards the checkpoint's MTP tensors |
+| Distributed oMLX MTP/speculation | Unavailable; oMLX rejects it in distributed mode |
+
+The single-host vLLM service above is the validated OpenAI-compatible path. Its
+prompt and completion share the 262,144-token context window; each request must
+leave room for the system prompt, tools, and conversation.
 
 ### Two-host vLLM pair benchmark
 
