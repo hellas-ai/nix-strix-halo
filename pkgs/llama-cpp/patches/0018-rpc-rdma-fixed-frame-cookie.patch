@@ -185,10 +185,10 @@ index 172ad08..7e55cb7 100644
          memcpy(local_caps, &rc, sizeof(rc));
      } else {
          rdma_reset_for_fallback("probe failed");
-@@ -1275,6 +1328,13 @@ void socket_t::impl::update_caps(const uint8_t * remote_caps) {
-         rdma_reset_for_fallback("remote has no RDMA caps");
-         return;
-     }
+@@ -1310,6 +1363,13 @@ void socket_t::impl::update_caps(const uint8_t * remote_caps) {
+ #  else
+     rdma_caps rc = {};
+     memcpy(&rc, remote_caps, sizeof(rc));
 +    if (rdma) {
 +        rdma->rx_cookie = rc.cookie;
 +        if (rdma_trace_io()) {
@@ -196,9 +196,9 @@ index 172ad08..7e55cb7 100644
 +                           (unsigned long long)rdma->rx_cookie);
 +        }
 +    }
-     if (rdma_activate(rc.qpn, rc.psn, rc.gid)) {
-         use_rdma = true;
-     } else {
+     bool activated = rdma_activate(rc.qpn, rc.psn, rc.gid);
+ #  endif
+     if (activated) {
 diff --git a/ggml/src/ggml-rpc/transport.h b/ggml/src/ggml-rpc/transport.h
 index 73b85cc..4bfea62 100644
 --- a/ggml/src/ggml-rpc/transport.h
@@ -212,3 +212,15 @@ index 73b85cc..4bfea62 100644
 
  struct socket_t {
      ~socket_t();
+diff --git a/ggml/src/ggml-rpc/transport-apple.cpp b/ggml/src/ggml-rpc/transport-apple.cpp
+index b932841..0824773 100644
+--- a/ggml/src/ggml-rpc/transport-apple.cpp
++++ b/ggml/src/ggml-rpc/transport-apple.cpp
+@@ -50,6 +50,7 @@ struct apple_rdma_caps {
+     uint16_t lid;
+     uint16_t reserved;
+     uint8_t  gid[RDMA_GID_SIZE];
++    uint64_t protocol_reserved;
+ };
+
+ static_assert(sizeof(apple_rdma_caps) == RPC_CONN_CAPS_SIZE, "apple_rdma_caps must match conn_caps size");

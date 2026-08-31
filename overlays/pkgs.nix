@@ -26,10 +26,28 @@ let
   suffix = rocmTarget.packageSuffix;
   firstBuildTarget = builtins.head rocmTarget.buildTargets;
 
+  # The monolithic source build exposes the same headers, libraries, and HIP
+  # compiler as the split ROCm packages expected by nixpkgs consumers. Present
+  # the three-package subset llama.cpp asks for as a small compatibility scope
+  # so selecting `therock-source` changes its actual derivation graph, not just
+  # the provider label used by Hydra.
+  therockSourceSdk = final."therock-rocm-${suffix}";
+  activeRocmPackages =
+    if rocmProvider == "therock-source" then
+      {
+        clr = therockSourceSdk // {
+          hipClangPath = "${therockSourceSdk}/lib/llvm/bin";
+        };
+        hipblas = therockSourceSdk;
+        rocblas = therockSourceSdk;
+      }
+    else
+      final.rocmPackages;
+
   rocmOverride = {
     rocmSupport = true;
     rpcSupport = true;
-    inherit (final) rocmPackages;
+    rocmPackages = activeRocmPackages;
     inherit (rocmTarget) rocmGpuTargets;
   };
   vulkanOverride = {
@@ -153,8 +171,7 @@ let
     ];
     patches = (old.patches or [ ]) ++ [
       ../pkgs/llama-cpp/patches/0001-rpc-rdma-configurable-chunk-size.patch
-      ../pkgs/llama-cpp/patches/0002-rpc-rdma-darwin-librdma.patch
-      ../pkgs/llama-cpp/patches/0003-rpc-rdma-log-probe-and-avoid-darwin-fallback-hang.patch
+      ../pkgs/llama-cpp/patches/0003-rpc-rdma-log-probe-failures.patch
       ../pkgs/llama-cpp/patches/0004-rpc-rdma-selectable-uc-qp.patch
       ../pkgs/llama-cpp/patches/0005-rpc-rdma-remote-lid-env.patch
       ../pkgs/llama-cpp/patches/0006-rpc-rdma-mtu-and-uc-init-shape.patch
@@ -189,11 +206,16 @@ let
 
   # llama.cpp otherwise prefers a host /opt/rocm when one is visible. Apart
   # from making the build impure, that can mix a host HIP runtime with the
-  # target-narrowed nixpkgs ROCm libraries selected above.
+  # provider-selected ROCm libraries above.
   withHermeticRocm =
     drv:
-    drv.overrideAttrs (_: {
-      env.ROCM_PATH = final.rocmPackages.clr;
+    drv.overrideAttrs (old: {
+      env.ROCM_PATH = activeRocmPackages.clr;
+      cmakeFlags =
+        (old.cmakeFlags or [ ])
+        ++ lib.optionals (rocmProvider == "therock-source") [
+          (lib.cmakeFeature "CMAKE_HIP_COMPILER" "${therockSourceSdk}/bin/therock-hip-clang++")
+        ];
     });
 
   # macOS 26 exposes Apple Thunderbolt RDMA through the SDK's infiniband
@@ -236,6 +258,11 @@ let
       ecPackages = prev.callPackage ../pkgs/ec-su-axb35.nix {
         ec-su-axb35-src = inputs.ec-su-axb35;
       };
+      qwen4PythonPackages = final.${therockPythonConfig.packagesAttr}.overrideScope (
+        pyFinal: _pyPrev: {
+          transformers = pyFinal.callPackage ../pkgs/transformers-5_12_1.nix { };
+        }
+      );
     in
     {
       amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
@@ -328,6 +355,35 @@ let
         rocmSdk = final."therock-rocm-${suffix}";
         inherit (rocmTarget) packageSuffix;
         hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+      };
+      sglang-qwen38-flash-next-rocm = prev.callPackage ../pkgs/sglang {
+        pythonPackages = qwen4PythonPackages;
+        rocmSdk = final."therock-rocm-${suffix}";
+        inherit (rocmTarget) packageSuffix;
+        hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+        sglangVersion = "0.5.17.dev0+qwen4exp.73a2552";
+        sglangGitCommit = "73a255206f916366c8d26d4022f82ddfb0ab558d";
+        sglangSource = final.fetchFromGitHub {
+          owner = "sgl-project";
+          repo = "sglang";
+          rev = "73a255206f916366c8d26d4022f82ddfb0ab558d";
+          hash = "sha256-7idPvXJCurLcQXcpppOuZjvoy/mEYIWB85ItBCQK/pI=";
+        };
+        sglangPatchesPath = ../pkgs/sglang/patches-qwen4-exp;
+        sglangTestsPath = ../pkgs/sglang/tests-qwen4-exp;
+        sglangExtraScripts = [
+          ../scripts/qwen38-flash-next-bench.py
+          ../scripts/qwen38-flash-next-fp16-audit.py
+          ../scripts/qwen38-flash-next-inventory.py
+          ../scripts/qwen38-flash-next-quantize-experts.py
+          ../scripts/qwen38-flash-next-qsa-aot.py
+          ../scripts/qwen38-flash-next-runtime-smoke.py
+          ../scripts/qwen38-flash-next-serve.sh
+        ];
+        sglangRunChecks = false;
+        # The PR advertises optional CUDA and gfx95-only extras that are
+        # deliberately absent from this gfx1030 closure.
+        sglangRelaxRuntimeDeps = true;
       };
       vllm-rocm = final."vllm-rocm-therock-${suffix}";
     }

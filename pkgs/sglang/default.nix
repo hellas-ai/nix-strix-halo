@@ -16,6 +16,17 @@
   rocmSdk,
   packageSuffix ? "rocm",
   hsaOverrideGfxVersion ? null,
+  # Keep the released wheel as the default.  Qwen4-Exp support currently lives
+  # in an unmerged upstream PR, so its package is built side-by-side from the
+  # exact reviewed source revision instead of mutating the known-good service.
+  sglangVersion ? "0.5.14",
+  sglangGitCommit ? null,
+  sglangSource ? null,
+  sglangPatchesPath ? ./patches,
+  sglangTestsPath ? null,
+  sglangExtraScripts ? [ ],
+  sglangRunChecks ? false,
+  sglangRelaxRuntimeDeps ? false,
 }:
 
 let
@@ -25,6 +36,11 @@ let
   rocmRuntimeLibraryPath =
     (pythonPackages.torch.passthru.rocmRuntimeEnv or { }).LD_LIBRARY_PATH or "";
   gpuArch = if lib.hasPrefix "gfx" packageSuffix then packageSuffix else null;
+  sourceBuild = sglangSource != null;
+  sglangPatches = builtins.path {
+    path = sglangPatchesPath;
+    name = "sglang-${sglangVersion}-patches";
+  };
   rocmSdkForJit = symlinkJoin {
     name = "${rocmSdk.name or "rocm-sdk"}-sglang-jit";
     paths = [ rocmSdk ];
@@ -127,6 +143,10 @@ let
   };
   torchaoNoChecks = pythonPackages.torchao.overridePythonAttrs (old: {
     doCheck = false;
+    # ROCm-enabled torchao 0.17 builds its swizzle extension against the
+    # hipBLASLt C++ API. The Python wheel closure carries the runtime library,
+    # but ROCm 10 no longer carries this header in its core wheel.
+    buildInputs = (old.buildInputs or [ ]) ++ [ rocmSdk ];
     nativeCheckInputs = [ ];
     pythonImportsCheck = old.pythonImportsCheck or [ "torchao" ];
   });
@@ -180,18 +200,53 @@ assert lib.assertMsg (
 ) "sglang-rocm requires the TheRock torch wheel package with passthru.sitePackages";
 pythonPackages.buildPythonApplication rec {
   pname = "sglang-rocm-${packageSuffix}";
-  version = "0.5.14";
-  format = "wheel";
+  version = sglangVersion;
+  format = if sourceBuild then "pyproject" else "wheel";
 
-  src = fetchurl {
-    url = "https://files.pythonhosted.org/packages/45/72/276c6252abfe5a0c893ab7b975253c73ae73f69d1fe7746e168bbefa2fcc/sglang-${version}-cp313-cp313-manylinux_2_34_x86_64.whl";
-    hash = "sha256-LSLmoX9sc1gK7yXSJPMWKh47yc1QQ7QCLYSXXF6WoM0=";
+  src =
+    if sourceBuild then
+      sglangSource
+    else
+      fetchurl {
+        url = "https://files.pythonhosted.org/packages/45/72/276c6252abfe5a0c893ab7b975253c73ae73f69d1fe7746e168bbefa2fcc/sglang-${version}-cp313-cp313-manylinux_2_34_x86_64.whl";
+        hash = "sha256-LSLmoX9sc1gK7yXSJPMWKh47yc1QQ7QCLYSXXF6WoM0=";
+      };
+
+  sourceRoot = lib.optionalString sourceBuild "source/python";
+
+  postPatch = lib.optionalString sourceBuild ''
+    cp pyproject_other.toml pyproject.toml
+    substituteInPlace pyproject.toml \
+      --replace-fail ', "setuptools-rust>=1.10"' ""
+  '';
+
+  env = {
+    # torch._dynamo initializes its cache during SGLang's import check.  The
+    # Nix builder HOME is /homeless-shelter, so give it a writable build-root
+    # cache instead of disabling the useful import gate.
+    XDG_CACHE_HOME = "/build/sglang-cache";
+    TORCHINDUCTOR_CACHE_DIR = "/build/sglang-cache/inductor";
+  }
+  // lib.optionalAttrs sourceBuild {
+    SETUPTOOLS_SCM_PRETEND_VERSION = version;
+    SGLANG_BUILD_RUST_EXTS = "none";
   };
 
   nativeBuildInputs = [
     autoPatchelfHook
     makeWrapper
-  ];
+  ]
+  ++ lib.optionals sourceBuild (
+    with pythonPackages;
+    [
+      setuptools
+      setuptools-scm
+      wheel
+    ]
+  );
+
+  doCheck = sglangRunChecks;
+  dontCheckRuntimeDeps = sglangRelaxRuntimeDeps;
 
   buildInputs = [
     stdenv.cc.cc.lib
@@ -204,6 +259,7 @@ pythonPackages.buildPythonApplication rec {
     amd-aiter
     anthropic
     apache-tvm-ffi
+    av
     blobfile
     build
     compressed-tensors
@@ -255,6 +311,7 @@ pythonPackages.buildPythonApplication rec {
     uvloop
     watchfiles
     xgrammar_0_2_1
+    xxhash
   ];
 
   pythonRemoveDeps = [
@@ -293,9 +350,30 @@ pythonPackages.buildPythonApplication rec {
   ];
 
   postInstall = ''
-    for patch_file in ${./patches}/*.patch; do
+    for patch_file in ${sglangPatches}/*.patch; do
+      [ -e "$patch_file" ] || continue
       patch -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
     done
+  ''
+  + lib.optionalString (gpuArch != null) ''
+    arch_patch_dir=${lib.escapeShellArg "${sglangPatches}/${gpuArch}"}
+    if [ -d "$arch_patch_dir" ]; then
+      for patch_file in "$arch_patch_dir"/*.patch; do
+        [ -e "$patch_file" ] || continue
+        patch -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
+      done
+    fi
+  ''
+  # The Qwen4-Exp acceptance suite covers the gfx1030-only V620 patch set.
+  + lib.optionalString (sglangTestsPath != null && gpuArch == "gfx1030") ''
+    SGLANG_ROOT_UNDER_TEST="$out/${pythonSitePackages}" \
+      ${pythonPackages.python.interpreter} \
+        ${sglangTestsPath}/test_qsa_rocm_decode_patch.py
+  ''
+  + lib.optionalString (sglangExtraScripts != [ ]) ''
+    ${lib.concatMapStringsSep "\n" (script: ''
+      install -Dm755 ${script} "$out/bin/${lib.removeSuffix ".py" (baseNameOf script)}"
+    '') sglangExtraScripts}
   '';
 
   postFixup = ''
@@ -334,8 +412,18 @@ pythonPackages.buildPythonApplication rec {
     ${lib.optionalString (hsaOverrideGfxVersion != null) ''
       wrap_args+=(--set HSA_OVERRIDE_GFX_VERSION ${lib.escapeShellArg hsaOverrideGfxVersion})
     ''}
+    ${lib.optionalString (sglangGitCommit != null) ''
+      wrap_args+=(--set SGLANG_GIT_COMMIT ${lib.escapeShellArg sglangGitCommit})
+    ''}
 
-    for bin in "$out/bin/sglang" "$out/bin/killall_sglang"; do
+    for bin in \
+      "$out/bin/sglang" \
+      "$out/bin/killall_sglang" \
+      ${
+        lib.concatMapStringsSep " \\\n      " (
+          script: ''"$out/bin/${lib.removeSuffix ".py" (baseNameOf script)}"''
+        ) sglangExtraScripts
+      }; do
       [ -x "$bin" ] || continue
       wrapProgram "$bin" "''${wrap_args[@]}"
     done

@@ -1,0 +1,74 @@
+HiSparse is disabled for the Qwen4-Exp V620 service, but the scheduler imports
+its memory-pool module unconditionally.  The module in turn assumes every HIP
+target ships sgl-kernel's kvcacheio extension.  gfx1030 has no compatible
+sgl-kernel wheel, so keep the dependency at its actual feature boundary and
+report a useful error only if HiSparse is selected.
+
+--- a/sglang/srt/mem_cache/hisparse_memory_pool.py
++++ b/sglang/srt/mem_cache/hisparse_memory_pool.py
+@@ -8,18 +8,14 @@
+ from sglang.srt.layers.radix_attention import RadixAttention
+ from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+-from sglang.srt.utils import is_cuda, is_hip
+
+ logger = logging.getLogger(__name__)
+
+-# sgl_kernel.kvcacheio is only available in CUDA/ROCm sgl-kernel builds (not XPU/MPS/NPU/CPU).
+-_is_cuda = is_cuda()
+-_is_hip = is_hip()
+-if _is_cuda or _is_hip:
++try:
+     from sgl_kernel.kvcacheio import transfer_kv_all_layer_mla
+-else:
++except ImportError:
+
+     def transfer_kv_all_layer_mla(*args, **kwargs):
+         raise RuntimeError(
+-            "HiSparse device KV transfer requires sgl_kernel.kvcacheio (CUDA/ROCm). "
+-            "It is not available on this backend."
++            "HiSparse device KV transfer requires sgl_kernel.kvcacheio, which "
++            "is not available in this runtime closure."
+         )
+
+--- a/sglang/srt/managers/scheduler.py
++++ b/sglang/srt/managers/scheduler.py
+@@ -76,9 +76,6 @@
+     DecodeTransferQueue,
+     SchedulerDisaggregationDecodeMixin,
+ )
+-from sglang.srt.disaggregation.decode_kvcache_offload_manager import (
+-    DecodeKVCacheOffloadManager,
+-)
+ from sglang.srt.disaggregation.encode_receiver import create_mm_receiver
+ from sglang.srt.disaggregation.prefill import (
+     PrefillBootstrapQueue,
+@@ -570,6 +567,10 @@
+             get_disagg().disaggregation_mode == "decode"
+             and get_disagg().disaggregation_decode_enable_offload_kvcache
+         ):
++            from sglang.srt.disaggregation.decode_kvcache_offload_manager import (
++                DecodeKVCacheOffloadManager,
++            )
++
+             self.decode_offload_manager = DecodeKVCacheOffloadManager(
+                 req_to_token_pool=self.req_to_token_pool,
+                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+
+--- a/sglang/srt/managers/scheduler.py
++++ b/sglang/srt/managers/scheduler.py
+@@ -105,7 +105,6 @@
+ from sglang.srt.lora.lora_drainer import LoRADrainer
+ from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
+ from sglang.srt.managers.disagg_service import maybe_create_ascend_config_store
+-from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
+ from sglang.srt.managers.io_struct import (
+     AbortReq,
+     ActiveRanksOutput,
+@@ -1131,6 +1130,6 @@
+         )
+
+     def init_hisparse_coordinator(self) -> None:
+-        self.hisparse_coordinator: Optional[HiSparseCoordinator] = None
++        self.hisparse_coordinator: Optional[Any] = None
+         if not self.enable_hisparse:
+             return

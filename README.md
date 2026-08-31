@@ -233,11 +233,13 @@ Example RDMA RPC server instance:
 ## Hydra / CI
 
 Hydra reads the root flake's `hydraJobs` output. Required PR CI is split
-into three gates:
+into four gates:
 
 - `ci.checks` runs source/meta checks such as formatting and Nix linting.
 - `ci.build` builds the package surface, including cross-platform package
   outputs and provider variants.
+- `ci.source` builds the source-pinned TheRock SDK and every downstream
+  package affected by that pin or the `therock-source` provider.
 - `ci.smoke` runs one small real-hardware smoke per accelerated engine.
 
 The separate `hydraBenchmarkJobs` output is used by the background benchmark
@@ -247,6 +249,7 @@ required for PR merge.
 ```bash
 nix build .#hydraJobs.x86_64-linux.ci.checks
 nix build .#hydraJobs.x86_64-linux.ci.build
+nix build .#hydraJobs.x86_64-linux.ci.source
 nix build .#hydraJobs.x86_64-linux.ci.smoke
 nix build .#hydraBenchmarkJobs.x86_64-linux.bench-mlx-rocm-gfx1151-gemm-smoke
 ```
