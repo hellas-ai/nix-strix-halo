@@ -654,7 +654,6 @@
 
           genericPackages = {
             default = pkgs.llama-cpp;
-            npu-toolchain = pkgs.mlir-aie-env;
             pi-wrap = pkgs.callPackage ./pkgs/pi-wrap {
               inherit (aiTools) pi;
             };
@@ -717,6 +716,7 @@
               live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
               mlx = mlxRocm;
               mlx-lm = mlxLmRocm;
+              npu-toolchain = pkgs.mlir-aie-env;
               "strix-halo-vllm-pair-bench-${s}" = pkgs.callPackage ./pkgs/strix-halo-vllm-pair-bench {
                 vllmPackage = vllmPairBenchEnv;
                 packageSuffix = s;
