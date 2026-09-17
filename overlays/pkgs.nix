@@ -238,6 +238,14 @@ let
       };
     in
     {
+      amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
+      amd-npu-exporter = prev.callPackage ../pkgs/amd-npu-exporter { };
+
+      # Interactive counterpart to the exporters: a btop-style TUI over the
+      # same amdgpu/XDNA telemetry, useful on a Strix Halo box where the APU
+      # and the NPU both matter.
+      amdtop = prev.callPackage ../pkgs/amdtop { };
+
       ec-su-axb35 = ecPackages.kernelModule;
       ec-su-axb35-monitor = ecPackages.monitor;
       strix-halo-mes-firmware = prev.callPackage ../pkgs/strix-halo-mes-firmware.nix { };
@@ -250,6 +258,13 @@ let
         xdnaVersion = inputVersion "1.7" inputs.xdna-driver-src;
       };
       xrt-amdxdna = final.xrt.xdna;
+
+      mlirAiePackages = prev.callPackage ../pkgs/mlir-aie {
+        inherit (final) xrt;
+      };
+      llvm-aie = final.mlirAiePackages.llvm-aie;
+      mlir-aie = final.mlirAiePackages.mlir-aie;
+      mlir-aie-env = final.mlirAiePackages.mlir-aie-env;
 
       fastflowlm = prev.callPackage ../pkgs/fastflowlm {
         inherit (final) tokenizers-cpp xrt;

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Refresh TheRock ROCm tarball pins used by this flake.
+Refresh stable TheRock ROCm tarball pins used by this flake.
 
-The TheRock nightly index is intentionally kept out of Nix evaluation. Run this
-script manually when bumping the opt-in preview SDK, review the diff, then
-commit the updated JSON.
+The AMD release index is intentionally kept out of Nix evaluation. Run this
+script manually when bumping the binary SDK, review the diff, then commit the
+updated JSON.
 """
 
 import argparse
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-BASE_URL = "https://rocm.nightlies.amd.com/tarball-multi-arch/"
+BASE_URL = "https://stable.repo.amd.com/rocm/core/tarball/"
 TARGET_SLUGS = {
     "gfx1010": "gfx101X-dgpu",
     "gfx1030": "gfx103X-all",
@@ -39,14 +39,31 @@ def fetch_index() -> str:
 
 def find_version(index: str, target: str, series: str | None) -> str:
     slug = re.escape(target_slug(target))
-    pattern = re.compile(rf"therock-dist-linux-{slug}-([0-9][^\"<>/]+)\.tar\.gz")
-    versions = sorted(set(pattern.findall(index)))
+    pattern = re.compile(rf"therock-dist-linux-{slug}-([0-9][0-9A-Za-z.+~_-]*)\.tar\.gz")
+    versions = sorted(set(pattern.findall(index)), key=version_key)
     if series is not None:
         versions = [version for version in versions if version.startswith(series)]
     if not versions:
         suffix = f" in series {series}" if series else ""
         raise SystemExit(f"no TheRock tarball found for {target}{suffix}")
     return versions[-1]
+
+
+def version_key(
+    version: str,
+) -> tuple[tuple[int, ...], int, tuple[tuple[int, int | str], ...]]:
+    """Sort numeric releases correctly, with a final release after its prereleases."""
+    match = re.fullmatch(r"(\d+(?:\.\d+)*)(.*)", version)
+    if match is None:
+        return ((), 0, ((0, version.lower()),))
+
+    release = tuple(int(part) for part in match.group(1).split("."))
+    suffix = match.group(2)
+    suffix_key = tuple(
+        (1, int(part)) if part.isdigit() else (0, part.lower())
+        for part in re.findall(r"\d+|[A-Za-z]+", suffix)
+    )
+    return (release, int(not suffix), suffix_key)
 
 
 def prefetch(url: str) -> dict[str, str]:
@@ -70,8 +87,7 @@ def prefetch(url: str) -> dict[str, str]:
 def pinned_series(output: str) -> str | None:
     """Derive the version series (major.minor) from the current pin so the
     default tracks whatever is checked in instead of going stale when the
-    nightly train rolls (7.13 stopped publishing 2026-05-15; the updater
-    silently found "no new version" for a month)."""
+    release train rolls."""
     try:
         sources = json.loads(Path(output).read_text())
         for entry in sources.get("linux", {}).values():

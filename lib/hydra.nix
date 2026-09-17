@@ -101,10 +101,13 @@ let
           ds4-rocm
           ec-su-axb35-monitor
           fastflowlm
+          kerf-multikernel
           llama-cpp-rocm
           llama-cpp-vulkan
           llama-cpp-master
+          linux-multikernel
           mlx-rocm
+          multikernel-demo-initrd
           strix-halo-mes-firmware
           therock-rocm
           tokenizers-cpp
