@@ -120,6 +120,9 @@ stdenv.mkDerivation (finalAttrs: {
     # parallel-jobs for these invocations
     # https://github.com/ROCm/rocm-libraries/issues/1242
     ./parallel-buildSourceCodeObjectFile.diff
+    # Tensile's worker pools otherwise use every host CPU, independently of
+    # the parallelism allocated to this Nix build.
+    ./respect-nix-build-cores.patch
     # Support loading zstd compressed .dat files, required to keep output under
     # hydra size limit
     ./messagepack-compression-support.patch
