@@ -12,7 +12,7 @@ Workspace flake for Hellas- libraries and applications from ML ecosystem, packag
 
 ## What's in it
 
-Default outputs target gfx1151 with the binary TheRock ROCm SDK and the
+Default outputs target gfx1151 with AMD's stable ROCm 10 TheRock SDK and
 TheRock-published Python wheels.
 
 | Output (under `packages.x86_64-linux.*`) | What |
@@ -25,6 +25,9 @@ TheRock-published Python wheels.
 | `fastflowlm` | XDNA2 NPU CLI (`flm`) |
 | `strix-halo-vllm-pair-bench-gfx1151` | two-host vLLM transport-matrix bench driver |
 | `therock-rocm`, `therock-python`, `torch-rocm` | TheRock binary SDK + wheels |
+| `amdtop` | btop/nvitop-style TUI for AMD CPU, GPU and XDNA NPU telemetry |
+| `linux-multikernel`, `kerf-multikernel` | pinned Linux 7.0-mk2 host/spawn kernel and lifecycle manager |
+| `multikernel-demo-initrd` | tiny interactive spawn initramfs for bare-metal isolation demos |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
 | Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
@@ -169,12 +172,16 @@ Per-target packages (default providers) are available under
 
 ```bash
 nix build .#legacyPackages.x86_64-linux.gfx1103.llama-cpp-rocm
+nix build .#legacyPackages.x86_64-linux.gfx1030.vllm-rocm # Radeon Pro V620
 ```
 
 Only targets with matching TheRock binary/Python source pins expose
 TheRock-shaped packages such as `therock-rocm`, `ds4-rocm`, `mlx-rocm`, and
-`vllm-rocm`. At the moment those pins exist for `gfx1151`; `llama-cpp-rocm`
-is available for every target listed in `pkgs/therock/targets.nix`.
+`vllm-rocm`. At the moment those pins exist for `gfx1030` (Radeon Pro V620) and
+`gfx1151`. Package availability may be narrower where an architecture lacks a
+required feature: `ds4-rocm` requires rocWMMA and is not exposed for `gfx1030`.
+`llama-cpp-rocm` is available for every target listed in
+`pkgs/therock/targets.nix`.
 
 For non-default providers compose your own overlays with `lib.mkRocmOverlay`,
 `lib.mkPythonOverlay`, and `lib.mkPkgsOverlay`. Add a new target by
@@ -189,6 +196,12 @@ the tag in `lib/providers.nix`.
 - `nixosModules.fastflowlm` — FastFlowLM OpenAI-compatible server (XDNA2)
 - `nixosModules.benchmark-runner` / `benchmark-executor` — local + remote bench infra
 - `nixosModules.ec-su-axb35`, `ryzenadj`, `tuning` — Strix Halo hardware modules
+- `nixosModules.multikernel` — declarative bare-metal kernel pools and spawn instances
+
+The multikernel package builds the complete upstream `v7.0-mk2` tree, not a
+patch stack replayed onto the current nixpkgs kernel. See
+[docs/multikernel.md](docs/multikernel.md) for the module, local-source override,
+hardware bring-up, rollback, and panic-isolation demonstration.
 
 Example RDMA RPC server instance:
 
@@ -220,11 +233,13 @@ Example RDMA RPC server instance:
 ## Hydra / CI
 
 Hydra reads the root flake's `hydraJobs` output. Required PR CI is split
-into three gates:
+into four gates:
 
 - `ci.checks` runs source/meta checks such as formatting and Nix linting.
 - `ci.build` builds the package surface, including cross-platform package
   outputs and provider variants.
+- `ci.source` builds the source-pinned TheRock SDK and every downstream
+  package affected by that pin or the `therock-source` provider.
 - `ci.smoke` runs one small real-hardware smoke per accelerated engine.
 
 The separate `hydraBenchmarkJobs` output is used by the background benchmark
@@ -234,6 +249,7 @@ required for PR merge.
 ```bash
 nix build .#hydraJobs.x86_64-linux.ci.checks
 nix build .#hydraJobs.x86_64-linux.ci.build
+nix build .#hydraJobs.x86_64-linux.ci.source
 nix build .#hydraJobs.x86_64-linux.ci.smoke
 nix build .#hydraBenchmarkJobs.x86_64-linux.bench-mlx-rocm-gfx1151-gemm-smoke
 ```

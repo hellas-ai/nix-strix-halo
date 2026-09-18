@@ -26,10 +26,28 @@ let
   suffix = rocmTarget.packageSuffix;
   firstBuildTarget = builtins.head rocmTarget.buildTargets;
 
+  # The monolithic source build exposes the same headers, libraries, and HIP
+  # compiler as the split ROCm packages expected by nixpkgs consumers. Present
+  # the three-package subset llama.cpp asks for as a small compatibility scope
+  # so selecting `therock-source` changes its actual derivation graph, not just
+  # the provider label used by Hydra.
+  therockSourceSdk = final."therock-rocm-${suffix}";
+  activeRocmPackages =
+    if rocmProvider == "therock-source" then
+      {
+        clr = therockSourceSdk // {
+          hipClangPath = "${therockSourceSdk}/lib/llvm/bin";
+        };
+        hipblas = therockSourceSdk;
+        rocblas = therockSourceSdk;
+      }
+    else
+      final.rocmPackages;
+
   rocmOverride = {
     rocmSupport = true;
     rpcSupport = true;
-    inherit (final) rocmPackages;
+    rocmPackages = activeRocmPackages;
     inherit (rocmTarget) rocmGpuTargets;
   };
   vulkanOverride = {
@@ -153,8 +171,7 @@ let
     ];
     patches = (old.patches or [ ]) ++ [
       ../pkgs/llama-cpp/patches/0001-rpc-rdma-configurable-chunk-size.patch
-      ../pkgs/llama-cpp/patches/0002-rpc-rdma-darwin-librdma.patch
-      ../pkgs/llama-cpp/patches/0003-rpc-rdma-log-probe-and-avoid-darwin-fallback-hang.patch
+      ../pkgs/llama-cpp/patches/0003-rpc-rdma-log-probe-failures.patch
       ../pkgs/llama-cpp/patches/0004-rpc-rdma-selectable-uc-qp.patch
       ../pkgs/llama-cpp/patches/0005-rpc-rdma-remote-lid-env.patch
       ../pkgs/llama-cpp/patches/0006-rpc-rdma-mtu-and-uc-init-shape.patch
@@ -185,6 +202,20 @@ let
       cmakeFlags = (old.cmakeFlags or [ ]) ++ [
         (lib.cmakeBool "GGML_RPC_RDMA" true)
       ];
+    });
+
+  # llama.cpp otherwise prefers a host /opt/rocm when one is visible. Apart
+  # from making the build impure, that can mix a host HIP runtime with the
+  # provider-selected ROCm libraries above.
+  withHermeticRocm =
+    drv:
+    drv.overrideAttrs (old: {
+      env.ROCM_PATH = activeRocmPackages.clr;
+      cmakeFlags =
+        (old.cmakeFlags or [ ])
+        ++ lib.optionals (rocmProvider == "therock-source") [
+          (lib.cmakeFeature "CMAKE_HIP_COMPILER" "${therockSourceSdk}/bin/therock-hip-clang++")
+        ];
     });
 
   # macOS 26 exposes Apple Thunderbolt RDMA through the SDK's infiniband
@@ -229,6 +260,14 @@ let
       };
     in
     {
+      amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
+      amd-npu-exporter = prev.callPackage ../pkgs/amd-npu-exporter { };
+
+      # Interactive counterpart to the exporters: a btop-style TUI over the
+      # same amdgpu/XDNA telemetry, useful on a Strix Halo box where the APU
+      # and the NPU both matter.
+      amdtop = prev.callPackage ../pkgs/amdtop { };
+
       ec-su-axb35 = ecPackages.kernelModule;
       ec-su-axb35-monitor = ecPackages.monitor;
       strix-halo-mes-firmware = prev.callPackage ../pkgs/strix-halo-mes-firmware.nix { };
@@ -242,34 +281,32 @@ let
       };
       xrt-amdxdna = final.xrt.xdna;
 
+      mlirAiePackages = prev.callPackage ../pkgs/mlir-aie {
+        inherit (final) xrt;
+      };
+      llvm-aie = final.mlirAiePackages.llvm-aie;
+      mlir-aie = final.mlirAiePackages.mlir-aie;
+      mlir-aie-env = final.mlirAiePackages.mlir-aie-env;
+
       fastflowlm = prev.callPackage ../pkgs/fastflowlm {
         inherit (final) tokenizers-cpp xrt;
         src = inputs.fastflowlm;
       };
 
       llama-cpp-rocm = bigParallel (
-        setPname "llama-cpp-rocm-${suffix}" (withRdmaRpc (localLlamaCpp rocmOverride))
+        setPname "llama-cpp-rocm-${suffix}" (withRdmaRpc (withHermeticRocm (localLlamaCpp rocmOverride)))
       );
       llama-cpp-vulkan = withRdmaRpc (localLlamaCpp vulkanOverride);
       llama-cpp-cuda = localLlamaCpp cudaOverride;
       llama-cpp-master-rocm = bigParallel (
-        setPname "llama-cpp-master-rocm-${suffix}" (withRdmaRpc (llamaCppMaster.override rocmOverride))
+        setPname "llama-cpp-master-rocm-${suffix}" (
+          withRdmaRpc (withHermeticRocm (llamaCppMaster.override rocmOverride))
+        )
       );
       llama-cpp-master-vulkan = withRdmaRpc (llamaCppMaster.override vulkanOverride);
       llama-cpp-master-cuda = llamaCppMaster.override cudaOverride;
     }
     // lib.optionalAttrs supportsTherockRocm {
-      ds4-rocm = bigParallel (
-        prev.callPackage ../pkgs/ds4-rocm {
-          src = inputs.ds4-hip;
-          rocmSdk = final."therock-rocm-${suffix}";
-          version = inputVersion "experimental" inputs.ds4-hip;
-          inherit (rocmTarget) packageSuffix;
-          offloadArch = firstBuildTarget;
-          hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
-        }
-      );
-
       mlx-rocm = bigParallel (
         final.python3Packages.callPackage ../pkgs/mlx/rocm.nix {
           mlx = final.python3Packages.mlx.override {
@@ -288,6 +325,18 @@ let
       # package set's target is fixed (which it is per pkgsFor invocation).
       therock-rocm = final."therock-rocm-${suffix}";
       therock-rocm-env = final."therock-rocm-${suffix}-env";
+    }
+    // lib.optionalAttrs (supportsTherockRocm && rocmTarget.supportsRocWmma) {
+      ds4-rocm = bigParallel (
+        prev.callPackage ../pkgs/ds4-rocm {
+          src = inputs.ds4-hip;
+          rocmSdk = final."therock-rocm-${suffix}";
+          version = inputVersion "experimental" inputs.ds4-hip;
+          inherit (rocmTarget) packageSuffix;
+          offloadArch = firstBuildTarget;
+          hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+        }
+      );
     }
     // lib.optionalAttrs supportsTherockPython {
       therock-python = final."therock-python-${suffix}";

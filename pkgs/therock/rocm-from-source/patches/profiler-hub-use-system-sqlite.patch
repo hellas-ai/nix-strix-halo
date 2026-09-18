@@ -1,0 +1,73 @@
+--- a/rocm-systems/profilers/profiler-hub/cmake/sqlite3.cmake
++++ b/rocm-systems/profilers/profiler-hub/cmake/sqlite3.cmake
+@@ -10,7 +10,18 @@
+ # git repository at a pinned tag, then build locally. Avoids vendoring
+ # any binary blobs in the source tree.
+ #
++# TheRock's Nix build already provides a pinned SQLite and runs without
++# network access. Reuse that package instead of cloning another source tree
++# during CMake configuration.
+ # ----------------------------------------------------------------------------------------#
++find_package(SQLite3 REQUIRED)
++
++add_library(profiler-hub-sqlite3 INTERFACE)
++target_link_libraries(
++    profiler-hub-sqlite3
++    INTERFACE SQLite::SQLite3 ${CMAKE_DL_LIBS}
++)
++return()
+
+ set(SQLITE3_GIT_URL
+     "https://github.com/sqlite/sqlite.git"
+--- a/rocm-systems/profilers/profiler-hub/CMakeLists.txt
++++ b/rocm-systems/profilers/profiler-hub/CMakeLists.txt
+@@ -216,11 +216,6 @@
+ add_library(profiler-hub-static STATIC $<TARGET_OBJECTS:profiler-hub-objects>)
+ set_target_properties(profiler-hub-static PROPERTIES OUTPUT_NAME profiler-hub)
+
+-target_link_options(
+-    profiler-hub
+-    PRIVATE -Wl,--exclude-libs,$<TARGET_FILE_NAME:profiler-hub-sqlite3-static>
+-)
+-
+ # Embed semantic version + ABI version on the shared library so that
+ # libprofiler-hub.so.<MAJOR> is the SONAME and libprofiler-hub.so.<MAJOR>.<MINOR>.<PATCH>
+ # is the actual file, with both symlinks installed alongside libprofiler-hub.so.
+@@ -326,6 +321,37 @@
+ unset(_profiler_hub_dep_target)
+ unset(_profiler_hub_dep_aliased)
+ unset(_profiler_hub_dep_is_imported)
++# System SQLite backs profiler-hub-objects, so the installed static archive
++# retains unresolved SQLite and dl symbols. Preserve both link requirements
++# for static consumers and load SQLite before importing the exported target.
++if(TARGET SQLite::SQLite3)
++    get_target_property(
++        _profiler_hub_sqlite_target
++        SQLite::SQLite3
++        ALIASED_TARGET
++    )
++    if(NOT _profiler_hub_sqlite_target)
++        set(_profiler_hub_sqlite_target SQLite::SQLite3)
++    endif()
++    get_target_property(
++        _profiler_hub_sqlite_is_imported
++        ${_profiler_hub_sqlite_target}
++        IMPORTED
++    )
++    if(_profiler_hub_sqlite_is_imported)
++        list(
++            APPEND profiler_hub_static_iface_libs
++            "$<INSTALL_INTERFACE:SQLite::SQLite3>"
++            ${CMAKE_DL_LIBS}
++        )
++        string(
++            APPEND profiler_hub_static_find_dependencies
++            "find_dependency(SQLite3)\n"
++        )
++    endif()
++endif()
++unset(_profiler_hub_sqlite_target)
++unset(_profiler_hub_sqlite_is_imported)
+ if(USE_SCHEMA_FROM_ROCPROFILER_SDK_ROCPD)
+     # rocprofiler-sdk-rocpd is only ever discovered via find_package() (see
+     # cmake/rocprofiler-sdk-rocpd.cmake); unlike fmt/spdlog it has no in-tree
