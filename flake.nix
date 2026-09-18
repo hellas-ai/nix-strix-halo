@@ -564,6 +564,18 @@
           system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
           aiTools = inputs.nix-ai-tools.packages.${system};
+          piPackage =
+            if pkgs.stdenv.isDarwin then
+              aiTools.pi.overrideAttrs (old: {
+                nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.darwin.signingUtils ];
+                # Bun's compiled executable retains an invalid linker signature.
+                # Re-sign after fixup so macOS can launch the packaged Pi client.
+                postFixup = (old.postFixup or "") + ''
+                  sign "$out/libexec/pi/pi"
+                '';
+              })
+            else
+              aiTools.pi;
           cudaPkgs = cudaPkgsFor system;
           packageRuntimeEnv = import ./lib/runtime-env.nix { inherit lib; };
           inherit (packageRuntimeEnv) wrapRuntimeEnv;
@@ -654,11 +666,10 @@
 
           genericPackages = {
             default = pkgs.llama-cpp;
-            npu-toolchain = pkgs.mlir-aie-env;
             pi-wrap = pkgs.callPackage ./pkgs/pi-wrap {
-              inherit (aiTools) pi;
+              pi = piPackage;
             };
-            inherit (aiTools) pi;
+            pi = piPackage;
             inherit (pkgs)
               llama-cpp
               llama-cpp-master
@@ -717,6 +728,7 @@
               live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
               mlx = mlxRocm;
               mlx-lm = mlxLmRocm;
+              npu-toolchain = pkgs.mlir-aie-env;
               "strix-halo-vllm-pair-bench-${s}" = pkgs.callPackage ./pkgs/strix-halo-vllm-pair-bench {
                 vllmPackage = vllmPairBenchEnv;
                 packageSuffix = s;

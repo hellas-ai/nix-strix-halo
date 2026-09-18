@@ -40,7 +40,8 @@ let
 
     gfx1151 = mkRocmTarget {
       packageSuffix = "gfx1151";
-      hsaOverride = "11.5.1";
+      # The SDK supports gfx1151 natively. A global HSA override also changes
+      # other GPUs on hybrid builders and can prevent runtime initialization.
       description = "gfx1151 ROCm target";
 
       # gfx90a is a composable_kernel build workaround; top-level TheRock target

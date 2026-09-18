@@ -138,10 +138,13 @@ replace only the source while preserving the package recipe:
 
 ```nix
 linux-multikernel = prev.linux-multikernel.override {
-  source = /mnt/Home/src/mklinux-7.0-mk2;
+  source = ./mklinux-7.0-mk2;
 };
 linuxPackages_multikernel = final.linuxPackagesFor final.linux-multikernel;
 ```
+
+The source path is relative to the Nix file containing the override; adjust it
+to your kernel checkout.
 
 Nix flakes include only Git-tracked local-source changes. Stage new kernel files
 before evaluating a flake that references the checkout.
