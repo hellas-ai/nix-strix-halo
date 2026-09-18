@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Refresh pinned TheRock Python wheels used by this flake.
+Refresh pinned stable ROCm Python wheels used by this flake.
 
-The TheRock wheel index is intentionally kept out of Nix evaluation. Run this
-script manually when bumping the opt-in binary PyTorch/ROCm stack, review the
-diff, then commit the updated JSON.
+The AMD wheel index is intentionally kept out of Nix evaluation. Run this
+script manually when bumping the binary PyTorch/ROCm stack, review the diff,
+then commit the updated JSON.
 """
 
 import argparse
@@ -20,9 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-BASE_URL = "https://rocm.nightlies.amd.com/whl-multi-arch"
+BASE_URL = "https://stable.repo.amd.com/rocm/whl-next"
 DEFAULT_TARGET = "gfx1151"
-DEFAULT_SERIES = "7.15"
+DEFAULT_SERIES = "10.0"
 BASE_PACKAGES = [
     "rocm",
     "rocm-bootstrap",
@@ -116,9 +116,9 @@ def parse_distribution(project: str, href: str, index_url: str) -> Distribution 
         platform_tag = "source"
         kind = "sdist"
 
-    rocm_match = re.search(r"(?:\+|\.|-)rocm(7\.[^-+]+)", package_version)
+    rocm_match = re.search(r"(?:\+|\.|-)rocm(\d+\.[^-+]+)", package_version)
     if rocm_match is None and (project.startswith("rocm-sdk") or project == "rocm"):
-        rocm_match = re.search(r"^(7\.[^-+]+)$", package_version)
+        rocm_match = re.search(r"^(\d+\.[^-+]+)$", package_version)
     return Distribution(
         project=project,
         filename=filename,
@@ -155,12 +155,27 @@ def dist_matches_platform(dist: Distribution) -> bool:
     }
 
 
-def package_version_key(version: str) -> tuple[tuple[int, int | str], ...]:
-    public_version = version.split("+", 1)[0]
-    return tuple(
-        (1, int(part)) if part.isdigit() else (0, part)
-        for part in re.findall(r"\d+|[A-Za-z]+", public_version)
+def version_key(
+    version: str,
+) -> tuple[tuple[int, ...], int, tuple[tuple[int, int | str], ...]]:
+    """Sort numeric releases correctly, with a final release after its prereleases."""
+    match = re.fullmatch(r"(\d+(?:\.\d+)*)(.*)", version)
+    if match is None:
+        return ((), 0, ((0, version.lower()),))
+
+    release = tuple(int(part) for part in match.group(1).split("."))
+    suffix = match.group(2)
+    suffix_key = tuple(
+        (1, int(part)) if part.isdigit() else (0, part.lower())
+        for part in re.findall(r"\d+|[A-Za-z]+", suffix)
     )
+    return (release, int(not suffix), suffix_key)
+
+
+def package_version_key(
+    version: str,
+) -> tuple[tuple[int, ...], int, tuple[tuple[int, int | str], ...]]:
+    return version_key(version.split("+", 1)[0])
 
 
 def public_package_version(version: str) -> str:
@@ -205,7 +220,7 @@ def choose_rocm_version(
             f"with Python tag {python_tag}"
         )
 
-    return sorted(common_versions)[-1]
+    return sorted(common_versions, key=version_key)[-1]
 
 
 def choose_distribution(
@@ -287,7 +302,7 @@ def load_sources(path: Path) -> dict:
 def pinned_series(output: str) -> str | None:
     """Series (major.minor) of the currently pinned rocmVersion, so the
     default follows the checked-in pin instead of going stale when the
-    nightly train rolls to a new series."""
+    release train rolls to a new series."""
     try:
         text = Path(output).read_text()
         match = re.search(r'"rocmVersion":\s*"(\d+\.\d+)\.', text)

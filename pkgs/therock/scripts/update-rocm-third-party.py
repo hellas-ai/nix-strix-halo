@@ -16,9 +16,7 @@ from pathlib import Path
 
 
 DEFAULT_OUTPUT = "pkgs/therock/sources/rocm-third-party.json"
-SPIRV_HEADERS_HASH = "sha256-JjunFDBwTV4qMCrXcCEHPxtEvaj6vqpvkWnImF+LM5A="
 ESMI_IB_LIBRARY_URL = "https://github.com/amd/esmi_ib_library.git"
-ESMI_IB_LIBRARY_HASH = "sha256-StSYzyIujaH8UJIRpfJC0lf+oVT9fWflJgQONvRqu70="
 
 
 def sri(algo: str, hex_digest: str) -> str:
@@ -84,40 +82,80 @@ def ls_remote_peeled_tag(url: str, tag: str) -> str:
     return revs.get(f"refs/tags/{tag}^{{}}", revs[f"refs/tags/{tag}"])
 
 
-def scan_esmi_ib_library(source: Path, hash_: str) -> dict[str, str]:
+def parse_esmi_pin(cmake: str) -> dict[str, str]:
+    commit_match = re.search(r'set\(ESMI_GIT_HASH\s+"([0-9a-f]{40})"\)', cmake)
+    if commit_match:
+        rev = commit_match.group(1)
+        return {"ref": rev, "rev": rev}
+
+    tag_match = re.search(r'set\(current_esmi_tag\s+"([^"]+)"\)', cmake)
+    if tag_match:
+        tag = tag_match.group(1)
+        return {
+            "ref": f"refs/tags/{tag}",
+            "rev": ls_remote_peeled_tag(ESMI_IB_LIBRARY_URL, tag),
+        }
+
+    raise RuntimeError("could not find the amdsmi ESMI source pin")
+
+
+def scan_esmi_ib_library(source: Path) -> dict[str, str]:
     cmake = (source / "rocm-systems/projects/amdsmi/CMakeLists.txt").read_text()
-    match = re.search(r'set\(current_esmi_tag\s+"([^"]+)"\)', cmake)
-    if not match:
-        raise RuntimeError("could not find amdsmi current_esmi_tag")
-    tag = match.group(1)
     return {
         "url": ESMI_IB_LIBRARY_URL,
-        "ref": f"refs/tags/{tag}",
-        "rev": ls_remote_peeled_tag(ESMI_IB_LIBRARY_URL, tag),
-        "hash": hash_,
+        **parse_esmi_pin(cmake),
     }
+
+
+def source_hash(source: dict[str, str], previous: dict[str, str], *, git: bool) -> str:
+    # A hash is reusable only for the exact same source, never for a new revision.
+    if all(source.get(key) == previous.get(key) for key in ("url", "rev")) and previous.get("hash"):
+        return previous["hash"]
+    if git:
+        result = subprocess.check_output(
+            ["nix-prefetch-git", "--quiet", "--url", source["url"], "--rev", source["rev"]],
+            text=True,
+        )
+        digest = json.loads(result)["sha256"]
+        return subprocess.check_output(
+            ["nix", "hash", "convert", "--hash-algo", "sha256", "--to", "sri", digest],
+            text=True,
+        ).strip()
+    result = subprocess.check_output(
+        ["nix", "store", "prefetch-file", "--unpack", "--json", source["url"]], text=True
+    )
+    return json.loads(result)["hash"]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="Staged TheRock source tree")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--spirv-headers-hash", default=SPIRV_HEADERS_HASH)
-    parser.add_argument("--esmi-ib-library-hash", default=ESMI_IB_LIBRARY_HASH)
+    parser.add_argument("--spirv-headers-hash", help="Override the automatically prefetched hash")
+    parser.add_argument("--esmi-ib-library-hash", help="Override the automatically prefetched hash")
     args = parser.parse_args()
 
     source = Path(args.source)
+    output = Path(args.output)
+    previous = json.loads(output.read_text()) if output.exists() else {}
     tag = (source / "compiler/spirv-llvm-translator/spirv-headers-tag.conf").read_text().strip()
+    esmi = scan_esmi_ib_library(source)
+    spirv = {
+        "url": f"https://github.com/KhronosGroup/SPIRV-Headers/archive/{tag}.tar.gz",
+        "rev": tag,
+    }
+    esmi["hash"] = args.esmi_ib_library_hash or source_hash(
+        esmi, previous.get("esmiIbLibrary", {}), git=True
+    )
+    spirv["hash"] = args.spirv_headers_hash or source_hash(
+        spirv, previous.get("spirvHeaders", {}), git=False
+    )
     data = {
         "archives": scan_archives(source),
-        "esmiIbLibrary": scan_esmi_ib_library(source, args.esmi_ib_library_hash),
-        "spirvHeaders": {
-            "url": f"https://github.com/KhronosGroup/SPIRV-Headers/archive/{tag}.tar.gz",
-            "rev": tag,
-            "hash": args.spirv_headers_hash,
-        },
+        "esmiIbLibrary": esmi,
+        "spirvHeaders": spirv,
     }
-    Path(args.output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    output.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":

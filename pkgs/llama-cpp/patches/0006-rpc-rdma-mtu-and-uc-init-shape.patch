@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
-@@ -108,6 +108,36 @@ static uint16_t rdma_remote_lid() {
+@@ -91,4 +91,34 @@ static uint16_t rdma_remote_lid() {
      return static_cast<uint16_t>(parsed);
  }
 
@@ -34,9 +34,7 @@
 +    }
 +}
 +
- #ifdef __APPLE__
- static bool rdma_darwin_leak_on_close() {
-     const char * env = std::getenv("GGML_RDMA_DARWIN_LEAK_ON_CLOSE");
+ struct rdma_conn {
 @@ -374,7 +402,7 @@ bool socket_t::impl::rdma_probe() {
              gid_idx = found_gid;
              gid_version = found_version;

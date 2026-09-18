@@ -476,6 +476,17 @@ overrideLlvmPackagesRocm (s: {
           mkdir -p "''${sourceRoot}/openmp/device/include"
           ln -s "${llvmSrc}/openmp/device/include/EmissaryIds.h" "''${sourceRoot}/openmp/device/include/"
         '';
+        postPatch = ''
+          ${old.postPatch or ""}
+          ${lib.optionalString (therockSource != null) ''
+            # The GetBundleIDsInFile backport predates LLVM 23's verbose-stream
+            # API. TheRock 10 carries the new decompress signature.
+            substituteInPlace lib/Driver/OffloadBundler.cpp \
+              --replace-fail \
+                'CompressedOffloadBundle::decompress(**CodeOrErr, BundlerConfig.Verbose);' \
+                'CompressedOffloadBundle::decompress(**CodeOrErr, BundlerConfig.Verbose ? &llvm::errs() : nullptr);'
+          ''}
+        '';
         hardeningDisable = [ "all" ];
         nativeBuildInputs = old.nativeBuildInputs ++ [
           removeReferencesTo

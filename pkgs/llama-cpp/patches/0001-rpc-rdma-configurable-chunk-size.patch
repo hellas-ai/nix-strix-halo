@@ -1,13 +1,22 @@
 --- a/ggml/src/ggml-rpc/transport.cpp
 +++ b/ggml/src/ggml-rpc/transport.cpp
-@@ -19,0 +20 @@
+@@ -17,6 +17,7 @@
+ #  include <netdb.h>
+ #  include <unistd.h>
+ #endif
 +#include <cerrno>
-@@ -45,2 +46,2 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <mutex>
+@@ -52,8 +53,28 @@
+ #endif // GGML_RPC_RDMA
+
+ #if defined(GGML_RPC_RDMA) && !defined(GGML_RPC_RDMA_APPLE)
 -static constexpr size_t RDMA_CHUNK    = 256 * 1024;   // 256 KiB per send/recv (fits default 8 MiB memlock)
 -static constexpr int    RDMA_RX_DEPTH = 24;            // pre-posted recv ring: 24 × 256 KiB = 6 MiB
 +static constexpr size_t RDMA_DEFAULT_CHUNK = 4 * 1024; // 4 KiB per fixed-frame send/recv
 +static constexpr int    RDMA_RX_DEPTH      = 24;         // pre-posted recv ring
-@@ -49,0 +51,20 @@
++
 +static size_t rdma_align_alloc_size(size_t size) {
 +    static constexpr size_t ALIGN = 16 * 1024;
 +    return ((size + ALIGN - 1) / ALIGN) * ALIGN;
@@ -27,38 +36,73 @@
 +    }
 +    return static_cast<size_t>(parsed);
 +}
-+
-@@ -60 +81 @@
+
+ struct rdma_conn {
+     struct ibv_context * ctx = nullptr;
+@@ -65,20 +86,21 @@
+     void          * tx_buf = nullptr;
+     struct ibv_mr * tx_mr  = nullptr;
+
 -    void          * rx_buf = nullptr; // RDMA_RX_DEPTH × RDMA_CHUNK contiguous
 +    void          * rx_buf = nullptr; // RDMA_RX_DEPTH slots of chunk_size bytes
-@@ -64,0 +86 @@
+     struct ibv_mr * rx_mr  = nullptr;
+     int             rx_head = 0;
+
+     uint32_t        max_inline = 0;
 +    size_t          chunk_size = RDMA_DEFAULT_CHUNK;
-@@ -67 +89 @@
+
+     uint8_t * rx_slot(int i) const {
 -        return static_cast<uint8_t *>(rx_buf) + static_cast<size_t>(i) * RDMA_CHUNK;
 +        return static_cast<uint8_t *>(rx_buf) + static_cast<size_t>(i) * chunk_size;
-@@ -73 +95 @@
+     }
+
+     bool post_rx(int i) {
+         struct ibv_sge sge = {};
+         sge.addr   = (uintptr_t)rx_slot(i);
 -        sge.length = RDMA_CHUNK;
 +        sge.length = chunk_size;
-@@ -294,0 +317,4 @@
+         sge.lkey   = rx_mr->lkey;
+         struct ibv_recv_wr wr = {}, * bad = nullptr;
+         wr.wr_id   = (uint64_t)i;
+@@ -308,13 +330,17 @@
+     rdma->qp = ibv_create_qp(rdma->pd, &qia);
+     if (!rdma->qp) return false;
+     rdma->max_inline = qia.cap.max_inline_data;
 +    rdma->chunk_size = rdma_chunk_size();
 +    const size_t rx_bytes = static_cast<size_t>(RDMA_RX_DEPTH) * rdma->chunk_size;
 +    const size_t tx_alloc_bytes = rdma_align_alloc_size(rdma->chunk_size);
 +    const size_t rx_alloc_bytes = rdma_align_alloc_size(rx_bytes);
-@@ -296,2 +322,2 @@
+
 -    rdma->tx_buf = aligned_alloc(4096, RDMA_CHUNK);
 -    rdma->rx_buf = aligned_alloc(4096, static_cast<size_t>(RDMA_RX_DEPTH) * RDMA_CHUNK);
 +    rdma->tx_buf = aligned_alloc(16 * 1024, tx_alloc_bytes);
 +    rdma->rx_buf = aligned_alloc(16 * 1024, rx_alloc_bytes);
-@@ -300,2 +326,2 @@
+     if (!rdma->tx_buf || !rdma->rx_buf) return false;
+
 -    rdma->tx_mr = ibv_reg_mr(rdma->pd, rdma->tx_buf, RDMA_CHUNK, IBV_ACCESS_LOCAL_WRITE);
 -    rdma->rx_mr = ibv_reg_mr(rdma->pd, rdma->rx_buf, static_cast<size_t>(RDMA_RX_DEPTH) * RDMA_CHUNK,
 +    rdma->tx_mr = ibv_reg_mr(rdma->pd, rdma->tx_buf, rdma->chunk_size, IBV_ACCESS_LOCAL_WRITE);
 +    rdma->rx_mr = ibv_reg_mr(rdma->pd, rdma->rx_buf, rx_bytes,
-@@ -318,2 +344,2 @@
+                            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+     if (!rdma->tx_mr || !rdma->rx_mr) return false;
+
+@@ -331,8 +357,8 @@
+     } else if (gid_version == IBV_GID_TYPE_ROCE_V1) {
+         ver_str = " RoCEv1";
+     }
 -    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qpn=%u inline=%u\n",
 -                  matched_dev, gid_idx, ver_str, rdma_local.qpn, rdma->max_inline);
 +    GGML_LOG_INFO("RDMA probed: dev=%s gid=%d%s qpn=%u inline=%u chunk=%zu\n",
 +                  matched_dev, gid_idx, ver_str, rdma_local.qpn, rdma->max_inline, rdma->chunk_size);
-@@ -410 +436 @@
+     return true;
+ }
+
+@@ -423,7 +449,7 @@
+     const uint8_t * src = (const uint8_t *)data;
+     size_t rem = size;
+     while (rem > 0) {
 -        size_t chunk = std::min(rem, RDMA_CHUNK);
 +        size_t chunk = std::min(rem, c->chunk_size);
+
+         struct ibv_sge sge = {};
+         struct ibv_send_wr wr = {}, * bad = nullptr;

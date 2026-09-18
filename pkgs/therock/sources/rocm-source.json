@@ -2,9 +2,9 @@
   "targets": {
     "gfx1151": {
       "url": "https://github.com/ROCm/TheRock.git",
-      "ref": "refs/heads/main",
-      "rev": "1de3171d00f6de55e9ed517dc6ca6e825d1e4b55",
-      "version": "7.15",
+      "ref": "refs/heads/release/therock-10.0",
+      "rev": "16adc4d875fd4f65ea23c7c84e1c66706fde3047",
+      "version": "10.0",
       "fetchArgs": [],
       "deepNestedSubmodules": [
         {
@@ -41,7 +41,7 @@
           ]
         }
       ],
-      "updated": "2026-07-20T01:23:54.593615+00:00"
+      "updated": "2026-08-28T13:47:48.790885+00:00"
     }
   }
 }
