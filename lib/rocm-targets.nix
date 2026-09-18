@@ -8,6 +8,8 @@
       systemFeature ? runtimeArch,
       hsaOverride ? null,
       therockTarget ? packageSuffix,
+      therockSourceTarget ? packageSuffix,
+      supportsRocWmma ? true,
       description ? packageSuffix,
     }:
     {
@@ -19,6 +21,8 @@
         systemFeature
         hsaOverride
         therockTarget
+        therockSourceTarget
+        supportsRocWmma
         description
         ;
     };

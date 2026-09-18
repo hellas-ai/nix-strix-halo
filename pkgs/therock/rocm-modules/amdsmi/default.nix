@@ -9,6 +9,7 @@
   libmnl,
   libnl,
   esmiIbLibrarySource,
+  esmiIbLibraryRev,
   python,
   wrapPython,
   autoPatchelfHook,
@@ -32,8 +33,17 @@ stdenv.mkDerivation (finalAttrs: {
   postPatch = ''
     substituteInPlace goamdsmi_shim/CMakeLists.txt \
       --replace-fail "amd_smi)" ${"'"}''${AMD_SMI_TARGET})'
-    substituteInPlace CMakeLists.txt \
-      --replace-fail "if(NOT latest_esmi_tag STREQUAL current_esmi_tag)" "if(OFF)"
+
+    if grep -q 'set(ESMI_GIT_HASH ' CMakeLists.txt; then
+      grep -Fq 'set(ESMI_GIT_HASH "${esmiIbLibraryRev}")' CMakeLists.txt \
+        || { echo "amdsmi ESMI pin does not match the vendored source" >&2; exit 1; }
+    elif grep -q 'set(current_esmi_tag ' CMakeLists.txt; then
+      substituteInPlace CMakeLists.txt \
+        --replace-fail "if(NOT latest_esmi_tag STREQUAL current_esmi_tag)" "if(OFF)"
+    else
+      echo "unsupported amdsmi ESMI source declaration" >&2
+      exit 1
+    fi
 
     # Vendor the exact ESMI revision from TheRock's generated third-party
     # manifest so AMD SMI never runs its configure-time git clone.

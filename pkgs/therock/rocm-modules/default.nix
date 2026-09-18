@@ -13,6 +13,7 @@
   therockSource ? null,
   therockVersion ? "unstable",
   esmiIbLibrarySource,
+  esmiIbLibraryRev,
 }:
 
 let
@@ -127,7 +128,7 @@ let
       amdsmi = fromTheRock "rocm-systems/projects/amdsmi" (
         pyPackages.callPackage ./amdsmi {
           inherit (self) rocmUpdateScript;
-          inherit esmiIbLibrarySource;
+          inherit esmiIbLibrarySource esmiIbLibraryRev;
         }
       );
 

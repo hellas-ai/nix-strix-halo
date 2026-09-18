@@ -155,7 +155,7 @@
   },
   "esmiIbLibrary": {
     "hash": "sha256-StSYzyIujaH8UJIRpfJC0lf+oVT9fWflJgQONvRqu70=",
-    "ref": "refs/tags/esmi_pkg_ver-5.2.1.1",
+    "ref": "d494a3194ceb4cc4dbb2debf9fcbe8773c6d3bef",
     "rev": "d494a3194ceb4cc4dbb2debf9fcbe8773c6d3bef",
     "url": "https://github.com/amd/esmi_ib_library.git"
   },

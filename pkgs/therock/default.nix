@@ -33,23 +33,23 @@ let
   sourcePinsByTarget = therockRocmSourcePins.targets;
 
   sourceFor =
-    suffix:
-    if builtins.hasAttr suffix sourcePinsByTarget then
-      sourcePinsByTarget.${suffix}
+    rocmTarget:
+    if builtins.hasAttr rocmTarget.therockSourceTarget sourcePinsByTarget then
+      sourcePinsByTarget.${rocmTarget.therockSourceTarget}
     else
-      throw "missing TheRock source pin for ${suffix}";
+      throw "missing TheRock source pin for ${rocmTarget.packageSuffix}";
 
-  defaultSource = sourceFor target.packageSuffix;
+  defaultSource = sourceFor target;
 
   lockedSourceTreeFor =
-    suffix:
+    rocmTarget:
     let
-      sourceTree = therockRocmSourceTrees.${suffix};
+      sourceTree = therockRocmSourceTrees.${rocmTarget.therockSourceTarget};
     in
-    if !(builtins.hasAttr suffix therockRocmSourceTrees) then
-      throw "missing locked TheRock source tree inputs for ${suffix}"
+    if !(builtins.hasAttr rocmTarget.therockSourceTarget therockRocmSourceTrees) then
+      throw "missing locked TheRock source tree inputs for ${rocmTarget.packageSuffix}"
     else if !(builtins.isAttrs sourceTree && sourceTree ? root && sourceTree ? submodules) then
-      throw "invalid locked TheRock source tree inputs for ${suffix}"
+      throw "invalid locked TheRock source tree inputs for ${rocmTarget.packageSuffix}"
     else
       sourceTree;
 
@@ -133,6 +133,7 @@ let
     esmiIbLibrarySource = prev.fetchgit {
       inherit (therockRocmThirdPartySources.esmiIbLibrary) url rev hash;
     };
+    esmiIbLibraryRev = therockRocmThirdPartySources.esmiIbLibrary.rev;
     rocprofilerOtf2Archive = prev.fetchurl {
       url = "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/otf2-3.0.3.tar.gz";
       hash = "sha256-GKOQX3kXNAOH4+3I5XZvMasa9B9OzFZl2mx2nKIcTug=";
@@ -151,7 +152,7 @@ let
     rocmTarget:
     let
       suffix = rocmTarget.packageSuffix;
-      source = sourceFor suffix;
+      source = sourceFor rocmTarget;
       cmakeConfig = {
         target = suffix;
         amdgpuTargets = rocmTarget.buildTargets;
@@ -160,7 +161,7 @@ let
       projectTargetUnexcludes = lib.optionalAttrs (builtins.elem suffix rocmTarget.buildTargets) {
         rocprofiler-compute = [ suffix ];
       };
-      sourceTreeInputs = lockedSourceTreeFor suffix;
+      sourceTreeInputs = lockedSourceTreeFor rocmTarget;
       compilerSourceTreeInputs = sourceTreeInputs // {
         submodules = builtins.filter (
           submodule: !(lib.hasPrefix "rocm-systems/projects/rocprofiler-" submodule.path)
@@ -223,6 +224,11 @@ let
       amdLlvm = prev.callPackage ./rocm-from-source {
         stdenv = prev.llvmPackages_21.stdenv;
         llvmPackages = prev.llvmPackages_21;
+        # Unbounded LLVM/Flang parallelism can consume well over 100 GiB on a
+        # 128-thread builder and trip the fleet's early-OOM guard. Thirty-two
+        # jobs keeps the heavyweight build parallel without making it fragile
+        # when the builder is doing other work.
+        buildJobs = 32;
         inherit (cmakeConfig) target amdgpuTargets distBundleName;
         inherit (source) version;
         profile = "compiler";
@@ -239,6 +245,7 @@ let
           llvmPackages = prev.llvmPackages_21;
           inherit (cmakeConfig) target amdgpuTargets distBundleName;
           inherit (source) version;
+          buildJobs = 32;
           profile = "full";
           therockSource = sourceTree;
           prebuiltStageTree = amdLlvm;
@@ -263,7 +270,7 @@ let
     };
 
   therockFromSourceTargets = builtins.filter (
-    rocmTarget: builtins.hasAttr rocmTarget.packageSuffix sourcePinsByTarget
+    rocmTarget: builtins.hasAttr rocmTarget.therockSourceTarget sourcePinsByTarget
   ) rocmTargets;
 
   therockFromSourcePerArch = lib.foldl' lib.recursiveUpdate { } (
@@ -275,7 +282,7 @@ in
     prev.callPackage ./rocm-modules {
       therockSource = final."therock-rocm-source-${target.packageSuffix}";
       therockVersion = defaultSource.rocmVersion or (normalizeRocmVersion defaultSource.version);
-      inherit (therockFromSourceThirdPartyFetches) esmiIbLibrarySource;
+      inherit (therockFromSourceThirdPartyFetches) esmiIbLibrarySource esmiIbLibraryRev;
     }
   );
 }
