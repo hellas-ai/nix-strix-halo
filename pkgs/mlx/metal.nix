@@ -10,6 +10,7 @@
   zsh,
   apple-sdk_26,
   mlx-src,
+  jaccl ? null,
   buildStage ? 1,
   pname ? if buildStage == 2 then "mlx-metal" else "mlx",
   backendPackage ? null,
@@ -54,14 +55,15 @@ mlx.overrideAttrs (old: {
     (replaceVars ./patches/darwin-sdk-version.patch {
       sdkVersion = darwinSdkVersion;
     })
-  ];
+  ]
+  ++ lib.optionals (jaccl != null) [ ./patches/use-system-jaccl.patch ];
 
   nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ zsh ];
   buildInputs = (old.buildInputs or [ ]) ++ [ darwinSdk ];
-  __noChroot = true;
   propagatedBuildInputs = lib.optionals (buildStage == 1) (
     (old.propagatedBuildInputs or [ ]) ++ [ backendPackage ]
   );
+  __noChroot = true;
 
   postPatch = (old.postPatch or "") + ''
     substituteInPlace mlx/backend/cpu/jit_compiler.cpp \
@@ -79,6 +81,7 @@ mlx.overrideAttrs (old: {
       (lib.cmakeFeature "nanobind_DIR" "${nanobind}/${sitePackages}/nanobind/cmake")
       (lib.cmakeFeature "CMAKE_OSX_SYSROOT" darwinSdkRoot)
       (lib.cmakeFeature "CMAKE_OSX_DEPLOYMENT_TARGET" darwinDeploymentTarget)
+      (lib.cmakeFeature "CMAKE_PREFIX_PATH" (lib.optionalString (jaccl != null) (toString jaccl)))
     ];
   };
 
@@ -99,7 +102,7 @@ mlx.overrideAttrs (old: {
         /var/run/com.apple.security.cryptexd/mnt; do
         if [ -d "$root" ]; then
           path="$(find "$root" -path "*/Metal.xctoolchain/usr/bin/$tool" 2>/dev/null | head -n 1 || true)"
-          if [ -n "$path" ] && [ -x "$path" ] && "$path" --version >/dev/null 2>&1; then
+          if [ -n "$path" ] && [ -x "$path" ]; then
             printf '%s\n' "$path"
             return 0
           fi
@@ -107,7 +110,7 @@ mlx.overrideAttrs (old: {
       done
 
       path="$(/usr/bin/xcrun -sdk macosx -find "$tool" 2>/dev/null || true)"
-      if [ -n "$path" ] && [ -x "$path" ] && "$path" --version >/dev/null 2>&1; then
+      if [ -n "$path" ] && [ -x "$path" ]; then
         printf '%s\n' "$path"
         return 0
       fi
@@ -168,6 +171,16 @@ mlx.overrideAttrs (old: {
     export MLX_METAL_TOOL="$metal_tool"
     export MLX_METALLIB_TOOL="$metallib_tool"
     export PATH="$xcrun_wrapper:$PATH:/usr/bin:/bin"
+
+    # CMake's generated custom commands may resolve xcrun before the build
+    # phase runs.  Embed the build-local wrapper explicitly so every Metal
+    # compile uses the downloaded toolchain selected above.
+    substituteInPlace CMakeLists.txt \
+      --replace-warn "xcrun" "$xcrun_wrapper/xcrun"
+    substituteInPlace cmake/extension.cmake \
+      --replace-warn "xcrun" "$xcrun_wrapper/xcrun"
+    substituteInPlace mlx/backend/metal/kernels/CMakeLists.txt \
+      --replace-warn "xcrun" "$xcrun_wrapper/xcrun"
   '';
 
   postInstall =
@@ -186,10 +199,10 @@ mlx.overrideAttrs (old: {
       cmake_targets="$out/${sitePackages}/mlx/share/cmake/MLX/MLXTargets.cmake"
       if [ -f "$cmake_targets" ]; then
         substituteInPlace "$cmake_targets" \
-          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Metal.framework" "-framework;Metal" \
-          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Foundation.framework" "-framework;Foundation" \
-          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/QuartzCore.framework" "-framework;QuartzCore" \
-          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Accelerate.framework" "-framework;Accelerate"
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Metal.framework" "-Wl,-framework,Metal" \
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Foundation.framework" "-Wl,-framework,Foundation" \
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/QuartzCore.framework" "-Wl,-framework,QuartzCore" \
+          --replace-fail "${darwinSdkRoot}/System/Library/Frameworks/Accelerate.framework" "-Wl,-framework,Accelerate"
       fi
     '';
 
