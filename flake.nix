@@ -1250,6 +1250,7 @@
             ++ lib.optionals pkgs.stdenv.isLinux [
               (pkgs.python3.withPackages (
                 ps: with ps; [
+                  boto3
                   numpy
                   pandas
                   plotly
