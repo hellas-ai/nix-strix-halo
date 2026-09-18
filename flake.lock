@@ -69,11 +69,11 @@
     "ec-su-axb35": {
       "flake": false,
       "locked": {
-        "lastModified": 1783792693,
-        "narHash": "sha256-+fN7C07oYYZW6qp4kDlg51N1mAgQTbgPiQnf2wX1KUs=",
+        "lastModified": 1787229963,
+        "narHash": "sha256-R172f44zac7quY8apVi4qnJIPOwZgVPN2DMOJTkg5yg=",
         "owner": "cmetz",
         "repo": "ec-su_axb35-linux",
-        "rev": "7a9f372edcaa99e562dece70204c4f609692a778",
+        "rev": "f62c2c228959a08683273a26ef3afd8991e69f6d",
         "type": "github"
       },
       "original": {
