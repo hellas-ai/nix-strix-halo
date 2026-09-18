@@ -1121,6 +1121,9 @@ stdenv.mkDerivation {
           -DROCM_PATH=
     ${mediaLibCmakeArgs}'
 
+                # LLVM builds compiler-rt builtins before its runtimes. Keep
+                # that ordering instead of rebuilding the same archive while
+                # OpenMP's Archer library links against it.
                 substituteInPlace compiler/pre_hook_amd-llvm.cmake \
                   --replace-fail \
                     'set(RUNTIMES_CMAKE_ARGS "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON")' \
@@ -1132,7 +1135,6 @@ stdenv.mkDerivation {
                   "-DCMAKE_ASM_FLAGS_INIT=--sysroot=${nixSysroot} --gcc-toolchain=${nixSysroot}/usr -B${nixSysroot}/lib"
                   "-DCMAKE_EXE_LINKER_FLAGS_INIT=${nixToolchainExeLinkerFlags}"
                   "-DCMAKE_SHARED_LINKER_FLAGS_INIT=${nixToolchainRuntimeLinkerFlags}"
-                  "-DCOMPILER_RT_BUILD_BUILTINS=ON"
                   "-DCOMPILER_RT_BUILD_SANITIZERS=OFF"
                   "-DCOMPILER_RT_BUILD_XRAY=OFF"
                   "-DCOMPILER_RT_BUILD_LIBFUZZER=OFF"
