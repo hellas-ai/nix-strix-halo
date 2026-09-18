@@ -1149,6 +1149,10 @@ stdenv.mkDerivation {
                 ${compilerBuiltinsSourcePatch}
   ''
   + lib.optionalString (profile != "compiler") ''
+    # The full SDK embeds the same Tensile worker pool as the standalone
+    # hipBLASLt package. CMake's job limit does not bound this Python pool.
+    patch -d rocm-libraries/projects/hipblaslt -p1 < ${../rocm-modules/hipblaslt/respect-nix-build-cores.patch}
+
     substituteInPlace dctools/CMakeLists.txt \
       --replace-fail \
         '      -DGRPC_DESIRED_VERSION=''${THEROCK_GRPC_VERSION}' \
