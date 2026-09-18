@@ -127,6 +127,10 @@ let
   };
   torchaoNoChecks = pythonPackages.torchao.overridePythonAttrs (old: {
     doCheck = false;
+    # ROCm-enabled torchao 0.17 builds its swizzle extension against the
+    # hipBLASLt C++ API. The Python wheel closure carries the runtime library,
+    # but ROCm 10 no longer carries this header in its core wheel.
+    buildInputs = (old.buildInputs or [ ]) ++ [ rocmSdk ];
     nativeCheckInputs = [ ];
     pythonImportsCheck = old.pythonImportsCheck or [ "torchao" ];
   });

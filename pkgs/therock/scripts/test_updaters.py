@@ -18,7 +18,9 @@ def load_script(name: str):
 
 
 update_rocm = load_script("update-rocm.py")
+update_rocm_source = load_script("update-rocm-source.py")
 update_wheels = load_script("update-python-wheels.py")
+update_third_party = load_script("update-rocm-third-party.py")
 
 
 class RocmTarballUpdaterTests(unittest.TestCase):
@@ -82,6 +84,42 @@ class PythonWheelUpdaterTests(unittest.TestCase):
         self.assertIn("amd-torch-device-gfx1151", packages)
         self.assertIn("amd-torch-device-gfx115x", packages)
         self.assertIn("amd-torchvision-device-gfx1151", packages)
+
+
+class RocmThirdPartyUpdaterTests(unittest.TestCase):
+    def test_parses_rocm_10_esmi_commit_pin(self):
+        rev = "d494a3194ceb4cc4dbb2debf9fcbe8773c6d3bef"
+        self.assertEqual(
+            update_third_party.parse_esmi_pin(f'set(ESMI_GIT_HASH "{rev}")'),
+            {"ref": rev, "rev": rev},
+        )
+
+
+class RocmSourceUpdaterTests(unittest.TestCase):
+    def test_reads_series_from_selected_target(self):
+        sources = {
+            "targets": {
+                "gfx1151": {"version": "10.0.7"},
+                "gfx1100": {"version": "9.2.3"},
+            }
+        }
+        self.assertEqual(update_rocm_source.pinned_series(sources, "gfx1151"), "10.0")
+        self.assertEqual(update_rocm_source.pinned_series(sources, "gfx1100"), "9.2")
+
+    def test_preserves_checked_in_fetch_policy(self):
+        nested = [{"parent": "rocm-systems", "paths": ["projects/example"]}]
+        sources = {
+            "targets": {
+                "gfx1151": {
+                    "fetchArgs": ["--example"],
+                    "deepNestedSubmodules": nested,
+                }
+            }
+        }
+        self.assertEqual(
+            update_rocm_source.source_fetch_policy(sources, "gfx1151", None, None),
+            (["--example"], nested),
+        )
 
 
 if __name__ == "__main__":

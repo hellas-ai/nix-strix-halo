@@ -84,16 +84,28 @@ def ls_remote_peeled_tag(url: str, tag: str) -> str:
     return revs.get(f"refs/tags/{tag}^{{}}", revs[f"refs/tags/{tag}"])
 
 
+def parse_esmi_pin(cmake: str) -> dict[str, str]:
+    commit_match = re.search(r'set\(ESMI_GIT_HASH\s+"([0-9a-f]{40})"\)', cmake)
+    if commit_match:
+        rev = commit_match.group(1)
+        return {"ref": rev, "rev": rev}
+
+    tag_match = re.search(r'set\(current_esmi_tag\s+"([^"]+)"\)', cmake)
+    if tag_match:
+        tag = tag_match.group(1)
+        return {
+            "ref": f"refs/tags/{tag}",
+            "rev": ls_remote_peeled_tag(ESMI_IB_LIBRARY_URL, tag),
+        }
+
+    raise RuntimeError("could not find the amdsmi ESMI source pin")
+
+
 def scan_esmi_ib_library(source: Path, hash_: str) -> dict[str, str]:
     cmake = (source / "rocm-systems/projects/amdsmi/CMakeLists.txt").read_text()
-    match = re.search(r'set\(current_esmi_tag\s+"([^"]+)"\)', cmake)
-    if not match:
-        raise RuntimeError("could not find amdsmi current_esmi_tag")
-    tag = match.group(1)
     return {
         "url": ESMI_IB_LIBRARY_URL,
-        "ref": f"refs/tags/{tag}",
-        "rev": ls_remote_peeled_tag(ESMI_IB_LIBRARY_URL, tag),
+        **parse_esmi_pin(cmake),
         "hash": hash_,
     }
 
