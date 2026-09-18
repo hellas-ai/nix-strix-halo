@@ -145,6 +145,8 @@ let
     pkgs.writeShellScript "${namePrefix}-benchmark-runner" ''
       set -euo pipefail
 
+      ${lib.optionalString (!isMetal) (benchLib.hipArchGuard target.runtimeArch)}
+
       # ds4's single-instance lock defaults to /tmp/ds4.lock. The darwin
       # sandbox shares /tmp, so a lock left by an aborted run under another
       # _nixbld user is unopenable (0600) and fails the whole benchmark.
