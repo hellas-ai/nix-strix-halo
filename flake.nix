@@ -1237,6 +1237,7 @@
             (with pkgs; [
               deadnix
               nix-fast-build
+              nix-prefetch-git
               nixfmt-tree
               statix
             ])

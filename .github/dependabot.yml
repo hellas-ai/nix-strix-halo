@@ -6,6 +6,9 @@ updates:
       - "/lib/hydra/benchmark"
     schedule:
       interval: "daily"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
     groups:
       nix-inputs:
         patterns:
