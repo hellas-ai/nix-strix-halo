@@ -1,0 +1,39 @@
+ROCm: allow the mamba radix cache "extra_buffer" strategy on HIP with the
+triton linear-attn backend.
+
+Source-ified from .bench-artifacts/radix/graft/sitecustomize.py.  The
+CUDA/MUSA/NPU assert in ServerArgs._validate_mamba_extra_buffer over-guards:
+for --linear-attn-backend triton the entire extra_buffer data path is Triton
+plus plain torch indexing (chunk_gated_delta_rule_fwd_h already produces the
+per-chunk hidden states unconditionally; the checkpoint tracking is pure
+tensor indexing; mamba_checkpoint_pool's one CUDA symbol,
+torch.cuda.mem_get_info, is implemented on ROCm).  Every other assert in the
+method is kept verbatim; unlike the runtime graft, the gate is widened rather
+than dropped, so non-triton linear-attn backends on HIP still fail loudly.
+
+Applies on top of 0002-rocm-default-triton-and-xgrammar-fallback.patch (which
+touches a different region of server_args.py).
+
+--- a/sglang/srt/server_args.py
++++ b/sglang/srt/server_args.py
+@@ -4365,9 +4365,18 @@
+         assert self._support_mamba_cache_extra_buffer(
+             model_arch
+         ), f"extra_buffer is not supported for {model_arch}; use no_buffer."
++        # ROCm with the triton linear-attn backend is also fine: the whole
++        # extra_buffer data path there is Triton kernels (fla.chunk already
++        # returns the per-chunk hidden states h unconditionally) plus plain
++        # torch indexing, and torch.cuda.mem_get_info() exists on ROCm.  The
++        # CUDA-only kernels (gdn_cutedsl, gdn_flashinfer) are selected by
++        # --linear-attn-backend and raise their own errors.
+         assert (
+-            is_cuda() or is_musa() or is_npu()
+-        ), "extra_buffer needs CUDA/MUSA/NPU (FLA)."
++            is_cuda()
++            or is_musa()
++            or is_npu()
++            or (is_hip() and self.linear_attn_backend == "triton")
++        ), "extra_buffer needs CUDA/MUSA/NPU, or ROCm with --linear-attn-backend triton (FLA)."
+         if self.speculative_num_draft_tokens is not None:
+             assert (
+                 not self.enable_mamba_extra_buffer_lazy()
