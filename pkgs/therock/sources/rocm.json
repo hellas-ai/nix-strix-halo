@@ -1,18 +1,18 @@
 {
   "linux": {
     "gfx1151": {
-      "url": "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-gfx1151-7.15.0a20260719.tar.gz",
-      "hash": "sha256-04mWViYQujFAy+mbptQ8djGHgLFlmaQHFTfTW8LJ/MY=",
-      "version": "7.15.0a20260719",
-      "filename": "therock-dist-linux-gfx1151-7.15.0a20260719.tar.gz",
-      "updated": "2026-07-19T15:05:53.258172+00:00"
+      "url": "https://stable.repo.amd.com/rocm/core/tarball/therock-dist-linux-gfx1151-10.0.0.tar.gz",
+      "hash": "sha256-T+q9ny2nI1LfN/bXFKVIR9P+kTwDQfviplQsEWQCS68=",
+      "version": "10.0.0",
+      "filename": "therock-dist-linux-gfx1151-10.0.0.tar.gz",
+      "updated": "2026-08-28T08:59:01.222797+00:00"
     },
     "gfx1030": {
-      "url": "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-gfx103X-all-7.15.0a20260719.tar.gz",
-      "hash": "sha256-XqhekKNqQaIgCx5/3/fgZdRvE4wVIkeiBrV1uebKn9E=",
-      "version": "7.15.0a20260719",
-      "filename": "therock-dist-linux-gfx103X-all-7.15.0a20260719.tar.gz",
-      "updated": "2026-07-21T17:01:40.257051+00:00"
+      "url": "https://stable.repo.amd.com/rocm/core/tarball/therock-dist-linux-gfx103X-all-10.0.0.tar.gz",
+      "hash": "sha256-GRPPVTGTpWQrwIlIB+aN0gZySzd7d5EBrdjmKETC4gw=",
+      "version": "10.0.0",
+      "filename": "therock-dist-linux-gfx103X-all-10.0.0.tar.gz",
+      "updated": "2026-08-28T08:59:42.850082+00:00"
     }
   }
 }

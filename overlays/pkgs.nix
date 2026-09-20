@@ -26,10 +26,28 @@ let
   suffix = rocmTarget.packageSuffix;
   firstBuildTarget = builtins.head rocmTarget.buildTargets;
 
+  # The monolithic source build exposes the same headers, libraries, and HIP
+  # compiler as the split ROCm packages expected by nixpkgs consumers. Present
+  # the three-package subset llama.cpp asks for as a small compatibility scope
+  # so selecting `therock-source` changes its actual derivation graph, not just
+  # the provider label used by Hydra.
+  therockSourceSdk = final."therock-rocm-${suffix}";
+  activeRocmPackages =
+    if rocmProvider == "therock-source" then
+      {
+        clr = therockSourceSdk // {
+          hipClangPath = "${therockSourceSdk}/lib/llvm/bin";
+        };
+        hipblas = therockSourceSdk;
+        rocblas = therockSourceSdk;
+      }
+    else
+      final.rocmPackages;
+
   rocmOverride = {
     rocmSupport = true;
     rpcSupport = true;
-    inherit (final) rocmPackages;
+    rocmPackages = activeRocmPackages;
     inherit (rocmTarget) rocmGpuTargets;
   };
   vulkanOverride = {
@@ -153,8 +171,7 @@ let
     ];
     patches = (old.patches or [ ]) ++ [
       ../pkgs/llama-cpp/patches/0001-rpc-rdma-configurable-chunk-size.patch
-      ../pkgs/llama-cpp/patches/0002-rpc-rdma-darwin-librdma.patch
-      ../pkgs/llama-cpp/patches/0003-rpc-rdma-log-probe-and-avoid-darwin-fallback-hang.patch
+      ../pkgs/llama-cpp/patches/0003-rpc-rdma-log-probe-failures.patch
       ../pkgs/llama-cpp/patches/0004-rpc-rdma-selectable-uc-qp.patch
       ../pkgs/llama-cpp/patches/0005-rpc-rdma-remote-lid-env.patch
       ../pkgs/llama-cpp/patches/0006-rpc-rdma-mtu-and-uc-init-shape.patch
@@ -189,11 +206,16 @@ let
 
   # llama.cpp otherwise prefers a host /opt/rocm when one is visible. Apart
   # from making the build impure, that can mix a host HIP runtime with the
-  # target-narrowed nixpkgs ROCm libraries selected above.
+  # provider-selected ROCm libraries above.
   withHermeticRocm =
     drv:
-    drv.overrideAttrs (_: {
-      env.ROCM_PATH = final.rocmPackages.clr;
+    drv.overrideAttrs (old: {
+      env.ROCM_PATH = activeRocmPackages.clr;
+      cmakeFlags =
+        (old.cmakeFlags or [ ])
+        ++ lib.optionals (rocmProvider == "therock-source") [
+          (lib.cmakeFeature "CMAKE_HIP_COMPILER" "${therockSourceSdk}/bin/therock-hip-clang++")
+        ];
     });
 
   # macOS 26 exposes Apple Thunderbolt RDMA through the SDK's infiniband

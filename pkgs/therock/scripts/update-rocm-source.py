@@ -18,7 +18,7 @@ from typing import Any
 
 DEFAULT_URL = "https://github.com/ROCm/TheRock.git"
 DEFAULT_TARGET = "gfx1151"
-DEFAULT_SERIES = "7.15"
+DEFAULT_SERIES = "10.0"
 DEFAULT_FETCH_ARGS: list[str] = []
 DEFAULT_DEEP_NESTED_SUBMODULES: list[dict[str, object]] = []
 
@@ -57,17 +57,32 @@ def load_sources(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def pinned_series(output: str) -> str | None:
+def pinned_series(sources: dict[str, Any], target: str) -> str | None:
     """Series of the currently pinned source, so the default follows the
     checked-in pin instead of going stale when the release train rolls."""
     try:
-        version = json.loads(Path(output).read_text()).get("version", "")
+        version = sources.get("targets", {}).get(target, {}).get("version", "")
         match = re.match(r"(\d+\.\d+)", version)
         if match:
             return match.group(1)
-    except (OSError, ValueError):
+    except (AttributeError, TypeError):
         pass
     return None
+
+
+def source_fetch_policy(
+    sources: dict[str, Any],
+    target: str,
+    fetch_args: list[str] | None,
+    deep_nested_submodules: list[dict[str, object]] | None,
+) -> tuple[list[str], list[dict[str, object]]]:
+    current = sources.get("targets", {}).get(target, {})
+    return (
+        fetch_args if fetch_args is not None else current.get("fetchArgs", DEFAULT_FETCH_ARGS),
+        deep_nested_submodules
+        if deep_nested_submodules is not None
+        else current.get("deepNestedSubmodules", DEFAULT_DEEP_NESTED_SUBMODULES),
+    )
 
 
 def main() -> None:
@@ -97,19 +112,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not args.series:
-        args.series = pinned_series(args.output) or DEFAULT_SERIES
-
     output = Path(args.output)
     sources = load_sources(output)
+    if not args.series:
+        args.series = pinned_series(sources, args.target) or DEFAULT_SERIES
+
     ref = args.ref or f"refs/heads/release/therock-{args.series}"
     version = args.version or args.series
     rev = args.rev or git_rev(args.url, ref)
-    fetch_args = args.fetch_args if args.fetch_args is not None else DEFAULT_FETCH_ARGS
-    deep_nested_submodules = (
-        args.deep_nested_submodules
-        if args.deep_nested_submodules is not None
-        else DEFAULT_DEEP_NESTED_SUBMODULES
+    fetch_args, deep_nested_submodules = source_fetch_policy(
+        sources,
+        args.target,
+        args.fetch_args,
+        args.deep_nested_submodules,
     )
 
     targets = sources.setdefault("targets", {})
