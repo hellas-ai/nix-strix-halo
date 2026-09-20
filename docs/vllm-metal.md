@@ -18,6 +18,16 @@ nix build .#checks.aarch64-darwin.vllm-metal-module
   -c 'import mlx.core, mlx_lm, ray, vllm, vllm_metal'
 ```
 
+The 0.29.0 package passed these checks on an M4 Mac running macOS 27.0 on
+2026-09-20. The native test verified exact KV-cache scatter in float32,
+float16, and bfloat16 with JACCL available. The HTTP test matched two greedy
+completions against a PyTorch reference using a locally generated Llama model.
+A separate real-model test of `Qwen/Qwen3-0.6B` at revision
+`c1899de289a04d12100db370d81485cdf75e47ca` matched two simultaneous 16-token
+completion requests against PyTorch float32, and streaming chat matched the
+non-streaming response. These results cover single-host serving; the older
+multi-host measurements below have not been repeated with this release.
+
 The flake also exports `darwinModules.vllm-metal`. Its defaults are localhost,
 an 8,192-token context, one sequence, and no prefix caching or speculation.
 Activation creates the state directory for the configured service account;
