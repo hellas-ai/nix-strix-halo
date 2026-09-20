@@ -3,7 +3,6 @@
   callPackage,
   mlxPackage,
   mlxMetalPackage,
-  mlx-lm-src,
   python312,
   pyproject-build-systems,
   pyproject-nix,
@@ -13,7 +12,9 @@
 
 let
   pname = "vllm-metal";
-  version = "0.3.0.dev20260826134128";
+  version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
+  lock = builtins.fromTOML (builtins.readFile ./uv.lock);
+  lockedMlx = lib.findFirst (package: package.name == "mlx") null lock.package;
 
   workspace = uv2nix.lib.workspace.loadWorkspace {
     workspaceRoot = ./.;
@@ -48,11 +49,6 @@ let
         mlx = useSourcePackage prev.mlx mlxPackage;
         mlx-metal = useSourcePackage prev.mlx-metal mlxMetalPackage;
 
-        mlx-lm = prev.mlx-lm.overrideAttrs (_: {
-          # Deliberate 0.31.3 compatibility override; see the input comment.
-          src = mlx-lm-src;
-        });
-
         # vllm and mlx-vlm depend on the headless and GUI OpenCV wheels,
         # respectively. Keep the headless cv2 implementation and only retain
         # the GUI wheel's distribution metadata for dependency resolution.
@@ -65,15 +61,49 @@ let
     ]
   );
 in
+assert lib.assertMsg
+  (mlxPackage.version == lockedMlx.version && mlxMetalPackage.version == lockedMlx.version)
+  "vllm-metal: update the MLX source and paired release wheels together; their native ABIs must match";
 (pythonSet.mkVirtualEnv "${pname}-${version}" workspace.deps.default).overrideAttrs (
   final: old: {
     passthru = (old.passthru or { }) // {
       tests = (old.passthru.tests or { }) // {
         imports = runCommand "${pname}-imports" { nativeBuildInputs = [ final.finalPackage ]; } ''
           mkdir "$out"
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+          export HF_HUB_OFFLINE=1
           python -c 'import mlx.core, mlx_lm, ray, vllm, vllm_metal' > "$out/imports"
           vllm --help > "$out/vllm-help"
         '';
+        metal =
+          runCommand "${pname}-metal-smoke"
+            {
+              nativeBuildInputs = [ final.finalPackage ];
+              requiredSystemFeatures = [ "metal" ];
+              __noChroot = true;
+            }
+            ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              export HF_HUB_OFFLINE=1
+              export VLLM_METAL_BUILD_FROM_SOURCE=0
+              python ${./smoke.py} > "$out"
+            '';
+        server =
+          runCommand "${pname}-serve-smoke"
+            {
+              nativeBuildInputs = [ final.finalPackage ];
+              requiredSystemFeatures = [ "metal" ];
+              __noChroot = true;
+            }
+            ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              export HF_HUB_OFFLINE=1
+              export VLLM_METAL_BUILD_FROM_SOURCE=0
+              python ${./serve-smoke.py} > "$out"
+            '';
       };
     };
 

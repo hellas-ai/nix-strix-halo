@@ -184,6 +184,16 @@ let
             "address to its Thunderbolt interface");
       }
       src.local_id = port_attr.lid;'
+        # MLX 0.32.1 already checks for a missing IPv4 GID. Preserve that
+        # diagnostic while recording the index selected by its newer loop.
+        replace_if_present "$out/jaccl/rdma.cpp" \
+          '  bool found_gid = false;' \
+          '  int gid_index = 0;
+      bool found_gid = false;'
+        replace_if_present "$out/jaccl/rdma.cpp" \
+          '        found_gid = true;' \
+          '        gid_index = i;
+            found_gid = true;'
         replace_if_present "$out/jaccl/rdma.cpp" \
           '  src.packet_sequence_number = 7;
       src.global_identifier = gid;' \
@@ -193,6 +203,18 @@ let
         replace_if_present "$out/jaccl/rdma.cpp" \
           '    attr.ah_attr.grh.sgid_index = 1;' \
           '    attr.ah_attr.grh.sgid_index = src.source_gid_index;'
+        # These edits must land together. Fail at source preparation if a new
+        # upstream layout would otherwise leave a partial GID-index patch.
+        for expected in \
+          'int gid_index = 0;' \
+          'gid_index = i;' \
+          'src.source_gid_index = gid_index;' \
+          'attr.ah_attr.grh.sgid_index = src.source_gid_index;'; do
+          if ! grep -Fq "$expected" "$out/jaccl/rdma.cpp"; then
+            echo "jaccl: incomplete dynamic GID patch: $expected" >&2
+            exit 1
+          fi
+        done
         replace_if_present "$out/jaccl/rdma.cpp" \
           '    // Search for the name and try to open the device
         for (int i = 0; i < num_devices; i++) {
@@ -296,7 +318,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "jaccl";
-  version = "0.32.0-mlx";
+  version = "${import ../../lib/mlx-version.nix mlx-src}-mlx";
   src = jaccl-src;
 
   nativeBuildInputs = [

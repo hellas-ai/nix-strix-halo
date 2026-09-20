@@ -9,6 +9,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    nix-darwin = {
+      url = "github:nix-darwin/nix-darwin";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -77,16 +82,7 @@
     };
 
     mlx-metal-src = {
-      url = "github:ml-explore/mlx/v0.32.0";
-      flake = false;
-    };
-
-    mlx-lm-metal-src = {
-      # vLLM-Metal declares another 0.31.3 source revision in its wheel
-      # metadata. The Darwin stack pins this API-compatible revision because
-      # it retains the state-machine interface used by the Metal model loaders.
-      # The package smoke test imports the resulting combined environment.
-      url = "github:ml-explore/mlx-lm/ab1806e8f5d6aa035973af194a1b9198ab4754dc";
+      url = "github:ml-explore/mlx/v0.32.1";
       flake = false;
     };
 
@@ -824,7 +820,6 @@
                   pyproject-nix
                   uv2nix
                   ;
-                mlx-lm-src = inputs.mlx-lm-metal-src;
                 mlxPackage = vllmMlxStack.mlxMetal;
                 mlxMetalPackage = vllmMlxStack.mlxMetalBackend;
               };
@@ -1302,73 +1297,12 @@
                 '';
           }
         )
-        // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "aarch64-darwin") (
-          let
-            fakeVllmMetal = pkgs.writeShellScriptBin "vllm" ''
-              exit 0
-            '';
-            evalService =
-              serviceConfig:
-              lib.evalModules {
-                specialArgs = { inherit pkgs; };
-                modules = [
-                  self.darwinModules.vllm-metal
-                  {
-                    options = {
-                      assertions = lib.mkOption {
-                        type = lib.types.listOf lib.types.attrs;
-                        default = [ ];
-                      };
-                      launchd.daemons = lib.mkOption {
-                        type = lib.types.attrsOf lib.types.anything;
-                        default = { };
-                      };
-                    };
-                    config.services.vllm-metal = {
-                      enable = true;
-                      package = lib.mkForce fakeVllmMetal;
-                      model = "example/Qwen";
-                      user = "vllm-test";
-                    }
-                    // serviceConfig;
-                  }
-                ];
-              };
-            good = evalService {
-              environment.HF_HOME = "/Users/vllm-test/.cache/huggingface";
-              workingDirectory = "/Users/vllm-test";
-              speculativeConfig = {
-                method = "mtp";
-                num_speculative_tokens = 1;
-              };
-            };
-            badMtp = evalService {
-              maxNumSeqs = 2;
-              speculativeConfig.method = "mtp";
-            };
-            failedAssertions =
-              configuration: lib.filter (item: !item.assertion) configuration.config.assertions;
-            service = good.config.launchd.daemons.vllm-metal;
-          in
-          {
-            vllm-metal-module =
-              assert failedAssertions good == [ ];
-              assert failedAssertions badMtp != [ ];
-              assert good.config.services.vllm-metal.host == "127.0.0.1";
-              assert good.config.services.vllm-metal.maxModelLen == 262144;
-              assert service.environment.HF_HOME == "/Users/vllm-test/.cache/huggingface";
-              assert service.serviceConfig.UserName == "vllm-test";
-              assert service.serviceConfig.WorkingDirectory == "/Users/vllm-test";
-              assert service.serviceConfig.KeepAlive.SuccessfulExit == false;
-              pkgs.runCommandLocal "ci-vllm-metal-module" { } ''
-                grep -F -- '--host 127.0.0.1' ${service.command}
-                grep -F -- '--max-model-len 262144' ${service.command}
-                grep -F -- '--speculative-config' ${service.command}
-                grep -F -- '"method":"mtp"' ${service.command}
-                touch "$out"
-              '';
-          }
-        )
+        // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "aarch64-darwin") {
+          vllm-metal-module = pkgs.callPackage ./pkgs/vllm-metal/module-check.nix {
+            inherit (inputs) nix-darwin;
+            module = self.darwinModules.vllm-metal;
+          };
+        }
       );
 
       devShells = perSystem (pkgs: {

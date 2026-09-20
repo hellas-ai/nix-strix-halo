@@ -46,7 +46,7 @@ let
 in
 mlx.overrideAttrs (old: {
   inherit pname;
-  version = "0.32.0";
+  version = import ../../lib/mlx-version.nix mlx-src;
 
   src = mlx-src;
   patches = [
@@ -110,10 +110,16 @@ mlx.overrideAttrs (old: {
       done
 
       path="$(/usr/bin/xcrun -sdk macosx -find "$tool" 2>/dev/null || true)"
-      if [ -n "$path" ] && [ -x "$path" ]; then
-        printf '%s\n' "$path"
-        return 0
-      fi
+      # xcrun can resolve a download inside the invoking user's home. Builders
+      # must use a system installation that is also available to Nix build users.
+      case "$path" in
+        /Applications/*|/Library/*|/System/*|/usr/*|/var/run/*|/private/var/run/*|/nix/store/*)
+          if [ -x "$path" ]; then
+            printf '%s\n' "$path"
+            return 0
+          fi
+          ;;
+      esac
 
       return 1
     }

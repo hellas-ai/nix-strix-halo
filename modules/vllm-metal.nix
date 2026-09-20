@@ -24,7 +24,7 @@ let
     "--gpu-memory-utilization"
     (toString cfg.gpuMemoryUtilization)
   ]
-  ++ lib.optional cfg.enablePrefixCaching "--enable-prefix-caching"
+  ++ [ (if cfg.enablePrefixCaching then "--enable-prefix-caching" else "--no-enable-prefix-caching") ]
   ++ lib.optionals (cfg.reasoningParser != null) [
     "--reasoning-parser"
     cfg.reasoningParser
@@ -95,7 +95,7 @@ in
 
     maxModelLen = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 262144;
+      default = 8192;
       description = "Maximum combined prompt and completion length in tokens.";
     };
 
@@ -113,8 +113,11 @@ in
 
     enablePrefixCaching = lib.mkOption {
       type = lib.types.bool;
-      default = true;
-      description = "Enable automatic prefix caching.";
+      default = false;
+      description = ''
+        Enable automatic prefix caching. Disabled by default because upstream
+        still reports cache-on/cache-off parity failures for some hybrid models.
+      '';
     };
 
     reasoningParser = lib.mkOption {
@@ -167,22 +170,30 @@ in
       type = lib.types.attrsOf lib.types.str;
       default = { };
       example = {
-        HOME = "/Users/alice";
-        HF_HOME = "/Users/alice/.cache/huggingface";
+        HF_HUB_OFFLINE = "1";
       };
-      description = "Environment variables for the launchd service.";
+      description = "Additional environment variables; override the service-owned cache defaults.";
+    };
+
+    stateDirectory = lib.mkOption {
+      type = lib.types.addCheck lib.types.str (path: lib.hasPrefix "/" path && path != "/");
+      default = "/var/lib/vllm-metal";
+      description = ''
+        Absolute directory for model downloads, caches, and logs. Activation
+        creates this directory with mode 0700 and assigns it to the service user.
+      '';
     };
 
     user = lib.mkOption {
       type = lib.types.nonEmptyStr;
-      example = "alice";
-      description = "Unprivileged account under which the system daemon runs.";
+      example = "vllm";
+      description = "Existing unprivileged account under which the system daemon runs.";
     };
 
     workingDirectory = lib.mkOption {
       type = lib.types.nullOr lib.types.nonEmptyStr;
-      default = null;
-      example = "/Users/alice";
+      default = cfg.stateDirectory;
+      defaultText = lib.literalExpression "config.services.vllm-metal.stateDirectory";
       description = "Working directory for the daemon, or null for launchd's default.";
     };
 
@@ -199,6 +210,10 @@ in
         message = "services.vllm-metal.gpuMemoryUtilization must be greater than zero";
       }
       {
+        assertion = cfg.user != "root" && cfg.user != "0";
+        message = "services.vllm-metal.user must be an unprivileged service account";
+      }
+      {
         assertion = !cfg.enableAutoToolChoice || cfg.toolCallParser != null;
         message = "services.vllm-metal.enableAutoToolChoice requires toolCallParser";
       }
@@ -211,9 +226,19 @@ in
       }
     ];
 
+    # Run after nix-darwin creates users and before launchd loads the daemon.
+    system.activationScripts.launchd.text = lib.mkBefore ''
+      /usr/bin/install -d -m 0700 -o ${lib.escapeShellArg cfg.user} ${lib.escapeShellArg cfg.stateDirectory}
+    '';
+
     launchd.daemons.vllm-metal = {
       command = "${runScript}";
-      inherit (cfg) environment;
+      environment = {
+        HOME = cfg.stateDirectory;
+        HF_HOME = "${cfg.stateDirectory}/huggingface";
+        XDG_CACHE_HOME = "${cfg.stateDirectory}/cache";
+      }
+      // cfg.environment;
       serviceConfig = {
         KeepAlive = {
           SuccessfulExit = false;
@@ -222,6 +247,8 @@ in
         ExitTimeOut = 60;
         ThrottleInterval = 60;
         UserName = cfg.user;
+        StandardOutPath = "${cfg.stateDirectory}/stdout.log";
+        StandardErrorPath = "${cfg.stateDirectory}/stderr.log";
       }
       // lib.optionalAttrs (cfg.workingDirectory != null) {
         WorkingDirectory = cfg.workingDirectory;

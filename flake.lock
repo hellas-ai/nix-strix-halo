@@ -170,36 +170,19 @@
         "type": "github"
       }
     },
-    "mlx-lm-metal-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1783466239,
-        "narHash": "sha256-C8KF9q/gxR+YTH8Pg9qmQ/mFnVHQ30vl4BBUQl8IPP4=",
-        "owner": "ml-explore",
-        "repo": "mlx-lm",
-        "rev": "ab1806e8f5d6aa035973af194a1b9198ab4754dc",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ml-explore",
-        "repo": "mlx-lm",
-        "rev": "ab1806e8f5d6aa035973af194a1b9198ab4754dc",
-        "type": "github"
-      }
-    },
     "mlx-metal-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1783440633,
-        "narHash": "sha256-yHpTyRf9FOPbdyDWSM7b6VC72STnUpgCMLbDxLbdaqs=",
+        "lastModified": 1787017453,
+        "narHash": "sha256-VstsaBOAvqHJhTNXczjFavG4l5VTJdJWT0VKuzmwIEA=",
         "owner": "ml-explore",
         "repo": "mlx",
-        "rev": "7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247",
+        "rev": "3a6219917e4535575ce5bce2fc2ba27a483a709b",
         "type": "github"
       },
       "original": {
         "owner": "ml-explore",
-        "ref": "v0.32.0",
+        "ref": "v0.32.1",
         "repo": "mlx",
         "type": "github"
       }
@@ -242,6 +225,26 @@
       "original": {
         "owner": "numtide",
         "repo": "nix-ai-tools",
+        "type": "github"
+      }
+    },
+    "nix-darwin": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1786845137,
+        "narHash": "sha256-oQFip+v0luP8NIxJzmiW4Wu8bILsbFWom5l0zonl8hQ=",
+        "owner": "nix-darwin",
+        "repo": "nix-darwin",
+        "rev": "4cff07de74b50e64bdd68cd4e722ab5b6b35ee48",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-darwin",
+        "repo": "nix-darwin",
         "type": "github"
       }
     },
@@ -315,10 +318,10 @@
         "fastflowlm": "fastflowlm",
         "llama-cpp-master": "llama-cpp-master",
         "llama-cpp-spacemit": "llama-cpp-spacemit",
-        "mlx-lm-metal-src": "mlx-lm-metal-src",
         "mlx-metal-src": "mlx-metal-src",
         "mlx-src": "mlx-src",
         "nix-ai-tools": "nix-ai-tools",
+        "nix-darwin": "nix-darwin",
         "nixpkgs": "nixpkgs",
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",
