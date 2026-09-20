@@ -183,7 +183,7 @@ recorded in `uv.lock`; there is no second source override.
    both URLs and the project version in `pkgs/vllm-metal/pyproject.toml`.
 2. Set `mlx-metal-src` in `flake.nix` to the exact MLX version required by that
    release. Run `nix flake lock`.
-3. Run `nix shell nixpkgs#uv --command uv lock --project pkgs/vllm-metal --python 3.12`.
+3. Run `nix shell --inputs-from . nixpkgs#uv --command uv lock --project pkgs/vllm-metal --python 3.12`.
    Review the resulting dependency changes and keep source hashes committed.
 4. Build the package, import check, native Metal smoke, serving smoke, and
    module check using

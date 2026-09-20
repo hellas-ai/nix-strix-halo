@@ -14,7 +14,7 @@ let
   pname = "vllm-metal";
   version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
   lock = builtins.fromTOML (builtins.readFile ./uv.lock);
-  lockedMlx = lib.findFirst (package: package.name == "mlx") null lock.package;
+  lockedVersion = name: (lib.findFirst (package: package.name == name) null lock.package).version;
 
   workspace = uv2nix.lib.workspace.loadWorkspace {
     workspaceRoot = ./.;
@@ -62,8 +62,11 @@ let
   );
 in
 assert lib.assertMsg
-  (mlxPackage.version == lockedMlx.version && mlxMetalPackage.version == lockedMlx.version)
+  (mlxPackage.version == lockedVersion "mlx" && mlxMetalPackage.version == lockedVersion "mlx-metal")
   "vllm-metal: update the MLX source and paired release wheels together; their native ABIs must match";
+assert lib.assertMsg (
+  lockedVersion "vllm-metal" == version && lib.removeSuffix "+cpu" (lockedVersion "vllm") == version
+) "vllm-metal: the project version and both locked release wheels must match";
 (pythonSet.mkVirtualEnv "${pname}-${version}" workspace.deps.default).overrideAttrs (
   final: old: {
     passthru = (old.passthru or { }) // {

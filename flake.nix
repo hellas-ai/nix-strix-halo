@@ -1270,6 +1270,10 @@
             therock-updater-tests = runSourceCheck "therock-updater-tests" [
               pkgs.python3
             ] "python3 -m unittest discover -s pkgs/therock/scripts -p 'test_*.py'";
+            vllm-metal-lock = runSourceCheck "vllm-metal-lock" [ pkgs.uv ] ''
+              uv lock --project pkgs/vllm-metal --check --offline --no-python-downloads \
+                --python ${pkgs.python312}/bin/python3.12
+            '';
             nixfmt = runSourceCheck "nixfmt" [
               pkgs.nixfmt-tree
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
