@@ -72,7 +72,8 @@ mlx.overrideAttrs (old: {
 
   env = {
     PYPI_RELEASE = "1";
-    MLX_BUILD_STAGE = toString buildStage;
+    MLX_BUILD_FRONTEND_PACKAGE = if buildStage == 1 then "1" else "0";
+    MLX_BUILD_BACKEND_PACKAGE = if buildStage == 2 then "1" else "0";
     CMAKE_ARGS = lib.concatStringsSep " " [
       (lib.cmakeBool "MLX_BUILD_METAL" true)
       (lib.cmakeBool "USE_SYSTEM_FMT" true)
@@ -86,6 +87,7 @@ mlx.overrideAttrs (old: {
   };
 
   preBuild = (old.preBuild or "") + ''
+    export CMAKE_BUILD_PARALLEL_LEVEL="$NIX_BUILD_CORES"
     if [ ! -d "${darwinSdkRoot}" ]; then
       echo "mlx-metal: missing macOS SDK: ${darwinSdkRoot}" >&2
       exit 1
@@ -198,10 +200,6 @@ mlx.overrideAttrs (old: {
       done
     ''
     + lib.optionalString (buildStage == 2) ''
-      find "$out/${sitePackages}/mlx" -maxdepth 1 -type f \
-        \( -name '*.py' -o -name '*.pyc' -o -name 'py.typed' \) -delete
-      rm -rf "$out/${sitePackages}/mlx/__pycache__"
-
       cmake_targets="$out/${sitePackages}/mlx/share/cmake/MLX/MLXTargets.cmake"
       if [ -f "$cmake_targets" ]; then
         substituteInPlace "$cmake_targets" \
