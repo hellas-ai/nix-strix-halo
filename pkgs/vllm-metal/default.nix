@@ -1,6 +1,8 @@
 {
   lib,
   callPackage,
+  cctools,
+  darwin,
   mlxPackage,
   mlxMetalPackage,
   python312,
@@ -48,6 +50,24 @@ let
       (_: prev: {
         mlx = useSourcePackage prev.mlx mlxPackage;
         mlx-metal = useSourcePackage prev.mlx-metal mlxMetalPackage;
+
+        vllm-metal = prev.vllm-metal.overrideAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+            cctools
+            darwin.sigtool
+          ];
+          postFixup = (old.postFixup or "") + ''
+            for extension in "$out/${python312.sitePackages}/vllm_metal/metal/"_paged_ops*.so; do
+              # The release wheel records its CI runner's install name and an
+              # unqualified MLX dependency. Bind it to our exact source build.
+              install_name_tool -id "$extension" \
+                -change @rpath/libmlx.dylib \
+                ${mlxMetalPackage}/${python312.sitePackages}/mlx/lib/libmlx.dylib \
+                "$extension"
+              codesign -f -s - "$extension"
+            done
+          '';
+        });
 
         # vllm and mlx-vlm depend on the headless and GUI OpenCV wheels,
         # respectively. Keep the headless cv2 implementation and only retain
