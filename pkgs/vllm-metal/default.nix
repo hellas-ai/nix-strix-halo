@@ -60,9 +60,12 @@ let
             for extension in "$out/${python312.sitePackages}/vllm_metal/metal/"_paged_ops*.so; do
               # The release wheel records its CI runner's install name and an
               # unqualified MLX dependency. Bind it to our exact source build.
-              install_name_tool -id "$extension" \
-                -change @rpath/libmlx.dylib \
-                ${mlxMetalPackage}/${python312.sitePackages}/mlx/lib/libmlx.dylib \
+              # A sibling symlink keeps load commands short enough for the
+              # wheel's Mach-O header, which has no room for store paths.
+              ln -s ${mlxMetalPackage}/${python312.sitePackages}/mlx/lib/libmlx.dylib \
+                "$(dirname "$extension")/libmlx.dylib"
+              install_name_tool -id "@rpath/$(basename "$extension")" \
+                -change @rpath/libmlx.dylib @loader_path/libmlx.dylib \
                 "$extension"
               codesign -f -s - "$extension"
             done

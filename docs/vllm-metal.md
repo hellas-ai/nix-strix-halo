@@ -104,7 +104,9 @@ For a larger transport sanity check, append for example
 `--elements 67108864 --warmup 3 --iterations 20`. The reported
 `payload_gib_s` is application payload per rank, not physical link line rate.
 
-`vllm-metal` does not currently expose cross-host tensor parallelism. The
+This package is validated for single-host serving. vLLM-Metal 0.29 includes
+pipeline and data parallel execution paths, but rejects tensor parallel sizes
+greater than one; those multi-host serving paths are not validated here. The
 included MLX-LM harness can compare a single-host greedy reference with
 tensor-parallel weight sharding over JACCL. First capture the reference:
 
@@ -148,22 +150,22 @@ sudo ifconfig en2 inet 10.56.2.1/30 up
 ```
 
 In the measured MBP/Goblin lab pair, either 80 Gbit/s cable sustained about 62.5
-Gbit/s of JACCL collective traffic and both sustained 103.6 Gbit/s. The full
-closure is 3.7 GiB. The official Qwen3.8-27B BF16 weights occupy roughly 52 GiB
+Gbit/s of JACCL collective traffic and both sustained 103.6 Gbit/s. The tested
+0.28 package closure was 3.7 GiB. The official Qwen3.8-27B BF16 weights occupy roughly 52 GiB
 on disk. TP=2 shards supported layers in memory, while the checkpoint must
 still be readable by both ranks and active KV state and cache allocations
 remain per-rank costs. A 131,017-token prefill on ordinary MLX-LM did not finish
 in 1 hour 49 minutes, so 256K is an accepted window, not a demonstrated useful
 throughput target for this backend.
 
-| Capability | Verified result |
+| Capability | Historical result (MLX 0.32.0 / vLLM 0.28) |
 |---|---|
 | JACCL exact all-reduce over two Thunderbolt links | Works |
 | MLX-LM TP=2 greedy correctness | Exact match for unquantized Qwen3.5-0.8B |
 | MLX-LM TP=2 Qwen3.8-27B serving | Not viable on the tested 36 GiB worker |
 | Exact-prefix reuse | Works; 44.913 s cold became 0.277 s warm |
 | Ray import and single-node task | Works |
-| Ray multi-node macOS control plane | Unsupported upstream; worker lost GCS after 60 s |
+| Ray multi-node macOS control plane | Worker lost GCS after 60 s in this experiment |
 | MTP in `Qwen/Qwen3.8-27B` | Unavailable on this path; MLX-LM discards the checkpoint's MTP tensors |
 | Distributed oMLX MTP/speculation | Unavailable; oMLX rejects it in distributed mode |
 
