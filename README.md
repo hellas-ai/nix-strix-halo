@@ -30,7 +30,7 @@ TheRock-published Python wheels.
 | `multikernel-demo-initrd` | tiny interactive spawn initramfs for bare-metal isolation demos |
 | `xrt`, `xrt-amdxdna`, `tokenizers-cpp`, `strix-halo-mes-firmware`, `ec-su-axb35-monitor` | hardware support bits |
 | `live-iso` | USB-flashable strix-halo live system |
-| Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `ds4`, `jaccl` | cross-platform / Metal |
+| Darwin: `llama-cpp`, `llama-cpp-master`, `llama-cpp-master-rdma`, `mlx`, `mlx-metal`, `vllm-metal`, `ds4`, `jaccl` | cross-platform / Metal |
 
 Apps mirror the package names — `apps.x86_64-linux.llama-cli-rocm`,
 `llama-rpc-server`, `flm`, `therock-python`, `live-iso-vm`, etc.
@@ -135,6 +135,22 @@ client per process with `GGML_RPC_SERVER_ONE_SHOT=1`; pair it with systemd
 for comparison runs, or override pieces explicitly with
 `GGML_RPC_RDMA_SEND_FRAME_ACK`, `GGML_RPC_RDMA_WAIT_FRAME_ACK`,
 `GGML_RPC_RDMA_ACK_TIMEOUT_US`, and `GGML_RPC_RDMA_ACK_RETRIES`.
+
+### Darwin vLLM Metal and JACCL
+
+`packages.aarch64-darwin.vllm-metal` packages the matching vLLM 0.29.0 and
+vLLM-Metal 0.29.0 wheels with source-built MLX 0.32.1 and JACCL.
+
+```bash
+nix run .#vllm-metal -- serve Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 --max-model-len 8192 --no-enable-prefix-caching
+nix build .#packages.aarch64-darwin.vllm-metal.tests.metal
+```
+
+The `darwinModules.vllm-metal` service keeps its downloads, caches, and logs in
+`/var/lib/vllm-metal`. See [the Metal guide](docs/vllm-metal.md) for host
+requirements, service configuration, validation, coordinated dependency updates,
+and the separate MLX-LM/JACCL tensor-parallel harness.
 
 ### Two-host vLLM pair benchmark
 
