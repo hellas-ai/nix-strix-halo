@@ -1,0 +1,89 @@
+gfx1030: retile the four Gated-DeltaNet chunked-prefill Triton kernels.
+
+Source-ified from .bench-artifacts/prefill/graft/qwen38_gdn_tiles.py.  The
+shipped tile constants were chosen on CDNA/Hopper; on gfx1030 (wave32, 1024
+VGPRs/SIMD) every one of these kernels lands on 256 VGPRs and spills to
+scratch.  Only launch constants change; no kernel body is touched.
+Measured on one V620, TP4 shard shapes (H=4, HV=12, K=V=128), T=2048:
+
+  chunk_fwd_kernel_o           BK128 BV64 w4 s2  645us -> BK32 BV128 w8 s2  249us
+  ..._fwd_kernel_h_blockdim64  BV32       w4 s2 1005us -> BV16       w8 s2  419us
+  ..._fwd_kkt_solve_kernel     BK64       w4 s1  252us -> BK16       w2 s2  182us
+  recompute_w_u_fwd_kernel     BK64 BV64  w4 s3  189us -> BK64 BV64  w8 s1  104us
+
+chunk_delta_h.py keeps its upstream SGLANG_GDN_CHUNK_H_* env knobs (only the
+defaults change), and keeps the load-bearing single-config autotune property.
+causal_conv1d is deliberately untouched: at the real call-site strides the
+shipped kernel already runs at occupancy 16 with zero spills.
+
+--- a/sglang/srt/layers/attention/fla/chunk_o.py
++++ b/sglang/srt/layers/attention/fla/chunk_o.py
+@@ -164,11 +164,16 @@
+         K=K,
+         V=V,
+         BT=BT,
+-        BK=128,
+-        BV=64,
++        # gfx1030 (RDNA2, wave32, 1024 VGPRs/SIMD): the CDNA-era BK=128/BV=64
++        # tile lands on 256 VGPRs (occupancy 4) and spills hundreds of values
++        # to scratch.  BK=32/BV=128 with 8 warps holds less of the tile per
++        # lane and removes the spills: 645us -> 249us on V620 TP4 shard shapes
++        # (H=4, HV=12, K=V=128, T=2048).  Kernel body unchanged.
++        BK=32,
++        BV=128,
+         USE_G=g is not None,
+         IS_VARLEN=cu_seqlens is not None,
+-        num_warps=4,
++        num_warps=8,
+         num_stages=2,
+     )
+     return o
+--- a/sglang/srt/layers/attention/fla/wy_fast.py
++++ b/sglang/srt/layers/attention/fla/wy_fast.py
+@@ -147,8 +147,10 @@
+         BK=BK,
+         BV=BV,
+         IS_VARLEN=cu_seqlens is not None,
+-        num_warps=4,
+-        num_stages=3,
++        # gfx1030: 8 warps / 1 stage avoids the register spills of the shipped
++        # 4-warp 3-stage launch: 189us -> 104us on V620 TP4 shard shapes.
++        num_warps=8,
++        num_stages=1,
+     )
+     return w, u
+ 
+--- a/sglang/srt/layers/attention/fla/chunk_delta_h.py
++++ b/sglang/srt/layers/attention/fla/chunk_delta_h.py
+@@ -21,8 +21,12 @@
+ 
+ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
+ CHUNK_SIZE = 64
+-GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "32"))
+-GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "4"))
++# gfx1030 defaults: the shipped BV=32/4-warp tile spills on RDNA2's 256-VGPR
++# wave32 register file; BV=16 with 8 warps runs 1005us -> 419us on V620 TP4
++# shard shapes.  The env knobs keep the single-config property (see below)
++# while allowing local revalidation.
++GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "16"))
++GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "8"))
+ GDN_CHUNK_H_NUM_STAGES = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES", "2"))
+ 
+ 
+--- a/sglang/srt/layers/attention/fla/chunk_fwd.py
++++ b/sglang/srt/layers/attention/fla/chunk_fwd.py
+@@ -28,10 +28,11 @@
+     }
+ )
+ @triton.autotune(
++    # gfx1030: the winner is BK=16 with 2 warps / 2 stages (252us -> 182us on
++    # V620 TP4 shard shapes), which is not in the upstream BK in [32, 64] x
++    # num_warps in [1, 2, 4] search space at all.  Pinned to a single config.
+     configs=[
+-        triton.Config({"BK": BK}, num_warps=num_warps)
+-        for BK in [32, 64]
+-        for num_warps in [1, 2, 4]
++        triton.Config({"BK": 16}, num_warps=2, num_stages=2),
+     ],
+     key=["H", "Hg", "K", "BC"],
+     **autotune_cache_kwargs,

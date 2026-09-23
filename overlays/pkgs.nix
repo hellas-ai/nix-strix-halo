@@ -258,6 +258,11 @@ let
       ecPackages = prev.callPackage ../pkgs/ec-su-axb35.nix {
         ec-su-axb35-src = inputs.ec-su-axb35;
       };
+      qwen4PythonPackages = final.${therockPythonConfig.packagesAttr}.overrideScope (
+        pyFinal: _pyPrev: {
+          transformers = pyFinal.callPackage ../pkgs/transformers-5_12_1.nix { };
+        }
+      );
     in
     {
       amdgpu-smu-exporter = prev.callPackage ../pkgs/amdgpu-smu-exporter { };
@@ -350,6 +355,35 @@ let
         rocmSdk = final."therock-rocm-${suffix}";
         inherit (rocmTarget) packageSuffix;
         hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+      };
+      sglang-qwen38-flash-next-rocm = prev.callPackage ../pkgs/sglang {
+        pythonPackages = qwen4PythonPackages;
+        rocmSdk = final."therock-rocm-${suffix}";
+        inherit (rocmTarget) packageSuffix;
+        hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+        sglangVersion = "0.5.17.dev0+qwen4exp.73a2552";
+        sglangGitCommit = "73a255206f916366c8d26d4022f82ddfb0ab558d";
+        sglangSource = final.fetchFromGitHub {
+          owner = "sgl-project";
+          repo = "sglang";
+          rev = "73a255206f916366c8d26d4022f82ddfb0ab558d";
+          hash = "sha256-7idPvXJCurLcQXcpppOuZjvoy/mEYIWB85ItBCQK/pI=";
+        };
+        sglangPatchesPath = ../pkgs/sglang/patches-qwen4-exp;
+        sglangTestsPath = ../pkgs/sglang/tests-qwen4-exp;
+        sglangExtraScripts = [
+          ../scripts/qwen38-flash-next-bench.py
+          ../scripts/qwen38-flash-next-fp16-audit.py
+          ../scripts/qwen38-flash-next-inventory.py
+          ../scripts/qwen38-flash-next-quantize-experts.py
+          ../scripts/qwen38-flash-next-qsa-aot.py
+          ../scripts/qwen38-flash-next-runtime-smoke.py
+          ../scripts/qwen38-flash-next-serve.sh
+        ];
+        sglangRunChecks = false;
+        # The PR advertises optional CUDA and gfx95-only extras that are
+        # deliberately absent from this gfx1030 closure.
+        sglangRelaxRuntimeDeps = true;
       };
       vllm-rocm = final."vllm-rocm-therock-${suffix}";
     }

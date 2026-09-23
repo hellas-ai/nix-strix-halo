@@ -1,0 +1,19 @@
+The upstream QSA tuning table assumes NVIDIA shared-memory limits.  Its
+64-token prefill tile compiles to 67,584 bytes of LDS on gfx1030, just over
+the V620's 65,536-byte workgroup limit, and terminates every scheduler rank.
+
+Keep the selected tile and warp count, but use a single software-pipeline
+stage on ROCm.  This removes the double-buffered LDS peak while leaving CUDA's
+upstream tuning unchanged.
+
+--- a/sglang/srt/layers/attention/qsa/sparse_attn.py
++++ b/sglang/srt/layers/attention/qsa/sparse_attn.py
+@@ -26 +26,7 @@ def _get_best_config(total_q: int):
+-    return next(cfg for limit, cfg in table if total_q <= limit)
++    block_n, warps, stages = next(cfg for limit, cfg in table if total_q <= limit)
++    # gfx1030 exposes 64 KiB of LDS per workgroup.  Triton's two-stage
++    # 64-token QSA prefill requires 67,584 bytes, so avoid double buffering
++    # on ROCm while preserving the upstream CUDA configurations.
++    if torch.version.hip is not None:
++        stages = 1
++    return block_n, warps, stages
