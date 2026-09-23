@@ -173,16 +173,16 @@
     "mlx-metal-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1787017453,
-        "narHash": "sha256-VstsaBOAvqHJhTNXczjFavG4l5VTJdJWT0VKuzmwIEA=",
+        "lastModified": 1787651808,
+        "narHash": "sha256-pAQZ1RJq9Mb66qXMdZUt3znNKY+bhpxYckY708i0CmY=",
         "owner": "ml-explore",
         "repo": "mlx",
-        "rev": "3a6219917e4535575ce5bce2fc2ba27a483a709b",
+        "rev": "1f8e74e3f12f31365464a6867c6579f0e9b29d85",
         "type": "github"
       },
       "original": {
         "owner": "ml-explore",
-        "ref": "v0.32.1",
+        "ref": "v0.32.2",
         "repo": "mlx",
         "type": "github"
       }
