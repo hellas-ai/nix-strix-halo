@@ -58,10 +58,13 @@ The nodes' `/models` mounts are older read-only SPDK snapshots. Publishing a
 replacement requires a coordinated storage rollout and also affects other
 clients. For bring-up, trex exports its current model filesystem read-only to
 the four fabric IPs via `/etc/exports.d/glm53.exports`; each node mounts
-`192.168.25.8:/strix-models` at `/mnt/glm53-models`. Linux NFSv4 reused an existing
-server session over the LAN on strix-1 despite the fabric address, so model
-loading throughput over this mount is not a fabric benchmark. The temporary
-exports and mounts need declarative integration after the runtime is qualified.
+`192.168.25.8:/strix-models` at `/mnt/glm53-fabric`, explicitly using
+`ro,vers=4.1,proto=tcp,nconnect=4,nosharecache`. This gives each node a fabric
+session (`addr=192.168.25.8`, client addresses `.101`–`.104`); a 1 GiB direct
+read on strix-1 measured 1.3 GB/s. The initial NFS 4.2 mount at
+`/mnt/glm53-models` reused the existing home-directory session on the slower
+LAN and was abandoned for model loading. The temporary exports and mounts
+need declarative integration after the runtime is qualified.
 
 Nominal snapshot size divided by four is 44.4 GiB per rank, or about 41 GiB
 for the main shards without MTP. Actual resident memory also includes replicated
@@ -143,7 +146,7 @@ export NCCL_IB_DISABLE=1  # establish a TCP baseline before qualifying RoCE
 
 # NODE_RANK must be set separately on each node.
 nix run .#sglang-rocm -- serve \
-  --model-path /mnt/glm53-models/GLM-5.3-Flash-AWQ-W4A16 \
+  --model-path /mnt/glm53-fabric/GLM-5.3-Flash-AWQ-W4A16 \
   --served-model-name glm-5.3-flash \
   --tp-size 4 --nnodes 4 --node-rank "$NODE_RANK" \
   --dist-init-addr 192.168.25.101:50000 \

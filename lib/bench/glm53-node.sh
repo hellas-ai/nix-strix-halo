@@ -10,7 +10,7 @@ case "$rank" in
   *) echo "RANK must be 0, 1, 2 or 3" >&2; exit 2 ;;
 esac
 
-model=${GLM_MODEL_PATH:-/mnt/glm53-models/GLM-5.3-Flash-AWQ-W4A16}
+model=${GLM_MODEL_PATH:-/mnt/glm53-fabric/GLM-5.3-Flash-AWQ-W4A16}
 "${GLM_PYTHON:-python3}" - "$model" <<'PY'
 import json
 from pathlib import Path
