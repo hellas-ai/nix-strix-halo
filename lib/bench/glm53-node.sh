@@ -38,11 +38,15 @@ export NCCL_IB_DISABLE=1
 export AITER_JIT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/aiter/jit"
 export TRITON_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/triton"
 export OMP_NUM_THREADS=${GLM_CPU_THREADS:-8}
+export SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S=${GLM_LOAD_TIMEOUT:-1800}
 
 options=(
   --model-path "$model" --served-model-name glm-5.3-flash
   --tp-size "$nodes" --nnodes "$nodes" --node-rank "$rank"
   --dist-init-addr "${GLM_DIST_ADDR:-192.168.25.101:50000}"
+  --dist-timeout "${GLM_LOAD_TIMEOUT:-1800}"
+  --weight-loader-disable-mmap
+  --model-loader-extra-config '{"enable_multithread_load":false}'
   --dtype bfloat16 --kv-cache-dtype bfloat16
   --attention-backend dsa --dsa-prefill-backend triton --dsa-decode-backend triton
   --linear-attn-backend triton --moe-runner-backend triton

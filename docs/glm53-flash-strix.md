@@ -1,10 +1,10 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
-Updated on trex, 2026-09-29 (Europe/Zurich). GPU kernel and collective probes
-have run on all four nodes. TP4 reached weight loading, but strix-1 reset before
-startup completed. A concurrent task is configuring its PLX board, so these
-resets are not evidence of a model-runtime failure. The remaining ranks were
-stopped. No successful generation or coding-agent acceptance is claimed.
+Updated on trex, 2026-09-29 (Europe/Zurich). All four TP ranks completed
+weight loading and allocated their KV caches. Attention initialization then
+failed because a CUDA-only workspace was selected on gfx1151; the package
+now guards that selection by platform. Full startup and generation remain
+under qualification. No coding-agent acceptance is claimed.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -15,8 +15,8 @@ lossless queues. The original PFC setting was restored. RDMA discovery then
 passed and nodes 3/4 reconnected their storage. This establishes a PFC stall
 as a cause of the storage outage; the precise trigger remains unproven.
 TP4 remains the requested configuration. The canonical checkpoint and caches
-on nodes 1, 3 and 4 have now passed full verification. Node 2 has recovered and
-uses the verified canonical checkpoint through the fabric NFS mount.
+on nodes 1, 3 and 4 have now passed full verification. Node 2 has recovered and its restaged private-volume cache has also passed
+full verification.
 
 The separate `nixos-config` recovery work adds an initrd hardware watchdog,
 reboot actions for failed boot/storage startup, and a runtime direct-read
@@ -28,7 +28,22 @@ The new initrd activated its hardware watchdog at 7.9 seconds, and the node
 returned to SSH on the published image. The old runtime hardware watchdog
 alone could keep being fed while storage was unavailable.
 
-TP4 was relaunched at 23:07 UTC. Startup and generation are still under test.
+TP4 relaunched at 23:07 UTC and initialized all four ranks. Weight loading
+finished in 109 seconds on node 1 and 423–427 seconds on nodes 3/4. Node 2
+was still loading directly from NFS when the 480-second post-load barrier
+expired at 23:18 UTC. The remaining rank was stopped; no node rebooted.
+TP4 restarted at 23:26 UTC with verified private-volume caches on all four
+nodes. All four completed loading at 23:43 UTC; loading took 216–981 seconds.
+Sequential prefetch helped the slow ranks complete. Each rank held roughly
+42 GB of weights and allocated 0.39 GB for its initial 32768-token KV pool.
+Initialization then failed with `NameError: flashinfer` in the DSA backend: its
+`device_sm_major >= 10` test selected NVIDIA workspace allocation on gfx1151.
+The patch requires `is_cuda()` for that allocation and the corresponding
+TRT-LLM ragged-attention branch. The next launch uses serial eager safetensors
+reads to avoid scattered mmap faults on network storage. The largest shard
+is 20 GB; serial loading keeps its temporary memory bounded. A separate
+patch makes the post-load barrier deadline configurable, preserving the
+480-second upstream default; this launcher selects 1800 seconds.
 
 ## Snapshot
 
@@ -103,8 +118,9 @@ need declarative integration after the runtime is qualified.
 The attempted per-node cache is
 `/tmp/glm53-models/GLM-5.3-Flash-AWQ-W4A16`. Here `/tmp` is on each host's
 private NVMe/RDMA volume, not a local physical SSD, and is reformatted on every
-boot. After recovery, nodes 3 and 4 completed full verification. Node 2's check
-was interrupted and its next normal boot will discard that copy. Strix-1 now
+boot. After recovery, nodes 3 and 4 completed full verification. Node 2's previous copy
+was discarded during the watchdog reboot test; its replacement passed full
+verification at 23:26 UTC. Strix-1 now
 uses NFS for the system store, with its former private volume attached over
 NVMe/TCP at `/mnt/glm53-cache`; its verified checkpoint is under
 `/mnt/glm53-cache/tmp/glm53-models/GLM-5.3-Flash-AWQ-W4A16`. Its `/tmp` is now
@@ -158,7 +174,8 @@ agentic coding behavior have not yet passed acceptance.
 
 The official HIP recipe pins transformers 5.12.1; nixpkgs supplies 5.17.0.
 The staged model config and compressed-tensors metadata parse with this package;
-weight loading still needs an end-to-end check.
+all four ranks now complete weight loading. Attention initialization and
+generation still need an end-to-end check.
 
 The package build, GLM config/server-argument/native cache imports, and
 `sglang serve --help` passed on trex. CLI help and quantization-config parsing
@@ -182,7 +199,7 @@ one optimization at a time after coherent generation is established.
 The initial server uses the following conservative configuration. The
 [`node launcher`](../lib/bench/glm53-node.sh) checks the verified snapshot and
 starts one rank per Strix host; rank values are 0, 1, 2, 3. GPU imports and
-weight-loader selection have passed; complete server startup is still pending.
+weight loading have passed; complete server startup is still pending.
 `GLM_NNODES=2` also selects TP2 (ranks 0/1); set `GLM_DIST_ADDR` to that pair's
 rank-zero host. TP2 remains unqualified and needs measured memory headroom.
 
@@ -195,13 +212,16 @@ export SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD=0
 export NCCL_SOCKET_IFNAME=cx5fabric0
 export GLOO_SOCKET_IFNAME=cx5fabric0
 export NCCL_IB_DISABLE=1  # establish a TCP baseline before qualifying RoCE
+export SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S=1800
 
 # NODE_RANK must be set separately on each node.
 nix run .#sglang-rocm -- serve \
   --model-path /mnt/glm53-fabric/GLM-5.3-Flash-AWQ-W4A16 \
   --served-model-name glm-5.3-flash \
   --tp-size 4 --nnodes 4 --node-rank "$NODE_RANK" \
-  --dist-init-addr 192.168.25.101:50000 \
+  --dist-init-addr 192.168.25.101:50000 --dist-timeout 1800 \
+  --weight-loader-disable-mmap \
+  --model-loader-extra-config '{"enable_multithread_load":false}' \
   --dtype bfloat16 --kv-cache-dtype bfloat16 \
   --attention-backend dsa \
   --dsa-prefill-backend triton --dsa-decode-backend triton \
@@ -237,6 +257,15 @@ patches, builds and tests, including tool-call parsing and streaming. Qualify
 **128K tokens** after basic generation correctness, then compare cold and warm
 prefixes, cache-on/cache-off output, and multi-turn tool use. Do not equate a
 successful import or a coherent one-line answer with this acceptance target.
+
+The prepared harnesses are `glm53-api-check.py` (math, streaming tool calls
+and tool continuation), `glm53-consistency.py` (decode versus teacher-forced
+prefill logprobs), and `glm53-context-cache.py` (measured context length,
+three-depth retrieval and cold/warm output with cache-hit assertions). The
+context harness defaults to 131072 tokens including a 2048-token output
+reserve. Run it with `--expect-cache off` before enabling radix caching, and
+with `--expect-cache on` afterward. These are investigation gates, not a
+claim that all coding tasks or quantization quality have passed.
 
 `lib/bench/glm53-hardware.py` measures components without model weights. The
 initial results are in

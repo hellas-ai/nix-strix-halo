@@ -1,0 +1,14 @@
+--- a/sglang/srt/layers/attention/dsa_backend.py
++++ b/sglang/srt/layers/attention/dsa_backend.py
+@@ -534 +534,3 @@
+-        elif self.device_sm_major >= 10 or self.dsa_decode_impl == "trtllm":
++        elif is_cuda() and (
++            self.device_sm_major >= 10 or self.dsa_decode_impl == "trtllm"
++        ):
+@@ -2921,3 +2923,3 @@
+-        # gfx950 reports device capability sm_(9,5), so it never enters this SM100+
+-        # branch and falls through to the aiter flash_attn_varlen_func path below.
+-        if self.device_sm_major >= 10:
++        # HIP devices can also report a major capability >= 10 (e.g. gfx1151).
++        # NVIDIA kernels must be selected by platform as well as capability.
++        if is_cuda() and self.device_sm_major >= 10:
