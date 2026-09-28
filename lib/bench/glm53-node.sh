@@ -5,12 +5,14 @@ set -euo pipefail
 
 rank=${1:?usage: glm53-node.sh RANK [additional SGLang arguments]}
 shift
-case "$rank" in
-  0|1|2|3) ;;
-  *) echo "RANK must be 0, 1, 2 or 3" >&2; exit 2 ;;
+nodes=${GLM_NNODES:-4}
+case "$nodes:$rank" in
+  4:0|4:1|4:2|4:3|2:0|2:1) ;;
+  *) echo "Use GLM_NNODES=2 or 4 and a zero-based RANK below that count" >&2; exit 2 ;;
 esac
 
 model=${GLM_MODEL_PATH:-/mnt/glm53-fabric/GLM-5.3-Flash-AWQ-W4A16}
+context_length=${GLM_CONTEXT_LENGTH:-32768}
 "${GLM_PYTHON:-python3}" - "$model" <<'PY'
 import json
 from pathlib import Path
@@ -39,15 +41,16 @@ export OMP_NUM_THREADS=${GLM_CPU_THREADS:-8}
 
 options=(
   --model-path "$model" --served-model-name glm-5.3-flash
-  --tp-size 4 --nnodes 4 --node-rank "$rank"
+  --tp-size "$nodes" --nnodes "$nodes" --node-rank "$rank"
   --dist-init-addr "${GLM_DIST_ADDR:-192.168.25.101:50000}"
   --dtype bfloat16 --kv-cache-dtype bfloat16
   --attention-backend dsa --dsa-prefill-backend triton --dsa-decode-backend triton
   --linear-attn-backend triton --moe-runner-backend triton
   --disable-shared-experts-fusion --disable-custom-all-reduce
-  --context-length "${GLM_CONTEXT_LENGTH:-32768}"
+  --context-length "$context_length"
   --chunked-prefill-size "${GLM_PREFILL_CHUNK:-1024}"
   --max-running-requests "${GLM_MAX_REQUESTS:-1}"
+  --max-total-tokens "${GLM_MAX_TOTAL_TOKENS:-$context_length}"
   --mem-fraction-static "${GLM_MEMORY_FRACTION:-0.75}"
   --reasoning-parser glm45 --tool-call-parser glm47
   --default-chat-template-kwargs '{"clear_thinking":true,"reasoning_effort":"low"}'

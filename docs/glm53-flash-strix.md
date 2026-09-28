@@ -1,8 +1,10 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
 Updated on trex, 2026-09-28. GPU kernel and collective probes have run on all
-four nodes. The initial TP4 server has started loading verified weights; successful
-generation and coding-agent acceptance remain pending.
+four nodes. TP4 reached weight loading, but strix-1 reset at approximately
+21:44 UTC before startup completed. The remaining ranks were stopped. No
+successful generation or coding-agent acceptance is claimed. Local checkpoint
+caches and host recovery are in progress.
 
 ## Snapshot
 
@@ -133,6 +135,8 @@ The initial server uses the following conservative configuration. The
 [`node launcher`](../lib/bench/glm53-node.sh) checks the verified snapshot and
 starts one rank per Strix host; rank values are 0, 1, 2, 3. GPU imports and
 weight-loader selection have passed; complete server startup is still pending.
+`GLM_NNODES=2` also selects TP2 (ranks 0/1); set `GLM_DIST_ADDR` to that pair's
+rank-zero host. TP2 remains unqualified and needs measured memory headroom.
 
 ```bash
 export HIP_VISIBLE_DEVICES=0
