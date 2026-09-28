@@ -15,15 +15,20 @@ lossless queues. The original PFC setting was restored. RDMA discovery then
 passed and nodes 3/4 reconnected their storage. This establishes a PFC stall
 as a cause of the storage outage; the precise trigger remains unproven.
 TP4 remains the requested configuration. The canonical checkpoint and caches
-on nodes 1, 3 and 4 have now passed full verification. Node 2 still needs a reset.
+on nodes 1, 3 and 4 have now passed full verification. Node 2 has recovered and
+uses the verified canonical checkpoint through the fabric NFS mount.
 
 The separate `nixos-config` recovery work adds an initrd hardware watchdog,
 reboot actions for failed boot/storage startup, and a runtime direct-read
 watchdog. Its signed boot images are published and cached on the router;
-the runtime service is active on nodes 1, 3 and 4. Fault-injection tests passed
-for transient errors, persistent errors and a stopped probe process. The new
-initrd still needs verification during node 2's next boot. The old runtime
-hardware watchdog alone could keep being fed while storage was unavailable.
+the runtime service is active on all four nodes. Fault-injection tests passed
+for transient errors, persistent errors and a stopped probe process. A real
+SIGSTOP test on node 2 triggered its 120-second watchdog and automatic reboot.
+The new initrd activated its hardware watchdog at 7.9 seconds, and the node
+returned to SSH on the published image. The old runtime hardware watchdog
+alone could keep being fed while storage was unavailable.
+
+TP4 was relaunched at 23:07 UTC. Startup and generation are still under test.
 
 ## Snapshot
 
@@ -64,8 +69,8 @@ It downloads only this revision, retries failed transfers, and runs
 ## Cluster observations
 
 Before the storage outage, all four nodes reported one gfx1151 Radeon 8060S GPU, about
-124 GiB system RAM and 117–119 GiB available before testing. Strix-2 currently
-answers ping but refuses SSH. Torch sees approximately 124 GiB of GPU-addressable shared memory.
+124 GiB system RAM and 117–119 GiB available before testing. All four nodes are
+now reachable. Torch sees approximately 124 GiB of GPU-addressable shared memory.
 
 After its first recovery, strix-1 reported 85 W STAPM, 120 W fast PPT, 85 W
 slow PPT and 70 W APU limits; its `ryzenadj` service was masked. The optional
