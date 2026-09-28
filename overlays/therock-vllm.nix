@@ -31,9 +31,7 @@ let
   vllmSrcWithTag = vllmSrc // {
     tag = vllmSrc.tag or "v${vllmVersion}";
   };
-  opentelemetrySemanticConventionsAi =
-    py.callPackage ../pkgs/opentelemetry-semantic-conventions-ai
-      { };
+  opentelemetrySemanticConventionsAi = py.opentelemetry-semantic-conventions-ai;
   mistralCommon = py.mistral-common.overridePythonAttrs (old: rec {
     version = "1.11.2";
     src = py.fetchPypi {
@@ -261,6 +259,11 @@ let
       (old: {
         version = vllmVersion;
         src = vllmSrcWithTag;
+        # This overlay disables the optional Rust frontend below. Newer
+        # nixpkgs adds Cargo vendoring for its own vLLM revision; inheriting
+        # that fixed hash with our source both fetches unused dependencies
+        # and fails the build.
+        cargoDeps = null;
 
         patches = builtins.filter (
           patch: !(lib.hasSuffix "0006-drop-rocm-extra-reqs.patch" (toString patch))
@@ -333,18 +336,24 @@ let
         # on the same kind of host.
         requiredSystemFeatures = (old.requiredSystemFeatures or [ ]) ++ [ "big-parallel" ];
 
-        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
-          final.pkg-config
-        ];
+        nativeBuildInputs =
+          lib.subtractLists [
+            final.rustPlatform.cargoSetupHook
+            final.cargo
+            final.rustc
+          ] (old.nativeBuildInputs or [ ])
+          ++ [ final.pkg-config ];
         build-system =
           dropNamedDeps [
             "grpcio-tools"
             "setuptools"
+            "setuptools-rust"
             "setuptools-scm"
           ] (old.build-system or [ ])
           ++ [
             grpcioToolsForSetup
             py.setuptools_80
+            setuptoolsRustForSetup
             setuptoolsScmForSetup
           ];
         # rocm_smi-config.cmake (pulled in by torch's LoadHIP.cmake

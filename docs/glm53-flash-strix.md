@@ -1,7 +1,8 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
-Reviewed on trex, 2026-09-28. Inference has not been launched. Runtime behavior
-and performance below remain unmeasured on this cluster.
+Updated on trex, 2026-09-28. GPU kernel and collective probes have run on all
+four nodes. The initial TP4 server has started loading verified weights; successful
+generation and coding-agent acceptance remain pending.
 
 ## Snapshot
 
@@ -21,7 +22,8 @@ and performance below remain unmeasured on this cluster.
 
 On trex, `_staging/manifest.json` records the upstream file sizes and digests.
 `_staging/status.json` reports downloading, verifying, complete, or a failure.
-Only `_staging/verified.json` certifies that every file passed upstream SHA-256 / Git
+Verification completed at **2026-09-28 21:14:36 UTC**: all 24 files and
+111,346 indexed tensors passed. `_staging/verified.json` certifies that every file passed upstream SHA-256 / Git
 blob digest checks, exact size checks, safetensors payload validation and
 resolution of every tensor-to-shard index reference. Auxiliary tensors outside
 the main index are counted separately. File presence or `du` alone
@@ -40,20 +42,26 @@ It downloads only this revision, retries failed transfers, and runs
 
 ## Cluster observations
 
-Read-only SSH checks reached strix-1, strix-3 and strix-4. Each reports about
-125 GiB usable system RAM and about 119 GiB available at inspection.
-strix-2 refused TCP/22 on both `192.168.23.192` and `192.168.25.102`.
+All four nodes are reachable and report one gfx1151 Radeon 8060S GPU, about
+124 GiB system RAM and 117–119 GiB available before testing. strix-2 is now
+online. Torch sees approximately 124 GiB of GPU-addressable shared memory.
 
 The fabric addresses are `192.168.25.101` through `.104` on `cx5fabric0`.
-strix-1 reports a 100 Gb/s link and an active mlx5 Ethernet/RDMA port.
-End-to-end RCCL/RoCE operation was not tested. Do not infer a working RDMA
-collective from link state alone.
+Four-rank RCCL over TCP passed nonzero-data correctness checks from 4 bytes
+through 64 MiB. RoCE restricted to the HCA carrying `cx5fabric0` passed through
+4 MiB but stalled at 64 MiB and was stopped after more than three minutes.
+RCCL reported that GPU Direct RDMA was unavailable (`GDR 0`). Do not select
+RoCE for serving until this larger-transfer failure is resolved. HCA numbers
+must be derived from each host's netdev, not assumed to match across nodes.
 
-The nodes mount `/models` as a read-only XFS filesystem over trex's SPDK NVMe
-export (`nqn.2026-07.link.satanic.trex:models`). strix-1 did not see the newly
-created model directory. Before serving, use the existing storage publication
-procedure to flush trex's writer and refresh the readers; verify identical
-snapshot contents on every node. These reader mounts were not changed.
+The nodes' `/models` mounts are older read-only SPDK snapshots. Publishing a
+replacement requires a coordinated storage rollout and also affects other
+clients. For bring-up, trex exports its current model filesystem read-only to
+the four fabric IPs via `/etc/exports.d/glm53.exports`; each node mounts
+`192.168.25.8:/strix-models` at `/mnt/glm53-models`. Linux NFSv4 reused an existing
+server session over the LAN on strix-1 despite the fabric address, so model
+loading throughput over this mount is not a fabric benchmark. The temporary
+exports and mounts need declarative integration after the runtime is qualified.
 
 Nominal snapshot size divided by four is 44.4 GiB per rank, or about 41 GiB
 for the main shards without MTP. Actual resident memory also includes replicated
@@ -80,15 +88,24 @@ remain available. Its local ROCm patches are rebased onto
 0.5.20's new kernel and argument-resolution module paths. Import checks cover
 the model configuration and server arguments without loading model weights.
 
-This is preparation for bring-up, not qualification of the full GLM execution
-path. The Nix package still omits `sglang-kernel`: some operations have local
-Torch/Triton/JIT fallbacks, while host KV transfers and other AOT-only paths
-remain unavailable. Qualify the selected GLM kernels on gfx1151 before relying
-on this launch template. If native AOT kernels are needed, package the matching
-0.5.20 source with upstream's `docker/patches/sgl-kernel-gfx1151.sh` wave32 and
-architecture fixes. The official HIP recipe pins transformers 5.12.1; nixpkgs
-supplies 5.17.0. The staged model config and compressed-tensors metadata parse
-with this package; weight loading still needs an end-to-end check.
+The gfx1151 package now builds native `sglang-kernel` 0.4.7 from the same
+SGLang v0.5.20 source. It applies upstream's
+`docker/patches/sgl-kernel-gfx1151.sh`, including the host/device wave32 fix,
+and links against TheRock's libtorch. A local patch sends HIP clamped SwiGLU
+through the existing Triton activation path; the upstream unfiltered path
+asserts because it selects a CUDA/XPU-only kernel. TheRock invokes Clang directly, so the
+build translates `--amdgpu-target` to `--offload-arch`. Other unsupported GPU
+architectures retain the existing optional-kernel fallbacks.
+
+The full GLM implementation imports on strix-1. Native softmax and sigmoid
+routing (288 experts, top-8, batches 1/17/1024) agree with CPU references on all
+four GPUs. BF16 matrix multiplication also passes its reference check. This
+is component qualification; the complete model, quantization quality and
+agentic coding behavior have not yet passed acceptance.
+
+The official HIP recipe pins transformers 5.12.1; nixpkgs supplies 5.17.0.
+The staged model config and compressed-tensors metadata parse with this package;
+weight loading still needs an end-to-end check.
 
 The package build, GLM config/server-argument/native cache imports, and
 `sglang serve --help` passed on trex. CLI help and quantization-config parsing
@@ -109,9 +126,10 @@ explicitly select its torch fallback for the initial run. Disable speculative
 decoding, graph capture and radix caching initially, then enable and measure
 one optimization at a time after coherent generation is established.
 
-The following is an **untested bring-up template**, for the updated and
-validated SGLang environment. It has not been executed. Run one rank on each
-Strix host; rank values are 0, 1, 2, 3. It is not a trex server command.
+The initial server uses the following conservative configuration. The
+[`node launcher`](../lib/bench/glm53-node.sh) checks the verified snapshot and
+starts one rank per Strix host; rank values are 0, 1, 2, 3. GPU imports and
+weight-loader selection have passed; complete server startup is still pending.
 
 ```bash
 export HIP_VISIBLE_DEVICES=0
@@ -125,7 +143,7 @@ export NCCL_IB_DISABLE=1  # establish a TCP baseline before qualifying RoCE
 
 # NODE_RANK must be set separately on each node.
 nix run .#sglang-rocm -- serve \
-  --model-path /models/GLM-5.3-Flash-AWQ-W4A16 \
+  --model-path /mnt/glm53-models/GLM-5.3-Flash-AWQ-W4A16 \
   --served-model-name glm-5.3-flash \
   --tp-size 4 --nnodes 4 --node-rank "$NODE_RANK" \
   --dist-init-addr 192.168.25.101:50000 \
@@ -138,6 +156,7 @@ nix run .#sglang-rocm -- serve \
   --context-length 32768 --chunked-prefill-size 1024 \
   --max-running-requests 1 --mem-fraction-static 0.75 \
   --reasoning-parser glm45 --tool-call-parser glm47 \
+  --default-chat-template-kwargs '{"clear_thinking":true,"reasoning_effort":"low"}' \
   --host 127.0.0.1 --port 30000
 ```
 
@@ -150,7 +169,34 @@ the official template's `clear_thinking=true` option; begin with
 After correctness checks, benchmark RCCL/RoCE against TCP on the same fabric,
 then compare TP4 with TP2 (or two TP2 replicas for aggregate throughput).
 Fewer nodes may reduce communication overhead; TP2 leaves less memory for
-loading and context. There is no measured tokens/s estimate yet.
+loading and context. There is no measured model tokens/s result yet. Each node uses the transient
+user unit `glm53-sglang.service`. On trex, `glm53-tunnel.service` forwards
+`127.0.0.1:30053` to rank zero's loopback API at port 30000. A listening tunnel
+alone does not mean the model is ready; check `/health` after loading.
+
+## Qualification target and initial measurements
+
+The user-selected acceptance workload is useful coding in isolated worktrees
+of this flake, using Pi or another compatible client. Judge tasks by actual
+patches, builds and tests, including tool-call parsing and streaming. Qualify
+**128K tokens** after basic generation correctness, then compare cold and warm
+prefixes, cache-on/cache-off output, and multi-turn tool use. Do not equate a
+successful import or a coherent one-line answer with this acceptance target.
+
+`lib/bench/glm53-hardware.py` measures components without model weights. The
+initial results are in
+[`glm53-hardware-2026-09-28.json`](../lib/bench/results/glm53-hardware-2026-09-28.json).
+All four GPUs delivered roughly 228–231 GB/s for a three-array streaming add
+(3 GiB transferred per iteration), and roughly 33–37 BF16 TFLOP/s for a
+4096-square GEMM. TCP four-rank all-reduce on strix-1 measured about 0.29 ms
+for 64 KiB, 3.76 ms for 4 MiB and 75.74 ms for 64 MiB. These are initial
+component baselines, not model throughput or proof of a roofline target.
+
+For the model, derive separate decode and prefill limits from bytes read,
+actual selected experts, math, attention/state traffic and measured collective
+cost. The target is approximately 80% of the applicable hardware roofline;
+report the gap and its causes if that target is not attainable. Numerical
+agreement and executable coding acceptance take priority over optimization.
 
 ## References
 

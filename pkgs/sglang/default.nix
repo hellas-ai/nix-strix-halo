@@ -34,6 +34,12 @@ let
   rocmRuntimeLibraryPath =
     (pythonPackages.torch.passthru.rocmRuntimeEnv or { }).LD_LIBRARY_PATH or "";
   gpuArch = if lib.hasPrefix "gfx" packageSuffix then packageSuffix else null;
+  hasNativeKernels = lib.elem gpuArch [
+    "gfx1151"
+    "gfx942"
+    "gfx950"
+    "gfx1250"
+  ];
   rocmSdkForJit = symlinkJoin {
     name = "${rocmSdk.name or "rocm-sdk"}-sglang-jit";
     paths = [ rocmSdk ];
@@ -56,6 +62,18 @@ let
     '';
   };
   tvmFfiLibDir = "${pythonPackages.apache-tvm-ffi}/${pythonSitePackages}/tvm_ffi/lib";
+  sglangKernel = import ./kernel.nix {
+    inherit
+      lib
+      stdenv
+      fetchurl
+      autoPatchelfHook
+      pythonPackages
+      packageSuffix
+      gpuArch
+      ;
+    rocmSdk = rocmSdkForJit;
+  };
   outlinesCoreCargoLock = ./outlines-core-0_1_26-Cargo.lock;
   outlines-core_0_1_26 = pythonPackages.buildPythonPackage rec {
     pname = "outlines-core";
@@ -210,65 +228,68 @@ pythonPackages.buildPythonApplication rec {
 
   dontUseNinjaBuild = true;
 
-  dependencies = with pythonPackages; [
-    aiohttp
-    amd-aiter
-    anthropic
-    apache-tvm-ffi
-    blobfile
-    build
-    compressed-tensors
-    datasets
-    distro
-    easydict
-    einops
-    fastapi
-    gguf
-    interegular
-    ipython
-    sglangDependencies.kernels
-    llguidance
-    pythonPackages."mistral-common"
-    msgspec
-    ninja
-    numba
-    numpy
-    nvidia-ml-py
-    openai
-    openai-harmony
-    orjson
-    outlines_0_1_11
-    packaging
-    partial-json-parser
-    pillow
-    prometheus-client
-    psutil
-    pybase64
-    pydantic
-    python-multipart
-    pyzmq
-    requests
-    scipy
-    sentencepiece
-    setproctitle
-    sglangDependencies.smg-grpc-servicer
-    soundfile
-    tiktoken
-    timm
-    torch
-    torch-memory-saver
-    torchaoNoChecks
-    torchaudio
-    torchvision
-    tqdm
-    transformers
-    uvicorn
-    uvloop
-    watchfiles
-    xgrammar_0_2_1
-    xxhash
-    zstandard
-  ];
+  dependencies =
+    with pythonPackages;
+    [
+      aiohttp
+      amd-aiter
+      anthropic
+      apache-tvm-ffi
+      blobfile
+      build
+      compressed-tensors
+      datasets
+      distro
+      easydict
+      einops
+      fastapi
+      gguf
+      interegular
+      ipython
+      sglangDependencies.kernels
+      llguidance
+      pythonPackages."mistral-common"
+      msgspec
+      ninja
+      numba
+      numpy
+      nvidia-ml-py
+      openai
+      openai-harmony
+      orjson
+      outlines_0_1_11
+      packaging
+      partial-json-parser
+      pillow
+      prometheus-client
+      psutil
+      pybase64
+      pydantic
+      python-multipart
+      pyzmq
+      requests
+      scipy
+      sentencepiece
+      setproctitle
+      sglangDependencies.smg-grpc-servicer
+      soundfile
+      tiktoken
+      timm
+      torch
+      torch-memory-saver
+      torchaoNoChecks
+      torchaudio
+      torchvision
+      tqdm
+      transformers
+      uvicorn
+      uvloop
+      watchfiles
+      xgrammar_0_2_1
+      xxhash
+      zstandard
+    ]
+    ++ lib.optional hasNativeKernels sglangKernel;
 
   pythonRemoveDeps = [
     "cuda-python"
@@ -289,14 +310,15 @@ pythonPackages.buildPythonApplication rec {
     "quack-kernels"
     "sgl-deep-ep"
     "sgl-deep-gemm"
-    "sglang-kernel"
     "tilelang"
     "torchcodec"
     "tokenspeed-mla"
     "tokenspeed_mla"
-  ];
+  ]
+  ++ lib.optional (!hasNativeKernels) "sglang-kernel";
 
   pythonRelaxDeps = [
+    "sglang-kernel"
     "apache-tvm-ffi"
     "blobfile"
     "llguidance"

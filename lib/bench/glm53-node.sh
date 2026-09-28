@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# One TP rank per Strix host. Put this flake's sglang-rocm on PATH or set
+# GLM_SGLANG_BIN. This starts inference; staging alone never invokes it.
+set -euo pipefail
+
+rank=${1:?usage: glm53-node.sh RANK [additional SGLang arguments]}
+shift
+case "$rank" in
+  0|1|2|3) ;;
+  *) echo "RANK must be 0, 1, 2 or 3" >&2; exit 2 ;;
+esac
+
+model=${GLM_MODEL_PATH:-/mnt/glm53-models/GLM-5.3-Flash-AWQ-W4A16}
+"${GLM_PYTHON:-python3}" - "$model" <<'PY'
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+verified = json.loads((root / "_staging/verified.json").read_text())
+assert verified["revision"] == "abd7b07719111f137e1de8a0c1b7e01c11b74d1a"
+assert verified["bytes"] == 190843146350
+assert len(verified["files"]) == 24
+for entry in verified["files"]:
+    assert (root / entry["path"]).stat().st_size == entry["size"], entry["path"]
+PY
+
+export HIP_VISIBLE_DEVICES=0
+export SGLANG_USE_AITER=0
+export SGLANG_OPT_USE_TILELANG_MHC_PRE=0
+export SGLANG_OPT_USE_TILELANG_MHC_POST=0
+export SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD=0
+export NCCL_SOCKET_IFNAME=cx5fabric0
+export GLOO_SOCKET_IFNAME=cx5fabric0
+# RoCE currently stalls on the 64 MiB correctness probe. TCP passes all sizes.
+export NCCL_IB_DISABLE=1
+export AITER_JIT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/aiter/jit"
+export TRITON_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/triton"
+export OMP_NUM_THREADS=${GLM_CPU_THREADS:-8}
+
+options=(
+  --model-path "$model" --served-model-name glm-5.3-flash
+  --tp-size 4 --nnodes 4 --node-rank "$rank"
+  --dist-init-addr "${GLM_DIST_ADDR:-192.168.25.101:50000}"
+  --dtype bfloat16 --kv-cache-dtype bfloat16
+  --attention-backend dsa --dsa-prefill-backend triton --dsa-decode-backend triton
+  --linear-attn-backend triton --moe-runner-backend triton
+  --disable-shared-experts-fusion --disable-custom-all-reduce
+  --context-length "${GLM_CONTEXT_LENGTH:-32768}"
+  --chunked-prefill-size "${GLM_PREFILL_CHUNK:-1024}"
+  --max-running-requests "${GLM_MAX_REQUESTS:-1}"
+  --mem-fraction-static "${GLM_MEMORY_FRACTION:-0.75}"
+  --reasoning-parser glm45 --tool-call-parser glm47
+  --default-chat-template-kwargs '{"clear_thinking":true,"reasoning_effort":"low"}'
+  --host 127.0.0.1 --port "${GLM_PORT:-30000}"
+)
+if [[ ${GLM_RADIX_CACHE:-0} == 0 ]]; then options+=(--disable-radix-cache); fi
+if [[ ${GLM_CUDA_GRAPH:-0} == 0 ]]; then options+=(--disable-cuda-graph); fi
+exec "${GLM_SGLANG_BIN:-sglang}" serve "${options[@]}" "$@"
