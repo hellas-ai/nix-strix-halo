@@ -87,7 +87,14 @@ remain unavailable. Qualify the selected GLM kernels on gfx1151 before relying
 on this launch template. If native AOT kernels are needed, package the matching
 0.5.20 source with upstream's `docker/patches/sgl-kernel-gfx1151.sh` wave32 and
 architecture fixes. The official HIP recipe pins transformers 5.12.1; nixpkgs
-supplies 5.17.0, so model loading also needs an end-to-end check.
+supplies 5.17.0. The staged model config and compressed-tensors metadata parse
+with this package; weight loading still needs an end-to-end check.
+
+The package build, GLM config/server-argument/native cache imports, and
+`sglang serve --help` passed on trex. CLI help and quantization-config parsing
+also emit a PyTorch `_clear_torch_ops_cache` cleanup traceback after AITER is
+imported (`ValueError: too many values to unpack`), while exiting successfully.
+This remains an upstream compatibility issue to investigate during bring-up.
 
 Upstream also provides `docker/rocm-gfx1151.Dockerfile` as an alternative
 bring-up environment. Its nightly workflow publishes dated
