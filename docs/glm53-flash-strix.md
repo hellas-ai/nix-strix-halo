@@ -1,10 +1,17 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
-Updated on trex, 2026-09-28. GPU kernel and collective probes have run on all
-four nodes. TP4 reached weight loading, but strix-1 reset at approximately
-21:44 UTC before startup completed. The remaining ranks were stopped. No
-successful generation or coding-agent acceptance is claimed. Local checkpoint
-caches and host recovery are in progress.
+Updated on trex, 2026-09-29 (Europe/Zurich). GPU kernel and collective probes
+have run on all four nodes. TP4 reached weight loading, but strix-1 reset before
+startup completed. A concurrent task is configuring its PLX board, so these
+resets are not evidence of a model-runtime failure. The remaining ranks were
+stopped. No successful generation or coding-agent acceptance is claimed.
+
+At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
+storage connections while copying/checking local checkpoint caches, with no
+model server running. Trex logged keep-alive timeouts and RDMA retry errors;
+strix-1 logged `no usable path - requeuing I/O`. Recovery is in progress and
+TP4 remains the requested configuration. The verified canonical checkpoint
+on trex is complete; none of the new per-node copies has finished verification.
 
 ## Snapshot
 
@@ -44,9 +51,17 @@ It downloads only this revision, retries failed transfers, and runs
 
 ## Cluster observations
 
-All four nodes are reachable and report one gfx1151 Radeon 8060S GPU, about
+Before the storage outage, all four nodes reported one gfx1151 Radeon 8060S GPU, about
 124 GiB system RAM and 117–119 GiB available before testing. strix-2 is now
 online. Torch sees approximately 124 GiB of GPU-addressable shared memory.
+
+After its first recovery, strix-1 reported 85 W STAPM, 120 W fast PPT, 85 W
+slow PPT and 70 W APU limits; its `ryzenadj` service was masked. The optional
+minus-10 curve-optimizer service was inactive on every node. Nodes 2–4 logged
+successful application of neutral CO at boot. No surviving previous-boot
+journal or pstore record established the cause of strix-1's earlier reset.
+These settings were left unchanged. Record power settings again before timing
+inference; prior component timings must not be treated as current-power results.
 
 The fabric addresses are `192.168.25.101` through `.104` on `cx5fabric0`.
 Four-rank RCCL over TCP passed nonzero-data correctness checks from 4 bytes
@@ -67,6 +82,18 @@ read on strix-1 measured 1.3 GB/s. The initial NFS 4.2 mount at
 `/mnt/glm53-models` reused the existing home-directory session on the slower
 LAN and was abandoned for model loading. The temporary exports and mounts
 need declarative integration after the runtime is qualified.
+
+The attempted per-node cache is
+`/tmp/glm53-models/GLM-5.3-Flash-AWQ-W4A16`. Here `/tmp` is on each host's
+private NVMe/RDMA volume, not a local physical SSD, and is reformatted on every
+boot. Copies completed on nodes 2–4, but full digest checks were interrupted
+by the storage outage. A copied verification marker alone is insufficient:
+rerun the snapshot's `_staging/verify.py` locally before using that cache.
+
+On nodes 2–4, the fabric NIC negotiated PCIe 3.0 x4. Its encoding ceiling is
+about 3.94 GB/s per direction before transaction overhead, even though the
+Ethernet link reports 100 Gb/s. Use the negotiated PCIe link and measured
+collectives when constructing the communication roofline.
 
 Nominal snapshot size divided by four is 44.4 GiB per rank, or about 41 GiB
 for the main shards without MTP. Actual resident memory also includes replicated

@@ -12,14 +12,14 @@ import time
 import urllib.request
 
 
-def request(base, path, payload=None):
+def request(base, path, payload=None, *, json_response=True):
     req = urllib.request.Request(
         base.rstrip("/") + path,
         None if payload is None else json.dumps(payload).encode(),
         {"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=1800) as response:
-        return json.load(response)
+        return json.load(response) if json_response else response.read().decode()
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
     ]
     failed = False
     for index, prompt in enumerate(prompts):
-        request(args.base_url, "/flush_cache")
+        request(args.base_url, "/flush_cache", json_response=False)
         started = time.monotonic()
         generated = request(args.base_url, "/generate", {
             "text": prompt,
@@ -55,7 +55,7 @@ def main():
         assert len(output_ids) == args.tokens
         if index == 1:
             assert len(input_ids) > 1024
-        request(args.base_url, "/flush_cache")
+        request(args.base_url, "/flush_cache", json_response=False)
         scored = request(args.base_url, "/generate", {
             "input_ids": input_ids + output_ids,
             "sampling_params": {"temperature": 0, "max_new_tokens": 0},
