@@ -43,7 +43,7 @@ in
 assert assertionOk;
 
 final: prev:
-if !prev.stdenv.isLinux then
+if !prev.stdenv.hostPlatform.isLinux then
   { }
 else if provider == "therock-bin" then
   therockBinOverlay final prev

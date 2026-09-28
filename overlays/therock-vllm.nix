@@ -11,7 +11,7 @@ let
 in
 final: prev:
 let
-  hasTherockVllmInputs = enabled && prev.stdenv.isLinux;
+  hasTherockVllmInputs = enabled && prev.stdenv.hostPlatform.isLinux;
   sdkBase = final."therock-rocm-${s}";
   vllmGpuTargets = target.buildTargets;
   sdk = sdkBase // {
@@ -88,6 +88,9 @@ let
     miopen-hip = sdk;
     miopen = sdk;
     rccl = sdk;
+    rocshmem = sdk;
+    rocm-smi = sdk;
+    hipsparselt = sdk;
     rocblas = sdk;
     rocm-comgr = sdk;
     rocfft = sdk;

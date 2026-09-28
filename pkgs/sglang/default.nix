@@ -19,6 +19,14 @@
 }:
 
 let
+  sglangDependencies = import ./dependencies.nix {
+    inherit
+      pythonPackages
+      fetchurl
+      autoPatchelfHook
+      stdenv
+      ;
+  };
   pythonSitePackages = pythonPackages.python.sitePackages;
   pythonTag = builtins.replaceStrings [ "." ] [ "" ] pythonPackages.python.pythonVersion;
   rocmSitePackages = pythonPackages.torch.passthru.sitePackages or null;
@@ -134,9 +142,6 @@ let
     nativeCheckInputs = [ ];
     pythonImportsCheck = old.pythonImportsCheck or [ "torchao" ];
   });
-  modelscopeWithCompatibleSetuptools = pythonPackages.modelscope.override {
-    setuptools = pythonPackages.setuptools_80;
-  };
   xgrammar_0_2_1 = pythonPackages.buildPythonPackage rec {
     pname = "xgrammar";
     version = "0.2.1";
@@ -184,12 +189,12 @@ assert lib.assertMsg (
 ) "sglang-rocm requires the TheRock torch wheel package with passthru.sitePackages";
 pythonPackages.buildPythonApplication rec {
   pname = "sglang-rocm-${packageSuffix}";
-  version = "0.5.14";
+  version = "0.5.20";
   format = "wheel";
 
   src = fetchurl {
-    url = "https://files.pythonhosted.org/packages/45/72/276c6252abfe5a0c893ab7b975253c73ae73f69d1fe7746e168bbefa2fcc/sglang-${version}-cp313-cp313-manylinux_2_34_x86_64.whl";
-    hash = "sha256-LSLmoX9sc1gK7yXSJPMWKh47yc1QQ7QCLYSXXF6WoM0=";
+    url = "https://files.pythonhosted.org/packages/ec/49/bd2e0f7eac9d826cf02b04e64f9285f5c559440dc8ffe31927fe42c26cf1/sglang-${version}-cp313-cp313-manylinux_2_34_x86_64.whl";
+    hash = "sha256-ewa/flefwibjbVE5/K8qGnEQ9eE7kGdHYkFmC6AeVac=";
   };
 
   nativeBuildInputs = [
@@ -219,12 +224,12 @@ pythonPackages.buildPythonApplication rec {
     gguf
     interegular
     ipython
-    kernels
+    sglangDependencies.kernels
     llguidance
     pythonPackages."mistral-common"
-    modelscopeWithCompatibleSetuptools
     msgspec
     ninja
+    numba
     numpy
     nvidia-ml-py
     openai
@@ -244,7 +249,7 @@ pythonPackages.buildPythonApplication rec {
     scipy
     sentencepiece
     setproctitle
-    smg-grpc-servicer
+    sglangDependencies.smg-grpc-servicer
     soundfile
     tiktoken
     timm
@@ -259,19 +264,28 @@ pythonPackages.buildPythonApplication rec {
     uvloop
     watchfiles
     xgrammar_0_2_1
+    xxhash
+    zstandard
   ];
 
   pythonRemoveDeps = [
     "cuda-python"
+    "cuda-tile"
     "flash-attn-4"
     "flashinfer-cubin"
     "flashinfer-python"
     "flashinfer_cubin"
     "flashinfer_python"
+    "humming-kernels"
+    # Optional alternative model hub; nixpkgs marks it insecure. Local paths
+    # and Hugging Face downloads do not import it.
+    "modelscope"
+    "nvshmem4py-cu13"
     "nvidia-cutlass-dsl"
     "nvidia-mathdx"
     "py-spy"
     "quack-kernels"
+    "sgl-deep-ep"
     "sgl-deep-gemm"
     "sglang-kernel"
     "tilelang"
@@ -283,12 +297,14 @@ pythonPackages.buildPythonApplication rec {
   pythonRelaxDeps = [
     "apache-tvm-ffi"
     "blobfile"
-    "kernels"
     "llguidance"
+    "numba"
     "openai"
     "openai-harmony"
     "outlines"
+    "soundfile"
     "timm"
+    "tokenizers"
     "torch"
     "torchaudio"
     "torchcodec"
@@ -298,7 +314,7 @@ pythonPackages.buildPythonApplication rec {
 
   postInstall = ''
     for patch_file in ${./patches}/*.patch; do
-      patch -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
+      patch --batch --fuzz=0 -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
     done
   '';
 
@@ -347,6 +363,8 @@ pythonPackages.buildPythonApplication rec {
 
   pythonImportsCheck = [
     "sglang"
+    "sglang.srt.configs.glm5_next"
+    "sglang.srt.server_args"
   ];
 
   meta = {

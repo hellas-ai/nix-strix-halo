@@ -341,7 +341,7 @@
           thunderbolt-ibverbs-bench-tools = tbPkgs.bench-tools;
           thunderbolt-ibverbs-perftest = tbPkgs.perftest;
         }
-        // lib.optionalAttrs prev.stdenv.isLinux {
+        // lib.optionalAttrs prev.stdenv.hostPlatform.isLinux {
           inherit (tbPkgs)
             linux-thunderbolt
             linux-thunderbolt-dev
@@ -604,7 +604,7 @@
           s = defaultRocmTarget.packageSuffix;
           aiTools = inputs.nix-ai-tools.packages.${system};
           piPackage =
-            if pkgs.stdenv.isDarwin then
+            if pkgs.stdenv.hostPlatform.isDarwin then
               aiTools.pi.overrideAttrs (old: {
                 nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.darwin.signingUtils ];
                 # Bun's compiled executable retains an invalid linker signature.
@@ -622,10 +622,10 @@
             {
               mlx-src = if pkgs.stdenv.hostPlatform.isDarwin then inputs.mlx-metal-src else inputs.mlx-src;
             }
-            // lib.optionalAttrs pkgs.stdenv.isLinux {
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
               rdma-core = pkgs.rdma-core-usb4;
             }
-            // lib.optionalAttrs pkgs.stdenv.isDarwin {
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
               darwinDeploymentTarget = "26.2";
             }
           );
@@ -645,13 +645,13 @@
                     ++ [
                       mlxPackage
                     ]
-                    ++ lib.optional pkgs.stdenv.isLinux pythonPackages.sentencepiece
+                    ++ lib.optional pkgs.stdenv.hostPlatform.isLinux pythonPackages.sentencepiece
                   );
                   meta = (oldAttrs.meta or { }) // {
                     mainProgram = "mlx_lm";
                   };
                 }
-                // lib.optionalAttrs pkgs.stdenv.isLinux {
+                // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                   doCheck = false;
                   doInstallCheck = false;
                   dontCheckRuntimeDeps = true;
@@ -838,8 +838,8 @@
         in
         genericPackages
         // spacemitK3Packages
-        // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
-        // lib.optionalAttrs pkgs.stdenv.isDarwin darwinPackages
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxPackages
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin darwinPackages
       );
 
       apps = perSystem (
@@ -976,8 +976,8 @@
             };
         in
         genericApps
-        // lib.optionalAttrs pkgs.stdenv.isLinux linuxApps
-        // lib.optionalAttrs pkgs.stdenv.isDarwin darwinApps
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxApps
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin darwinApps
       );
 
       checks = perSystem (
@@ -1325,7 +1325,7 @@
             ++ [
               self.packages.${pkgs.stdenv.hostPlatform.system}.pi-wrap
             ]
-            ++ lib.optionals pkgs.stdenv.isLinux [
+            ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               (pkgs.python3.withPackages (
                 ps: with ps; [
                   boto3

@@ -249,11 +249,11 @@ let
     llama-cpp-master = llamaCppMaster;
   };
 
-  darwinPackages = lib.optionalAttrs prev.stdenv.isDarwin {
+  darwinPackages = lib.optionalAttrs prev.stdenv.hostPlatform.isDarwin {
     llama-cpp-master-rdma = setPname "llama-cpp-master-rdma" (withDarwinRdmaRpc llamaCppMaster);
   };
 
-  linuxPackages = lib.optionalAttrs prev.stdenv.isLinux (
+  linuxPackages = lib.optionalAttrs prev.stdenv.hostPlatform.isLinux (
     let
       ecPackages = prev.callPackage ../pkgs/ec-su-axb35.nix {
         ec-su-axb35-src = inputs.ec-su-axb35;
