@@ -12,6 +12,7 @@
   rustPlatform,
   rustc,
   symlinkJoin,
+  writableTmpDirAsHomeHook,
   pythonPackages,
   rocmSdk,
   packageSuffix ? "rocm",
@@ -200,6 +201,7 @@ pythonPackages.buildPythonApplication rec {
   nativeBuildInputs = [
     autoPatchelfHook
     makeWrapper
+    writableTmpDirAsHomeHook
   ];
 
   buildInputs = [
@@ -318,6 +320,11 @@ pythonPackages.buildPythonApplication rec {
     done
   '';
 
+  preFixup = ''
+    # The Rust radix-tree extension links against libtorch from the wheel.
+    addAutoPatchelfSearchPath ${lib.escapeShellArg "${rocmSitePackages}/torch/lib"}
+  '';
+
   postFixup = ''
     wrapPythonPrograms
 
@@ -365,6 +372,7 @@ pythonPackages.buildPythonApplication rec {
     "sglang"
     "sglang.srt.configs.glm5_next"
     "sglang.srt.server_args"
+    "sglang.srt.mem_cache.rust_tree_core.mem_cache"
   ];
 
   meta = {
