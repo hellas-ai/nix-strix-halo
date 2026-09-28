@@ -9,9 +9,21 @@ stopped. No successful generation or coding-agent acceptance is claimed.
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
 model server running. Trex logged keep-alive timeouts and RDMA retry errors;
-strix-1 logged `no usable path - requeuing I/O`. Recovery is in progress and
-TP4 remains the requested configuration. The verified canonical checkpoint
-on trex is complete; none of the new per-node copies has finished verification.
+strix-1 logged `no usable path - requeuing I/O`. At 22:34 UTC, clearing PFC
+for two seconds on the CRS812's interconnect to the CRS804 drained both stuck
+lossless queues. The original PFC setting was restored. RDMA discovery then
+passed and nodes 3/4 reconnected their storage. This establishes a PFC stall
+as a cause of the storage outage; the precise trigger remains unproven.
+TP4 remains the requested configuration. The canonical checkpoint and caches
+on nodes 1, 3 and 4 have now passed full verification. Node 2 still needs a reset.
+
+The separate `nixos-config` recovery work adds an initrd hardware watchdog,
+reboot actions for failed boot/storage startup, and a runtime direct-read
+watchdog. Its signed boot images are published and cached on the router;
+the runtime service is active on nodes 1, 3 and 4. Fault-injection tests passed
+for transient errors, persistent errors and a stopped probe process. The new
+initrd still needs verification during node 2's next boot. The old runtime
+hardware watchdog alone could keep being fed while storage was unavailable.
 
 ## Snapshot
 
@@ -52,8 +64,8 @@ It downloads only this revision, retries failed transfers, and runs
 ## Cluster observations
 
 Before the storage outage, all four nodes reported one gfx1151 Radeon 8060S GPU, about
-124 GiB system RAM and 117–119 GiB available before testing. strix-2 is now
-online. Torch sees approximately 124 GiB of GPU-addressable shared memory.
+124 GiB system RAM and 117–119 GiB available before testing. Strix-2 currently
+answers ping but refuses SSH. Torch sees approximately 124 GiB of GPU-addressable shared memory.
 
 After its first recovery, strix-1 reported 85 W STAPM, 120 W fast PPT, 85 W
 slow PPT and 70 W APU limits; its `ryzenadj` service was masked. The optional
@@ -86,9 +98,13 @@ need declarative integration after the runtime is qualified.
 The attempted per-node cache is
 `/tmp/glm53-models/GLM-5.3-Flash-AWQ-W4A16`. Here `/tmp` is on each host's
 private NVMe/RDMA volume, not a local physical SSD, and is reformatted on every
-boot. Copies completed on nodes 2–4, but full digest checks were interrupted
-by the storage outage. A copied verification marker alone is insufficient:
-rerun the snapshot's `_staging/verify.py` locally before using that cache.
+boot. After recovery, nodes 3 and 4 completed full verification. Node 2's check
+was interrupted and its next normal boot will discard that copy. Strix-1 now
+uses NFS for the system store, with its former private volume attached over
+NVMe/TCP at `/mnt/glm53-cache`; its verified checkpoint is under
+`/mnt/glm53-cache/tmp/glm53-models/GLM-5.3-Flash-AWQ-W4A16`. Its `/tmp` is now
+RAM-backed, so do not copy another checkpoint there. A copied verification
+marker alone is insufficient: run `_staging/verify.py` on each new copy.
 
 On nodes 2–4, the fabric NIC negotiated PCIe 3.0 x4. Its encoding ceiling is
 about 3.94 GB/s per direction before transaction overhead, even though the
