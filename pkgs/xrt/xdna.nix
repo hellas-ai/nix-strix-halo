@@ -22,6 +22,7 @@
   protobuf,
   systemd,
   libsystemtap,
+  writeText,
   src,
   version,
 }:
@@ -59,13 +60,14 @@ let
 
     env.LDFLAGS = "-Wl,--copy-dt-needed-entries";
 
-    preConfigure = ''
-      # The build inspects /etc/os-release to gate behaviour; provide a
-      # NixOS-flavoured stub via NIX_REDIRECTS so we don't depend on a
-      # writable /etc.
-      mkdir -p $TMPDIR/etc
-      echo 'ID=nixos' > $TMPDIR/etc/os-release
-      export NIX_REDIRECTS=/etc/os-release=$TMPDIR/etc/os-release
+    postPatch = ''
+      # The bundled XRT must use the same hermetic distro metadata as the
+      # standalone package. NIX_REDIRECTS does not redirect ordinary awk I/O.
+      substituteInPlace xrt/src/CMake/nativeLnx.cmake xrt/src/CMake/cpackLin.cmake \
+        --replace-fail /etc/os-release ${writeText "xrt-os-release" ''
+          ID=nixos
+          VERSION_ID="${lib.trivial.release}"
+        ''}
     '';
 
     cmakeFlags = [

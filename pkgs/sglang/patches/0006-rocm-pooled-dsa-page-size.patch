@@ -1,0 +1,11 @@
+--- a/sglang/srt/arg_groups/model_overrides/deepseek_v2.py
++++ b/sglang/srt/arg_groups/model_overrides/deepseek_v2.py
+@@ -41,0 +42 @@
++        get_dsa_index_kpool,
+@@ -133 +134,5 @@
+-            if get_platform().is_hip and not aiter_can_use_preshuffle_paged_mqa():
++            if get_dsa_index_kpool(hf_config) > 1:
++                # Pooled index metadata requires 64-token physical pages on HIP too.
++                overrides["page_size"] = 64
++                logger.warning("Setting page size to 64 for pooled DeepSeek DSA.")
++            elif get_platform().is_hip and not aiter_can_use_preshuffle_paged_mqa():

@@ -1,0 +1,22 @@
+{
+  "date": "2026-09-29",
+  "model": "GLM-5.3-Flash-AWQ-W4A16",
+  "client": "pi 0.87.1",
+  "task": "Reject streamed server errors and truncated SSE responses in the benchmark client",
+  "baseline": "3bcfce64",
+  "transport": "TCP",
+  "elapsed_seconds": 583.0079483985901,
+  "assistant_turns": 12,
+  "usage": {
+    "input": 7293,
+    "output": 4863,
+    "cacheRead": 86464,
+    "cacheWrite": 0
+  },
+  "first_draft_accepted": true,
+  "model_tests": 13,
+  "independent_HTTP_checks": 14,
+  "baseline_independent_failures": 8,
+  "review": "Reviewed both changed files; adopted functional patch unchanged. Formatted new tests. Independent HTTP checks pass after adoption.",
+  "qualification": "One bounded coding task in an isolated checkout; not broad coding reliability."
+}

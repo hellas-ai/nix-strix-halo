@@ -1,0 +1,100 @@
+--- a/sglang/kernels/ops/layernorm/mhc.py
++++ b/sglang/kernels/ops/layernorm/mhc.py
+@@ -1808,6 +1808,71 @@
+     return post.unsqueeze(-1), comb, layer_input
+ 
+ 
++@triton.jit
++def _mhc_project_partials_hip(
++    X, W, P, K: tl.constexpr, N: tl.constexpr, SPLITS: tl.constexpr, BK: tl.constexpr
++):
++    token, row, part = tl.program_id(0), tl.program_id(1), tl.program_id(2)
++    k = part * BK + tl.arange(0, BK)
++    x = tl.load(X + token * K + k, k < K, 0).to(tl.float32)
++    if row < N:
++        w = tl.load(W + row * K + k, k < K, 0)
++        value = tl.sum(x * w, 0)
++    else:
++        value = tl.sum(x * x, 0)
++    tl.store(P + (token * (N + 1) + row) * SPLITS + part, value)
++
++
++@triton.jit
++def _mhc_project_finalize_hip(
++    P,
++    O,
++    K: tl.constexpr,
++    N: tl.constexpr,
++    SPLITS: tl.constexpr,
++    EPS: tl.constexpr,
++    BN: tl.constexpr,
++    BS: tl.constexpr,
++):
++    token = tl.program_id(0)
++    row = tl.arange(0, BN)
++    part = tl.arange(0, BS)
++    products = tl.load(
++        P + (token * (N + 1) + row[:, None]) * SPLITS + part[None, :],
++        (row[:, None] < N) & (part[None, :] < SPLITS),
++        0,
++    )
++    squares = tl.load(P + (token * (N + 1) + N) * SPLITS + part, part < SPLITS, 0)
++    rms = tl.rsqrt(tl.sum(squares, 0) / K + EPS)
++    result = tl.sum(products, 1) * rms
++    tl.store(O + token * N + row, result, row < N)
++
++
++def _mhc_project_hip(x, w, eps):
++    """Split the tiny-output FP32 projection across CUs, retaining FP32 sums."""
++    bk, warps = 1024, 4
++    tokens = x.shape[0]
++    n, k = w.shape
++    splits = triton.cdiv(k, bk)
++    p = torch.empty((tokens, n + 1, splits), device=x.device, dtype=torch.float32)
++    out = torch.empty((tokens, n), device=x.device, dtype=torch.float32)
++    _mhc_project_partials_hip[(tokens, n + 1, splits)](
++        x, w, p, k, n, splits, bk, num_warps=warps
++    )
++    _mhc_project_finalize_hip[(tokens,)](
++        p,
++        out,
++        k,
++        n,
++        splits,
++        eps,
++        triton.next_power_of_2(n),
++        triton.next_power_of_2(splits),
++        num_warps=4,
++    )
++    return out
++
++
+ def _mhc_pre_hip(
+     residual: torch.Tensor,
+     fn: torch.Tensor,
+@@ -1822,9 +1887,22 @@
+     """FP32 projection and fused Sinkhorn for the ROCm torch fallback."""
+     assert hc_pre_eps == hc_sinkhorn_eps and hc_post_mult_value == 2.0
+     s, n, h = residual.shape
+-    x_flat = residual.reshape(s, n * h).float()
+-    inv_rms = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + rms_eps)
+-    mixes = torch.nn.functional.linear(x_flat, fn) * inv_rms
++    if (
++        0 < s <= 32
++        and (n, h) == (4, 4096)
++        and residual.is_contiguous()
++        and residual.dtype == torch.bfloat16
++        and fn.is_contiguous()
++        and fn.shape == (24, 16384)
++        and fn.dtype == torch.float32
++    ):
++        # Generic BLAS launches only two workgroups for this skinny projection.
++        # Split its reduction to use the device; prefill retains the BLAS path.
++        mixes = _mhc_project_hip(residual, fn, rms_eps)
++    else:
++        x_flat = residual.reshape(s, n * h).float()
++        inv_rms = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + rms_eps)
++        mixes = torch.nn.functional.linear(x_flat, fn) * inv_rms
+     pre, post, comb = _hc_split_sinkhorn_triton(
+         mixes.unsqueeze(0), hc_scale, hc_base, n, sinkhorn_repeat, hc_sinkhorn_eps
+     )

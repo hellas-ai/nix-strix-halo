@@ -1,0 +1,20 @@
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -1006,6 +1006,8 @@
+             not _is_cuda
+             and not _is_musa
+             and not _use_aiter
++            # The Triton runner already scales the routed expert sum on HIP.
++            and not (_is_hip and get_moe_runner_backend().is_triton())
+             or isinstance(self.experts.quant_method, KTEPWrapperMethod)
+         ):
+             final_hidden_states *= self.routed_scaling_factor
+@@ -1153,6 +1155,8 @@
+             and not _is_musa
+             and not _is_xpu
+             and not _use_aiter
++            # The Triton runner already scales the routed expert sum on HIP.
++            and not (_is_hip and get_moe_runner_backend().is_triton())
+             or isinstance(self.experts.quant_method, KTEPWrapperMethod)
+         ):
+             # fused in biased_grouped_topk so we can skip here

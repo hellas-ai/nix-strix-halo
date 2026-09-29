@@ -1,0 +1,28 @@
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -295,7 +295,7 @@
+                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+             )
+         self.act_fn = SiluAndMul()
+-        self.use_fused_clamp_act_mul = _is_hip
++        self.use_fused_clamp_act_mul = _use_aiter
+         self._fused_clamp_fp8_checked = False
+         self._fused_clamp_use_fp8 = False
+ 
+@@ -434,7 +434,15 @@
+ 
+         # Fallback: fused silu+clamp kernel (still faster than unfused)
+         elif self.swiglu_limit is not None:
+-            if _is_npu:
++            if _is_hip:
++                from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
++                    act_and_mul_triton,
++                )
++
++                M, N = gate_up.shape
++                x = gate_up.new_empty((M, N // 2))
++                act_and_mul_triton(gate_up, x, {}, swiglu_limit=self.swiglu_limit)
++            elif _is_npu:
+                 x = torch.ops.npu.npu_clipped_swiglu(
+                     gate_up,
+                     alpha=1,

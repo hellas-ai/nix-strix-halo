@@ -1,0 +1,21 @@
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
+@@ -706,7 +706,8 @@
+             swiglu_limit_for_triton: Optional[float] = None
+             swiglu_limit_for_silu_and_mul_clamp: Optional[float] = None
+ 
+-            if filter_expert:
++            # HIP uses the existing Triton clamp for both local and EP experts.
++            if filter_expert or _is_hip:
+                 swiglu_limit_for_triton = swiglu_limit
+             else:
+                 assert _is_cuda or _is_xpu, (
+@@ -714,7 +715,7 @@
+                 )
+                 swiglu_limit_for_silu_and_mul_clamp = swiglu_limit
+ 
+-            if not filter_expert:
++            if not filter_expert and not _is_hip:
+                 if swiglu_limit_for_silu_and_mul_clamp is not None:
+                     from sglang.kernels.ops.attention.dsv4 import silu_and_mul_clamp
+ 

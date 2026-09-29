@@ -1,0 +1,224 @@
+{
+  "date": "2026-09-29",
+  "runtime": "ap29zmw1lrhcvnbwkffll5gs2r6fw3a6-sglang-rocm-gfx1151-0.5.20",
+  "scope": "FP32 router projection and complete MoE component; not full-model quality",
+  "baseline": "Patch 0012 alone fails the requested FP32 router dtype assertion.",
+  "reference": "Transformers 5.17 Glm5NextTextTopkRouter computes F.linear(hidden_states.float(), weight.float()).",
+  "captured_router_rounding_audit": {
+    "model_revision": "abd7b07719111f137e1de8a0c1b7e01c11b74d1a",
+    "token_layer_pairs": 840,
+    "changed_top8_expert_sets": 21,
+    "scope": "FP32 logits vs BF16-rounded logits on captured inputs, before the routing fix"
+  },
+  "fixed_nodes": {
+    "strix-1": [
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      }
+    ],
+    "strix-2": [
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      }
+    ],
+    "strix-3": [
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      }
+    ],
+    "strix-4": [
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 1,
+        "relative_l2": 0.0017195377731695771,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 7,
+        "relative_l2": 0.0006787641323171556,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "router_dtype": "float32",
+        "tokens": 33,
+        "relative_l2": 0.0008800423820503056,
+        "max_abs": 0.25
+      }
+    ]
+  },
+  "full_model_after_scaling_fix_before_routing_fix": {
+    "arithmetic": "3973",
+    "streamed_read_file": "passed",
+    "tool_result_continuation": "GLM_AGENT_ACCEPTANCE_53",
+    "consistency": [
+      {
+        "prompt_index": 0,
+        "prompt_tokens": 12,
+        "output_tokens": 32,
+        "generated_seconds": 7.679462810978293,
+        "max_logprob_delta": 0.11543352901935577,
+        "mean_logprob_delta": 0.011412128210679384,
+        "thresholds": {
+          "max": 0.05,
+          "mean": 0.01
+        },
+        "passed": false
+      },
+      {
+        "prompt_index": 1,
+        "prompt_tokens": 2322,
+        "output_tokens": 32,
+        "generated_seconds": 31.347675362951122,
+        "max_logprob_delta": 0.1397625207901001,
+        "mean_logprob_delta": 0.01299803546351086,
+        "thresholds": {
+          "max": 0.05,
+          "mean": 0.01
+        },
+        "passed": false
+      }
+    ]
+  }
+}
