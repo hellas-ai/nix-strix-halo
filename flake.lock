@@ -157,16 +157,16 @@
     "llama-cpp-spacemit": {
       "flake": false,
       "locked": {
-        "lastModified": 1787901305,
-        "narHash": "sha256-UM9Yrnu+4JGBZrUIk5XbzUKe2LR4esuF8kogLYrNUHs=",
+        "lastModified": 1790235820,
+        "narHash": "sha256-rP3bY0fN+dFId0X+zW+oU0Z+aBpED6q2JxmiYWckK+M=",
         "owner": "spacemit-com",
         "repo": "llama.cpp",
-        "rev": "5496cdc9caacaaaf631811766e9e26c946850b0c",
+        "rev": "64316cd57bc50cbf8aafdbccdfeb5b77aba441ac",
         "type": "github"
       },
       "original": {
         "owner": "spacemit-com",
-        "ref": "v0.1.9",
+        "ref": "v0.2.0",
         "repo": "llama.cpp",
         "type": "github"
       }
@@ -1032,11 +1032,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786615403,
-        "narHash": "sha256-U++y7nM/6xiEcWI7q4fQoPZjPvRaTwkSqzBOVoEBjUE=",
+        "lastModified": 1790341335,
+        "narHash": "sha256-wFnDm/o/4OebDlpGFyVXP8DLUx0/gR/jUFuGqmTwsQg=",
         "owner": "pyproject-nix",
         "repo": "uv2nix",
-        "rev": "4b59abb2ae1896d2a0e1abfc47fbc9bf985ea730",
+        "rev": "a24323e9e6ecbbf305c238845ff6c612d50467c0",
         "type": "github"
       },
       "original": {

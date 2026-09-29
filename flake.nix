@@ -47,7 +47,7 @@
     };
 
     llama-cpp-spacemit = {
-      url = "github:spacemit-com/llama.cpp/v0.1.9";
+      url = "github:spacemit-com/llama.cpp/v0.2.0";
       flake = false;
     };
 
