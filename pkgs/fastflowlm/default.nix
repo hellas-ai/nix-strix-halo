@@ -15,6 +15,8 @@
   fftw,
   fftwFloat,
   fftwLongDouble,
+  readline,
+  ncurses,
   tokenizers-cpp,
   xrt,
   src,
@@ -58,13 +60,6 @@ stdenv.mkDerivation (finalAttrs: {
     add_library(tokenizers_cpp STATIC IMPORTED)\
     set_target_properties(tokenizers_cpp PROPERTIES IMPORTED_LOCATION ''${TOKENIZERS_CPP_LIB_PATH} INTERFACE_INCLUDE_DIRECTORIES ''${TOKENIZERS_CPP_INCLUDE_PATH})' CMakeLists.txt
 
-        # The upstream install rule adds a convenience symlink in
-        # /usr/local/bin for non-FHS prefixes. Keep installation confined to
-        # the Nix output instead.
-        substituteInPlace CMakeLists.txt \
-          --replace-fail \
-            'if(NOT WIN32 AND NOT FLM_PORTABLE_BUILD AND NOT CMAKE_INSTALL_PREFIX STREQUAL "/usr" AND NOT CMAKE_INSTALL_PREFIX STREQUAL "/usr/local")' \
-            'if(FALSE)'
   '';
 
   nativeBuildInputs = [
@@ -89,9 +84,13 @@ stdenv.mkDerivation (finalAttrs: {
     fftw
     fftwFloat
     fftwLongDouble
+    readline
+    ncurses
   ];
 
   cmakeFlags = [
+    # Upstream composes both install paths and $ORIGIN RPATHs from this.
+    (lib.cmakeFeature "CMAKE_INSTALL_LIBDIR" "lib")
     (lib.cmakeFeature "TOKENIZERS_CPP_LIB_PATH" "${tokenizers-cpp}/lib/libtokenizers_cpp.a")
     (lib.cmakeFeature "TOKENIZERS_CPP_INCLUDE_PATH" "${tokenizers-cpp}/include")
     (lib.cmakeFeature "TOKENIZERS_C_LIB_PATH" "${tokenizers-cpp.tokenizers-c}/lib/libtokenizers_c.a")
@@ -130,7 +129,7 @@ stdenv.mkDerivation (finalAttrs: {
     # entries) and prepend the correct relative path plus XRT.
     current_rpath=$(patchelf --print-rpath $out/bin/flm)
     fixed_rpath=$(echo "$current_rpath" | tr ':' '\n' | grep -v '..//nix/store' | paste -sd:)
-    patchelf --set-rpath "\$ORIGIN/../lib/flm:${xrt.xdna}/lib:$fixed_rpath" $out/bin/flm
+    patchelf --set-rpath "\$ORIGIN/../lib:\$ORIGIN/../lib/flm:${xrt.xdna}/lib:$fixed_rpath" $out/bin/flm
 
   '';
 
