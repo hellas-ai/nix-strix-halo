@@ -72,11 +72,29 @@ and the [performance audit](glm53-performance-audit.md).
 These runs use a community AWQ checkpoint; matching component references
 does not establish quality equivalence to the official FP8 release. The
 official `zai-org/GLM-5.3-Flash` snapshot at
-`eb9eb208eb0d988989d07a6a12d0fdeb5f52574a` is being staged separately under
+`eb9eb208eb0d988989d07a6a12d0fdeb5f52574a` is staged separately under
 `/models/GLM-5.3-Flash-FP8` for that comparison (328,366,173,469 bytes).
-It has not yet been qualified on this runtime. At about 06:08 UTC, the user
+All 73 files passed upstream digest, size, safetensors interval and index
+verification at 07:25 UTC; see
+[`glm53-official-fp8-staging-2026-09-29.json`](../lib/bench/results/glm53-official-fp8-staging-2026-09-29.json).
+Set `GLM_MODEL_VARIANT=fp8` to select this checkpoint and Triton FP8 GEMMs;
+the launcher requires its pinned verification manifest. Full serving and
+quality comparison are still pending. At about 06:08 UTC, the user
 reset the Strix power strip; the 13.68 tok/s measurements completed before
-that reset. Node and model-cache recovery is in progress.
+that reset. All four nodes and watchdogs recovered, and all four AWQ caches
+passed full checksums again by 06:31 UTC. The post-reset GPU trace confirms
+the tuned runtime's reduced mHC/expert costs. The official FP8 dense kernel
+passes decode/prefill CPU-reference probes; full FP8 serving and quality remain
+unqualified. A source-derived estimate gives 80.47 GB of FP8 weights per rank,
+excluding loader peak, caches, graphs and workspace.
+
+After a further user reboot of strix-1, the accepted runtime reproduced both
+consistency prompts' token probabilities bitwise and measured 13.83 tok/s.
+Two normalization experiments were kept outside the applied patches: their
+faster timings do not establish numerical qualification. A live paired test
+found identical native/candidate norm values but changed full-model output
+even when selecting native values. Details and calibrated expert memory
+counters are in the [performance audit](glm53-performance-audit.md).
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no

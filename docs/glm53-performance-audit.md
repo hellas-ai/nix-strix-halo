@@ -74,6 +74,70 @@ microbenchmark gains from this table and present the result as a new trace.
 
 See [full trace summary](../lib/bench/results/glm53-gpu-profile-2026-09-29.json).
 
+## Trace after the mHC and W4 fixes
+
+A new 16-step trace on all four nodes after the power-strip reset confirms
+**3,502 dispatches/token**, down from 3,952. Strix-1's nonoverlapping kernel
+intervals total **68.15 ms/token**, with a synchronized region median of
+76.84 ms. The established unprofiled result is 73.08 ms/token.
+
+| Work | Device ms/token, Strix-1 |
+|---|---:|
+| BF16 BLAS | 26.06 |
+| W4 experts | 18.91 |
+| FP32 BLAS | 3.33 |
+| Dedicated mHC projection | 0.93 |
+| RCCL | 5.25 |
+| 113 mixed-dtype norm weight multiplies | 5.00 |
+| Other kernels | 8.66 |
+
+Other ranks have 18.54–18.67 ms of expert work and 6.65–7.34 ms in collectives.
+The trace directly confirms the reductions in mHC and expert time; BF16 BLAS
+and normalization remain significant. No hardware traffic counters were
+collected in this trace. See
+[updated profile](../lib/bench/results/glm53-gpu-profile-tuned-2026-09-29.json).
+
+## Expert memory counters
+
+A separate Strix-3 probe collected `FETCH_SIZE` from the matching ROCm wheel
+profiler. A known 256 MiB read measured 268,448,896 bytes, within 0.0051% of
+the expected 268,435,456 bytes, at 215.66 GB/s. These are **L2 external
+reads**, which can hit the system cache; they are not an unqualified DRAM
+bandwidth measurement.
+
+With the actual per-rank dimensions and synthetic expert weights, increasing
+the reduction tile from 64 to 128 cut median gate/up traffic from **38.74 MB
+to 17.97 MB**. The selected packed weights and scales total 17.04 MB. The
+earlier tile therefore caused substantial read amplification, and the
+accepted change removes most of it. Down-projection reads remain 8.66 MB
+against an 8.52 MB payload.
+
+The larger tile uses 256 VGPRs/thread and reaches only about 43 GB/s in the
+gate/up counter probe. Eliminating redundant reads did not make the kernel
+stream efficiently. Register pressure, instruction cost and memory concurrency
+still need separating. Counter-instrumented latency is not full-model latency.
+See [counter samples and calibration](../lib/bench/results/glm53-w4-counters-2026-09-29.json).
+
+## Normalization experiments remain unqualified
+
+Fusing the full normalization reached 15.31 tok/s but increased the cache
+truncation probability delta to 0.0942, above the unchanged 0.05 gate. A
+narrower candidate preserving Torch statistics reached 14.83 tok/s and matched
+the native implementation exactly in 298 component cases on each GPU, yet
+changed full-model probabilities and one generated sequence. Neither change
+is accepted on the strength of its speed or component checks.
+
+Restarting the accepted runtime after the user's reboot reproduced the earlier
+decode and prefill probabilities bitwise for both consistency prompts, at
+13.83 tok/s. A same-process native/candidate/native comparison found **zero
+differing norm elements across all 113 norms on all four ranks**. All three
+phases had identical full-model probabilities, matching the candidate runtime
+and differing from the uninstrumented baseline. The checked norm arithmetic
+is therefore not the source of this difference; allocation, layout or another
+execution dependency needs investigation. The candidate is retained under
+`lib/bench/experiments`, outside the package's applied patches.
+See [trial results](../lib/bench/results/glm53-rmsnorm-investigation-2026-09-29.json).
+
 ## Runtime paths requiring attention
 
 1. **Expert decode uses generic padded matrix tiles.** SGLang's
@@ -82,7 +146,8 @@ See [full trace summary](../lib/bench/results/glm53-gpu-profile-2026-09-29.json)
    bytes when its 1.09 GB count is divided by 31.12 ms. That is not measured
    DRAM bandwidth. Transaction amplification, register pressure, instruction
    overhead and insufficient memory concurrency need separating. The trace
-   reports 168 VGPRs/thread and no scratch allocation for these kernels.
+   originally reported 168 VGPRs/thread and no scratch allocation. The tuned
+   gate/up counter probe reports 256 VGPRs/thread with no scratch allocation.
 2. **RMSNorm falls back to separate Torch operations.** With AITER disabled
    and no vLLM custom op available, `RMSNorm.forward_hip` selects
    `forward_native`: casts, square/reduction, normalization and multiplication.
@@ -143,11 +208,11 @@ Historical sources retained on trex:
 
 ## Next measurements and decisions
 
-Freeze the 13.68 tok/s baseline while making a current per-stage latency and
-traffic budget. Collect hardware memory-request counters for expert and
-dense kernels, and annotate norms/KDA boundaries so fallback attribution is
-measured. gfx1151 exposes `FETCH_SIZE`/`GL2C_EA_RDREQ_*`; these measure L2
-external traffic, which must not be casually relabeled as DRAM bytes when
+Keep the accepted runtime while completing the current per-stage traffic
+budget. The expert counter probe establishes its read amplification; collect
+dense-kernel counters next and isolate the normalization numerical difference
+on live inputs. gfx1151 exposes `FETCH_SIZE`/`GL2C_EA_RDREQ_*`; these measure
+L2 external traffic, which must not be casually relabeled as DRAM bytes when
 the system cache can service it.
 
 Then choose work by full-token time saved: adapt the proven HIP expert

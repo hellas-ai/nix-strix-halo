@@ -1,0 +1,82 @@
+--- /dev/null
++++ b/sglang/kernels/ops/layernorm/rocm_rmsnorm.py
+@@ -0,0 +1,35 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Fuse ROCm RMSNorm's final multiplies, retaining native FP32 statistics."""
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _rmsnorm_multiply(X, W, INV, Y, N: tl.constexpr, BLOCK: tl.constexpr):
++    row = tl.program_id(0)
++    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    x = tl.load(X + row * N + col, col < N, 0).to(tl.float32)
++    w = tl.load(W + col, col < N, 0).to(tl.float32)
++    inverse_rms = tl.load(INV + row)
++    tl.store(Y + row * N + col, (x * inverse_rms) * w, col < N)
++
++
++def rmsnorm(x, weight, eps):
++    # Keep the exact native reduction and rsqrt calls. Replacing these with
++    # Triton changed BF16 rounding enough to regress full-model cache checks.
++    variance = x.float().pow(2).mean(dim=-1, keepdim=True)
++    inverse_rms = torch.rsqrt(variance + eps)
++    output = torch.empty_like(x)
++    _rmsnorm_multiply[(x.shape[0], triton.cdiv(x.shape[1], 256))](
++        x,
++        weight,
++        inverse_rms,
++        output,
++        x.shape[1],
++        256,
++        num_warps=4,
++        enable_fp_fusion=False,
++    )
++    return output
+--- a/sglang/srt/layers/layernorm.py
++++ b/sglang/srt/layers/layernorm.py
+@@ -135,6 +135,8 @@
+         _has_vllm_rms_norm = False
+ 
+ if _is_hip:
++    from sglang.kernels.ops.layernorm.rocm_rmsnorm import rmsnorm as rocm_rmsnorm
++
+     try:
+         from sglang.kernels.ops.layernorm.minimax_m3_rmsnorm import (
+             gemma_fused_add_rmsnorm as rocm_triton_gemma_fused_add_rmsnorm,
+@@ -733,8 +735,31 @@
+         post_residual_addition: Optional[torch.Tensor] = None,
+         quant_linear: Optional[nn.Module] = None,
+     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+-        # Fallback to native implementation if vllm is not available
++        # The native fallback dispatches separate casts, reduction and mixed-
++        # dtype multiplies. Fuse the final multiplies on gfx1151;
++        # retain native semantics for residuals and all special options.
+         if not _has_vllm_rms_norm:
++            if (
++                residual is None
++                and post_residual_addition is None
++                and quant_linear is None
++                and not self.cast_x_before_out_mul
++                and self.override_orig_dtype is None
++                and self.variance_size_override is None
++                and not is_batch_invariant_mode_enabled()
++                and x.dim() == 2
++                and x.numel() > 0
++                and x.dtype == torch.bfloat16
++                and x.is_contiguous()
++                and x.shape[-1] == self.hidden_size
++                and self.hidden_size in (512, 1536, 4096)
++                and self.weight.dtype in (torch.bfloat16, torch.float32)
++                and self.weight.is_contiguous()
++                and torch.cuda.get_device_properties(x.device).gcnArchName.startswith(
++                    "gfx1151"
++                )
++            ):
++                return rocm_rmsnorm(x, self.weight, self.variance_epsilon)
+             return self.forward_native(x, residual, post_residual_addition)
+ 
+         if is_batch_invariant_mode_enabled():

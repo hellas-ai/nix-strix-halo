@@ -11,17 +11,27 @@ case "$nodes:$rank" in
   *) echo "Use GLM_NNODES=2 or 4 and a zero-based RANK below that count" >&2; exit 2 ;;
 esac
 
-model=${GLM_MODEL_PATH:-/mnt/glm53-fabric/GLM-5.3-Flash-AWQ-W4A16}
+variant=${GLM_MODEL_VARIANT:-awq}
+case "$variant" in
+  awq) model_name=GLM-5.3-Flash-AWQ-W4A16 ;;
+  fp8) model_name=GLM-5.3-Flash-FP8 ;;
+  *) echo "GLM_MODEL_VARIANT must be awq or fp8" >&2; exit 2 ;;
+esac
+model=${GLM_MODEL_PATH:-/mnt/glm53-fabric/$model_name}
 context_length=${GLM_CONTEXT_LENGTH:-32768}
-"${GLM_PYTHON:-python3}" - "$model" <<'PY'
+"${GLM_PYTHON:-python3}" - "$model" "$variant" <<'PY'
 import json
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 verified = json.loads((root / "_staging/verified.json").read_text())
-assert verified["revision"] == "abd7b07719111f137e1de8a0c1b7e01c11b74d1a"
-assert verified["bytes"] == 190843146350
-assert len(verified["files"]) == 24
+revision, size, files = {
+    "awq": ("abd7b07719111f137e1de8a0c1b7e01c11b74d1a", 190843146350, 24),
+    "fp8": ("eb9eb208eb0d988989d07a6a12d0fdeb5f52574a", 328366173469, 73),
+}[sys.argv[2]]
+assert verified["revision"] == revision
+assert verified["bytes"] == size
+assert len(verified["files"]) == files
 for entry in verified["files"]:
     assert (root / entry["path"]).stat().st_size == entry["size"], entry["path"]
 PY
@@ -81,4 +91,5 @@ options=(
 )
 if [[ ${GLM_RADIX_CACHE:-0} == 0 ]]; then options+=(--disable-radix-cache); fi
 if [[ ${GLM_CUDA_GRAPH:-0} == 0 ]]; then options+=(--disable-cuda-graph); fi
+if [[ $variant == fp8 ]]; then options+=(--fp8-gemm-backend triton); fi
 exec "${GLM_SGLANG_BIN:-sglang}" serve "${options[@]}" "$@"
