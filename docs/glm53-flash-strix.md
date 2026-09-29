@@ -6,11 +6,18 @@ kernels. Patch 0019 replaces expensive FP8 widening with an exact bit
 conversion and selects smaller batch-one tiles. Both consistency prompts'
 token IDs and checked probabilities are bitwise identical to the initial
 FP8 run. Its first isolated Pi coding repair passes all 14 held-out checks.
-Decode/prefill consistency and cache truncation still fail their original
-numerical limits, so overall correctness remains unqualified. Three-marker retrieval passes at 129,017 prompt tokens, with the same answer
+The prefix-cache repair shares complete packed-index pages and 1024-token
+prefill chunks. Cached and fresh generation now match exactly across repeated,
+appended, truncated and divergent prefixes. Decode/prefill consistency still
+fails its original numerical limits, so overall correctness remains unqualified.
+Before this repair, three-marker retrieval passed at 129,017 prompt tokens, with the same answer
 on a cached repeat: 943.40 seconds cold and 6.60 seconds warm, reusing 128,960
 tokens. This is a bounded retrieval check, not complex coding acceptance at 128K. See the [performance audit](glm53-performance-audit.md)
 and [FP8 evidence](../lib/bench/results/glm53-fp8-decode-2026-09-29.json).
+
+To check the cache repair against an idle server, run
+`python3 lib/bench/glm53-cache-boundaries.py` with radix caching and
+1024-token chunked prefill. It requires exact cached/fresh output agreement.
 
 The earlier results below use the community AWQ checkpoint unless explicitly
 identified as official FP8. Fixing duplicate MoE scaling restored coherent answers: the
@@ -89,8 +96,9 @@ official `zai-org/GLM-5.3-Flash` snapshot at
 All 73 files passed upstream digest, size, safetensors interval and index
 verification at 07:25 UTC; see
 [`glm53-official-fp8-staging-2026-09-29.json`](../lib/bench/results/glm53-official-fp8-staging-2026-09-29.json).
-Set `GLM_MODEL_VARIANT=fp8` to select this checkpoint and Triton FP8 GEMMs;
-the launcher requires its pinned verification manifest. The initial full-model
+The launcher defaults to this official FP8 checkpoint and Triton FP8 GEMMs;
+it requires the pinned verification manifest. Set `GLM_MODEL_VARIANT=awq`
+explicitly to select the earlier community checkpoint. The initial full-model
 FP8 run passes arithmetic, streamed tools and tool-result continuation, but its
 generic kernels reach only **1.97 tok/s**. Decode/prefill probability maxima
 are 0.1918/0.1235, with zero sampled token-choice disagreements; both means
