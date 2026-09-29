@@ -93,6 +93,100 @@ class PythonWheelUpdaterTests(unittest.TestCase):
             f"{update_wheels.BASE_URL}/{project}/",
         )
 
+    def make_dist(self, project: str, rocm_version: str):
+        return update_wheels.Distribution(
+            project=project,
+            filename=f"{project}-{rocm_version}-py3-none-linux_x86_64.whl",
+            url=f"{update_wheels.BASE_URL}/{project}/",
+            package_version=rocm_version,
+            rocm_version=rocm_version,
+            python_tag="py3",
+            abi_tag="none",
+            platform_tag="linux_x86_64",
+            kind="wheel",
+        )
+
+    def test_in_rocm_series(self):
+        in_series = update_wheels.in_rocm_series
+        self.assertTrue(in_series("10.1.0", "10.1"))
+        self.assertTrue(in_series("10.1.5", "10.1"))
+        self.assertTrue(in_series("10.1.0rc2", "10.1"))
+        self.assertTrue(in_series("10.1.0rc2", "10.1.0"))
+        self.assertTrue(in_series("10.1.0", "10.1.0"))
+        self.assertFalse(in_series("10.10.0", "10.1"))
+        self.assertFalse(in_series("10.12.0", "10.1"))
+        self.assertFalse(in_series("10.1.1", "10.1.0"))
+        self.assertFalse(in_series("10.0.0", "10.1"))
+        self.assertFalse(in_series("11.1.0", "10.1"))
+
+    def test_choose_rocm_version_does_not_cross_numeric_prefixes(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0"),
+                self.make_dist("rocm-sdk-core", "10.10.0"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.0",
+        )
+
+    def test_choose_rocm_version_series_pin_keeps_prereleases(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0rc2"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1.0",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.0rc2",
+        )
+
+    def test_choose_rocm_version_series_pin_excludes_next_patch(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0"),
+                self.make_dist("rocm-sdk-core", "10.1.1"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1.0",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.0",
+        )
+
+    def test_choose_rocm_version_prefers_latest_in_series(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0"),
+                self.make_dist("rocm-sdk-core", "10.1.9"),
+                self.make_dist("rocm-sdk-core", "10.2.0"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.9",
+        )
+
     def test_parses_rocm_10_frontend_and_sdk_versions(self):
         torch = self.parse(
             "torch",

@@ -5,13 +5,14 @@ four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
 arithmetic, streamed tool call and tool-result continuation checks now pass.
 The FP32-router fix also passes component and API checks. Numerical
 consistency still exceeds its investigation limits; the latest run changed
-one of 64 sampled token choices between decode and prefill. Pi completed one
-updater repair after review feedback. Three-marker retrieval passed at
+one of 64 sampled token choices between decode and prefill. Pi completed three
+updater repairs: one after review feedback and two on the first draft,
+including a task starting above 100K prompt tokens. Three-marker retrieval passed at
 129,017 prompt tokens both uncached and with prefix reuse. The cached repeat
 reused 128,960 tokens and took 4.49 seconds, versus 362 seconds cold.
 Synthetic fresh-repeat, appended-prefix and truncated-prefix checks still
 fail numerical comparisons, with changed token choices on truncation.
-General cache correctness, coding at long context and performance relative
+General cache correctness, broader coding quality and performance relative
 to the hardware roofline remain unqualified.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
@@ -437,6 +438,17 @@ used 4,981 uncached input tokens, 22,080 cached tokens and 1,155 output tokens.
 The reviewed patch is included in this branch. Evidence is in
 [`glm53-pi-wheel-links-2026-09-29.json`](../lib/bench/results/glm53-pi-wheel-links-2026-09-29.json).
 
+A third task supplied 99,998 tokens of repository source and instructions
+before asking Pi to repair ROCm series matching in the wheel updater. The
+first API prompt contained 101,440 tokens including Pi's instructions/tools;
+later prompts reached 108,454. Pi completed twelve turns in 593 seconds,
+using 106,167 uncached input tokens, 1,156,224 cached tokens and 2,480 output
+tokens. The first draft passes all 28 repository tests and eight independent
+held-out cases; the reviewed patch is included. This establishes one useful
+coding run with a large context and repeated tool use, rather than general
+coding quality or full-window acceptance. See
+[`glm53-pi-long-context-2026-09-29.json`](../lib/bench/results/glm53-pi-long-context-2026-09-29.json).
+
 ## Qualification target and initial measurements
 
 The user-selected acceptance workload is useful coding in isolated worktrees
@@ -462,6 +474,10 @@ and truncated branches differed by 0.313 and 0.847. The latter also changed
 generated token IDs. Identical and divergent cases passed the 0.05 limit.
 Fresh/fresh variation means these results cannot be attributed solely to
 cache state restoration. All comparisons are retained, including failures.
+An isolated BF16 TCP all-reduce probe found identical repeated results and
+agreement between PyTorch, PyNccl and graph execution at 8 KiB through 8 MiB.
+It therefore did not reproduce the full-model variation; it does not rule
+out other shapes or batch-size-dependent reduction order.
 
 The latest runtime uses context 131072, `--max-mamba-cache-size 128`, radix
 caching and decode graphs restricted to batch size one. Pinning 512 Mamba

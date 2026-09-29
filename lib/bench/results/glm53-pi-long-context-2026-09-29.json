@@ -1,0 +1,106 @@
+{
+  "date": "2026-09-29",
+  "model_revision": "abd7b07719111f137e1de8a0c1b7e01c11b74d1a",
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
+  "tensor_parallel": 4,
+  "context_limit": 131072,
+  "radix_cache": true,
+  "decode_graphs": true,
+  "client": "Packaged glm53-pi, Pi 0.87.1",
+  "reasoning_effort": "low",
+  "task": "Repair wheel-updater ROCm series matching without breaking prereleases, common-version selection or package/platform/ABI filters.",
+  "source_snapshot": {
+    "raw_prompt_tokens": 99998,
+    "bytes": 367836,
+    "sha256": "d7e7d7b44aa1fe8ee5db874d5804a02fd9b64d7d9b72889659436831189aeeeb",
+    "checkout_head": "b24012c4bd0ec1bcaaeb9435851f016856c2af31",
+    "files_started": 75,
+    "qualification": "Repository source snapshot plus real dependency-updater repair; token count excludes Pi system/tool overhead."
+  },
+  "isolation": "Bubblewrap with only acceptance checkout and temporary state writable; extensions, skills and context files disabled.",
+  "assistant_turns": 12,
+  "usage": {
+    "input": 106167,
+    "output": 2480,
+    "cacheRead": 1156224,
+    "cacheWrite": 0,
+    "reasoning": 0,
+    "totalTokens": 1264871
+  },
+  "turn_usage": [
+    {
+      "input_tokens": 100416,
+      "cached_tokens": 1024,
+      "output_tokens": 39
+    },
+    {
+      "input_tokens": 932,
+      "cached_tokens": 101440,
+      "output_tokens": 34
+    },
+    {
+      "input_tokens": 1069,
+      "cached_tokens": 102400,
+      "output_tokens": 153
+    },
+    {
+      "input_tokens": 1060,
+      "cached_tokens": 103424,
+      "output_tokens": 64
+    },
+    {
+      "input_tokens": 394,
+      "cached_tokens": 104448,
+      "output_tokens": 30
+    },
+    {
+      "input_tokens": 53,
+      "cached_tokens": 104832,
+      "output_tokens": 249
+    },
+    {
+      "input_tokens": 769,
+      "cached_tokens": 104960,
+      "output_tokens": 339
+    },
+    {
+      "input_tokens": 108,
+      "cached_tokens": 105984,
+      "output_tokens": 163
+    },
+    {
+      "input_tokens": 70,
+      "cached_tokens": 106240,
+      "output_tokens": 30
+    },
+    {
+      "input_tokens": 346,
+      "cached_tokens": 106304,
+      "output_tokens": 990
+    },
+    {
+      "input_tokens": 144,
+      "cached_tokens": 107520,
+      "output_tokens": 45
+    },
+    {
+      "input_tokens": 806,
+      "cached_tokens": 107648,
+      "output_tokens": 344
+    }
+  ],
+  "runner": {
+    "returncode": 0,
+    "elapsed": 592.6885502338409,
+    "held_out_test_returncode": 0
+  },
+  "repository_tests": 28,
+  "held_out_tests": 8,
+  "review_passed": true,
+  "review_feedback_rounds": 0,
+  "changed_files": [
+    "pkgs/therock/scripts/update-python-wheels.py",
+    "pkgs/therock/scripts/test_updaters.py"
+  ],
+  "qualification": "One coding task starting above 100K prompt tokens passed on first draft and reused prefixes over multiple tool turns. Does not establish near-perfect general coding quality, full-window coding, or bitwise cache fidelity."
+}

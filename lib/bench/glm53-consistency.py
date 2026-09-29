@@ -76,7 +76,9 @@ def main():
             for i, (token, choices) in enumerate(zip(output_ids, top, strict=True))
             if choices[0][1] != token
         ]
-        passed = maximum <= args.max_logprob_delta and mean <= args.mean_logprob_delta
+        passed = (maximum <= args.max_logprob_delta
+                  and mean <= args.mean_logprob_delta
+                  and not argmax_differences)
         failed |= not passed
         print(json.dumps({
             "prompt_index": index, "prompt_tokens": len(input_ids),
