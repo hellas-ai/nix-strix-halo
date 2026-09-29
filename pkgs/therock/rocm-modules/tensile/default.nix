@@ -36,6 +36,11 @@ buildPythonPackage (finalAttrs: {
   # TODO: It should be possible to run asm caps test ONCE for all supported arches
   # We currently disable the test because it's slow and runs each time tensile launches
   postPatch = ''
+    # The distribution follows the ROCm/TheRock release; Tensile's internal
+    # algorithm/CMake version is independent and must keep its upstream value.
+    # Match the wheel metadata to this derivation for nixpkgs's metadata check.
+    substituteInPlace setup.py \
+      --replace-fail 'version=readVersionFromInit(),' 'version="${finalAttrs.version}",'
     substituteInPlace Tensile/Common.py \
       --replace-fail 'if globalParameters["AssemblerPath"] is not None:' "if False:"
     # Add an assert that the fallback 9,0,0 is supported before setting the kernel to it
