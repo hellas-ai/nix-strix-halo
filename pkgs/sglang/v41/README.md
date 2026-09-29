@@ -17,6 +17,11 @@ loader, mmap enabled, and checkpoint prefetch disabled. Both prefill and decode
 must run eagerly: graph capture rejects this synchronous lookup path rather
 than replaying stale embeddings.
 
+`--model-loader-extra-config '{"enable_multithread_load":false}'` disables both
+iterator threads and model-side weight-copy threads. With threading enabled,
+the existing `num_threads` setting (default 8) also bounds outstanding copies,
+so CPU dequantization cannot run arbitrarily far ahead of device copies.
+
 Use `SGLANG_USE_AITER=0`, `SGLANG_HACK_FLASHMLA_BACKEND=triton`,
 `SGLANG_DSV4_KV_LAYOUT=v4`, `SGLANG_DSV4_COMPRESSED_KV_LAYOUT=fp8`,
 `--moe-runner-backend triton`, `--fp8-gemm-backend triton`,
@@ -39,6 +44,10 @@ They use independent numerical or bit-level references and changing-input
 graph replay where applicable. `ENGRAM_CPU_ONLY=1` runs the row-store checks
 without a GPU. Fixtures are synthetic and small; no checkpoint or run logs are
 included here.
+
+`tests/weight-loading.py` checks bounded source ownership, serial loading and
+copy-error propagation using the installed loader source. Run it with
+`HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES=''` for its CPU-only checks.
 
 Component qualification is in progress. Full-model text/image correctness,
 TP4 performance, 128K cache reuse and useful Pi/OpenCode acceptance remain
