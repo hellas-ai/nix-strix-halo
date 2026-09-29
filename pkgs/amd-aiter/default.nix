@@ -1,6 +1,7 @@
 {
   amd-aiter,
   lib,
+  python,
   ...
 }:
 
@@ -32,6 +33,12 @@ amd-aiter.overridePythonAttrs (old: {
         ln -sfn "$ck_project/example" "$ck/example"
       fi
     done
+
+    # The decorator must register, dispatch and unload without initializing a
+    # GPU. Check the installed module directly, avoiding GPU-only package imports.
+    HIP_VISIBLE_DEVICES= ROCR_VISIBLE_DEVICES= ${python.interpreter} \
+      ${./tests/library-registration.py} \
+      "$out/${python.sitePackages}/aiter/jit/utils/torch_guard.py"
   '';
 
   passthru = (old.passthru or { }) // {
