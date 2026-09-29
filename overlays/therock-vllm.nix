@@ -33,11 +33,11 @@ let
   };
   opentelemetrySemanticConventionsAi = py.opentelemetry-semantic-conventions-ai;
   mistralCommon = py.mistral-common.overridePythonAttrs (old: rec {
-    version = "1.11.2";
+    version = "1.11.6";
     src = py.fetchPypi {
       pname = "mistral_common";
       inherit version;
-      hash = "sha256-efaPwtEZDyhjf0DgU/kZyMJpfgCyqmed3uViqVGD9K0=";
+      hash = "sha256-Ne1Cjg6IaAjwwEitrFaEPOd9bO4TwbVKBFrY0R53x1Y=";
     };
     dependencies = lib.unique ((old.dependencies or [ ]) ++ [ py.pycountry ]);
     propagatedBuildInputs = lib.unique ((old.propagatedBuildInputs or [ ]) ++ [ py.pycountry ]);
@@ -47,10 +47,10 @@ let
   });
   xgrammar = final.callPackage ../pkgs/xgrammar-0_2.nix { pythonPackages = py; };
   tritonKernels = prev.fetchFromGitHub {
-    owner = "triton-lang";
+    owner = "ROCm";
     repo = "triton";
-    rev = "0263a6a6203cf27c441c57a6c808ea87ffb8f654";
-    hash = "sha256-BBlgFPScG2Zkk5o1Jf/0eCodZoL3Vf6jfOHoUZoPscM=";
+    rev = "0f380657dbf3ee86eb57558ff71df24f03b5d4e7";
+    hash = "sha256-UQ+N7JJNtk9ZlleeoIhwxwtpmX9+cc2WkyrliS9j5Aw=";
   };
   withSetuptools80 =
     pkg:
@@ -383,6 +383,9 @@ let
           "vllm.parser.harmony"
           "xgrammar.openai_tool_call_schema"
         ];
+        postPythonImportsCheck = (old.postPythonImportsCheck or "") + ''
+          ${py.python.interpreter} -c 'from vllm.utils.import_utils import import_triton_kernels; import_triton_kernels(); from triton_kernels.matmul_ogs import PrecisionConfig'
+        '';
         passthru = (old.passthru or { }) // {
           vllmFeatureOptions = featureFlags;
           vllmUnsupportedFeatures = unsupportedFeatureReasons;
