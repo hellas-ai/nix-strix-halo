@@ -115,6 +115,35 @@ class PythonWheelUpdaterTests(unittest.TestCase):
         self.assertIsNotNone(triton)
         self.assertEqual(triton.rocm_version, "10.0.0")
 
+    def test_parses_wheel_url_with_query_and_fragment(self):
+        dist = self.parse(
+            "torch",
+            "torch-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl"
+            "?delta=0#sha256=deadbeef",
+        )
+        self.assertIsNotNone(dist)
+        self.assertEqual(dist.kind, "wheel")
+        self.assertEqual(
+            dist.filename,
+            "torch-2.13.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+        )
+        self.assertEqual(
+            dist.url,
+            f"{update_wheels.BASE_URL}/torch/torch-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl"
+            "?delta=0#sha256=deadbeef",
+        )
+
+    def test_parses_sdist_url_with_query_and_fragment(self):
+        dist = self.parse(
+            "rocm-sdk-core",
+            "rocm_sdk_core-10.0.0.tar.gz#sha256=cafebabe",
+        )
+        self.assertIsNotNone(dist)
+        self.assertEqual(dist.kind, "sdist")
+        self.assertEqual(dist.python_tag, "source")
+        self.assertEqual(dist.package_version, "10.0.0")
+        self.assertEqual(dist.url, f"{update_wheels.BASE_URL}/rocm-sdk-core/rocm_sdk_core-10.0.0.tar.gz#sha256=cafebabe")
+
     def test_sorts_patch_and_prerelease_versions(self):
         self.assertGreater(update_wheels.version_key("10.0.10"), update_wheels.version_key("10.0.9"))
         self.assertGreater(update_wheels.version_key("10.0.0"), update_wheels.version_key("10.0.0rc4"))

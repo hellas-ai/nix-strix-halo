@@ -92,11 +92,18 @@ def fetch_index(url: str) -> str:
 
 
 def parse_distribution(project: str, href: str, index_url: str) -> Distribution | None:
-    if not (href.endswith(".whl") or href.endswith(".tar.gz")):
+    # Strip any query string or #sha256= fragment before inspecting the path.
+    path = urllib.parse.urlsplit(href).path
+    unquoted_path = urllib.parse.unquote(path)
+    if unquoted_path.endswith(".whl"):
+        extension = ".whl"
+    elif unquoted_path.endswith(".tar.gz"):
+        extension = ".tar.gz"
+    else:
         return None
 
-    filename = Path(urllib.parse.unquote(href)).name
-    if filename.endswith(".whl"):
+    filename = Path(unquoted_path).name
+    if extension == ".whl":
         stem = filename[:-4]
         parts = stem.rsplit("-", 4)
         if len(parts) != 5:

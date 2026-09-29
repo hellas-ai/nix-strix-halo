@@ -4,10 +4,15 @@ Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint serves on
 four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
 arithmetic, streamed tool call and tool-result continuation checks now pass.
 The FP32-router fix also passes component and API checks. Numerical
-consistency still exceeds its initial investigation limits, although all 64
-sampled token choices agree. Pi completed one updater repair after review
-feedback. Three-marker retrieval passed twice at 129,017 prompt tokens; coding
-at that length, cache reuse and performance qualification remain pending.
+consistency still exceeds its investigation limits; the latest run changed
+one of 64 sampled token choices between decode and prefill. Pi completed one
+updater repair after review feedback. Three-marker retrieval passed at
+129,017 prompt tokens both uncached and with prefix reuse. The cached repeat
+reused 128,960 tokens and took 4.49 seconds, versus 362 seconds cold.
+Synthetic fresh-repeat, appended-prefix and truncated-prefix checks still
+fail numerical comparisons, with changed token choices on truncation.
+General cache correctness, coding at long context and performance relative
+to the hardware roofline remain unqualified.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -328,13 +333,14 @@ architectures retain the existing optional-kernel fallbacks.
 The full GLM implementation imports on strix-1. Native softmax and sigmoid
 routing (288 experts, top-8, batches 1/17/1024) agree with CPU references on all
 four GPUs. BF16 matrix multiplication also passes its reference check. This
-is component qualification; the complete model, quantization quality and
-agentic coding behavior have not yet passed acceptance.
+is component qualification. Full-model and coding results, with remaining
+quality limitations, are recorded at the beginning of this document.
 
 The official HIP recipe pins transformers 5.12.1; nixpkgs supplies 5.17.0.
 The staged model config and compressed-tensors metadata parse with this package;
-all four ranks complete weight loading and initialization. The real-model
-generation checks above fail and must be repaired before acceptance.
+all four ranks complete weight loading and initialization. The corrected
+runtime passes the API checks above; strict numerical consistency is still
+under investigation.
 
 The package build, GLM config/server-argument/native cache imports, and
 `sglang serve --help` passed on trex. CLI help and quantization-config parsing
@@ -403,11 +409,33 @@ the official template's `clear_thinking=true` option; begin with
 After correctness checks, benchmark RCCL/RoCE against TCP on the same fabric,
 then compare TP4 with TP2 (or two TP2 replicas for aggregate throughput).
 Fewer nodes may reduce communication overhead; TP2 leaves less memory for
-loading and context. The uncached, eager baseline decodes at roughly 4.3 tokens/s on short coding
-requests; it is not roofline-qualified. Each node uses the transient
+loading and context. The corrected uncached, eager baseline has a measured median of 6.60 tokens/s
+on short coding requests; it is not roofline-qualified. Each node uses the transient
 user unit `glm53-sglang.service`. On trex, `glm53-tunnel.service` forwards
 `127.0.0.1:30053` to rank zero's loopback API at port 30000. A listening tunnel
 alone does not mean the model is ready; check `/health` after loading.
+
+## Pi client
+
+With the cluster and trex tunnel healthy, run from your coding checkout:
+
+```bash
+nix run /mnt/Home/src/nix-strix-halo-glm53#glm53-pi
+```
+
+The client selects `glm-5.3-flash` at `http://127.0.0.1:30053/v1`, low reasoning
+effort, a 131072-token context limit and an 8192-token output limit. Its sessions
+and editable `models.json` live in `$XDG_STATE_HOME/glm53-pi` (default
+`~/.local/state/glm53-pi`); `GLM_PI_DIR` selects another directory. The command
+uses Pi's offline startup mode and retains its normal coding tools. The
+isolated acceptance runner additionally restricts filesystem access and disables
+extensions/context files. Client startup, model discovery and a coding repair
+through this packaged command pass. Pi fixed wheel URLs containing query
+strings or hash fragments in 150 seconds, with 23 repository tests and eight
+held-out cases passing on its first draft. Across seven assistant turns it
+used 4,981 uncached input tokens, 22,080 cached tokens and 1,155 output tokens.
+The reviewed patch is included in this branch. Evidence is in
+[`glm53-pi-wheel-links-2026-09-29.json`](../lib/bench/results/glm53-pi-wheel-links-2026-09-29.json).
 
 ## Qualification target and initial measurements
 
@@ -426,6 +454,23 @@ context harness defaults to 131072 tokens including a 2048-token output
 reserve. Run it with `--expect-cache off` before enabling radix caching, and
 with `--expect-cache on` afterward. These are investigation gates, not a
 claim that all coding tasks or quantization quality have passed.
+
+`glm53-cache-branches.py` adds a fresh/fresh control and repeated, appended,
+truncated and divergent synthetic prefixes. On the graph-enabled runtime,
+the fresh control's maximum log-probability difference was 0.212; appended
+and truncated branches differed by 0.313 and 0.847. The latter also changed
+generated token IDs. Identical and divergent cases passed the 0.05 limit.
+Fresh/fresh variation means these results cannot be attributed solely to
+cache state restoration. All comparisons are retained, including failures.
+
+The latest runtime uses context 131072, `--max-mamba-cache-size 128`, radix
+caching and decode graphs restricted to batch size one. Pinning 512 Mamba
+states exhausted the remaining static memory budget during initialization;
+128 states fits. Three 128-token short-request measurements give a median
+8.63 tokens/s and 0.386-second time to first token. This includes the fused
+mHC post operation and graphs, so it does not isolate their individual gains
+from the earlier 6.60 tokens/s baseline. Evidence is in
+[`glm53-prefix-graph-2026-09-29.json`](../lib/bench/results/glm53-prefix-graph-2026-09-29.json).
 
 `lib/bench/glm53-hardware.py` measures components without model weights. The
 initial results are in

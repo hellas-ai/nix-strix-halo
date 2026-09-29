@@ -712,6 +712,9 @@
               pi = piPackage;
             };
             pi = piPackage;
+            glm53-pi = pkgs.callPackage ./pkgs/glm53-pi {
+              pi = piPackage;
+            };
             inherit (pkgs)
               llama-cpp
               llama-cpp-master
@@ -870,6 +873,9 @@
           };
 
           genericApps = {
+            glm53-pi =
+              ap self.packages.${system}.glm53-pi "glm53-pi"
+                "Run Pi against GLM-5.3-Flash on the Strix cluster";
             pi-wrap =
               ap self.packages.${system}.pi-wrap "pi-wrap"
                 "Run pi with provider settings from environment";

@@ -1,14 +1,16 @@
 {
-  "runtime": "/nix/store/vlzym7vnbx9vf4clvqnl1xg09zldmvlp-sglang-rocm-gfx1151-0.5.20",
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
   "api_math_streaming_and_tool_continuation": "passed",
+  "radix_cache": true,
+  "decode_graphs": true,
   "prefill_decode_consistency": [
     {
       "prompt_index": 0,
       "prompt_tokens": 12,
       "output_tokens": 32,
-      "generated_seconds": 9.990026600076817,
-      "max_logprob_delta": 0.058832406997680664,
-      "mean_logprob_delta": 0.006911935535299563,
+      "generated_seconds": 4.007744939997792,
+      "max_logprob_delta": 0.13193239271640778,
+      "mean_logprob_delta": 0.006423209208890057,
       "argmax_differences": [],
       "thresholds": {
         "max": 0.05,
@@ -20,10 +22,17 @@
       "prompt_index": 1,
       "prompt_tokens": 2322,
       "output_tokens": 32,
-      "generated_seconds": 12.542950051021762,
-      "max_logprob_delta": 0.21474695205688477,
-      "mean_logprob_delta": 0.014213014876361285,
-      "argmax_differences": [],
+      "generated_seconds": 10.380309788975865,
+      "max_logprob_delta": 0.11686187982559204,
+      "mean_logprob_delta": 0.0079572520489819,
+      "argmax_differences": [
+        {
+          "position": 25,
+          "decoded_id": 785,
+          "prefill_id": 7984,
+          "prefill_margin": 0.125
+        }
+      ],
       "thresholds": {
         "max": 0.05,
         "mean": 0.01
@@ -33,6 +42,41 @@
   ],
   "qualified": false,
   "previous_runs": [
+    {
+      "runtime": "/nix/store/vlzym7vnbx9vf4clvqnl1xg09zldmvlp-sglang-rocm-gfx1151-0.5.20",
+      "api_math_streaming_and_tool_continuation": "passed",
+      "prefill_decode_consistency": [
+        {
+          "prompt_index": 0,
+          "prompt_tokens": 12,
+          "output_tokens": 32,
+          "generated_seconds": 9.990026600076817,
+          "max_logprob_delta": 0.058832406997680664,
+          "mean_logprob_delta": 0.006911935535299563,
+          "argmax_differences": [],
+          "thresholds": {
+            "max": 0.05,
+            "mean": 0.01
+          },
+          "passed": false
+        },
+        {
+          "prompt_index": 1,
+          "prompt_tokens": 2322,
+          "output_tokens": 32,
+          "generated_seconds": 12.542950051021762,
+          "max_logprob_delta": 0.21474695205688477,
+          "mean_logprob_delta": 0.014213014876361285,
+          "argmax_differences": [],
+          "thresholds": {
+            "max": 0.05,
+            "mean": 0.01
+          },
+          "passed": false
+        }
+      ],
+      "qualified": false
+    },
     {
       "runtime": "/nix/store/ap29zmw1lrhcvnbwkffll5gs2r6fw3a6-sglang-rocm-gfx1151-0.5.20",
       "api_math_streaming_and_tool_continuation": "passed",
