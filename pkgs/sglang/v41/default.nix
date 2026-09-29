@@ -33,6 +33,7 @@ let
       ./patches/0007-engram-model.patch
       ./patches/0008-vision-reference-precision.patch
       ./patches/0009-bounded-weight-loading.patch
+      ./patches/0010-swa-autotune-head-tiles.patch
     ];
   };
   baseKernel = lib.findFirst (

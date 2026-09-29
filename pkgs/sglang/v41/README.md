@@ -32,6 +32,11 @@ rank-3 SDPA path and computes RoPE tables on the GPU to preserve the official
 BF16 rounding behavior.
 Disable both TileLang mHC overrides. The automatic HIP attention selection can
 choose an unqualified TileLang path, so the explicit Triton setting matters.
+For TP4's 16 attention heads per rank, single-scope SWA autotuning retains the
+three existing 16-head tiles and skips larger masked-head tiles. This reduces
+cold compilation without changing kernel arithmetic. `tests/swa.py` checks
+native cache bytes and attention against independent references, including
+changed-input graph replay through the SWA backend.
 
 Run the focused checks through the built package's interpreter, passing the
 package output as the first argument:
