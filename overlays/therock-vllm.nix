@@ -33,11 +33,11 @@ let
   };
   opentelemetrySemanticConventionsAi = py.opentelemetry-semantic-conventions-ai;
   mistralCommon = py.mistral-common.overridePythonAttrs (old: rec {
-    version = "1.11.2";
+    version = "1.11.6";
     src = py.fetchPypi {
       pname = "mistral_common";
       inherit version;
-      hash = "sha256-efaPwtEZDyhjf0DgU/kZyMJpfgCyqmed3uViqVGD9K0=";
+      hash = "sha256-Ne1Cjg6IaAjwwEitrFaEPOd9bO4TwbVKBFrY0R53x1Y=";
     };
     dependencies = lib.unique ((old.dependencies or [ ]) ++ [ py.pycountry ]);
     propagatedBuildInputs = lib.unique ((old.propagatedBuildInputs or [ ]) ++ [ py.pycountry ]);
@@ -45,11 +45,12 @@ let
     # PyPI sdists do not include all fixtures needed by the upstream tests.
     doCheck = false;
   });
+  xgrammar = final.callPackage ../pkgs/xgrammar-0_2.nix { pythonPackages = py; };
   tritonKernels = prev.fetchFromGitHub {
-    owner = "triton-lang";
+    owner = "ROCm";
     repo = "triton";
-    rev = "0263a6a6203cf27c441c57a6c808ea87ffb8f654";
-    hash = "sha256-BBlgFPScG2Zkk5o1Jf/0eCodZoL3Vf6jfOHoUZoPscM=";
+    rev = "0f380657dbf3ee86eb57558ff71df24f03b5d4e7";
+    hash = "sha256-UQ+N7JJNtk9ZlleeoIhwxwtpmX9+cc2WkyrliS9j5Aw=";
   };
   withSetuptools80 =
     pkg:
@@ -109,6 +110,7 @@ let
     "mistral-common"
     "mistral_common"
     "mistralai"
+    "mooncake-transfer-engine-rocm"
     "opencv-python-headless"
     "outlines"
     "peft"
@@ -139,6 +141,7 @@ let
     grpc = "smg-grpc-servicer is not packaged in this nixpkgs input";
     helion = "helion is marked broken in this nixpkgs input";
     instanttensor = "instanttensor is not packaged in this nixpkgs input";
+    mooncake = "Mooncake requires a separately packaged ROCm transfer engine for KV-cache offload and disaggregated serving";
     rixl = "RIXL needs separate ROCm RIXL/UCX/RDMA packaging and is only used by KV-transfer/disaggregated serving paths";
     runai = "runai-model-streamer is not packaged in this nixpkgs input";
     tensorizer = "tensorizer is not packaged in this nixpkgs input";
@@ -155,6 +158,7 @@ let
       grpcSupport ? false,
       helionSupport ? false,
       instanttensorSupport ? false,
+      mooncakeSupport ? false,
       otelSupport ? true,
       rixlSupport ? false,
       runaiSupport ? false,
@@ -174,6 +178,7 @@ let
         grpc = grpcSupport;
         helion = helionSupport;
         instanttensor = instanttensorSupport;
+        mooncake = mooncakeSupport;
         otel = otelSupport;
         rixl = rixlSupport;
         runai = runaiSupport;
@@ -238,6 +243,7 @@ let
         py.six
         py.tqdm
         py.watchfiles
+        xgrammar
       ];
       extraDependencies = lib.unique (baseExtraDependencies ++ featureDependencies);
     in
@@ -281,7 +287,7 @@ let
               "import pynvml"
 
           substituteInPlace pyproject.toml \
-            --replace-fail '"torch == 2.11.0"' '"torch"'
+            --replace-fail '"torch == 2.13.0"' '"torch"'
 
           substituteInPlace CMakeLists.txt \
             --replace-fail \
@@ -364,12 +370,27 @@ let
         buildInputs = (old.buildInputs or [ ]) ++ [ final.libdrm.dev ];
         pythonRemoveDeps = (old.pythonRemoveDeps or [ ]) ++ dropVllmDependencyNames;
         dependencies = lib.unique (
-          dropNamedDeps dropVllmDependencyNames (old.dependencies or [ ]) ++ extraDependencies
+          dropNamedDeps (dropVllmDependencyNames ++ [ "xgrammar" ]) (old.dependencies or [ ])
+          ++ extraDependencies
         );
         propagatedBuildInputs = lib.unique (
-          dropNamedDeps dropVllmDependencyNames (old.propagatedBuildInputs or [ ]) ++ extraDependencies
+          dropNamedDeps (dropVllmDependencyNames ++ [ "xgrammar" ]) (old.propagatedBuildInputs or [ ])
+          ++ extraDependencies
         );
         optional-dependencies = optionalDependencies;
+        pythonImportsCheck = (old.pythonImportsCheck or [ ]) ++ [
+          "vllm.entrypoints.cli.main"
+          "vllm.parser.harmony"
+          "xgrammar.openai_tool_call_schema"
+        ];
+        preDistPhases = (old.preDistPhases or [ ]) ++ [ "vllmTritonImportsCheckPhase" ];
+        vllmTritonImportsCheckPhase = ''
+          (
+            cd "$out"
+            export PYTHONPATH="$out/${py.python.sitePackages}:$PYTHONPATH"
+            ${py.python.interpreter} -c 'from vllm.utils.import_utils import import_triton_kernels; import_triton_kernels(); from triton_kernels.matmul_ogs import PrecisionConfig'
+          )
+        '';
         passthru = (old.passthru or { }) // {
           vllmFeatureOptions = featureFlags;
           vllmUnsupportedFeatures = unsupportedFeatureReasons;

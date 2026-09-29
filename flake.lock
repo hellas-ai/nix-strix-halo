@@ -37,11 +37,11 @@
     "ds4": {
       "flake": false,
       "locked": {
-        "lastModified": 1784559040,
-        "narHash": "sha256-GcuZrjETwo/oN+itgWuSVPhRmSYPo4gIFHzuoDKkkFk=",
+        "lastModified": 1789867284,
+        "narHash": "sha256-Bo/td1HwVjw6bwz3BDwTP+ZSudkVFCo2aIVK4axvmXg=",
         "owner": "antirez",
         "repo": "ds4",
-        "rev": "efdadd41e20134af4f3381e1ed90e96fe4faef6f",
+        "rev": "0aaea5a238fb41a35106a551e73c8409dfb751ac",
         "type": "github"
       },
       "original": {
@@ -86,11 +86,11 @@
     "fastflowlm": {
       "flake": false,
       "locked": {
-        "lastModified": 1784663835,
-        "narHash": "sha256-XV/8CQl9Dfc+QQ4YLo1d+jY/DI0XxTh2OYYTiE+7/TM=",
+        "lastModified": 1789666980,
+        "narHash": "sha256-fhjGxCzIcCp/PIEXukn01b9PhuDOIQE0U4PepoZrZNY=",
         "owner": "FastFlowLM",
         "repo": "FastFlowLM",
-        "rev": "7032b3c58373f7ebf41f8e01188ba1770a923ba2",
+        "rev": "d2c76ccb1fa065fa96268f334c26175536f7e4b2",
         "type": "github"
       },
       "original": {
@@ -141,11 +141,11 @@
     "llama-cpp-master": {
       "flake": false,
       "locked": {
-        "lastModified": 1789883983,
-        "narHash": "sha256-aPTZAfmQmRbrykP1+7A47PGNnCgWNLpbc0IOTF6TvOQ=",
+        "lastModified": 1790410498,
+        "narHash": "sha256-M/1zuvGoDBvZL3+KRegXxYCdRond8boykPc5Rji2whM=",
         "owner": "ggml-org",
         "repo": "llama.cpp",
-        "rev": "b23efaa2ef147f547ee75cbf0c621d61904de80e",
+        "rev": "81bc6b83f827df746eb129235488d325c49cae52",
         "type": "github"
       },
       "original": {
@@ -191,11 +191,11 @@
     "mlx-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1784241827,
-        "narHash": "sha256-aYsfPcYIwsuKkYwssy0ANHuRVlM/KarfoTqlT8VJggo=",
+        "lastModified": 1784502612,
+        "narHash": "sha256-NzfjN2dCLbYKb/TcN5G1hvgdh0QtnJtl4vBUfxkOP4I=",
         "owner": "NripeshN",
         "repo": "mlx",
-        "rev": "0dadb703d77301af29405cf7e12627efb88a6d0f",
+        "rev": "75915908dfe5028335d318b10340313744fd3a8d",
         "type": "github"
       },
       "original": {
@@ -278,11 +278,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786936886,
-        "narHash": "sha256-8SFyOdmcG6Nsh/JzlH812lTI/v+ur06fpQhj/acNn8k=",
+        "lastModified": 1790340365,
+        "narHash": "sha256-SNbVKxCfjcZGrkODFRb2hFKWfcVIKAx1PvzZlQJo2X0=",
         "owner": "pyproject-nix",
         "repo": "build-system-pkgs",
-        "rev": "90ffdeee1a4929b231913df067448cd9803d3e07",
+        "rev": "32156c9d9777eba86b09ad0e3299e6cd6e3fa46f",
         "type": "github"
       },
       "original": {
@@ -298,11 +298,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786031528,
-        "narHash": "sha256-cROiHKO3UbIKqF5FG5NikvydzlfIj4EcR1Cty9qOVt4=",
+        "lastModified": 1788394333,
+        "narHash": "sha256-xYOP0Xym1eVGUaHFx+eJEaycFGoiCbst3fZf0xFHP78=",
         "owner": "pyproject-nix",
         "repo": "pyproject.nix",
-        "rev": "1b1485546d85f6f6c7aadb10c4923dbc09633263",
+        "rev": "6a8a7881d75b6f98967e7b8069f4ead331384301",
         "type": "github"
       },
       "original": {
@@ -1048,16 +1048,16 @@
     "vllm-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1783899612,
-        "narHash": "sha256-a2OoTfQOJyB8iKBfkfCC23MMBMOHEBjAZ0WGag8hcTQ=",
+        "lastModified": 1790029969,
+        "narHash": "sha256-VCyNfE6r+lP0Yn5qmOqOU5VI9VrGCBNldMne7Jq86xI=",
         "owner": "vllm-project",
         "repo": "vllm",
-        "rev": "752a3a504485790a2e8491cacbb35c137339ad34",
+        "rev": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
         "type": "github"
       },
       "original": {
         "owner": "vllm-project",
-        "ref": "v0.25.1",
+        "ref": "v0.30.0",
         "repo": "vllm",
         "type": "github"
       }
@@ -1065,11 +1065,11 @@
     "xdna-driver-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1780591096,
-        "narHash": "sha256-pG9fptnKMoHbK2HSBObfflCyBt9k0uDO/leKvtsKUnA=",
+        "lastModified": 1784758690,
+        "narHash": "sha256-YUiM9u9vtISttbThTt9fTtBB/w3d5UatGyVK5mAgWNM=",
         "ref": "1.7",
-        "rev": "0fb464f6e043fdaf8d9007b76bd9e9a666ffe870",
-        "revCount": 873,
+        "rev": "4e5aed38f3b74a5a9a2c7a6222eaff1a8be54305",
+        "revCount": 874,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/amd/xdna-driver"
