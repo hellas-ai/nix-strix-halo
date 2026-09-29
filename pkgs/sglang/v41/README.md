@@ -20,7 +20,9 @@ than replaying stale embeddings.
 Use `SGLANG_USE_AITER=0`, `SGLANG_HACK_FLASHMLA_BACKEND=triton`,
 `SGLANG_DSV4_KV_LAYOUT=v4`, `SGLANG_DSV4_COMPRESSED_KV_LAYOUT=fp8`,
 `--moe-runner-backend triton`, `--fp8-gemm-backend triton`,
-`--disable-custom-all-reduce`, and `--mm-attention-backend triton_attn`.
+`--disable-custom-all-reduce`. The V4.1 vision tower uses a model-specific
+rank-3 SDPA path and computes RoPE tables on the GPU to preserve the official
+BF16 rounding behavior.
 Disable both TileLang mHC overrides. The automatic HIP attention selection can
 choose an unqualified TileLang path, so the explicit Triton setting matters.
 
@@ -40,6 +42,7 @@ included here.
 
 Component qualification is in progress. Full-model text/image correctness,
 TP4 performance, 128K cache reuse and useful Pi/OpenCode acceptance remain
-unqualified. The complete vision tower currently exceeds its provisional
-numerical tolerance against the official reference; that discrepancy is under
-investigation. This package is a candidate for that work.
+unqualified. The complete vision tower and image projection match the pinned
+official reference bitwise on three image inputs. Run `tests/vision.py` with
+the runtime path and checkpoint directory to repeat that comparison; it reads
+only the vision shard. This package is a candidate for full serving qualification.

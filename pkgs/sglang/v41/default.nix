@@ -27,6 +27,7 @@ let
       ./patches/0005-engram-store.patch
       ./patches/0006-engram-loader.patch
       ./patches/0007-engram-model.patch
+      ./patches/0008-vision-reference-precision.patch
     ];
   };
   baseKernel = lib.findFirst (
