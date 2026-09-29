@@ -1,0 +1,62 @@
+--- /dev/null
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_8_0/E=288,N=256,device_name=AMD_Radeon_8060S_Graphics,dtype=int4_w4a16.json
+@@ -0,0 +1,28 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 32,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 2
++  },
++  "2": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 32,
++    "BLOCK_SIZE_K": 64,
++    "GROUP_SIZE_M": 1
++  },
++  "288": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 32,
++    "BLOCK_SIZE_K": 64,
++    "GROUP_SIZE_M": 1
++  },
++  "289": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 32,
++    "GROUP_SIZE_M": 8
++  }
++}
+--- /dev/null
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_8_0/E=288,N=256,device_name=AMD_Radeon_8060S_Graphics,dtype=int4_w4a16_down.json
+@@ -0,0 +1,28 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 32,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 2
++  },
++  "2": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 32,
++    "BLOCK_SIZE_K": 64,
++    "GROUP_SIZE_M": 1
++  },
++  "288": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 32,
++    "BLOCK_SIZE_K": 64,
++    "GROUP_SIZE_M": 1
++  },
++  "289": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 32,
++    "GROUP_SIZE_M": 8
++  }
++}

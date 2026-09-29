@@ -88,7 +88,7 @@ let
     ];
   };
 
-  linuxBenchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
+  linuxBenchmarks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
     let
       fastflowlmBenchmarks =
         (import ./fastflowlm.nix {
@@ -121,7 +121,7 @@ let
     // flattenBenchmarks mlxRocmBenchmarks
   );
 
-  darwinBenchmarks = lib.optionalAttrs pkgs.stdenv.isDarwin (
+  darwinBenchmarks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin (
     let
       ds4MetalBenchmarks =
         (import ./ds4.nix {
@@ -147,7 +147,7 @@ let
     // flattenBenchmarks mlxMetalBenchmarks
   );
 
-  cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.isLinux (
+  cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
     let
       inherit (nvidiaRuntime) fallbackLibraryPath libraryPath sandboxPaths;
     in

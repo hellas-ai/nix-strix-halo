@@ -1,0 +1,57 @@
+--- a/sglang/kernels/ops/layernorm/mhc.py
++++ b/sglang/kernels/ops/layernorm/mhc.py
+@@ -1808,6 +1808,34 @@
+     return post.unsqueeze(-1), comb, layer_input
+ 
+ 
++def _mhc_pre_hip(
++    residual: torch.Tensor,
++    fn: torch.Tensor,
++    hc_scale: torch.Tensor,
++    hc_base: torch.Tensor,
++    rms_eps: float,
++    hc_pre_eps: float,
++    hc_sinkhorn_eps: float,
++    hc_post_mult_value: float,
++    sinkhorn_repeat: int,
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """FP32 projection and fused Sinkhorn for the ROCm torch fallback."""
++    assert hc_pre_eps == hc_sinkhorn_eps and hc_post_mult_value == 2.0
++    s, n, h = residual.shape
++    x_flat = residual.reshape(s, n * h).float()
++    inv_rms = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + rms_eps)
++    mixes = torch.nn.functional.linear(x_flat, fn) * inv_rms
++    pre, post, comb = _hc_split_sinkhorn_triton(
++        mixes.unsqueeze(0), hc_scale, hc_base, n, sinkhorn_repeat, hc_sinkhorn_eps
++    )
++    layer_input = (pre.reshape(s, n, 1) * residual.float()).sum(dim=1)
++    return (
++        post.reshape(s, n, 1),
++        comb.reshape(s, n, n),
++        layer_input.to(residual.dtype),
++    )
++
++
+ def _mhc_post_torch(
+     x: torch.Tensor,
+     residual: torch.Tensor,
+@@ -1836,7 +1864,18 @@
+ ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
+     assert residual.dim() == 3, f"residual must be (s, n, h); got {residual.shape}"
+     if not envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get():
+-        post_mix, comb_mix, layer_input = _mhc_pre_torch(
++        pre_impl = _mhc_pre_torch
++        if (
++            torch.version.hip is not None
++            and residual.is_cuda
++            and residual.shape[1] == 4
++            and hc_pre_eps == hc_sinkhorn_eps
++            and hc_post_mult_value == 2.0
++        ):
++            # Avoid launching each of the 20 Sinkhorn iterations separately.
++            # Other parameterizations retain the general torch implementation.
++            pre_impl = _mhc_pre_hip
++        post_mix, comb_mix, layer_input = pre_impl(
+             residual=residual,
+             fn=fn,
+             hc_scale=hc_scale,

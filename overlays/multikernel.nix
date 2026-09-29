@@ -1,6 +1,6 @@
 final: prev:
 
-prev.lib.optionalAttrs prev.stdenv.isLinux (
+prev.lib.optionalAttrs prev.stdenv.hostPlatform.isLinux (
   let
     rdtsc = final.python3Packages.callPackage ../pkgs/multikernel/rdtsc.nix { };
     kerf = final.python3Packages.callPackage ../pkgs/multikernel/kerf.nix {

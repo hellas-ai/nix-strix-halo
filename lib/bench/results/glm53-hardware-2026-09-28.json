@@ -1,0 +1,544 @@
+{
+  "date": "2026-09-28",
+  "torch": "2.13.0+rocm10.0.0",
+  "sglang": "0.5.20",
+  "native_kernel": "0.4.7 from SGLang v0.5.20 with upstream gfx1151 patch",
+  "tcp": [
+    {
+      "host": "strix-1",
+      "kind": "device",
+      "torch": "2.13.0+rocm10.0.0",
+      "hip": "7.15.26333",
+      "gpu": "_CudaDeviceProperties(name='AMD Radeon 8060S Graphics', major=11, minor=5, gcnArchName='gfx1151', total_memory=126976MB, multi_processor_count=20, uuid=58580000-0000-0000-0000-000000000000, pci_bus_id=214, pci_device_id=0, pci_domain_id=0, L2_cache_size=2MB)",
+      "free_total": [
+        130449506304,
+        133143986176
+      ]
+    },
+    {
+      "host": "strix-1",
+      "kind": "native_topk",
+      "passed": true,
+      "experts": 288,
+      "top_k": 8,
+      "token_counts": [
+        1,
+        17,
+        1024
+      ]
+    },
+    {
+      "host": "strix-1",
+      "kind": "bf16_matmul",
+      "passed": true
+    },
+    {
+      "host": "strix-1",
+      "kind": "stream_add",
+      "bytes_per_iteration": 3221225472,
+      "median_ms": 13.966450691223145,
+      "useful_GB_s": 230.64023517616369
+    },
+    {
+      "host": "strix-1",
+      "kind": "bf16_gemm",
+      "size": 4096,
+      "median_ms": 4.120035409927368,
+      "TFLOP_s": 33.35868258336714
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.08549750009478885,
+      "payload_GB_s": 4.678499366139717e-05,
+      "ring_bus_GB_s": 7.017749049209575e-05,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.21385449963418068,
+      "payload_GB_s": 0.0766128373638453,
+      "ring_bus_GB_s": 0.11491925604576796,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.2872694994948688,
+      "payload_GB_s": 0.22813420887089547,
+      "ring_bus_GB_s": 0.3422013133063432,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 3.7639550000676536,
+      "payload_GB_s": 1.1143342574299138,
+      "ring_bus_GB_s": 1.6715013861448706,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 67108864,
+      "median_ms": 75.74379549987498,
+      "payload_GB_s": 0.8859981673365017,
+      "ring_bus_GB_s": 1.3289972510047525,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-2",
+      "kind": "device",
+      "torch": "2.13.0+rocm10.0.0",
+      "hip": "7.15.26333",
+      "gpu": "_CudaDeviceProperties(name='AMD Radeon 8060S Graphics', major=11, minor=5, gcnArchName='gfx1151', total_memory=126976MB, multi_processor_count=20, uuid=58580000-0000-0000-0000-000000000000, pci_bus_id=68, pci_device_id=0, pci_domain_id=0, L2_cache_size=2MB)",
+      "free_total": [
+        130447433728,
+        133143986176
+      ]
+    },
+    {
+      "host": "strix-2",
+      "kind": "native_topk",
+      "passed": true,
+      "experts": 288,
+      "top_k": 8,
+      "token_counts": [
+        1,
+        17,
+        1024
+      ]
+    },
+    {
+      "host": "strix-2",
+      "kind": "bf16_matmul",
+      "passed": true
+    },
+    {
+      "host": "strix-2",
+      "kind": "stream_add",
+      "bytes_per_iteration": 3221225472,
+      "median_ms": 14.08109426498413,
+      "useful_GB_s": 228.76243929495703
+    },
+    {
+      "host": "strix-2",
+      "kind": "bf16_gemm",
+      "size": 4096,
+      "median_ms": 3.688554525375366,
+      "TFLOP_s": 37.260924984703465
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.08433050015810295,
+      "payload_GB_s": 4.743242353004896e-05,
+      "ring_bus_GB_s": 7.114863529507344e-05,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.20926149977640307,
+      "payload_GB_s": 0.07829438294911574,
+      "ring_bus_GB_s": 0.11744157442367362,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.28816249982810405,
+      "payload_GB_s": 0.22742723303377024,
+      "ring_bus_GB_s": 0.3411408495506554,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 3.702014000282361,
+      "payload_GB_s": 1.132978967578213,
+      "ring_bus_GB_s": 1.6994684513673195,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 67108864,
+      "median_ms": 75.04921199983983,
+      "payload_GB_s": 0.894198116299252,
+      "ring_bus_GB_s": 1.341297174448878,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-3",
+      "kind": "device",
+      "torch": "2.13.0+rocm10.0.0",
+      "hip": "7.15.26333",
+      "gpu": "_CudaDeviceProperties(name='AMD Radeon 8060S Graphics', major=11, minor=5, gcnArchName='gfx1151', total_memory=126976MB, multi_processor_count=20, uuid=58580000-0000-0000-0000-000000000000, pci_bus_id=68, pci_device_id=0, pci_domain_id=0, L2_cache_size=2MB)",
+      "free_total": [
+        130447470592,
+        133143986176
+      ]
+    },
+    {
+      "host": "strix-3",
+      "kind": "native_topk",
+      "passed": true,
+      "experts": 288,
+      "top_k": 8,
+      "token_counts": [
+        1,
+        17,
+        1024
+      ]
+    },
+    {
+      "host": "strix-3",
+      "kind": "bf16_matmul",
+      "passed": true
+    },
+    {
+      "host": "strix-3",
+      "kind": "stream_add",
+      "bytes_per_iteration": 3221225472,
+      "median_ms": 14.11105489730835,
+      "useful_GB_s": 228.27673022620309
+    },
+    {
+      "host": "strix-3",
+      "kind": "bf16_gemm",
+      "size": 4096,
+      "median_ms": 3.750017523765564,
+      "TFLOP_s": 36.65021632592033
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.08415299953412614,
+      "payload_GB_s": 4.753247088213297e-05,
+      "ring_bus_GB_s": 7.129870632319945e-05,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.21678900020560832,
+      "payload_GB_s": 0.07557579021288437,
+      "ring_bus_GB_s": 0.11336368531932656,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.29232750057417434,
+      "payload_GB_s": 0.22418691320959414,
+      "ring_bus_GB_s": 0.3362803698143912,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 3.953717500280618,
+      "payload_GB_s": 1.0608507056213061,
+      "ring_bus_GB_s": 1.5912760584319592,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 67108864,
+      "median_ms": 74.29493399968123,
+      "payload_GB_s": 0.9032764468205589,
+      "ring_bus_GB_s": 1.3549146702308383,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-4",
+      "kind": "device",
+      "torch": "2.13.0+rocm10.0.0",
+      "hip": "7.15.26333",
+      "gpu": "_CudaDeviceProperties(name='AMD Radeon 8060S Graphics', major=11, minor=5, gcnArchName='gfx1151', total_memory=126976MB, multi_processor_count=20, uuid=58580000-0000-0000-0000-000000000000, pci_bus_id=68, pci_device_id=0, pci_domain_id=0, L2_cache_size=2MB)",
+      "free_total": [
+        130447478784,
+        133143986176
+      ]
+    },
+    {
+      "host": "strix-4",
+      "kind": "native_topk",
+      "passed": true,
+      "experts": 288,
+      "top_k": 8,
+      "token_counts": [
+        1,
+        17,
+        1024
+      ]
+    },
+    {
+      "host": "strix-4",
+      "kind": "bf16_matmul",
+      "passed": true
+    },
+    {
+      "host": "strix-4",
+      "kind": "stream_add",
+      "bytes_per_iteration": 3221225472,
+      "median_ms": 14.054503917694092,
+      "useful_GB_s": 229.1952452298653
+    },
+    {
+      "host": "strix-4",
+      "kind": "bf16_gemm",
+      "size": 4096,
+      "median_ms": 3.694912552833557,
+      "TFLOP_s": 37.19680818064306
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.08442800026386976,
+      "payload_GB_s": 4.73776470779655e-05,
+      "ring_bus_GB_s": 7.106647061694824e-05,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.2141739996659453,
+      "payload_GB_s": 0.07649854802896103,
+      "ring_bus_GB_s": 0.11474782204344154,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.2895274997172237,
+      "payload_GB_s": 0.22635500967613728,
+      "ring_bus_GB_s": 0.3395325145142059,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 3.738491499916563,
+      "payload_GB_s": 1.1219241771965003,
+      "ring_bus_GB_s": 1.6828862657947505,
+      "nccl_ib_disable": "1"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 67108864,
+      "median_ms": 75.70755599999757,
+      "payload_GB_s": 0.8864222746802466,
+      "ring_bus_GB_s": 1.3296334120203699,
+      "nccl_ib_disable": "1"
+    }
+  ],
+  "roce_partial": [
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.07645100049558096,
+      "payload_GB_s": 5.2321094218135304e-05,
+      "ring_bus_GB_s": 7.848164132720296e-05,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.07831899984012125,
+      "payload_GB_s": 0.20919572560229255,
+      "ring_bus_GB_s": 0.31379358840343885,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.11614350023592124,
+      "payload_GB_s": 0.5642674783081043,
+      "ring_bus_GB_s": 0.8464012174621565,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-1",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 2.449973999773647,
+      "payload_GB_s": 1.7119789844249418,
+      "ring_bus_GB_s": 2.5679684766374127,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.07652149997738888,
+      "payload_GB_s": 5.227289064095644e-05,
+      "ring_bus_GB_s": 7.840933596143466e-05,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.07898600006228662,
+      "payload_GB_s": 0.20742916449851795,
+      "ring_bus_GB_s": 0.3111437467477769,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.11606449993450951,
+      "payload_GB_s": 0.5646515518266076,
+      "ring_bus_GB_s": 0.8469773277399115,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-2",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 2.5179869999192306,
+      "payload_GB_s": 1.6657369558041961,
+      "ring_bus_GB_s": 2.4986054337062944,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.07802099980835919,
+      "payload_GB_s": 5.126824841805525e-05,
+      "ring_bus_GB_s": 7.690237262708287e-05,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.07828099978723912,
+      "payload_GB_s": 0.20929727576973048,
+      "ring_bus_GB_s": 0.31394591365459573,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.11581900025703362,
+      "payload_GB_s": 0.5658484346657968,
+      "ring_bus_GB_s": 0.8487726519986952,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-3",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 2.535372000238567,
+      "payload_GB_s": 1.6543150273827016,
+      "ring_bus_GB_s": 2.4814725410740524,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4,
+      "median_ms": 0.0777830000515678,
+      "payload_GB_s": 5.1425118565086456e-05,
+      "ring_bus_GB_s": 7.713767784762969e-05,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 16384,
+      "median_ms": 0.07888800018918118,
+      "payload_GB_s": 0.20768684667768933,
+      "ring_bus_GB_s": 0.311530270016534,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 65536,
+      "median_ms": 0.11640700040516094,
+      "payload_GB_s": 0.5629901962244398,
+      "ring_bus_GB_s": 0.8444852943366596,
+      "nccl_ib_disable": "0"
+    },
+    {
+      "host": "strix-4",
+      "kind": "all_reduce",
+      "world": 4,
+      "bytes": 4194304,
+      "median_ms": 2.5039165002453956,
+      "payload_GB_s": 1.6750973922608596,
+      "ring_bus_GB_s": 2.5126460883912896,
+      "nccl_ib_disable": "0"
+    }
+  ],
+  "notes": [
+    "No model weights or inference in these measurements.",
+    "Native softmax/sigmoid top-8 routing for 288 experts and BF16 matmul passed on every node.",
+    "RoCE selected the HCA whose netdev is cx5fabric0. Logs report GDR 0.",
+    "RoCE passed through 4 MiB but stalled at 64 MiB; stopped after more than three minutes. TCP completed all sizes."
+  ]
+}
