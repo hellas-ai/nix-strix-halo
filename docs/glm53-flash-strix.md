@@ -1,11 +1,12 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
 Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint loads on all
-four TP ranks and allocates its KV caches. Generation remains unqualified:
-startup and warmup exposed CUDA-only dispatch and incomplete pooled-DSA support
-on ROCm. A reduced four-layer TP4 dummy fixture now exercises KDA, DSA and
-quantized MoE without repeated full-checkpoint reloads. No coding-agent
-acceptance is claimed.
+four TP ranks and serves requests, but **real-model correctness failed**. The
+first arithmetic request degenerated into repetition, and prefill/decode
+log-probability consistency failed on both short and chunked prompts. Pi
+acceptance, 128K context and performance tuning are gated on resolving this.
+The reduced TP4 dummy fixture and isolated kernels pass within their stated
+scope; those checks do not establish full-model correctness.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -76,8 +77,24 @@ CPU index checks cover boundary lengths, tied scores, remapped page rows,
 padded output rows and empty history with a live tail. Sorting cost is not yet
 optimized. The TP4 fixture completed warmup at 00:29 UTC and passed 7-token and
 3073-token prompts, each producing eight tokens with finite log probabilities.
-The full checkpoint is being reloaded with these patches. Component results
-are recorded in `lib/bench/results/glm53-rocm-components-2026-09-29.json`.
+Component results are recorded in
+`lib/bench/results/glm53-rocm-components-2026-09-29.json`.
+
+The full checkpoint became ready at 00:42:49 UTC. Serial eager loading took
+177 seconds on strix-1 and 499–526 seconds on the other ranks. The first real
+request (`137 * 29`, greedy, low reasoning effort) emitted 1024 repetitive
+reasoning tokens without a final answer. Decode throughput was approximately
+4.4 tokens/s, including no graph or prefix-cache acceleration; this is not a
+quality-qualified performance result. The consistency probe then found maximum
+log-probability differences of 18.03 and 9.08 on 12-token and 2322-token prompts
+(respective means 3.57 and 1.85), versus investigation limits 0.05/0.01.
+The same generated token IDs were rescored by prefill with caches flushed.
+The cause is under investigation; no coding-agent task has run.
+
+Hydra also exposed a Tensile wheel metadata mismatch after the nixpkgs update.
+The distribution now uses the packaged ROCm release version, retaining the
+independent upstream algorithm/CMake version. A full local Tensile build passes
+including the metadata check; final-head Hydra checks remain required.
 
 ## Snapshot
 
@@ -208,8 +225,8 @@ agentic coding behavior have not yet passed acceptance.
 
 The official HIP recipe pins transformers 5.12.1; nixpkgs supplies 5.17.0.
 The staged model config and compressed-tensors metadata parse with this package;
-all four ranks now complete weight loading. Attention initialization and
-generation still need an end-to-end check.
+all four ranks complete weight loading and initialization. The real-model
+generation checks above fail and must be repaired before acceptance.
 
 The package build, GLM config/server-argument/native cache imports, and
 `sglang serve --help` passed on trex. CLI help and quantization-config parsing
@@ -233,7 +250,7 @@ one optimization at a time after coherent generation is established.
 The initial server uses the following conservative configuration. The
 [`node launcher`](../lib/bench/glm53-node.sh) checks the verified snapshot and
 starts one rank per Strix host; rank values are 0, 1, 2, 3. GPU imports and
-weight loading have passed; complete server startup is still pending.
+weight loading and startup have passed; real-model correctness has not.
 `GLM_NNODES=2` also selects TP2 (ranks 0/1); set `GLM_DIST_ADDR` to that pair's
 rank-zero host. TP2 remains unqualified and needs measured memory headroom.
 
