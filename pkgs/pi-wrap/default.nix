@@ -54,34 +54,9 @@ writeShellApplication {
       exit 2
     fi
 
-    context_window="''${PI_CONTEXT_WINDOW:-32768}"
-    max_tokens="''${PI_MAX_TOKENS:-2048}"
-    reasoning="''${PI_REASONING:-false}"
-    case "$context_window:$max_tokens" in
-      *[!0-9:]*|:*|*:|0:*|*:0) echo "pi-wrap: context/token limits must be positive integers" >&2; exit 2 ;;
-    esac
-    case "$reasoning" in
-      true|false) ;;
-      *) echo "pi-wrap: PI_REASONING must be true or false" >&2; exit 2 ;;
-    esac
-
-    if [ -n "''${PI_WRAP_RUNTIME_DIR:-}" ]; then
-      runtime_root="$PI_WRAP_RUNTIME_DIR"
-    elif [ -n "''${XDG_RUNTIME_DIR:-}" ]; then
-      runtime_root="$XDG_RUNTIME_DIR/pi-wrap"
-    else
-      echo "pi-wrap: set XDG_RUNTIME_DIR or PI_WRAP_RUNTIME_DIR" >&2
-      exit 2
-    fi
-    case "$runtime_root/" in
-      /tmp/*) echo "pi-wrap: refusing a /tmp runtime directory" >&2; exit 2 ;;
-    esac
-    mkdir -p -- "$runtime_root"
-    chmod 700 -- "$runtime_root"
-    session_dir="$(mktemp -d "$runtime_root/session.XXXXXX")"
-    extension="$session_dir/provider.js"
+    extension="$(mktemp --suffix=.js -t pi-wrap-XXXXXX)"
     cleanup() {
-      rm -rf -- "$session_dir"
+      rm -f "$extension"
     }
     trap cleanup EXIT
 
@@ -101,16 +76,16 @@ writeShellApplication {
         models: [{
           id: model,
           name: model,
-          reasoning: $reasoning,
+          reasoning: false,
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: $context_window,
-          maxTokens: $max_tokens,
+          contextWindow: 32768,
+          maxTokens: 2048,
         }],
       });
     }
     EOF
 
-    ${pi}/bin/pi -e "$extension" --provider "$provider_id" --model "$model" "$@"
+    exec ${pi}/bin/pi -e "$extension" --provider "$provider_id" --model "$model" "$@"
   '';
 }
