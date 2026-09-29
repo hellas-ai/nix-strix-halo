@@ -3,10 +3,10 @@
 Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint serves on
 four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
 arithmetic, streamed tool call and tool-result continuation checks now pass.
-Numerical consistency still exceeds its initial investigation limits; a
-second fix restores the checkpoint's requested FP32 router computation and
-is undergoing full-model retesting. Pi acceptance, 128K context, cache reuse
-and performance qualification remain pending.
+The FP32-router fix also passes component and API checks. Numerical
+consistency still exceeds its initial investigation limits, although all 64
+sampled token choices agree. Pi completed one updater repair after review
+feedback; 128K context, cache reuse and performance qualification remain pending.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -96,7 +96,7 @@ module applies it again. Its captured first-MoE output matches a 6.25 scale
 Patch 0012 skips the duplicate outer scaling when HIP uses the Triton runner.
 With the patch, the same real-weight/input calculation agrees with an
 independent CPU reference at relative L2 0.000839. This is a layer check;
-full-model quality and consistency must be retested before any coding task.
+subsequent full-model and coding results are recorded below.
 
 `lib/bench/glm53-moe-scaling-check.py` exercises the complete MoE module,
 including top-eight routing, INT4 dequantization, clamped activation, the
@@ -125,9 +125,34 @@ ignored it and returned BF16 logits. Rounding the projection changed top-eight
 expert sets in 21 of 840 captured token/layer pairs. Patch 0013 honors that
 configuration through SGLang's existing FP32 gate path. Projection and complete
 MoE CPU-reference tests pass on all four GPUs (relative L2 0.000679–0.001720);
-the prior package fails the requested dtype assertion. Full-model tests are
-queued on a fresh TP4 launch without diagnostic captures. Evidence is in
+the prior package fails the requested dtype assertion. Full-model results follow below. Component evidence is in
 `lib/bench/results/glm53-router-fp32-2026-09-29.json`.
+
+
+On the FP32-router build, arithmetic and streamed tool use pass again. The
+short/chunked consistency maxima are 0.0848/0.1598 and means 0.00647/0.01220;
+all 64 sampled decode tokens are also the teacher-forced prefill argmax.
+The strict numerical thresholds remain failed and visible. These results
+justify an isolated coding evaluation, not a claim of full qualification.
+The launcher enables cache-usage reporting so prefix reuse can be measured.
+
+The package now supplies `sglang-python SCRIPT [ARGS...]`, sharing the serving
+CLI's Python dependencies and ROCm/JIT environment. For example, on a Strix node:
+
+```sh
+SGLANG_USE_AITER=0 sglang-python lib/bench/glm53-moe-scaling-check.py \
+  --model-path /mnt/glm53-fabric/GLM-5.3-Flash-AWQ-W4A16
+```
+
+The first isolated Pi task repaired the TheRock tarball updater's `10.1` versus
+`10.10` series-boundary bug, added three tests and passed all 19 repository tests
+plus five separate acceptance cases in 323 seconds. Review then found that the
+candidate rejected `10.1.0rc2` for series `10.1.0`. The follow-up fixed that regression in 520 seconds. Independent review then
+confirmed all 21 repository tests and nine separate acceptance cases pass;
+the two-file repair is included in this branch. The two rounds used 59,716
+input tokens and 2,453 output tokens, with no prefix reuse. This is one useful
+review-and-repair result, not near-perfect first-pass correctness. Evidence is
+in `lib/bench/results/glm53-pi-acceptance-2026-09-29.json`.
 
 Hydra also exposed a Tensile wheel metadata mismatch after the nixpkgs update.
 The distribution now uses the packaged ROCm release version, retaining the
@@ -288,7 +313,7 @@ one optimization at a time after coherent generation is established.
 The initial server uses the following conservative configuration. The
 [`node launcher`](../lib/bench/glm53-node.sh) checks the verified snapshot and
 starts one rank per Strix host; rank values are 0, 1, 2, 3. GPU imports and
-weight loading and startup have passed; real-model correctness has not.
+weight loading and startup have passed; full qualification remains incomplete.
 `GLM_NNODES=2` also selects TP2 (ranks 0/1); set `GLM_DIST_ADDR` to that pair's
 rank-zero host. TP2 remains unqualified and needs measured memory headroom.
 
@@ -333,7 +358,8 @@ the official template's `clear_thinking=true` option; begin with
 After correctness checks, benchmark RCCL/RoCE against TCP on the same fabric,
 then compare TP4 with TP2 (or two TP2 replicas for aggregate throughput).
 Fewer nodes may reduce communication overhead; TP2 leaves less memory for
-loading and context. There is no measured model tokens/s result yet. Each node uses the transient
+loading and context. The uncached, eager baseline decodes at roughly 4.3 tokens/s on short coding
+requests; it is not roofline-qualified. Each node uses the transient
 user unit `glm53-sglang.service`. On trex, `glm53-tunnel.service` forwards
 `127.0.0.1:30053` to rank zero's loopback API at port 30000. A listening tunnel
 alone does not mean the model is ready; check `/health` after loading.

@@ -37,6 +37,43 @@ class RocmTarballUpdaterTests(unittest.TestCase):
         """
         self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.0"), "10.0.10")
 
+    def test_series_matches_complete_numeric_components(self):
+        index = """
+          therock-dist-linux-gfx1151-10.1.0.tar.gz
+          therock-dist-linux-gfx1151-10.10.0.tar.gz
+        """
+        self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.1"), "10.1.0")
+
+    def test_series_still_matches_patch_versions(self):
+        index = """
+          therock-dist-linux-gfx1151-10.1.0.tar.gz
+          therock-dist-linux-gfx1151-10.1.3.tar.gz
+        """
+        self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.1"), "10.1.3")
+
+    def test_series_allows_prerelease_suffix_on_exact_series_match(self):
+        # Regression: series '10.1.0' must match '10.1.0rc2' (prerelease of the
+        # pinned release), not raise SystemExit.
+        index = "therock-dist-linux-gfx1151-10.1.0rc2.tar.gz"
+        self.assertEqual(
+            update_rocm.find_version(index, "gfx1151", "10.1.0"), "10.1.0rc2"
+        )
+
+    def test_series_matches_prerelease_of_series_head(self):
+        # Regression: series '10.1' must match '10.1rc2' but still exclude
+        # '10.10.0' (incomplete numeric component boundary).
+        index = """
+          therock-dist-linux-gfx1151-10.1rc2.tar.gz
+          therock-dist-linux-gfx1151-10.10.0.tar.gz
+        """
+        self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.1"), "10.1rc2")
+
+    def test_no_matching_series_raises(self):
+        with self.assertRaises(SystemExit):
+            update_rocm.find_version(
+                "therock-dist-linux-gfx1151-10.10.0.tar.gz", "gfx1151", "10.1"
+            )
+
     def test_prefers_release_over_prerelease(self):
         index = """
           therock-dist-linux-gfx1151-10.0.0rc10.tar.gz

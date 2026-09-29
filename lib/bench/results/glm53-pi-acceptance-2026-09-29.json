@@ -1,0 +1,57 @@
+{
+  "date": "2026-09-29",
+  "model_revision": "abd7b07719111f137e1de8a0c1b7e01c11b74d1a",
+  "runtime": "/nix/store/ap29zmw1lrhcvnbwkffll5gs2r6fw3a6-sglang-rocm-gfx1151-0.5.20",
+  "tp": 4,
+  "context": 32768,
+  "radix_cache": false,
+  "cuda_graph": false,
+  "client": "pi 0.87.1",
+  "reasoning_effort": "low",
+  "task": "Repair TheRock tarball series numeric-component boundary without breaking prereleases.",
+  "isolation": "Bubblewrap; only detached acceptance checkout and temporary state writable; no home or credentials exposed.",
+  "first_draft": {
+    "repository_tests": 19,
+    "held_out_tests": 5,
+    "review_passed": false,
+    "review_finding": "Rejected prerelease suffixes directly after the selected series."
+  },
+  "rounds": [
+    {
+      "name": "pi-series",
+      "wall_seconds": 323.150527,
+      "assistant_turns": 7,
+      "usage": {
+        "input": 25696,
+        "output": 864,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0,
+        "totalTokens": 26560
+      }
+    },
+    {
+      "name": "pi-series-review",
+      "wall_seconds": 519.740096,
+      "assistant_turns": 9,
+      "usage": {
+        "input": 34020,
+        "output": 1589,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0,
+        "totalTokens": 35609
+      }
+    }
+  ],
+  "reviewed_result": {
+    "repository_tests": 21,
+    "held_out_tests": 9,
+    "passed": true,
+    "changed_files": [
+      "pkgs/therock/scripts/update-rocm.py",
+      "pkgs/therock/scripts/test_updaters.py"
+    ]
+  },
+  "qualification": "One coding task passed after review feedback; not evidence of near-perfect first-pass correctness."
+}

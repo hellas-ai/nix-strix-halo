@@ -59,6 +59,7 @@ options=(
   --mem-fraction-static "${GLM_MEMORY_FRACTION:-0.75}"
   --reasoning-parser glm45 --tool-call-parser glm47
   --default-chat-template-kwargs '{"clear_thinking":true,"reasoning_effort":"low"}'
+  --enable-cache-report
   --host 127.0.0.1 --port "${GLM_PORT:-30000}"
 )
 if [[ ${GLM_RADIX_CACHE:-0} == 0 ]]; then options+=(--disable-radix-cache); fi

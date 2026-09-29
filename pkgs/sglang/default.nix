@@ -340,6 +340,21 @@ pythonPackages.buildPythonApplication rec {
     for patch_file in ${./patches}/*.patch; do
       patch --batch --fuzz=0 -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
     done
+    # Keep component checks in the same Python/ROCm environment as serving.
+    cat > "$out/bin/sglang-python" <<'PY'
+    #!${pythonPackages.python.interpreter}
+    import os
+    import runpy
+    import sys
+
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print("Usage: sglang-python SCRIPT [ARGS...]")
+        raise SystemExit(0 if len(sys.argv) > 1 else 2)
+    sys.argv = sys.argv[1:]
+    sys.path.insert(0, os.path.dirname(os.path.realpath(sys.argv[0])))
+    runpy.run_path(sys.argv[0], run_name="__main__")
+    PY
+    chmod +x "$out/bin/sglang-python"
   '';
 
   preFixup = ''
@@ -384,7 +399,7 @@ pythonPackages.buildPythonApplication rec {
       wrap_args+=(--set HSA_OVERRIDE_GFX_VERSION ${lib.escapeShellArg hsaOverrideGfxVersion})
     ''}
 
-    for bin in "$out/bin/sglang" "$out/bin/killall_sglang"; do
+    for bin in "$out/bin/sglang" "$out/bin/killall_sglang" "$out/bin/sglang-python"; do
       [ -x "$bin" ] || continue
       wrapProgram "$bin" "''${wrap_args[@]}"
     done

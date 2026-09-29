@@ -60,6 +60,7 @@ def main():
             "input_ids": input_ids + output_ids,
             "sampling_params": {"temperature": 0, "max_new_tokens": 0},
             "return_logprob": True, "logprob_start_len": 0,
+            "top_logprobs_num": 2,
         })
         prefilled = scored["meta_info"]["input_token_logprobs"][len(input_ids):]
         assert [item[1] for item in prefilled] == output_ids
@@ -68,12 +69,20 @@ def main():
         deltas = [abs(a[0] - b[0]) for a, b in zip(decoded, prefilled, strict=True)]
         assert all(math.isfinite(d) for d in deltas)
         maximum, mean = max(deltas), sum(deltas) / len(deltas)
+        top = scored["meta_info"]["input_top_logprobs"][len(input_ids):]
+        argmax_differences = [
+            {"position": i, "decoded_id": token, "prefill_id": choices[0][1],
+             "prefill_margin": choices[0][0] - choices[1][0]}
+            for i, (token, choices) in enumerate(zip(output_ids, top, strict=True))
+            if choices[0][1] != token
+        ]
         passed = maximum <= args.max_logprob_delta and mean <= args.mean_logprob_delta
         failed |= not passed
         print(json.dumps({
             "prompt_index": index, "prompt_tokens": len(input_ids),
             "output_tokens": len(output_ids), "generated_seconds": generated_seconds,
             "max_logprob_delta": maximum, "mean_logprob_delta": mean,
+            "argmax_differences": argmax_differences,
             "thresholds": {"max": args.max_logprob_delta, "mean": args.mean_logprob_delta},
             "passed": passed, "generated": generated, "scored": scored,
         }), flush=True)
