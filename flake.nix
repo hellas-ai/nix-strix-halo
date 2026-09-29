@@ -72,7 +72,7 @@
     };
 
     vllm-src = {
-      url = "github:vllm-project/vllm/v0.25.1";
+      url = "github:vllm-project/vllm/v0.30.0";
       flake = false;
     };
 
