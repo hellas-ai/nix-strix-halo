@@ -82,7 +82,7 @@
     };
 
     mlx-metal-src = {
-      url = "github:ml-explore/mlx/v0.32.1";
+      url = "github:ml-explore/mlx/v0.32.2";
       flake = false;
     };
 
