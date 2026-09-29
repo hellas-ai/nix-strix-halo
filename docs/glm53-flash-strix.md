@@ -74,8 +74,10 @@ PyTorch baseline in place of the CUDA JIT kernel, preserving short histories,
 ragged row starts, logical/page/offset mapping and compact live tails. Exact
 CPU index checks cover boundary lengths, tied scores, remapped page rows,
 padded output rows and empty history with a live tail. Sorting cost is not yet
-optimized. The TP4 fixture must pass short and >2048-token prefill plus decode
-before another full-model launch.
+optimized. The TP4 fixture completed warmup at 00:29 UTC and passed 7-token and
+3073-token prompts, each producing eight tokens with finite log probabilities.
+The full checkpoint is being reloaded with these patches. Component results
+are recorded in `lib/bench/results/glm53-rocm-components-2026-09-29.json`.
 
 ## Snapshot
 
