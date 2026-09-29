@@ -11,7 +11,7 @@
   rdma-core,
   rocmPackages,
   gfx ? "gfx1151",
-  pname ? "mlx-rocm",
+  packageName ? "mlx-rocm",
 }:
 
 let
@@ -55,7 +55,9 @@ let
   );
 in
 mlx.overrideAttrs (old: {
-  inherit pname;
+  # The wheel remains the mlx distribution; only its Nix output names vary.
+  pname = "mlx";
+  name = "${python.libPrefix}-${packageName}-0.32.0";
   version = "0.32.0";
   src = mlx-rocm-src;
 
@@ -67,16 +69,8 @@ mlx.overrideAttrs (old: {
               'executable="/bin/bash"' \
               'executable="${bash}/bin/bash"'
 
-          substituteInPlace CMakeLists.txt \
-            --replace-fail \
-              '  FetchContent_Declare(
-        nanobind
-        GIT_REPOSITORY https://github.com/wjakob/nanobind.git
-        GIT_TAG v2.13.0
-        GIT_SHALLOW TRUE
-        EXCLUDE_FROM_ALL)
-      FetchContent_MakeAvailable(nanobind)' \
-              '  find_package(nanobind CONFIG REQUIRED)'
+          # nixpkgs supplies the pinned nanobind source through
+          # FETCHCONTENT_SOURCE_DIR_NANOBIND; retain upstream FetchContent.
 
           substituteInPlace CMakeLists.txt \
             --replace-fail \

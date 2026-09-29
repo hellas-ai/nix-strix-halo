@@ -313,7 +313,7 @@ let
             nanobind = mlxNanobind;
           };
           inherit (inputs) mlx-src;
-          pname = "mlx-rocm-${suffix}";
+          packageName = "mlx-rocm-${suffix}";
           rdma-core = final.rdma-core-usb4;
           rocmPackages = final.therockRocmPackages.${firstBuildTarget};
           gfx = firstBuildTarget;
