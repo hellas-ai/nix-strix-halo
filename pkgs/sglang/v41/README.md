@@ -13,6 +13,12 @@ checks tensor metadata, and skips the large embedding tensors before the weight
 loader materializes them. This allows the native TP4 weights to fit in the four
 128 GB machines. Runtime memory and loader peaks still need measurement.
 
+After staging weights on Trex, publish a frozen, read-only SPDK model snapshot
+and point each rank at that snapshot mounted over NVMe/RDMA. Trex's writable
+`/models` and a client's pinned `/models` can contain different model generations.
+Verify the namespace UUID and RDMA transport before measuring loading or Engram
+lookup performance; a separate NFS export exercises a different storage path.
+
 Enable file-backed Engram with `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` and
 `SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=file`. It requires the default safetensors
 loader, mmap enabled, and checkpoint prefetch disabled. Both prefill and decode
