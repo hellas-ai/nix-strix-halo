@@ -1,7 +1,19 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
-Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint serves on
-four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
+Updated on trex, 2026-09-29 (Europe/Zurich). The official FP8 checkpoint now
+serves at **8.90 tokens/s** on four TP ranks, up from 1.97 with the generic
+kernels. Patch 0019 replaces expensive FP8 widening with an exact bit
+conversion and selects smaller batch-one tiles. Both consistency prompts'
+token IDs and checked probabilities are bitwise identical to the initial
+FP8 run. Its first isolated Pi coding repair passes all 14 held-out checks.
+Decode/prefill consistency and cache truncation still fail their original
+numerical limits, so overall correctness remains unqualified. Three-marker retrieval passes at 129,017 prompt tokens, with the same answer
+on a cached repeat: 943.40 seconds cold and 6.60 seconds warm, reusing 128,960
+tokens. This is a bounded retrieval check, not complex coding acceptance at 128K. See the [performance audit](glm53-performance-audit.md)
+and [FP8 evidence](../lib/bench/results/glm53-fp8-decode-2026-09-29.json).
+
+The earlier results below use the community AWQ checkpoint unless explicitly
+identified as official FP8. Fixing duplicate MoE scaling restored coherent answers: the
 arithmetic, streamed tool call and tool-result continuation checks now pass.
 The FP32-router fix also passes component and API checks. Numerical
 consistency still exceeds its probability limits. With the split mHC projection,
@@ -84,7 +96,7 @@ generic kernels reach only **1.97 tok/s**. Decode/prefill probability maxima
 are 0.1918/0.1235, with zero sampled token-choice disagreements; both means
 also exceed the unchanged 0.01 limit. Repeated, identical and appended cache
 checks are exact, while truncation reaches 0.0798 and fails the 0.05 gate.
-This is an untuned, numerically unqualified baseline, not evidence of quality
+This was the untuned, numerically unqualified baseline, not evidence of quality
 equivalence between checkpoints. See
 [`glm53-official-fp8-baseline-2026-09-29.json`](../lib/bench/results/glm53-official-fp8-baseline-2026-09-29.json).
 At about 06:08 UTC, the user
@@ -93,9 +105,23 @@ that reset. All four nodes and watchdogs recovered, and all four AWQ caches
 passed full checksums again by 06:31 UTC. The post-reset GPU trace confirms
 the tuned runtime's reduced mHC/expert costs. The official FP8 dense kernel
 passes decode/prefill CPU-reference probes; full FP8 quality remains unqualified.
-Strix-1 reports 75.82 GiB used after weight loading and 32.51 GiB available
+Strix-1 initially reported 75.82 GiB used after weight loading and 32.51 GiB available
 after allocating 128 Mamba-cache slots and 131,072 KV tokens. This establishes
-capacity for the trial; the FP8 128K functional check is still pending.
+capacity for the trial; subsequent FP8 128K marker retrieval passes as described above.
+
+Patch 0019 improves official FP8 decode to **8.90 tok/s**, with 1.395-second
+median TTFT, on the same three-run short streaming benchmark. All 256 FP8
+bit patterns pass the conversion check on every GPU: all 254 finite values
+widen bitwise to FP16 and both NaNs remain NaNs. Paired dense and routed-MoE
+probes preserve their outputs exactly, including the sampled prefill shapes.
+Full-model token probabilities and all five cache-branch results reproduce
+the baseline exactly; the same truncation and decode/prefill gates remain
+failed. Run `lib/bench/glm53-fp8-check.py` with the package's `sglang-python`
+on an idle GPU for the portable conversion and projection reference checks.
+
+A separate exported-shard reload experiment loaded weights in 69 seconds,
+but changed checked probabilities and one generated sequence. It was rejected;
+the measured runtime uses the original verified upstream checkpoint loader.
 
 After a further user reboot of strix-1, the accepted runtime reproduced both
 consistency prompts' token probabilities bitwise and measured 13.83 tok/s.

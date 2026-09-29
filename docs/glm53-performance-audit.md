@@ -1,9 +1,39 @@
 # GLM-5.3-Flash performance audit
 
 2026-09-29. Four gfx1151 Strix Halo nodes, TP=4, one decoding request,
-AWQ W4A16 routed experts, BF16 dense weights, stable FP32 routing, RoCE,
+stable FP32 routing, RoCE,
 128K configured capacity. The timed completion has a **12-token prompt**;
 these throughput numbers do not qualify decode at 128K occupied context.
+The current quality-preserving optimization work uses the official FP8
+checkpoint. Earlier AWQ measurements are retained separately below.
+
+## Official FP8 decode
+
+Exact FP8-to-FP16 widening and smaller batch-one tiles improve full-model
+decode from **1.97 to 8.90 tok/s (4.52×)**. Median TTFT is 1.395 seconds.
+Both consistency prompts reproduce the original FP8 baseline's token IDs
+and all checked generated/teacher-forced probabilities bit for bit. The
+cache-branch results also remain unchanged. This establishes preservation
+of those measurements, not overall model correctness: decode/prefill maxima
+remain 0.1918/0.1235 and truncation remains 0.0798, above the 0.05 limit.
+The first official-FP8 Pi coding task passes all 14 held-out checks. Three-marker
+retrieval passes at 129,017 prompt tokens: 943.40 seconds cold and 6.60 seconds
+warm, with an exact repeated answer and 128,960 tokens reused. This does not
+qualify general long-context coding reliability.
+
+The generic dense kernel's implicit FP8 conversion generated thousands of
+compare/select instructions and 384 bytes of private scratch per work item.
+The selected decode kernel has no private scratch and uses BM16/BN64/BK128,
+four warps and one stage. Other batch sizes retain their prior tile defaults.
+All 256 FP8 bit patterns pass widening checks on all four nodes; paired
+dense and MoE probes preserve outputs exactly. Component tuning times include
+a 256 MiB cache flush and must not be interpreted as pure kernel times.
+
+The tested package is `fy1c1ig0frvfb8jya52mcwgsrkxf4j2n-sglang-rocm-gfx1151-0.5.20`.
+GPUs reported approximately 2.9 GHz and 38–43°C edge temperatures during
+qualification. The 8.90 tok/s result is about **24%** of the optimistic
+36.65 tok/s memory bound below; reaching the target still requires substantial
+work. Evidence: [FP8 decode](../lib/bench/results/glm53-fp8-decode-2026-09-29.json).
 
 ## Established baseline
 
@@ -15,7 +45,7 @@ these throughput numbers do not qualify decode at 128K occupied context.
 | W4 decode reduction tile 64 → 128 | **13.68** | **73.08** |
 
 Each throughput result is the median of three 128-output-token streaming
-requests after warmup. The latest runtime is
+requests after warmup. The measured AWQ runtime is
 `j95k13kapgc1a26v8q9xh2w57xwc4cmr-sglang-rocm-gfx1151-0.5.20`.
 The W4 tile change preserves all checked token IDs and log probabilities
 from the mHC-only run, as well as all synthetic component outputs on all
@@ -56,9 +86,9 @@ more than the community AWQ checkpoint. More expert bytes are partly offset
 by dense weights that the official checkpoint stores in FP8. The ideal bound
 at 228 GB/s is 36.65 tok/s. Its initial generic-kernel result is only 1.97
 tok/s, so this small byte-count difference does not explain the slowdown.
-The compiled dense and expert kernels use FP16 WMMA after FP8 conversion;
-the generic block-FP8 path nevertheless pads batch-one work to 64-row tiles.
-Smaller tiles require reference checks and a separate full-model measurement.
+The compiled dense and expert kernels use FP16 WMMA after FP8 conversion.
+The widening and batch-one tile changes above remove major instruction and
+padding costs; the byte-count bound itself is unchanged.
 
 ## What the full GPU trace establishes
 
@@ -216,12 +246,21 @@ Historical sources retained on trex:
   especially the 2026-08-18 bandwidth correction and TP4 path audit.
 - `/mnt/Home/src/DS4_Q8.md`, separate GGUF/Q8 evidence.
 
+Another DS4 candidate, `nix-strix-halo-ds4-focus/pkgs/sglang/patches/0061-w8a8-m1-gemv-contiguous-k.patch`,
+reads contiguous K columns for batch-one GEMV. Its reported cold-weight
+108–144 GB/s results used FNUZ weights, while current GLM uses FN weights.
+The old synthetic checks also reported a few one-ULP differences; no complete
+model probability-parity result was found. Retest this memory-access design
+with FN operands and independent references before drawing conclusions.
+
 ## Next measurements and decisions
 
-Keep the accepted runtime while completing the current per-stage traffic
-budget. The expert counter probe establishes its read amplification; collect
-dense-kernel counters next and isolate the normalization numerical difference
-on live inputs. gfx1151 exposes `FETCH_SIZE`/`GL2C_EA_RDREQ_*`; these measure
+Keep the verified FP8 widening/tile runtime while expanding coding and 128K
+acceptance beyond the first bounded checks. Next compare the contiguous-K GEMV design with current FN kernels,
+then collect a new full-model FP8 trace to locate the remaining token time.
+The earlier expert counter probe establishes AWQ read amplification; its
+numbers must not be reused as FP8 traffic measurements. gfx1151 exposes
+`FETCH_SIZE`/`GL2C_EA_RDREQ_*`; these measure
 L2 external traffic, which must not be casually relabeled as DRAM bytes when
 the system cache can service it.
 
