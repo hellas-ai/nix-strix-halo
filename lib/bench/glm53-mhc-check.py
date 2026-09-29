@@ -4,10 +4,15 @@
 import json
 import os
 import time
+from functools import partial
 
 os.environ["SGLANG_OPT_USE_TILELANG_MHC_PRE"] = "0"
 import torch
-from sglang.kernels.ops.layernorm.mhc import _mhc_pre_dispatch, _mhc_pre_torch
+from sglang.kernels.ops.layernorm.mhc import (
+    _mhc_pre_dispatch,
+    _mhc_pre_torch,
+    _mhc_project_hip,
+)
 
 
 def reference(residual, fn, scale, base, eps=1e-6):
@@ -47,7 +52,7 @@ def timing(fn):
 
 torch.manual_seed(5353)
 torch.set_num_threads(4)
-for tokens in [1, 17, 1024]:
+for tokens in [1, 17, 32, 33, 1024]:
     for base_scale in [1, 10]:
         x = torch.randn(tokens, 4, 4096, device="cuda", dtype=torch.bfloat16)
         fn = torch.randn(24, 16384, device="cuda") * 0.01
@@ -66,10 +71,10 @@ for tokens in [1, 17, 1024]:
         row = {"tokens": tokens, "base_scale": base_scale, "relative_l2": rel}
         if base_scale == 1:
             row["eager_ms"] = timing(
-                lambda: _mhc_pre_torch(x, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
+                partial(_mhc_pre_torch, x, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
             )
             row["hip_ms"] = timing(
-                lambda: _mhc_pre_dispatch(x, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
+                partial(_mhc_pre_dispatch, x, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
             )
         print(json.dumps(row), flush=True)
 print("PASS mHC CPU double reference")
@@ -83,3 +88,43 @@ for pre_eps, post_mult in [(1e-5, 2.0), (1e-6, 3.0)]:
     ):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 print("PASS nonstandard mHC fallback")
+
+# The decode projection uses a split reduction, while larger batches retain
+# BLAS. Check its actual model dimensions against independent FP64 sums,
+# including zero/tiny inputs and the model's RMS epsilon.
+for tokens in (1, 4, 32):
+    for magnitude in (0, 1e-5, 1, 100):
+        x = (
+            torch.randn(tokens, 4, 4096, device="cuda", dtype=torch.bfloat16)
+            * magnitude
+        )
+        fn = torch.randn(24, 16384, device="cuda") * 0.01
+        flat = x.cpu().double().reshape(tokens, -1)
+        expected = (flat @ fn.cpu().double().T) * (
+            flat.square().mean(-1, keepdim=True) + 1e-5
+        ).rsqrt()
+        actual = _mhc_project_hip(x, fn, 1e-5)
+        torch.testing.assert_close(
+            actual.cpu().double(), expected, atol=2e-6, rtol=1e-4
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = _mhc_project_hip(x, fn, 1e-5)
+        for _ in range(8):
+            graph.replay()
+            torch.testing.assert_close(replayed, actual, atol=0, rtol=0)
+        print(
+            json.dumps(
+                {
+                    "projection": True,
+                    "tokens": tokens,
+                    "input_magnitude": magnitude,
+                    "max_abs_double": float(
+                        (actual.cpu().double() - expected).abs().max()
+                    ),
+                    "graph_repeat_exact": True,
+                }
+            ),
+            flush=True,
+        )
+print("PASS split mHC projection CPU double reference and graph replay")

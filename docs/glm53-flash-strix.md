@@ -4,15 +4,15 @@ Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint serves on
 four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
 arithmetic, streamed tool call and tool-result continuation checks now pass.
 The FP32-router fix also passes component and API checks. Numerical
-consistency still exceeds its probability limits. Stable routing made all 64
-sampled token choices agree on TCP; the RoCE launch has one disagreement. Pi completed four
+consistency still exceeds its probability limits. With the split mHC projection,
+all 64 sampled decode/prefill token choices agree on RoCE. Pi completed four
 coding repairs: one after review feedback and three on the first draft,
 including a task starting above 100K prompt tokens. Three-marker retrieval passed at
 129,017 prompt tokens both uncached and with prefix reuse. The cached repeat
 reused 128,960 tokens and took 4.07 seconds, versus 295 seconds cold on RoCE.
 Stable routing makes synthetic fresh-repeat, identical-prefix and appended-prefix
-probabilities exact. All five cache-branch checks pass on the latest RoCE
-launch, including truncation (maximum delta 0.0201); this is one tested workload.
+probabilities exact. All five cache-branch checks pass with the split mHC
+projection, including truncation (maximum delta 0.0490); this is one tested workload.
 General cache correctness, broader coding quality and performance relative
 to the hardware roofline remain unqualified.
 
@@ -47,6 +47,36 @@ are 0.1821/0.2020 for the short/chunked cases, with one argmax disagreement;
 the strict numerical gate remains failed. All five cache-branch cases pass.
 The 129,017-token three-marker retrieval also passes with exact cold/warm
 answers: 294.75 seconds cold and 4.07 seconds warm, reusing 128,960 tokens.
+
+Patch 0017 splits the small mHC FP32 projection across GPU workgroups for
+contiguous BF16 batches of 1–32 tokens and the model's 4×4096 shape. Larger
+batches and other layouts keep the existing path. Ten full mHC CPU-double
+cases, two fallback cases, and twelve projection/reference/graph-repeat cases
+pass on each GPU. Short-request throughput improves from 9.63 to **11.65
+tokens/s**, with 0.324-second median TTFT. API and all five cache cases pass.
+Decode/prefill maxima improve to 0.0634/0.1079, with no token-choice disagreement,
+but still exceed the unchanged 0.05 limit. Truncation's cache delta rises from
+0.0201 to 0.0490, below the same limit. The 128K result above predates this patch.
+See [`glm53-mhc-projection-2026-09-29.json`](../lib/bench/results/glm53-mhc-projection-2026-09-29.json).
+
+Patch 0018 tunes the existing W4 decode tile to reduction width 128 for
+batch one on Radeon 8060S, keeping larger-batch defaults. All four GPUs pass
+CPU-reference and graph comparisons; tested outputs remain bitwise identical.
+Full-model throughput rises to **13.68 tokens/s**, with 0.311-second median
+TTFT. API, cache branches, token choices and the checked probabilities match
+the mHC-only run. The strict probability gate still fails as described above.
+The hardware target and broader quality remain unqualified. See
+[`glm53-w4-tuning-2026-09-29.json`](../lib/bench/results/glm53-w4-tuning-2026-09-29.json)
+and the [performance audit](glm53-performance-audit.md).
+
+These runs use a community AWQ checkpoint; matching component references
+does not establish quality equivalence to the official FP8 release. The
+official `zai-org/GLM-5.3-Flash` snapshot at
+`eb9eb208eb0d988989d07a6a12d0fdeb5f52574a` is being staged separately under
+`/models/GLM-5.3-Flash-FP8` for that comparison (328,366,173,469 bytes).
+It has not yet been qualified on this runtime. At about 06:08 UTC, the user
+reset the Strix power strip; the 13.68 tok/s measurements completed before
+that reset. Node and model-cache recovery is in progress.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -574,6 +604,17 @@ All four GPUs delivered roughly 228–231 GB/s for a three-array streaming add
 4096-square GEMM. TCP four-rank all-reduce on strix-1 measured about 0.29 ms
 for 64 KiB, 3.76 ms for 4 MiB and 75.74 ms for 64 MiB. These are initial
 component baselines, not model throughput or proof of a roofline target.
+
+The matching wheel's external `rocprofv3` successfully captured all four GPUs
+after RoCE repair. Sixteen batch-one decode steps contain 3,952 kernel dispatches
+per token. On strix-1, summed device time is 99.27 ms/token: 31.12 ms in W4
+experts, 47.21 ms in BLAS, 6.39 ms in collectives and 14.55 ms in other kernels.
+The other ranks agree closely, with collective time reaching 8.33 ms. Kernels
+do not overlap in this trace. Synchronized profiling regions average roughly
+108 ms, compared with approximately 104 ms/token unprofiled. Collective kernel
+time includes waiting for peers. This identifies matrix kernels as the main
+remaining target; it does not establish a complete roofline. See
+[`glm53-gpu-profile-2026-09-29.json`](../lib/bench/results/glm53-gpu-profile-2026-09-29.json).
 
 For the model, derive separate decode and prefill limits from bytes read,
 actual selected experts, math, attention/state traffic and measured collective
