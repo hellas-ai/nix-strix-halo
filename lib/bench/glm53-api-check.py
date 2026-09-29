@@ -48,7 +48,7 @@ def chat(base, messages, **options):
                     content.append(delta.get("content") or "")
                     reasoning.append(delta.get("reasoning_content") or "")
                     finish = choice.get("finish_reason") or finish
-                    for part in delta.get("tool_calls", []):
+                    for part in delta.get("tool_calls") or []:
                         call = calls.setdefault(part["index"], {
                             "id": "", "type": "function",
                             "function": {"name": "", "arguments": ""},

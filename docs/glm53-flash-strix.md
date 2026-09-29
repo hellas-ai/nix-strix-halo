@@ -1,12 +1,12 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
-Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint loads on all
-four TP ranks and serves requests, but **real-model correctness failed**. The
-first arithmetic request degenerated into repetition, and prefill/decode
-log-probability consistency failed on both short and chunked prompts. Pi
-acceptance, 128K context and performance tuning are gated on resolving this.
-The reduced TP4 dummy fixture and isolated kernels pass within their stated
-scope; those checks do not establish full-model correctness.
+Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint serves on
+four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
+arithmetic, streamed tool call and tool-result continuation checks now pass.
+Numerical consistency still exceeds its initial investigation limits; a
+second fix restores the checkpoint's requested FP32 router computation and
+is undergoing full-model retesting. Pi acceptance, 128K context, cache reuse
+and performance qualification remain pending.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -110,6 +110,24 @@ while that independent aliasing issue remains unresolved. Captured first-layer
 weights match the canonical checkpoint exactly; its KDA attention also agrees
 with an independent CPU recurrence (relative L2 0.00493). Results are recorded
 in `lib/bench/results/glm53-moe-scaling-2026-09-29.json`.
+
+
+After correcting scaling, the full model returns `3973` for `137 * 29`, emits
+a valid streamed `read_file` call and returns the exact supplied marker after
+the tool response. The API probe now handles nullable `tool_calls` in streaming
+deltas. The model generates sensible Fibonacci and parity code. Short/chunked
+prefill/decode maximum log-probability deltas fall to 0.1154/0.1398, with means
+0.0114/0.0130; these still exceed the initial 0.05/0.01 investigation limits.
+
+Transformers' `Glm5NextTextTopkRouter` computes the router projection in FP32.
+The checkpoint also declares `moe_router_dtype: float32`, but SGLang's HIP gate
+ignored it and returned BF16 logits. Rounding the projection changed top-eight
+expert sets in 21 of 840 captured token/layer pairs. Patch 0013 honors that
+configuration through SGLang's existing FP32 gate path. Projection and complete
+MoE CPU-reference tests pass on all four GPUs (relative L2 0.000679–0.001720);
+the prior package fails the requested dtype assertion. Full-model tests are
+queued on a fresh TP4 launch without diagnostic captures. Evidence is in
+`lib/bench/results/glm53-router-fp32-2026-09-29.json`.
 
 Hydra also exposed a Tensile wheel metadata mismatch after the nixpkgs update.
 The distribution now uses the packaged ROCm release version, retaining the

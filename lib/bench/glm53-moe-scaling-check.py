@@ -30,6 +30,9 @@ parser.add_argument(
     default="/mnt/glm53-fabric/GLM-5.3-Flash-AWQ-W4A16",
     help="Local model configuration; no checkpoint weights are loaded",
 )
+parser.add_argument(
+    "--router-dtype", choices=("float32", "bfloat16"), default="float32"
+)
 cli = parser.parse_args()
 assert torch.version.hip, "This regression exercises ROCm"
 torch.set_num_threads(4)
@@ -65,6 +68,7 @@ config = Glm5NextTextConfig(
     n_shared_experts=1,
     swiglu_limit=10,
     routed_scaling_factor=2.5,
+    moe_router_dtype=cli.router_dtype,
 )
 qc = {
     "quant_method": "compressed-tensors",
@@ -90,6 +94,7 @@ with torch.device("cuda"):
         config, 3, quant, prefix="model.layers.3.mlp", alt_stream=torch.cuda.Stream()
     )
     torch.set_default_dtype(torch.float32)
+assert m.gate.weight.dtype == getattr(torch, cli.router_dtype)
 
 
 def weight(rows, cols):
@@ -134,7 +139,13 @@ def act(y):
 
 for rows in (1, 7, 33):
     x = (torch.randn(rows, k) * 3).bfloat16()
-    logits = (x.float() @ router.float().T).bfloat16().float()
+    logits = x.float() @ router.float().T
+    if cli.router_dtype == "bfloat16":
+        logits = logits.bfloat16().float()
+    else:
+        with torch.no_grad():
+            actual_logits = m.gate(x.cuda()).cpu()
+        torch.testing.assert_close(actual_logits, logits, rtol=1e-5, atol=1e-5)
     scores = logits.sigmoid()
     ids = (scores + bias).topk(8, dim=-1).indices
     route = scores.gather(1, ids)
@@ -166,6 +177,7 @@ for rows in (1, 7, 33):
             json.dumps(
                 {
                     "method": method.__name__,
+                    "router_dtype": cli.router_dtype,
                     "tokens": rows,
                     "relative_l2": error,
                     "max_abs": float((got - ref).abs().max()),
