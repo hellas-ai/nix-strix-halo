@@ -383,8 +383,13 @@ let
           "vllm.parser.harmony"
           "xgrammar.openai_tool_call_schema"
         ];
-        postPythonImportsCheck = (old.postPythonImportsCheck or "") + ''
-          ${py.python.interpreter} -c 'from vllm.utils.import_utils import import_triton_kernels; import_triton_kernels(); from triton_kernels.matmul_ogs import PrecisionConfig'
+        preDistPhases = (old.preDistPhases or [ ]) ++ [ "vllmTritonImportsCheckPhase" ];
+        vllmTritonImportsCheckPhase = ''
+          (
+            cd "$out"
+            export PYTHONPATH="$out/${py.python.sitePackages}:$PYTHONPATH"
+            ${py.python.interpreter} -c 'from vllm.utils.import_utils import import_triton_kernels; import_triton_kernels(); from triton_kernels.matmul_ogs import PrecisionConfig'
+          )
         '';
         passthru = (old.passthru or { }) // {
           vllmFeatureOptions = featureFlags;
