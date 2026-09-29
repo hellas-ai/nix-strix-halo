@@ -11,7 +11,7 @@ case "$nodes:$rank" in
   *) echo "Use GLM_NNODES=2 or 4 and a zero-based RANK below that count" >&2; exit 2 ;;
 esac
 
-variant=${GLM_MODEL_VARIANT:-awq}
+variant=${GLM_MODEL_VARIANT:-fp8}
 case "$variant" in
   awq) model_name=GLM-5.3-Flash-AWQ-W4A16 ;;
   fp8) model_name=GLM-5.3-Flash-FP8 ;;
@@ -45,6 +45,9 @@ export SGLANG_ROCM_USE_MULTI_STREAM=0
 export SGLANG_OPT_USE_TILELANG_MHC_PRE=0
 export SGLANG_OPT_USE_TILELANG_MHC_POST=0
 export SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD=0
+# Share complete packed-index pages and complete prefill chunks. Partial
+# chunks can carry different hybrid-state rounding from an earlier request.
+export SGLANG_DSA_PREFIX_SHARING_CHUNK=1
 export NCCL_SOCKET_IFNAME=cx5fabric0
 export GLOO_SOCKET_IFNAME=cx5fabric0
 # RoCE must use the addressed fabric NIC and the switch's lossless DSCP 26
