@@ -74,7 +74,9 @@ for tokens in [1, 17, 32, 33, 1024]:
                 partial(_mhc_pre_torch, x, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
             )
             row["hip_ms"] = timing(
-                partial(_mhc_pre_dispatch, x, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
+                partial(
+                    _mhc_pre_dispatch, x, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20
+                )
             )
         print(json.dumps(row), flush=True)
 print("PASS mHC CPU double reference")
