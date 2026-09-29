@@ -109,6 +109,7 @@ let
     "mistral-common"
     "mistral_common"
     "mistralai"
+    "mooncake-transfer-engine-rocm"
     "opencv-python-headless"
     "outlines"
     "peft"
@@ -139,6 +140,7 @@ let
     grpc = "smg-grpc-servicer is not packaged in this nixpkgs input";
     helion = "helion is marked broken in this nixpkgs input";
     instanttensor = "instanttensor is not packaged in this nixpkgs input";
+    mooncake = "Mooncake requires a separately packaged ROCm transfer engine for KV-cache offload and disaggregated serving";
     rixl = "RIXL needs separate ROCm RIXL/UCX/RDMA packaging and is only used by KV-transfer/disaggregated serving paths";
     runai = "runai-model-streamer is not packaged in this nixpkgs input";
     tensorizer = "tensorizer is not packaged in this nixpkgs input";
@@ -155,6 +157,7 @@ let
       grpcSupport ? false,
       helionSupport ? false,
       instanttensorSupport ? false,
+      mooncakeSupport ? false,
       otelSupport ? true,
       rixlSupport ? false,
       runaiSupport ? false,
@@ -174,6 +177,7 @@ let
         grpc = grpcSupport;
         helion = helionSupport;
         instanttensor = instanttensorSupport;
+        mooncake = mooncakeSupport;
         otel = otelSupport;
         rixl = rixlSupport;
         runai = runaiSupport;
