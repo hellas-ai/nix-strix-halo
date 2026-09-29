@@ -1,0 +1,36 @@
+{
+  "date": "2026-09-29",
+  "model_revision": "abd7b07719111f137e1de8a0c1b7e01c11b74d1a",
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
+  "tensor_parallel": 4,
+  "context_limit": 131072,
+  "radix_cache": true,
+  "decode_graphs": true,
+  "client": "Packaged glm53-pi, Pi 0.87.1",
+  "reasoning_effort": "low",
+  "task": "Parse wheel and source-tarball links using the decoded URL path while preserving the resolved original URL, including queries and hash fragments.",
+  "isolation": "Bubblewrap with only acceptance checkout and temporary state writable; extensions, skills and context files disabled.",
+  "assistant_turns": 7,
+  "usage": {
+    "input": 4981,
+    "output": 1155,
+    "cacheRead": 22080,
+    "cacheWrite": 0,
+    "reasoning": 0,
+    "totalTokens": 28216
+  },
+  "runner": {
+    "returncode": 0,
+    "elapsed": 150.01797556877136,
+    "held_out_test_returncode": 0
+  },
+  "repository_tests": 23,
+  "held_out_tests": 8,
+  "review_passed": true,
+  "review_feedback_rounds": 0,
+  "changed_files": [
+    "pkgs/therock/scripts/update-python-wheels.py",
+    "pkgs/therock/scripts/test_updaters.py"
+  ],
+  "qualification": "One short-context task passed on first draft with observed prefix hits. Does not establish general cache fidelity or near-perfect coding quality."
+}

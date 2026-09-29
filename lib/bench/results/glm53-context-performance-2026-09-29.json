@@ -1,0 +1,174 @@
+{
+  "runtime": "/nix/store/vlzym7vnbx9vf4clvqnl1xg09zldmvlp-sglang-rocm-gfx1151-0.5.20",
+  "tensor_parallel": 4,
+  "context_limit": 131072,
+  "radix_cache": false,
+  "graphs": false,
+  "retrieval": [
+    {
+      "context": 131072,
+      "prompt_tokens": 129017,
+      "output_reserve": 2048,
+      "expected": {
+        "early": "amber-7251",
+        "middle": "cedar-4938",
+        "late": "violet-8614"
+      },
+      "records": 7013
+    },
+    {
+      "phase": "cold",
+      "wall_seconds": 478.45735189307015,
+      "result": {
+        "id": "b7759a6ff1d744688e290c29411b2d15",
+        "object": "chat.completion",
+        "created": 1790649432,
+        "model": "glm-5.3-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\"early\": \"amber-7251\", \"middle\": \"cedar-4938\", \"late\": \"violet-8614\"}",
+              "reasoning_content": null,
+              "tool_calls": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "matched_stop": 154827
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 129017,
+          "total_tokens": 129051,
+          "completion_tokens": 34,
+          "prompt_tokens_details": null,
+          "reasoning_tokens": 1
+        },
+        "metadata": {
+          "weight_version": "default",
+          "weight_versions": [
+            {
+              "version": "default",
+              "start": 0,
+              "end": 34
+            }
+          ]
+        }
+      }
+    },
+    {
+      "phase": "warm",
+      "wall_seconds": 400.0643867100589,
+      "result": {
+        "id": "870dfdc1d2624d2097e5ef76d3398380",
+        "object": "chat.completion",
+        "created": 1790649832,
+        "model": "glm-5.3-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\"early\": \"amber-7251\", \"middle\": \"cedar-4938\", \"late\": \"violet-8614\"}",
+              "reasoning_content": null,
+              "tool_calls": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "matched_stop": 154827
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 129017,
+          "total_tokens": 129051,
+          "completion_tokens": 34,
+          "prompt_tokens_details": null,
+          "reasoning_tokens": 1
+        },
+        "metadata": {
+          "weight_version": "default",
+          "weight_versions": [
+            {
+              "version": "default",
+              "start": 0,
+              "end": 34
+            }
+          ]
+        }
+      }
+    },
+    {
+      "context_and_cache": "passed",
+      "cache": "off"
+    }
+  ],
+  "short_prompt_streaming": [
+    {
+      "request_index": 0,
+      "ok": true,
+      "start": 696471.920193792,
+      "end": 696476.948939738,
+      "duration_s": 5.028745946008712,
+      "ttft_s": 0.36098137800581753,
+      "decode_s": 4.6677645680028945,
+      "prompt_tokens": 12,
+      "completion_tokens": 32,
+      "text_bytes": 90,
+      "error": "",
+      "sample": "warmup",
+      "decode_tokens_per_second": 6.641294681506048
+    },
+    {
+      "request_index": 1,
+      "ok": true,
+      "start": 696476.949048337,
+      "end": 696496.659348689,
+      "duration_s": 19.710300352075137,
+      "ttft_s": 0.4979916540905833,
+      "decode_s": 19.212308697984554,
+      "prompt_tokens": 12,
+      "completion_tokens": 128,
+      "text_bytes": 410,
+      "error": "",
+      "sample": "measure-1",
+      "decode_tokens_per_second": 6.610345586073307
+    },
+    {
+      "request_index": 2,
+      "ok": true,
+      "start": 696496.659471508,
+      "end": 696516.354132076,
+      "duration_s": 19.694660568027757,
+      "ttft_s": 0.422504298039712,
+      "decode_s": 19.272156269988045,
+      "prompt_tokens": 12,
+      "completion_tokens": 128,
+      "text_bytes": 410,
+      "error": "",
+      "sample": "measure-2",
+      "decode_tokens_per_second": 6.589817881342801
+    },
+    {
+      "request_index": 3,
+      "ok": true,
+      "start": 696516.354278445,
+      "end": 696536.09027416,
+      "duration_s": 19.735995715018362,
+      "ttft_s": 0.5068580739898607,
+      "decode_s": 19.2291376410285,
+      "prompt_tokens": 12,
+      "completion_tokens": 128,
+      "text_bytes": 409,
+      "error": "",
+      "sample": "measure-3",
+      "decode_tokens_per_second": 6.604560348511146
+    },
+    {
+      "median_decode_tokens_per_second": 6.604560348511146,
+      "median_ttft_seconds": 0.4979916540905833,
+      "qualification": "Single request, short coding completion; performance only. Does not establish coding quality or a complete roofline."
+    }
+  ],
+  "qualification": "Three-marker retrieval and repeated answer passed. This is not coding acceptance at 128K. Cache reuse and hardware roofline remain unqualified."
+}

@@ -19,6 +19,7 @@
   rapidjson,
   protobuf,
   libsystemtap,
+  writeText,
   src,
   version,
   xdnaSrc,
@@ -60,6 +61,12 @@ stdenv.mkDerivation (finalAttrs: {
   env.LDFLAGS = "-Wl,--copy-dt-needed-entries";
 
   postPatch = ''
+    # Host distro probing must not depend on /etc inside a Nix sandbox.
+    substituteInPlace src/CMake/nativeLnx.cmake src/CMake/cpackLin.cmake \
+      --replace-fail /etc/os-release ${writeText "xrt-os-release" ''
+        ID=nixos
+        VERSION_ID="${lib.trivial.release}"
+      ''}
     # aiebu's asm/dump tools statically link glibc, which nixpkgs does not
     # provide. The XRT/NPU host runtime does not need those binaries; FLM
     # only needs libxrt_coreutil/libxrt_driver_xdna at runtime.

@@ -1,0 +1,346 @@
+{
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
+  "node": "strix-4",
+  "seed": 53029,
+  "results": [
+    {
+      "blas": "_BlasBackend.Cublaslt",
+      "tf32": false,
+      "deterministic": false,
+      "atomics_env": null
+    },
+    {
+      "case": "linear-1-16384-24-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1-4096-288-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1-4096-1536-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1-1536-6144-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1-512-4096-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-pre-1",
+      "repeats": 12,
+      "changed_elements": [
+        0,
+        0,
+        0
+      ],
+      "max_delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-post-1",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-4-16384-24-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-4-4096-288-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-4-4096-1536-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-4-1536-6144-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-4-512-4096-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-pre-4",
+      "repeats": 12,
+      "changed_elements": [
+        0,
+        0,
+        0
+      ],
+      "max_delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-post-4",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-69-16384-24-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-69-4096-288-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-69-4096-1536-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-69-1536-6144-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-69-512-4096-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-pre-69",
+      "repeats": 12,
+      "changed_elements": [
+        0,
+        0,
+        0
+      ],
+      "max_delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-post-69",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1024-16384-24-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1024-4096-288-torch.float32",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1024-4096-1536-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1024-1536-6144-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "linear-1024-512-4096-torch.bfloat16",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-pre-1024",
+      "repeats": 12,
+      "changed_elements": [
+        0,
+        0,
+        0
+      ],
+      "max_delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "mhc-post-1024",
+      "repeats": 12,
+      "changed_elements": [
+        0
+      ],
+      "max_delta": [
+        0.0
+      ]
+    },
+    {
+      "case": "kda-4",
+      "repeats": 12,
+      "changed_elements": [
+        0,
+        0
+      ],
+      "max_delta": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "kda-69",
+      "repeats": 12,
+      "changed_elements": [
+        0,
+        0
+      ],
+      "max_delta": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "kda-1024",
+      "repeats": 12,
+      "changed_elements": [
+        0,
+        0
+      ],
+      "max_delta": [
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "qualification": "Twenty dense-projection shapes, four mHC pre, four mHC post and three KDA prefill cases reproduced bitwise over twelve calls each. KDA final states were also compared. Uses fixed random inputs and fresh zero state; does not cover full-model cache-pool restoration or all model operators."
+}

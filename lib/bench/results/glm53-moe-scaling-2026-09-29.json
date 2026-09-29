@@ -1,0 +1,189 @@
+{
+  "date": "2026-09-29",
+  "runtime": "25rd4mqjq41ayh1bmq8rx3wisxpq5lg4-sglang-rocm-gfx1151-0.5.20",
+  "scope": "Complete MoE component, independent CPU reference; not full-model qualification",
+  "synthetic_shape": {
+    "experts": 16,
+    "top_k": 8,
+    "hidden": 4096,
+    "intermediate": 512,
+    "group_size": 128,
+    "bits": 4,
+    "routed_scale": 2.5,
+    "clamp": 10
+  },
+  "unpatched_single_token_relative_l2": 1.4489350318908691,
+  "fixed_nodes": {
+    "strix-1": [
+      {
+        "method": "forward_normal",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      }
+    ],
+    "strix-2": [
+      {
+        "method": "forward_normal",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      }
+    ],
+    "strix-3": [
+      {
+        "method": "forward_normal",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      }
+    ],
+    "strix-4": [
+      {
+        "method": "forward_normal",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 1,
+        "relative_l2": 0.001831378205679357,
+        "max_abs": 0.125
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 7,
+        "relative_l2": 0.0007161892135627568,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      },
+      {
+        "method": "forward_normal_dual_stream",
+        "tokens": 33,
+        "relative_l2": 0.0009151712874881923,
+        "max_abs": 0.25
+      }
+    ]
+  },
+  "dual_stream_constraint": "Out-of-place expert output required; serving disables ROCm multi-stream because of separate input aliasing",
+  "real_first_moe_layer": {
+    "checkpoint_revision": "abd7b07719111f137e1de8a0c1b7e01c11b74d1a",
+    "tp": 1,
+    "layer": 3,
+    "sampled_prompt_positions": [
+      0,
+      5,
+      11
+    ],
+    "unpatched_relative_l2_against_correct_scale": 1.0045143365859985,
+    "unpatched_relative_l2_against_incorrect_scale_6_25": 0.0028799609281122684,
+    "fixed_relative_l2_against_correct_scale": 0.0008388450369238853
+  },
+  "notes": [
+    "The real-layer reference separately dequantizes checkpoint weights and computes selected/shared experts on the CPU.",
+    "Standalone regression processes exit 0 after passing but PyTorch 2.13 emits a custom-op cleanup ValueError during interpreter shutdown.",
+    "Full-model coherence and prefill/decode consistency require retesting."
+  ]
+}

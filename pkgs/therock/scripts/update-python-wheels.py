@@ -92,11 +92,18 @@ def fetch_index(url: str) -> str:
 
 
 def parse_distribution(project: str, href: str, index_url: str) -> Distribution | None:
-    if not (href.endswith(".whl") or href.endswith(".tar.gz")):
+    # Strip any query string or #sha256= fragment before inspecting the path.
+    path = urllib.parse.urlsplit(href).path
+    unquoted_path = urllib.parse.unquote(path)
+    if unquoted_path.endswith(".whl"):
+        extension = ".whl"
+    elif unquoted_path.endswith(".tar.gz"):
+        extension = ".tar.gz"
+    else:
         return None
 
-    filename = Path(urllib.parse.unquote(href)).name
-    if filename.endswith(".whl"):
+    filename = Path(unquoted_path).name
+    if extension == ".whl":
         stem = filename[:-4]
         parts = stem.rsplit("-", 4)
         if len(parts) != 5:
@@ -186,6 +193,24 @@ def dist_matches_package_version(dist: Distribution, package_version: str | None
     return package_version is None or public_package_version(dist.package_version) == package_version
 
 
+def in_rocm_series(version: str, series: str) -> bool:
+    """True when `version` belongs to the requested ROCm `series`.
+
+    The series' numeric components must match the version's release
+    components literally: series "10.1" must not admit 10.10.x, and a
+    fully-pinned series such as "10.1.0" admits only that release (with
+    its prereleases, e.g. 10.1.0rc2) and not 10.1.1.
+    """
+    series_parts = series.split(".")
+    if not all(part.isdigit() for part in series_parts):
+        return False
+    match = re.fullmatch(r"(\d+(?:\.\d+)*).*", version)
+    if match is None:
+        return False
+    release = match.group(1).split(".")
+    return len(release) >= len(series_parts) and release[: len(series_parts)] == series_parts
+
+
 def choose_rocm_version(
     distributions_by_project: dict[str, list[Distribution]],
     *,
@@ -199,7 +224,7 @@ def choose_rocm_version(
             dist.rocm_version
             for dist in distributions
             if dist.rocm_version is not None
-            and dist.rocm_version.startswith(series)
+            and in_rocm_series(dist.rocm_version, series)
             and dist_matches_python(dist, python_tag)
             and dist_matches_platform(dist)
             and dist_matches_package_version(dist, package_versions.get(normalize_project(project)))

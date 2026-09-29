@@ -1,0 +1,323 @@
+--- a/sglang/kernels/ops/quantization/fp8_utils.py
++++ b/sglang/kernels/ops/quantization/fp8_utils.py
+@@ -3,6 +3,7 @@
+ from typing import Optional, Tuple
+ 
+ import torch
++import triton
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import (
+@@ -48,3 +49,16 @@
+     if fp8_dtype == torch.float8_e5m2:
+         return tl.float8e5
+     raise ValueError(f"Unsupported FP8 dtype: {fp8_dtype}")
++
++
++@triton.jit
++def widen_e4m3fn_to_fp16(x):
++    """Exact widening without gfx1151 generic FP8 conversion sequence."""
++    bits = x.to(tl.uint8, bitcast=True).to(tl.uint16)
++    magnitude = bits & 0x7F
++    normal = (magnitude << 7) + 0x2000
++    subnormal = ((magnitude & 7).to(tl.float32) * 0.001953125).to(tl.float16).to(tl.uint16, bitcast=True)
++    value = tl.where(magnitude < 8, subnormal, normal)
++    value = tl.where(magnitude == 0x7F, 0x7E00, value).to(tl.uint16)
++    value = value | ((bits & 0x80) << 8)
++    return value.to(tl.float16, bitcast=True)
+--- a/sglang/kernels/ops/quantization/fp8_kernel.py
++++ b/sglang/kernels/ops/quantization/fp8_kernel.py
+@@ -24,7 +24,10 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
+-from sglang.kernels.ops.quantization.fp8_utils import fp8_dtype_to_triton
++from sglang.kernels.ops.quantization.fp8_utils import (
++    fp8_dtype_to_triton,
++    widen_e4m3fn_to_fp16,
++)
+ from sglang.srt.layers import deep_gemm_wrapper
+ from sglang.srt.utils import (
+     ceil_align,
+@@ -43,6 +46,10 @@
+ from sglang.srt.utils.patch_torch import register_fake_if_exists
+ 
+ _is_hip = is_hip()
++_gfx1151_fp8_widen = tl.constexpr(
++    _is_hip and torch.cuda.is_available()
++    and torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] == "gfx1151"
++)
+ _is_cuda = is_cuda()
+ _is_cpu = is_cpu()
+ _is_musa = is_musa()
+@@ -1009,6 +1016,9 @@
+         b_s = tl.load(Bs_ptrs)
+ 
+         scale_step_k = tl.where((k + 1) % n_tiles_k_per_group_k == 0, 1, 0)
++        if _gfx1151_fp8_widen and a.dtype == tl.float8e4nv and b.dtype == tl.float8e4nv:
++            a = widen_e4m3fn_to_fp16(a)
++            b = widen_e4m3fn_to_fp16(b)
+         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+         a_ptrs += BLOCK_SIZE_K * stride_ak
+         b_ptrs += BLOCK_SIZE_K * stride_bk
+@@ -1214,6 +1224,9 @@
+         a_s = tl.load(As_ptrs)
+         b_s = tl.load(Bs_ptrs)
+ 
++        if _gfx1151_fp8_widen and a.dtype == tl.float8e4nv and b.dtype == tl.float8e4nv:
++            a = widen_e4m3fn_to_fp16(a)
++            b = widen_e4m3fn_to_fp16(b)
+         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+         a_ptrs += BLOCK_SIZE_K * stride_ak
+         b_ptrs += BLOCK_SIZE_K * stride_bk
+@@ -1239,6 +1252,9 @@
+         a_s = tl.load(As_ptrs)
+         b_s = tl.load(Bs_ptrs)
+ 
++        if _gfx1151_fp8_widen and a.dtype == tl.float8e4nv and b.dtype == tl.float8e4nv:
++            a = widen_e4m3fn_to_fp16(a)
++            b = widen_e4m3fn_to_fp16(b)
+         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+         a_ptrs += BLOCK_SIZE_K * stride_ak
+         b_ptrs += BLOCK_SIZE_K * stride_bk
+@@ -1264,6 +1280,9 @@
+         a_s = tl.load(As_ptrs)
+         b_s = tl.load(Bs_ptrs)
+ 
++        if _gfx1151_fp8_widen and a.dtype == tl.float8e4nv and b.dtype == tl.float8e4nv:
++            a = widen_e4m3fn_to_fp16(a)
++            b = widen_e4m3fn_to_fp16(b)
+         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+         a_ptrs += BLOCK_SIZE_K * stride_ak
+         b_ptrs += BLOCK_SIZE_K * stride_bk
+@@ -1289,6 +1308,9 @@
+         a_s = tl.load(As_ptrs)
+         b_s = tl.load(Bs_ptrs)
+ 
++        if _gfx1151_fp8_widen and a.dtype == tl.float8e4nv and b.dtype == tl.float8e4nv:
++            a = widen_e4m3fn_to_fp16(a)
++            b = widen_e4m3fn_to_fp16(b)
+         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+         a_ptrs += BLOCK_SIZE_K * stride_ak
+         b_ptrs += BLOCK_SIZE_K * stride_bk
+--- a/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
++++ b/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
+@@ -14,6 +14,7 @@
+     scaled_fp8_quant,
+     sglang_per_token_group_quant_fp8,
+ )
++from sglang.kernels.ops.quantization.fp8_utils import widen_e4m3fn_to_fp16
+ from sglang.kernels.ops.quantization.int8_kernel import (
+     per_token_group_quant_int8,
+     per_token_quant_int8,
+@@ -38,6 +39,10 @@
+     _support_tensor_descriptor = False
+ 
+ _is_hip = is_hip()
++_gfx1151_fp8_widen = tl.constexpr(
++    _is_hip and torch.cuda.is_available()
++    and torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] == "gfx1151"
++)
+ _is_cuda = is_cuda()
+ _is_cpu_amx_available = cpu_has_amx_support()
+ _is_cpu = is_cpu()
+@@ -570,6 +575,10 @@
+         else:
+             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k_start, other=0.0)
+ 
++        if _gfx1151_fp8_widen and a.dtype == tl.float8e4nv and b.dtype == tl.float8e4nv:
++            a = widen_e4m3fn_to_fp16(a)
++            b = widen_e4m3fn_to_fp16(b)
++
+         # We accumulate along the K dimension.
+         if use_int8_w8a16:
+             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
+--- /dev/null
++++ "b/sglang/kernels/ops/quantization/configs/N=6144,K=4096,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 3
++  }
++}
+--- /dev/null
++++ "b/sglang/kernels/ops/quantization/configs/N=4096,K=3072,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 3
++  }
++}
+--- /dev/null
++++ "b/sglang/kernels/ops/quantization/configs/N=2048,K=4096,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 3
++  }
++}
+--- /dev/null
++++ "b/sglang/kernels/ops/quantization/configs/N=4096,K=1536,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 3
++  }
++}
+--- /dev/null
++++ "b/sglang/kernels/ops/quantization/configs/N=4096,K=4096,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 3
++  }
++}
+--- /dev/null
++++ "b/sglang/kernels/ops/quantization/configs/N=1024,K=4096,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 3
++  }
++}
+--- /dev/null
++++ "b/sglang/kernels/ops/quantization/configs/N=4096,K=512,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 3
++  }
++}
+--- /dev/null
++++ "b/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_8_0/E=288,N=512,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128].json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 2
++  }
++}
+--- /dev/null
++++ "b/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_8_0/E=288,N=512,device_name=AMD_Radeon_8060S_Graphics,dtype=fp8_w8a8,block_shape=[128, 128]_down.json"
+@@ -0,0 +1,18 @@
++{
++  "1": {
++    "BLOCK_SIZE_M": 16,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 1,
++    "num_warps": 4,
++    "num_stages": 1
++  },
++  "2": {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 2
++  }
++}
