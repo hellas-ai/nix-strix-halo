@@ -2145,6 +2145,107 @@
         "median_ttft_seconds": 0.3737195139983669,
         "qualification": "Single request, short coding completion; performance only. Does not establish coding quality or a complete roofline."
       }
+    ],
+    "context_cache": [
+      {
+        "context": 131072,
+        "prompt_tokens": 129017,
+        "output_reserve": 2048,
+        "expected": {
+          "early": "amber-7251",
+          "middle": "cedar-4938",
+          "late": "violet-8614"
+        },
+        "records": 7013
+      },
+      {
+        "phase": "cold",
+        "wall_seconds": 358.43617377302144,
+        "result": {
+          "id": "5431e4a28a9f478caf847e37febe8734",
+          "object": "chat.completion",
+          "created": 1790657371,
+          "model": "glm-5.3-flash",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"early\": \"amber-7251\", \"middle\": \"cedar-4938\", \"late\": \"violet-8614\"}",
+                "reasoning_content": null,
+                "tool_calls": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "matched_stop": 154827
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 129017,
+            "total_tokens": 129051,
+            "completion_tokens": 34,
+            "prompt_tokens_details": null,
+            "reasoning_tokens": 1
+          },
+          "metadata": {
+            "weight_version": "default",
+            "weight_versions": [
+              {
+                "version": "default",
+                "start": 0,
+                "end": 34
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "warm",
+        "wall_seconds": 4.447187238023616,
+        "result": {
+          "id": "746c4902eedb42998722f2aa373d9850",
+          "object": "chat.completion",
+          "created": 1790657375,
+          "model": "glm-5.3-flash",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"early\": \"amber-7251\", \"middle\": \"cedar-4938\", \"late\": \"violet-8614\"}",
+                "reasoning_content": null,
+                "tool_calls": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "matched_stop": 154827
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 129017,
+            "total_tokens": 129051,
+            "completion_tokens": 34,
+            "prompt_tokens_details": {
+              "cached_tokens": 128960
+            },
+            "reasoning_tokens": 1
+          },
+          "metadata": {
+            "weight_version": "default",
+            "weight_versions": [
+              {
+                "version": "default",
+                "start": 0,
+                "end": 34
+              }
+            ]
+          }
+        }
+      },
+      {
+        "context_and_cache": "passed",
+        "cache": "on"
+      }
     ]
   }
 }

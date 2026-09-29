@@ -4,17 +4,47 @@ Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint serves on
 four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
 arithmetic, streamed tool call and tool-result continuation checks now pass.
 The FP32-router fix also passes component and API checks. Numerical
-consistency still exceeds its probability limits; all 64 sampled token choices
-now agree between decode and prefill after enabling stable fused routing. Pi completed three
-updater repairs: one after review feedback and two on the first draft,
+consistency still exceeds its probability limits. Stable routing made all 64
+sampled token choices agree on TCP; the RoCE launch has one disagreement. Pi completed four
+coding repairs: one after review feedback and three on the first draft,
 including a task starting above 100K prompt tokens. Three-marker retrieval passed at
 129,017 prompt tokens both uncached and with prefix reuse. The cached repeat
-reused 128,960 tokens and took 4.49 seconds, versus 362 seconds cold.
+reused 128,960 tokens and took 4.45 seconds, versus 358 seconds cold.
 Stable routing makes synthetic fresh-repeat, identical-prefix and appended-prefix
-probabilities exact. Truncation still exceeds the probability limit, although
-all tested cache-branch token IDs now agree.
+probabilities exact. All five cache-branch checks pass on the latest RoCE
+launch, including truncation (maximum delta 0.0201); this is one tested workload.
 General cache correctness, broader coding quality and performance relative
 to the hardware roofline remain unqualified.
+
+RoCE bring-up exposed two independent faults. The SGLang wrapper omitted
+`libibverbs`, allowing RCCL to fall back silently to sockets. The package now
+includes `rdma-core` in its library search path. The CRS812 also flooded
+unicast fabric traffic despite showing learned host entries. During a single
+transfer to strix-1, unrelated ports each transmitted 6.35 GB of RoCE traffic.
+Persistent static forwarding entries for the four Strix MACs removed the flood;
+the same raw RDMA transfer improved from 9.74 to 27.48 Gb/s. Trex's fabric MAC
+is pinned as well. No switch firmware, PFC, port or VLAN settings were changed.
+The standalone reconciliation script is
+`machines/routeros/crs812/glm53-fabric-fdb.rsc` in the separate `nixos-config`
+task worktree. Revalidate these mappings after recabling; current host pairs
+share external ports despite the older per-host cable comments.
+
+With explicit HCA selection, `NCCL_IB_TC=106` (DSCP 26, ECT(0)) and
+`NCCL_NET=IB`, four-rank nonzero reductions pass from 4 bytes through 64 MiB.
+The 64 MiB median improved from 277.8 ms before the forwarding change to
+46.4 ms afterward; 8 KiB takes 0.074 ms in the standalone FP32 probe.
+Repeated BF16 reductions at 8 KiB through 8 MiB agree bitwise across PyTorch,
+SGLang PyNccl and graph execution. GPU Direct RDMA remains unavailable;
+transfers use host buffers. The launcher defaults to RoCE and fails if IB
+cannot initialize; `GLM_TRANSPORT=tcp` selects a deliberate TCP control.
+Detailed results are in
+[`glm53-roce-2026-09-29.json`](../lib/bench/results/glm53-roce-2026-09-29.json).
+The full server reached readiness in 230 seconds. Arithmetic, streamed tool
+calls and tool-result continuation pass. The same three-run short completion
+benchmark measures 9.63 tokens/s and 0.355-second time to first token, versus
+8.81 tokens/s and 0.374 seconds on TCP. Decode/prefill probability maxima
+are 0.1821/0.2020 for the short/chunked cases, with one argmax disagreement;
+the strict numerical gate remains failed. All five cache-branch cases pass.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -286,12 +316,11 @@ These settings were left unchanged. Record power settings again before timing
 inference; prior component timings must not be treated as current-power results.
 
 The fabric addresses are `192.168.25.101` through `.104` on `cx5fabric0`.
-Four-rank RCCL over TCP passed nonzero-data correctness checks from 4 bytes
-through 64 MiB. RoCE restricted to the HCA carrying `cx5fabric0` passed through
-4 MiB but stalled at 64 MiB and was stopped after more than three minutes.
-RCCL reported that GPU Direct RDMA was unavailable (`GDR 0`). Do not select
-RoCE for serving until this larger-transfer failure is resolved. HCA numbers
-must be derived from each host's netdev, not assumed to match across nodes.
+Four-rank RCCL over TCP and the corrected RoCE deployment pass nonzero-data
+correctness checks from 4 bytes through 64 MiB. Earlier unmarked RoCE tests
+stalled at large sizes while the switch flooded unicast traffic; see the
+forwarding and runtime fixes above. RCCL reports that GPU Direct RDMA is
+unavailable (`GDR 0`). The launcher derives the HCA from the fabric netdev.
 
 The nodes' `/models` mounts are older read-only SPDK snapshots. Publishing a
 replacement requires a coordinated storage rollout and also affects other
@@ -402,7 +431,7 @@ export SGLANG_OPT_USE_TILELANG_MHC_POST=0
 export SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD=0
 export NCCL_SOCKET_IFNAME=cx5fabric0
 export GLOO_SOCKET_IFNAME=cx5fabric0
-export NCCL_IB_DISABLE=1  # establish a TCP baseline before qualifying RoCE
+export NCCL_IB_DISABLE=1  # TCP control; the node launcher defaults to qualified RoCE
 export SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S=1800
 
 # NODE_RANK must be set separately on each node.
@@ -474,6 +503,14 @@ coding run with a large context and repeated tool use, rather than general
 coding quality or full-window acceptance. See
 [`glm53-pi-long-context-2026-09-29.json`](../lib/bench/results/glm53-pi-long-context-2026-09-29.json).
 
+A fourth task fixed the benchmark client treating streamed server errors and
+EOF without `[DONE]` as successful responses. Pi completed twelve turns in
+583 seconds; its first submitted patch passes 13 local tests and 14 independent
+tests using a real HTTP fixture (the old client failed eight). The reviewed
+implementation and tests are included. Failed streams no longer contribute
+to reported throughput. Evidence is in
+[`glm53-pi-stream-failure-2026-09-29.json`](../lib/bench/results/glm53-pi-stream-failure-2026-09-29.json).
+
 ## Qualification target and initial measurements
 
 The user-selected acceptance workload is useful coding in isolated worktrees
@@ -504,6 +541,15 @@ An isolated BF16 TCP all-reduce probe found identical repeated results and
 agreement between PyTorch, PyNccl and graph execution at 8 KiB through 8 MiB.
 It therefore did not reproduce the full-model variation; it does not rule
 out other shapes or batch-size-dependent reduction order.
+
+In the first-four-layer cache fixture, a 3073-token prefix truncated to 2119
+tokens still differs by 0.0627 in output log probability. Captures of the
+matched final 71-token chunk show bitwise-identical KDA initial/final states,
+attention outputs, DSA selected KV values and full DSA layer output. Physical
+cache page addresses differ as expected. This rules out a state-restoration
+difference at those captured stages for this case, while the full output
+probability gate remains failed. See
+[`glm53-cache-state-2026-09-29.json`](../lib/bench/results/glm53-cache-state-2026-09-29.json).
 
 The latest runtime uses context 131072, `--max-mamba-cache-size 128`, radix
 caching and decode graphs restricted to batch size one. Pinning 512 Mamba

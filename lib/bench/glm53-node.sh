@@ -37,8 +37,22 @@ export SGLANG_OPT_USE_TILELANG_MHC_POST=0
 export SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD=0
 export NCCL_SOCKET_IFNAME=cx5fabric0
 export GLOO_SOCKET_IFNAME=cx5fabric0
-# RoCE currently stalls on the 64 MiB correctness probe. TCP passes all sizes.
-export NCCL_IB_DISABLE=1
+# RoCE must use the addressed fabric NIC and the switch's lossless DSCP 26
+# queue (106 = DSCP 26 + ECT(0)). Require IB so a missing verbs library cannot
+# silently turn a RoCE deployment into TCP. TCP remains an explicit control.
+case ${GLM_TRANSPORT:-roce} in
+  roce)
+    export NCCL_IB_DISABLE=0 NCCL_NET=IB NCCL_IB_TC=106
+    fabric_hcas=(/sys/class/net/cx5fabric0/device/infiniband/*)
+    if [[ ${#fabric_hcas[@]} != 1 || ! -d ${fabric_hcas[0]} ]]; then
+      echo "Expected one RDMA device for cx5fabric0" >&2
+      exit 1
+    fi
+    export NCCL_IB_HCA="=${fabric_hcas[0]##*/}:1"
+    ;;
+  tcp) export NCCL_IB_DISABLE=1 NCCL_NET=Socket ;;
+  *) echo "GLM_TRANSPORT must be roce or tcp" >&2; exit 2 ;;
+esac
 export AITER_JIT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/aiter/jit"
 export TRITON_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/triton"
 export OMP_NUM_THREADS=${GLM_CPU_THREADS:-8}

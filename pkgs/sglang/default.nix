@@ -9,6 +9,7 @@
   openssl,
   patchelf,
   pkg-config,
+  rdma-core,
   rustPlatform,
   rustc,
   symlinkJoin,
@@ -367,7 +368,11 @@ pythonPackages.buildPythonApplication rec {
 
     rocm_site=${lib.escapeShellArg rocmSitePackages}
     rocm_lib_path="$(find "$rocm_site" -type d \( -name lib -o -name lib64 \) -print | paste -sd:)"
-    rocm_lib_path=${lib.escapeShellArg rocmRuntimeLibraryPath}:"$rocm_lib_path"
+    # RCCL opens libibverbs dynamically. Without it, requesting RoCE silently
+    # selects the socket transport even when the host has working RDMA devices.
+    rocm_lib_path=${
+      lib.escapeShellArg (lib.makeLibraryPath [ rdma-core ])
+    }:${lib.escapeShellArg rocmRuntimeLibraryPath}:"$rocm_lib_path"
 
     wrap_args=(
       --set HIP_PLATFORM amd
