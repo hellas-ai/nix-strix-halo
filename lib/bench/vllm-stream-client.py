@@ -14,7 +14,6 @@ import csv
 import datetime as dt
 import json
 import math
-import os
 import socket
 import statistics
 import sys
@@ -25,7 +24,6 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-
 
 FIELDS = [
     "timestamp_utc",
@@ -80,7 +78,7 @@ def percentile(values: list[float], pct: float) -> float | None:
     return ordered[lo] + (ordered[hi] - ordered[lo]) * (rank - lo)
 
 
-def fmt(value: float | int | str | None) -> str:
+def fmt(value: float | str | None) -> str:
     if value is None:
         return ""
     if isinstance(value, float):
@@ -143,9 +141,6 @@ def stream_one(
 
     barrier.wait()
     start = time.perf_counter()
-    first_token: float | None = None
-    usage: dict[str, Any] = {}
-    text_parts: list[str] = []
 
     try:
         req = urllib.request.Request(
@@ -155,46 +150,7 @@ def stream_one(
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            for raw in resp:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-
-                obj = json.loads(data)
-                if obj.get("usage") is not None:
-                    usage = obj["usage"]
-
-                for choice in obj.get("choices", []):
-                    piece = choice.get("text") or ""
-                    if piece:
-                        if first_token is None:
-                            first_token = time.perf_counter()
-                        text_parts.append(piece)
-
-        end = time.perf_counter()
-        completion_tokens = usage.get("completion_tokens")
-        prompt_tokens = usage.get("prompt_tokens")
-        duration = end - start
-        ttft = None if first_token is None else first_token - start
-        decode = None if ttft is None else max(0.0, duration - ttft)
-
-        return {
-            "request_index": request_index,
-            "ok": True,
-            "start": start,
-            "end": end,
-            "duration_s": duration,
-            "ttft_s": ttft,
-            "decode_s": decode,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "text_bytes": len("".join(text_parts).encode("utf-8")),
-            "error": "",
-        }
+            result = consume_stream(resp, start=start, request_index=request_index)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:4000]
         return {
@@ -212,6 +168,102 @@ def stream_one(
             "end": time.perf_counter(),
             "error": repr(exc),
         }
+    return result
+
+
+def consume_stream(resp: Any, *, start: float, request_index: int) -> dict[str, Any]:
+    """Consume an SSE completions stream from an open response body.
+
+    A stream is only successful if it ends with the [DONE] sentinel and no
+    data event carries a non-null top-level "error" value. Anything else
+    (server error event, EOF before [DONE], malformed JSON) is a failure,
+    even if some text already arrived.
+    """
+    first_token: float | None = None
+    usage: dict[str, Any] = {}
+    text_parts: list[str] = []
+    saw_done = False
+    stream_error: str | None = None
+
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line or not line.startswith("data:"):
+            continue
+
+        data = line[5:].strip()
+        if data == "[DONE]":
+            saw_done = True
+            break
+
+        try:
+            obj = json.loads(data)
+        except json.JSONDecodeError:
+            stream_error = f"malformed SSE data: {data[:300]}"
+            break
+
+        if obj.get("error") is not None:
+            stream_error = summarize_stream_error(obj["error"])
+            break
+
+        if obj.get("usage") is not None:
+            usage = obj["usage"]
+
+        for choice in obj.get("choices", []):
+            piece = choice.get("text") or ""
+            if piece:
+                if first_token is None:
+                    first_token = time.perf_counter()
+                text_parts.append(piece)
+
+    end = time.perf_counter()
+    if stream_error is not None:
+        return {
+            "request_index": request_index,
+            "ok": False,
+            "start": start,
+            "end": end,
+            "error": stream_error,
+        }
+    if not saw_done:
+        received = "".join(text_parts)
+        return {
+            "request_index": request_index,
+            "ok": False,
+            "start": start,
+            "end": end,
+            "error": (
+                "stream ended without [DONE]"
+                f" (received {len(received.encode('utf-8'))} bytes of text)"
+            ),
+        }
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    duration = end - start
+    ttft = None if first_token is None else first_token - start
+    decode = None if ttft is None else max(0.0, duration - ttft)
+
+    return {
+        "request_index": request_index,
+        "ok": True,
+        "start": start,
+        "end": end,
+        "duration_s": duration,
+        "ttft_s": ttft,
+        "decode_s": decode,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "text_bytes": len("".join(text_parts).encode("utf-8")),
+        "error": "",
+    }
+
+
+def summarize_stream_error(error: Any) -> str:
+    """Bounded, human-readable message from a top-level SSE error value."""
+    if isinstance(error, dict):
+        message = error.get("message") or json.dumps(error)
+    else:
+        message = str(error)
+    return f"stream error: {str(message)[:300]}"
 
 
 def aggregate(args: argparse.Namespace, prompt: str) -> dict[str, str]:

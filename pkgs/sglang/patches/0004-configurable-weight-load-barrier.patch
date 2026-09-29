@@ -1,0 +1,12 @@
+diff --git a/sglang/srt/model_executor/model_runner_components/load_model_utils.py b/sglang/srt/model_executor/model_runner_components/load_model_utils.py
+--- a/sglang/srt/model_executor/model_runner_components/load_model_utils.py
++++ b/sglang/srt/model_executor/model_runner_components/load_model_utils.py
+@@ -51 +51,7 @@
+-UNBALANCED_MODEL_LOADING_TIMEOUT_S = 480  # leave more time for post data processing
++# Cold network-backed checkpoints can vary substantially in load time by rank.
++# Preserve the upstream default while allowing a bounded, longer startup wait.
++UNBALANCED_MODEL_LOADING_TIMEOUT_S = int(
++    os.environ.get("SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S", "480")
++)
++if UNBALANCED_MODEL_LOADING_TIMEOUT_S <= 0:
++    raise ValueError("SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S must be positive")

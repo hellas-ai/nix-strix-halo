@@ -42,7 +42,8 @@ def find_version(index: str, target: str, series: str | None) -> str:
     pattern = re.compile(rf"therock-dist-linux-{slug}-([0-9][0-9A-Za-z.+~_-]*)\.tar\.gz")
     versions = sorted(set(pattern.findall(index)), key=version_key)
     if series is not None:
-        versions = [version for version in versions if version.startswith(series)]
+        series_pattern = re.compile(rf"^{re.escape(series)}(?!\d)")
+        versions = [version for version in versions if series_pattern.match(version)]
     if not versions:
         suffix = f" in series {series}" if series else ""
         raise SystemExit(f"no TheRock tarball found for {target}{suffix}")

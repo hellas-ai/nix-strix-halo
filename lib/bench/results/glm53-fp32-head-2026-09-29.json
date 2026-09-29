@@ -1,0 +1,377 @@
+{
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
+  "node": "strix-3",
+  "shape": {
+    "input_features": 4096,
+    "output_features": 38720
+  },
+  "inputs_and_weights": "fixed random BF16",
+  "reference": "CPU double product, first 128 output columns",
+  "results": [
+    {
+      "tokens": 1,
+      "results": {
+        "bf16": {
+          "changed": 0,
+          "median_ms": 1.63076251745224,
+          "reference_relative_l2": 0.001916290683821263
+        },
+        "fp32": {
+          "changed": 0,
+          "median_ms": 2.2165210247039795,
+          "reference_relative_l2": 5.6953464950110065e-06
+        }
+      }
+    },
+    {
+      "tokens": 4,
+      "results": {
+        "bf16": {
+          "changed": 0,
+          "median_ms": 1.582899034023285,
+          "reference_relative_l2": 0.0017398452348025757
+        },
+        "fp32": {
+          "changed": 0,
+          "median_ms": 2.334791421890259,
+          "reference_relative_l2": 5.722002795243944e-06
+        }
+      }
+    },
+    {
+      "tokens": 69,
+      "results": {
+        "bf16": {
+          "changed": 0,
+          "median_ms": 2.1060290336608887,
+          "reference_relative_l2": 0.0016323251046014345
+        },
+        "fp32": {
+          "changed": 0,
+          "median_ms": 5.855334043502808,
+          "reference_relative_l2": 5.7881184408959335e-06
+        }
+      }
+    }
+  ],
+  "qualification": "FP32 output improves component agreement and reduced the truncated-prefix probability difference in the four-layer fixture. However a divergent-prefix case changed token IDs, and decode/prefill checks still fail. Not enabled in the full model; this experiment does not establish a serving-path correction.",
+  "first_four_real_layers_tp4": {
+    "stable_router": true,
+    "cache_branches": [
+      {
+        "case": "fresh-repeat-control",
+        "first": {
+          "wall_seconds": 7.831296378048137,
+          "ids": [
+            3173,
+            14332,
+            14332,
+            4737,
+            63904,
+            16211,
+            9089,
+            49914
+          ],
+          "logprobs": [
+            -2.923387050628662,
+            -0.5537870526313782,
+            -5.397046089172363,
+            -4.993175029754639,
+            -1.2000577449798584,
+            -4.225958824157715,
+            -4.282257556915283,
+            -4.305219650268555
+          ],
+          "cached_tokens": 0
+        },
+        "second": {
+          "wall_seconds": 0.7354303289903328,
+          "ids": [
+            3173,
+            14332,
+            14332,
+            4737,
+            63904,
+            16211,
+            9089,
+            49914
+          ],
+          "logprobs": [
+            -2.923387050628662,
+            -0.5537870526313782,
+            -5.397046089172363,
+            -4.993175029754639,
+            -1.2000577449798584,
+            -4.225958824157715,
+            -4.282257556915283,
+            -4.305219650268555
+          ],
+          "cached_tokens": 0
+        },
+        "same_ids": true,
+        "max_logprob_delta": 0.0
+      },
+      {
+        "case": "identical",
+        "cold": {
+          "wall_seconds": 0.7173712619114667,
+          "ids": [
+            17430,
+            10320,
+            19615,
+            90856,
+            88150,
+            398,
+            14757,
+            14757
+          ],
+          "logprobs": [
+            -4.973949909210205,
+            -3.757636785507202,
+            -5.957883834838867,
+            -5.480441570281982,
+            -3.067409038543701,
+            -1.800107717514038,
+            -4.807206153869629,
+            -1.7981915473937988
+          ],
+          "cached_tokens": 0
+        },
+        "warm": {
+          "wall_seconds": 0.15061577397864312,
+          "ids": [
+            17430,
+            10320,
+            19615,
+            90856,
+            88150,
+            398,
+            14757,
+            14757
+          ],
+          "logprobs": [
+            -4.973949909210205,
+            -3.757636785507202,
+            -5.957883834838867,
+            -5.480441570281982,
+            -3.067409038543701,
+            -1.800107717514038,
+            -4.807206153869629,
+            -1.7981915473937988
+          ],
+          "cached_tokens": 3072
+        },
+        "same_ids": true,
+        "max_logprob_delta": 0.0
+      },
+      {
+        "case": "append",
+        "cached": {
+          "wall_seconds": 0.14395036501809955,
+          "ids": [
+            3173,
+            14332,
+            14332,
+            4737,
+            63904,
+            16211,
+            9089,
+            49914
+          ],
+          "logprobs": [
+            -2.923387050628662,
+            -0.5537870526313782,
+            -5.397046089172363,
+            -4.993175029754639,
+            -1.2000577449798584,
+            -4.225958824157715,
+            -4.282257556915283,
+            -4.305219650268555
+          ],
+          "cached_tokens": 3072
+        },
+        "fresh": {
+          "wall_seconds": 0.7736351720523089,
+          "ids": [
+            3173,
+            14332,
+            14332,
+            4737,
+            63904,
+            16211,
+            9089,
+            49914
+          ],
+          "logprobs": [
+            -2.923387050628662,
+            -0.5537870526313782,
+            -5.397046089172363,
+            -4.993175029754639,
+            -1.2000577449798584,
+            -4.225958824157715,
+            -4.282257556915283,
+            -4.305219650268555
+          ],
+          "cached_tokens": 0
+        },
+        "same_ids": true,
+        "max_logprob_delta": 0.0
+      },
+      {
+        "case": "truncate",
+        "cached": {
+          "wall_seconds": 0.176002596039325,
+          "ids": [
+            1960,
+            24639,
+            12535,
+            58924,
+            3245,
+            3245,
+            3245,
+            112299
+          ],
+          "logprobs": [
+            -3.5436556339263916,
+            -3.216766357421875,
+            -4.991508960723877,
+            -4.903316497802734,
+            -4.338931083679199,
+            -4.290233612060547,
+            -4.802746295928955,
+            -5.003602027893066
+          ],
+          "cached_tokens": 2048
+        },
+        "fresh": {
+          "wall_seconds": 0.5732189080445096,
+          "ids": [
+            1960,
+            24639,
+            12535,
+            58924,
+            3245,
+            3245,
+            3245,
+            112299
+          ],
+          "logprobs": [
+            -3.5436556339263916,
+            -3.216766357421875,
+            -5.006440162658691,
+            -4.9161376953125,
+            -4.327493190765381,
+            -4.290018558502197,
+            -4.793593406677246,
+            -5.009486675262451
+          ],
+          "cached_tokens": 0
+        },
+        "same_ids": true,
+        "max_logprob_delta": 0.014931201934814453
+      },
+      {
+        "case": "diverge",
+        "cached": {
+          "wall_seconds": 0.258258045068942,
+          "ids": [
+            14042,
+            19234,
+            48238,
+            94262,
+            5641,
+            29241,
+            12088,
+            911
+          ],
+          "logprobs": [
+            -5.524735927581787,
+            -4.04002046585083,
+            -4.85124397277832,
+            -0.0592678040266037,
+            -5.175080299377441,
+            -4.845380783081055,
+            -3.4078848361968994,
+            -4.2782392501831055
+          ],
+          "cached_tokens": 1024
+        },
+        "fresh": {
+          "wall_seconds": 0.4181353620951995,
+          "ids": [
+            14042,
+            19234,
+            48238,
+            94262,
+            5641,
+            16141,
+            55730,
+            7821
+          ],
+          "logprobs": [
+            -5.524735927581787,
+            -4.04002046585083,
+            -4.87690544128418,
+            -0.05915027856826782,
+            -5.174880027770996,
+            -4.8481316566467285,
+            -5.1256937980651855,
+            -4.693629741668701
+          ],
+          "cached_tokens": 0
+        },
+        "same_ids": false,
+        "max_logprob_delta": 1.7178089618682861
+      }
+    ],
+    "consistency": [
+      {
+        "prompt_index": 0,
+        "prompt_tokens": 12,
+        "output_tokens": 32,
+        "generated_seconds": 0.5178847709903494,
+        "max_logprob_delta": 0.0860891342163086,
+        "mean_logprob_delta": 0.014973286539316177,
+        "argmax_differences": [
+          {
+            "position": 4,
+            "decoded_id": 57203,
+            "prefill_id": 3439,
+            "prefill_margin": 0.0034770965576171875
+          },
+          {
+            "position": 5,
+            "decoded_id": 74825,
+            "prefill_id": 38268,
+            "prefill_margin": 0.012799263000488281
+          },
+          {
+            "position": 8,
+            "decoded_id": 19522,
+            "prefill_id": 16211,
+            "prefill_margin": 0.011616706848144531
+          }
+        ],
+        "thresholds": {
+          "max": 0.05,
+          "mean": 0.01
+        },
+        "passed": false
+      },
+      {
+        "prompt_index": 1,
+        "prompt_tokens": 2322,
+        "output_tokens": 32,
+        "generated_seconds": 1.7344897179864347,
+        "max_logprob_delta": 0.04382526874542236,
+        "mean_logprob_delta": 0.01158943772315979,
+        "argmax_differences": [],
+        "thresholds": {
+          "max": 0.05,
+          "mean": 0.01
+        },
+        "passed": false
+      }
+    ]
+  }
+}

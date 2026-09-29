@@ -1,0 +1,428 @@
+{
+  "date": "2026-09-29",
+  "accepted_runtime": "j95k13kapgc1a26v8q9xh2w57xwc4cmr-sglang-rocm-gfx1151-0.5.20",
+  "status": "Candidates remain unqualified. Live paired norm outputs are exact; inserting the paired path changes full output even in native mode. Allocation/layout or downstream dependency requires investigation.",
+  "trials": [
+    {
+      "name": "rmsnorm-full",
+      "runtime_prefix": "8fagysrl9j1nb0mqd5qxpxsv2gp8qna4",
+      "description": "Fused FP32 reduction, inverse RMS and weight multiply",
+      "stream": {
+        "median_decode_tokens_per_second": 15.306345549565068,
+        "median_ttft_seconds": 0.3033908000215888,
+        "qualification": "Single request, short coding completion; performance only. Does not establish coding quality or a complete roofline."
+      },
+      "consistency": [
+        {
+          "prompt_index": 0,
+          "prompt_tokens": 12,
+          "output_tokens": 32,
+          "max_logprob_delta": 0.08642175793647766,
+          "mean_logprob_delta": 0.005927010466734828,
+          "argmax_differences": [],
+          "passed": false
+        },
+        {
+          "prompt_index": 1,
+          "prompt_tokens": 2322,
+          "output_tokens": 32,
+          "max_logprob_delta": 0.14131289720535278,
+          "mean_logprob_delta": 0.007156499907637226,
+          "argmax_differences": [],
+          "passed": false
+        }
+      ],
+      "cache_branches": [
+        {
+          "case": "fresh-repeat-control",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "identical",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "append",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "truncate",
+          "same_ids": true,
+          "max_logprob_delta": 0.094228595495224
+        },
+        {
+          "case": "diverge",
+          "same_ids": true,
+          "max_logprob_delta": 0.00021130141976755112
+        }
+      ]
+    },
+    {
+      "name": "rmsnorm-native-stats-full",
+      "runtime_prefix": "xayc34s9a01g8k5b9l22jds85ma0gcrz",
+      "description": "Native Torch statistics and inverse RMS; fused final multiplies",
+      "stream": {
+        "median_decode_tokens_per_second": 14.833942614951274,
+        "median_ttft_seconds": 0.3090253039263189,
+        "qualification": "Single request, short coding completion; performance only. Does not establish coding quality or a complete roofline."
+      },
+      "consistency": [
+        {
+          "prompt_index": 0,
+          "prompt_tokens": 12,
+          "output_tokens": 32,
+          "max_logprob_delta": 0.2002233862876892,
+          "mean_logprob_delta": 0.012061053948798417,
+          "argmax_differences": [
+            {
+              "position": 28,
+              "decoded_id": 470,
+              "prefill_id": 264,
+              "prefill_margin": 0.25
+            }
+          ],
+          "passed": false
+        },
+        {
+          "prompt_index": 1,
+          "prompt_tokens": 2322,
+          "output_tokens": 32,
+          "max_logprob_delta": 0.05944192409515381,
+          "mean_logprob_delta": 0.008016185959604627,
+          "argmax_differences": [
+            {
+              "position": 25,
+              "decoded_id": 7984,
+              "prefill_id": 785,
+              "prefill_margin": 0.0
+            }
+          ],
+          "passed": false
+        }
+      ],
+      "cache_branches": [
+        {
+          "case": "fresh-repeat-control",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "identical",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "append",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "truncate",
+          "same_ids": true,
+          "max_logprob_delta": 0.03130364418029785
+        },
+        {
+          "case": "diverge",
+          "same_ids": true,
+          "max_logprob_delta": 0.00037169340066611767
+        }
+      ]
+    },
+    {
+      "name": "j95-reboot-control",
+      "runtime_prefix": "j95k13kapgc1a26v8q9xh2w57xwc4cmr",
+      "description": "Restarted baseline after user reboot",
+      "stream": {
+        "median_decode_tokens_per_second": 13.828511371517477,
+        "median_ttft_seconds": 0.31202737893909216,
+        "qualification": "Single request, short coding completion; performance only. Does not establish coding quality or a complete roofline."
+      },
+      "consistency": [
+        {
+          "prompt_index": 0,
+          "prompt_tokens": 12,
+          "output_tokens": 32,
+          "max_logprob_delta": 0.06339919567108154,
+          "mean_logprob_delta": 0.006483102898187099,
+          "argmax_differences": [],
+          "passed": false
+        },
+        {
+          "prompt_index": 1,
+          "prompt_tokens": 2322,
+          "output_tokens": 32,
+          "max_logprob_delta": 0.10791623592376709,
+          "mean_logprob_delta": 0.009175437309295376,
+          "argmax_differences": [],
+          "passed": false
+        }
+      ],
+      "cache_branches": [
+        {
+          "case": "fresh-repeat-control",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "identical",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "append",
+          "same_ids": true,
+          "max_logprob_delta": 0.0
+        },
+        {
+          "case": "truncate",
+          "same_ids": true,
+          "max_logprob_delta": 0.04904627799987793
+        },
+        {
+          "case": "diverge",
+          "same_ids": true,
+          "max_logprob_delta": 0.0012084050104022026
+        }
+      ]
+    }
+  ],
+  "baseline_restart_comparison": [
+    {
+      "prompt_index": 0,
+      "generated_logprobs_bitwise_equal": true,
+      "prefill_logprobs_bitwise_equal": true
+    },
+    {
+      "prompt_index": 1,
+      "generated_logprobs_bitwise_equal": true,
+      "prefill_logprobs_bitwise_equal": true
+    }
+  ],
+  "live_paired_norms": {
+    "native-a": [
+      {
+        "rank": 0,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 1,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 2,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 3,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      }
+    ],
+    "candidate": [
+      {
+        "rank": 0,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 1,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 2,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 3,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      }
+    ],
+    "native-b": [
+      {
+        "rank": 0,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 1,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 2,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      },
+      {
+        "rank": 3,
+        "norms": 113,
+        "calls": 7960,
+        "changed_elements": 0,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  "same_process_comparison": {
+    "candidate": [
+      {
+        "prompt_index": 0,
+        "generated_logprobs_equal": true,
+        "prefill_logprobs_equal": true
+      },
+      {
+        "prompt_index": 1,
+        "generated_logprobs_equal": true,
+        "prefill_logprobs_equal": true
+      }
+    ],
+    "native-b": [
+      {
+        "prompt_index": 0,
+        "generated_logprobs_equal": true,
+        "prefill_logprobs_equal": true
+      },
+      {
+        "prompt_index": 1,
+        "generated_logprobs_equal": true,
+        "prefill_logprobs_equal": true
+      }
+    ]
+  },
+  "first_prefill_differences": [
+    {
+      "prompt_index": 0,
+      "changed_prompt_logprobs": 3,
+      "first_changes": [
+        {
+          "logprob_position": 9,
+          "baseline": [
+            -0.3671465218067169,
+            79043,
+            null
+          ],
+          "candidate": [
+            -0.40170344710350037,
+            79043,
+            null
+          ]
+        },
+        {
+          "logprob_position": 10,
+          "baseline": [
+            -0.0005872909096069634,
+            1372,
+            null
+          ],
+          "candidate": [
+            -0.0005840741214342415,
+            1372,
+            null
+          ]
+        },
+        {
+          "logprob_position": 11,
+          "baseline": [
+            -1.1799423694610596,
+            14432,
+            null
+          ],
+          "candidate": [
+            -1.0431716442108154,
+            14432,
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "prompt_index": 1,
+      "changed_prompt_logprobs": 2105,
+      "first_changes": [
+        {
+          "logprob_position": 10,
+          "baseline": [
+            -2.6585254669189453,
+            11,
+            null
+          ],
+          "candidate": [
+            -2.6541013717651367,
+            11,
+            null
+          ]
+        },
+        {
+          "logprob_position": 11,
+          "baseline": [
+            -7.91586446762085,
+            13020,
+            null
+          ],
+          "candidate": [
+            -7.977034568786621,
+            13020,
+            null
+          ]
+        },
+        {
+          "logprob_position": 12,
+          "baseline": [
+            -0.3580802083015442,
+            11,
+            null
+          ],
+          "candidate": [
+            -0.3293372690677643,
+            11,
+            null
+          ]
+        },
+        {
+          "logprob_position": 13,
+          "baseline": [
+            -0.8501066565513611,
+            323,
+            null
+          ],
+          "candidate": [
+            -0.8450707793235779,
+            323,
+            null
+          ]
+        }
+      ]
+    }
+  ],
+  "prefill_observation": "The initial eager prefill already differs, starting at input-logprob positions 9 and 10 in the two prompts. A decode-graph-only explanation cannot account for this."
+}

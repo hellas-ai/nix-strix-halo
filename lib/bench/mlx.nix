@@ -2,7 +2,7 @@
   pkgs,
   package,
   target ? null,
-  accelerator ? if pkgs.stdenv.isDarwin then "metal" else "rocm",
+  accelerator ? if pkgs.stdenv.hostPlatform.isDarwin then "metal" else "rocm",
   hostProfile ? if accelerator == "metal" then "darwin-metal" else "linux-amd-kfd",
   matrixMetadata ? { },
   extraSystemFeatures ? [ ],

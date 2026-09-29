@@ -1,0 +1,17 @@
+--- a/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py
++++ b/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py
+@@ -197,6 +197,14 @@
+     per layer per forward for nothing. The fallback keeps the kernels' `+ g` / `+ dt`
+     addressing valid for exotic layouts -- no caller hits it today.
+     """
++    if torch.version.hip is not None:
++        # Absorbed ROCm BMM produces [H, N, D].transpose(0, 1). Its head
++        # stride contains N, so constexpr strides otherwise compile a new
++        # attention kernel for every final prefill chunk length.
++        if x.shape[-1] == 0:
++            return x, 0, 0
++        if x.stride(0) < x.stride(1):
++            x = x.contiguous()
+     if x.stride(-1) != 1:
+         x = x.contiguous()
+     return x, x.stride(0), x.stride(1)

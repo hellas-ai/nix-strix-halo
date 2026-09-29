@@ -9,9 +9,11 @@
   openssl,
   patchelf,
   pkg-config,
+  rdma-core,
   rustPlatform,
   rustc,
   symlinkJoin,
+  writableTmpDirAsHomeHook,
   pythonPackages,
   rocmSdk,
   packageSuffix ? "rocm",
@@ -19,12 +21,26 @@
 }:
 
 let
+  sglangDependencies = import ./dependencies.nix {
+    inherit
+      pythonPackages
+      fetchurl
+      autoPatchelfHook
+      stdenv
+      ;
+  };
   pythonSitePackages = pythonPackages.python.sitePackages;
   pythonTag = builtins.replaceStrings [ "." ] [ "" ] pythonPackages.python.pythonVersion;
   rocmSitePackages = pythonPackages.torch.passthru.sitePackages or null;
   rocmRuntimeLibraryPath =
     (pythonPackages.torch.passthru.rocmRuntimeEnv or { }).LD_LIBRARY_PATH or "";
   gpuArch = if lib.hasPrefix "gfx" packageSuffix then packageSuffix else null;
+  hasNativeKernels = lib.elem gpuArch [
+    "gfx1151"
+    "gfx942"
+    "gfx950"
+    "gfx1250"
+  ];
   rocmSdkForJit = symlinkJoin {
     name = "${rocmSdk.name or "rocm-sdk"}-sglang-jit";
     paths = [ rocmSdk ];
@@ -47,6 +63,18 @@ let
     '';
   };
   tvmFfiLibDir = "${pythonPackages.apache-tvm-ffi}/${pythonSitePackages}/tvm_ffi/lib";
+  sglangKernel = import ./kernel.nix {
+    inherit
+      lib
+      stdenv
+      fetchurl
+      autoPatchelfHook
+      pythonPackages
+      packageSuffix
+      gpuArch
+      ;
+    rocmSdk = rocmSdkForJit;
+  };
   outlinesCoreCargoLock = ./outlines-core-0_1_26-Cargo.lock;
   outlines-core_0_1_26 = pythonPackages.buildPythonPackage rec {
     pname = "outlines-core";
@@ -134,9 +162,6 @@ let
     nativeCheckInputs = [ ];
     pythonImportsCheck = old.pythonImportsCheck or [ "torchao" ];
   });
-  modelscopeWithCompatibleSetuptools = pythonPackages.modelscope.override {
-    setuptools = pythonPackages.setuptools_80;
-  };
   xgrammar_0_2_1 = pythonPackages.buildPythonPackage rec {
     pname = "xgrammar";
     version = "0.2.1";
@@ -184,17 +209,18 @@ assert lib.assertMsg (
 ) "sglang-rocm requires the TheRock torch wheel package with passthru.sitePackages";
 pythonPackages.buildPythonApplication rec {
   pname = "sglang-rocm-${packageSuffix}";
-  version = "0.5.14";
+  version = "0.5.20";
   format = "wheel";
 
   src = fetchurl {
-    url = "https://files.pythonhosted.org/packages/45/72/276c6252abfe5a0c893ab7b975253c73ae73f69d1fe7746e168bbefa2fcc/sglang-${version}-cp313-cp313-manylinux_2_34_x86_64.whl";
-    hash = "sha256-LSLmoX9sc1gK7yXSJPMWKh47yc1QQ7QCLYSXXF6WoM0=";
+    url = "https://files.pythonhosted.org/packages/ec/49/bd2e0f7eac9d826cf02b04e64f9285f5c559440dc8ffe31927fe42c26cf1/sglang-${version}-cp313-cp313-manylinux_2_34_x86_64.whl";
+    hash = "sha256-ewa/flefwibjbVE5/K8qGnEQ9eE7kGdHYkFmC6AeVac=";
   };
 
   nativeBuildInputs = [
     autoPatchelfHook
     makeWrapper
+    writableTmpDirAsHomeHook
   ];
 
   buildInputs = [
@@ -203,92 +229,107 @@ pythonPackages.buildPythonApplication rec {
 
   dontUseNinjaBuild = true;
 
-  dependencies = with pythonPackages; [
-    aiohttp
-    amd-aiter
-    anthropic
-    apache-tvm-ffi
-    blobfile
-    build
-    compressed-tensors
-    datasets
-    distro
-    easydict
-    einops
-    fastapi
-    gguf
-    interegular
-    ipython
-    kernels
-    llguidance
-    pythonPackages."mistral-common"
-    modelscopeWithCompatibleSetuptools
-    msgspec
-    ninja
-    numpy
-    nvidia-ml-py
-    openai
-    openai-harmony
-    orjson
-    outlines_0_1_11
-    packaging
-    partial-json-parser
-    pillow
-    prometheus-client
-    psutil
-    pybase64
-    pydantic
-    python-multipart
-    pyzmq
-    requests
-    scipy
-    sentencepiece
-    setproctitle
-    smg-grpc-servicer
-    soundfile
-    tiktoken
-    timm
-    torch
-    torch-memory-saver
-    torchaoNoChecks
-    torchaudio
-    torchvision
-    tqdm
-    transformers
-    uvicorn
-    uvloop
-    watchfiles
-    xgrammar_0_2_1
-  ];
+  dependencies =
+    with pythonPackages;
+    [
+      aiohttp
+      amd-aiter
+      anthropic
+      apache-tvm-ffi
+      blobfile
+      build
+      compressed-tensors
+      datasets
+      distro
+      easydict
+      einops
+      fastapi
+      gguf
+      interegular
+      ipython
+      sglangDependencies.kernels
+      llguidance
+      pythonPackages."mistral-common"
+      msgspec
+      ninja
+      numba
+      numpy
+      nvidia-ml-py
+      openai
+      openai-harmony
+      orjson
+      outlines_0_1_11
+      packaging
+      partial-json-parser
+      pillow
+      prometheus-client
+      psutil
+      pybase64
+      pydantic
+      python-multipart
+      pyzmq
+      requests
+      scipy
+      sentencepiece
+      setproctitle
+      sglangDependencies.smg-grpc-servicer
+      soundfile
+      tiktoken
+      timm
+      torch
+      torch-memory-saver
+      torchaoNoChecks
+      torchaudio
+      torchvision
+      tqdm
+      transformers
+      uvicorn
+      uvloop
+      watchfiles
+      xgrammar_0_2_1
+      xxhash
+      zstandard
+    ]
+    ++ lib.optional hasNativeKernels sglangKernel;
 
   pythonRemoveDeps = [
     "cuda-python"
+    "cuda-tile"
     "flash-attn-4"
     "flashinfer-cubin"
     "flashinfer-python"
     "flashinfer_cubin"
     "flashinfer_python"
+    "humming-kernels"
+    # Optional alternative model hub; nixpkgs marks it insecure. Local paths
+    # and Hugging Face downloads do not import it.
+    "modelscope"
+    "nvshmem4py-cu13"
     "nvidia-cutlass-dsl"
     "nvidia-mathdx"
     "py-spy"
     "quack-kernels"
+    "sgl-deep-ep"
     "sgl-deep-gemm"
-    "sglang-kernel"
     "tilelang"
     "torchcodec"
     "tokenspeed-mla"
     "tokenspeed_mla"
-  ];
+  ]
+  ++ lib.optional (!hasNativeKernels) "sglang-kernel";
 
   pythonRelaxDeps = [
+    "sglang-kernel"
     "apache-tvm-ffi"
     "blobfile"
-    "kernels"
     "llguidance"
+    "numba"
     "openai"
     "openai-harmony"
     "outlines"
+    "soundfile"
     "timm"
+    "tokenizers"
     "torch"
     "torchaudio"
     "torchcodec"
@@ -298,8 +339,28 @@ pythonPackages.buildPythonApplication rec {
 
   postInstall = ''
     for patch_file in ${./patches}/*.patch; do
-      patch -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
+      patch --batch --fuzz=0 -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
     done
+    # Keep component checks in the same Python/ROCm environment as serving.
+    cat > "$out/bin/sglang-python" <<'PY'
+    #!${pythonPackages.python.interpreter}
+    import os
+    import runpy
+    import sys
+
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print("Usage: sglang-python SCRIPT [ARGS...]")
+        raise SystemExit(0 if len(sys.argv) > 1 else 2)
+    sys.argv = sys.argv[1:]
+    sys.path.insert(0, os.path.dirname(os.path.realpath(sys.argv[0])))
+    runpy.run_path(sys.argv[0], run_name="__main__")
+    PY
+    chmod +x "$out/bin/sglang-python"
+  '';
+
+  preFixup = ''
+    # The Rust radix-tree extension links against libtorch from the wheel.
+    addAutoPatchelfSearchPath ${lib.escapeShellArg "${rocmSitePackages}/torch/lib"}
   '';
 
   postFixup = ''
@@ -307,7 +368,11 @@ pythonPackages.buildPythonApplication rec {
 
     rocm_site=${lib.escapeShellArg rocmSitePackages}
     rocm_lib_path="$(find "$rocm_site" -type d \( -name lib -o -name lib64 \) -print | paste -sd:)"
-    rocm_lib_path=${lib.escapeShellArg rocmRuntimeLibraryPath}:"$rocm_lib_path"
+    # RCCL opens libibverbs dynamically. Without it, requesting RoCE silently
+    # selects the socket transport even when the host has working RDMA devices.
+    rocm_lib_path=${
+      lib.escapeShellArg (lib.makeLibraryPath [ rdma-core ])
+    }:${lib.escapeShellArg rocmRuntimeLibraryPath}:"$rocm_lib_path"
 
     wrap_args=(
       --set HIP_PLATFORM amd
@@ -339,7 +404,7 @@ pythonPackages.buildPythonApplication rec {
       wrap_args+=(--set HSA_OVERRIDE_GFX_VERSION ${lib.escapeShellArg hsaOverrideGfxVersion})
     ''}
 
-    for bin in "$out/bin/sglang" "$out/bin/killall_sglang"; do
+    for bin in "$out/bin/sglang" "$out/bin/killall_sglang" "$out/bin/sglang-python"; do
       [ -x "$bin" ] || continue
       wrapProgram "$bin" "''${wrap_args[@]}"
     done
@@ -347,6 +412,9 @@ pythonPackages.buildPythonApplication rec {
 
   pythonImportsCheck = [
     "sglang"
+    "sglang.srt.configs.glm5_next"
+    "sglang.srt.server_args"
+    "sglang.srt.mem_cache.rust_tree_core.mem_cache"
   ];
 
   meta = {

@@ -1,0 +1,14 @@
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -476,7 +476,10 @@
+                 (config.n_routed_experts, config.hidden_size),
+                 dtype=(
+                     torch.float32
+-                    if getattr(config, "router_fp32", False)
++                    if (
++                        getattr(config, "router_fp32", False)
++                        or getattr(config, "moe_router_dtype", None) == "float32"
++                    )
+                     else torch.get_default_dtype()
+                 ),
+             )

@@ -1,0 +1,3998 @@
+{
+  "date": "2026-09-29",
+  "runtime": "/nix/store/4dp7zxvagi9vvhcgdv428hjnkfsg57p8-sglang-rocm-gfx1151-0.5.20",
+  "findings": [
+    "SGLang wrapper omitted libibverbs; NCCL_IB_DISABLE=0 silently fell back to sockets. rdma-core added to wrapper library search path.",
+    "RCCL must select the addressed HCA and DSCP26/ECT0 (NCCL_IB_TC=106). Unmarked actual IB timed out at 32 MiB on this run.",
+    "CRS812 dynamic entries flooded fabric unicast to unrelated ports. Explicit entries remove that flood; switch firmware, PFC settings and physical links were unchanged."
+  ],
+  "switch": {
+    "address": "192.168.23.27",
+    "version": "7.24rc4",
+    "bridge": "bridge",
+    "vid": 1,
+    "static_entries": [
+      {
+        "host": "strix-1",
+        "mac": "1C:34:DA:61:12:B5",
+        "port": "qsfp56-dd-2-1"
+      },
+      {
+        "host": "strix-2",
+        "mac": "1C:34:DA:61:12:B1",
+        "port": "qsfp56-dd-2-1"
+      },
+      {
+        "host": "strix-3",
+        "mac": "B8:59:9F:54:DB:E9",
+        "port": "qsfp56-dd-2-5"
+      },
+      {
+        "host": "strix-4",
+        "mac": "B8:59:9F:54:DB:E5",
+        "port": "qsfp56-dd-2-5"
+      },
+      {
+        "host": "trex",
+        "mac": "50:6B:4B:0D:24:86",
+        "port": "qsfp56-dd-1-1"
+      }
+    ],
+    "persistence": "RouterOS persistent configuration; standalone idempotent script in nixos-config task worktree, machines/routeros/crs812/glm53-fabric-fdb.rsc",
+    "rollback": "/interface bridge host remove [find where comment~\"^glm53:\"]"
+  },
+  "raw_rdma": {
+    "size": 1048576,
+    "queue_pairs": 1,
+    "duration_seconds": 5,
+    "mlx5_1_gid": 3,
+    "traffic_class": 106,
+    "before_Gbit_s": {
+      "2_to_1": 27.54,
+      "3_to_1": 9.74,
+      "4_to_2": 9.74,
+      "4_to_3": 27.52
+    },
+    "static_fdb_3_to_1_Gbit_s": 27.48,
+    "flood_before_bytes": {
+      "destination_port_2_1": 6318711592,
+      "unrelated_port_2_3": 6346348846,
+      "unrelated_port_2_7": 6346348846
+    },
+    "flood_after_bytes": {
+      "destination_port_2_1": 17572224994,
+      "unrelated_port_2_3": 55182,
+      "unrelated_port_2_7": 55182
+    },
+    "note": "Counters span complete connection/warmup/measurement and a little background traffic. Raw bandwidth is perftest reported measurement interval."
+  },
+  "collective_probes": {
+    "marked": {
+      "1": {
+        "records": [
+          {
+            "host": "strix-1",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.07651100168004632,
+            "max_ms": 0.14025800192030147
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.2036655005213106,
+            "max_ms": 0.2947530010715127
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.22544050079886802,
+            "max_ms": 0.28127800032962114
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.31524549922323786,
+            "max_ms": 0.6508289989142213
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 3.6765135009773076,
+            "max_ms": 4.533382001682185
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 7.461957498890115,
+            "max_ms": 51.185680997150484
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 18.44139499917219,
+            "max_ms": 50.48080200140248
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 43.79084249922016,
+            "max_ms": 100.24052599692368
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 235.1851040002657,
+            "max_ms": 280.2946659976442
+          },
+          {
+            "host": "strix-1",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "Socket",
+        "counter_deltas": {
+          "rdma": {},
+          "ethernet": {
+            "tx_pause_ctrl_phy": 108,
+            "rx_discards_phy": 4117,
+            "rx_prio0_bytes": 4606253079,
+            "rx_prio0_packets": 744433,
+            "rx_prio0_discards": 4117,
+            "tx_prio0_bytes": 4537345904,
+            "tx_prio0_packets": 740530,
+            "rx_prio3_bytes": 27642226,
+            "rx_prio3_packets": 8151,
+            "tx_prio3_bytes": 13536,
+            "tx_prio3_packets": 156,
+            "rx_prio5_bytes": 78926,
+            "rx_prio5_packets": 1061,
+            "rx_prio6_bytes": 106,
+            "rx_prio6_packets": 1,
+            "tx_prio3_pause": 108,
+            "tx_prio3_pause_duration": 220
+          }
+        }
+      },
+      "2": {
+        "records": [
+          {
+            "host": "strix-2",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.07709700184932444,
+            "max_ms": 0.15459499991266057
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.2057090005109785,
+            "max_ms": 0.31206499988911673
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.21244200070213992,
+            "max_ms": 0.27110900191473775
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.2949785011878703,
+            "max_ms": 0.7139970002754126
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 3.6424355021154042,
+            "max_ms": 4.917297002975829
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 7.550376001745462,
+            "max_ms": 50.727526999253314
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 18.307057998754317,
+            "max_ms": 54.72326399831218
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 43.42606550017081,
+            "max_ms": 101.00042599879089
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 234.78391649950936,
+            "max_ms": 279.13341499879607
+          },
+          {
+            "host": "strix-2",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "Socket",
+        "counter_deltas": {
+          "rdma": {
+            "rx_write_requests": 67
+          },
+          "ethernet": {
+            "tx_pause_ctrl_phy": 142,
+            "rx_discards_phy": 4117,
+            "rx_prio0_bytes": 4606808082,
+            "rx_prio0_packets": 746108,
+            "rx_prio0_discards": 4117,
+            "tx_prio0_bytes": 4537346454,
+            "tx_prio0_packets": 740535,
+            "rx_prio3_bytes": 29947056,
+            "rx_prio3_packets": 8866,
+            "tx_prio3_bytes": 14310,
+            "tx_prio3_packets": 165,
+            "rx_prio5_bytes": 79312,
+            "rx_prio5_packets": 1066,
+            "rx_prio6_bytes": 106,
+            "rx_prio6_packets": 1,
+            "tx_prio3_pause": 142,
+            "tx_prio3_pause_duration": 314
+          }
+        }
+      },
+      "3": {
+        "records": [
+          {
+            "host": "strix-3",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.07646250014659017,
+            "max_ms": 0.15180499758571386
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.20678299915743992,
+            "max_ms": 0.2791009974316694
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.2110879977408331,
+            "max_ms": 0.3038789946003817
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.3056999994441867,
+            "max_ms": 0.7131359961931594
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 3.5586459998739883,
+            "max_ms": 4.2352579985163175
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 7.7788199960195925,
+            "max_ms": 50.48150400398299
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 19.130705502902856,
+            "max_ms": 53.107045001524966
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 43.49885150077171,
+            "max_ms": 101.10110300593078
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 233.94102000020212,
+            "max_ms": 283.48140099842567
+          },
+          {
+            "host": "strix-3",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "Socket",
+        "counter_deltas": {
+          "rdma": {
+            "rx_write_requests": 91
+          },
+          "ethernet": {
+            "tx_pause_ctrl_phy": 74,
+            "rx_discards_phy": 3805,
+            "rx_prio0_bytes": 4605537858,
+            "rx_prio0_packets": 810976,
+            "rx_prio0_discards": 3805,
+            "tx_prio0_bytes": 4538414784,
+            "tx_prio0_packets": 675274,
+            "rx_prio3_bytes": 27582094,
+            "rx_prio3_packets": 7449,
+            "tx_prio3_bytes": 73668,
+            "tx_prio3_packets": 858,
+            "rx_prio5_bytes": 79908,
+            "rx_prio5_packets": 1074,
+            "rx_prio6_bytes": 106,
+            "rx_prio6_packets": 1,
+            "tx_prio3_pause": 74,
+            "tx_prio3_pause_duration": 147
+          }
+        }
+      },
+      "4": {
+        "records": [
+          {
+            "host": "strix-4",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.07670749982935376,
+            "max_ms": 0.15261500084307045
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.2002434994210489,
+            "max_ms": 0.2982399964821525
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.21517799905268475,
+            "max_ms": 0.2802809976856224
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.30428500031121075,
+            "max_ms": 0.6276089989114553
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 3.5961289977421984,
+            "max_ms": 4.376853001303971
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 7.668857000680873,
+            "max_ms": 48.23203599517001
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 17.00599750256515,
+            "max_ms": 55.07175600359915
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 42.43859600319411,
+            "max_ms": 100.732078004512
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 235.0505059985153,
+            "max_ms": 279.52318800089415
+          },
+          {
+            "host": "strix-4",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "Socket",
+        "counter_deltas": {
+          "rdma": {
+            "rx_write_requests": 212
+          },
+          "ethernet": {
+            "tx_pause_ctrl_phy": 74,
+            "rx_discards_phy": 3805,
+            "rx_prio0_bytes": 4605537163,
+            "rx_prio0_packets": 810973,
+            "rx_prio0_discards": 3805,
+            "tx_prio0_bytes": 4538414784,
+            "tx_prio0_packets": 675274,
+            "rx_prio3_bytes": 27582094,
+            "rx_prio3_packets": 7449,
+            "tx_prio3_bytes": 73668,
+            "tx_prio3_packets": 858,
+            "rx_prio5_bytes": 80048,
+            "rx_prio5_packets": 1076,
+            "rx_prio6_bytes": 106,
+            "rx_prio6_packets": 1,
+            "tx_prio3_pause": 74,
+            "tx_prio3_pause_duration": 147
+          }
+        }
+      }
+    },
+    "verbs-marked": {
+      "1": {
+        "records": [
+          {
+            "host": "strix-1",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04799350062967278,
+            "max_ms": 1.0726859982241876
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.06801999916206114,
+            "max_ms": 0.12091199823771603
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.13114149987814017,
+            "max_ms": 0.14195200128597207
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.2688349995878525,
+            "max_ms": 0.29683700267923996
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 15.557015000013052,
+            "max_ms": 15.632228998583741
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 31.215065999276703,
+            "max_ms": 31.849505001446232
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 62.2713639986614,
+            "max_ms": 63.20879600025364
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 138.74601899988193,
+            "max_ms": 139.11712800108944
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 277.81089349991817,
+            "max_ms": 279.2684489977546
+          },
+          {
+            "host": "strix-1",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "rx_write_requests": 9604
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 580460,
+            "tx_pause_ctrl_phy": 72,
+            "rx_prio0_bytes": 49721277,
+            "rx_prio0_packets": 44590,
+            "tx_prio0_bytes": 796742,
+            "tx_prio0_packets": 1070,
+            "rx_prio3_bytes": 4570978232,
+            "rx_prio3_packets": 1729620,
+            "tx_prio3_bytes": 4566841054,
+            "tx_prio3_packets": 1747171,
+            "rx_prio5_bytes": 165144,
+            "rx_prio5_packets": 2248,
+            "rx_prio3_pause": 580460,
+            "rx_prio3_pause_duration": 6933331,
+            "tx_prio3_pause": 72,
+            "tx_prio3_pause_duration": 170,
+            "rx_prio3_pause_transition": 181316
+          }
+        }
+      },
+      "2": {
+        "records": [
+          {
+            "host": "strix-2",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.047883999286568724,
+            "max_ms": 1.0773860012704972
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.06954299897188321,
+            "max_ms": 0.1163950000773184
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.13024500003666617,
+            "max_ms": 0.14471699978457764
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.26649599931261037,
+            "max_ms": 0.2923789979831781
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 15.594617500028107,
+            "max_ms": 15.723530999821378
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 31.074188498678268,
+            "max_ms": 31.58583699769224
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 62.31487299919536,
+            "max_ms": 64.17478200091864
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 138.7583915002324,
+            "max_ms": 139.8878190011601
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 277.3039815001539,
+            "max_ms": 280.8238409998012
+          },
+          {
+            "host": "strix-2",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "rx_read_requests": 36,
+            "rx_write_requests": 9649
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 580460,
+            "tx_pause_ctrl_phy": 72,
+            "rx_prio0_bytes": 49778629,
+            "rx_prio0_packets": 45037,
+            "tx_prio0_bytes": 797230,
+            "tx_prio0_packets": 1074,
+            "rx_prio3_bytes": 4570982554,
+            "rx_prio3_packets": 1729623,
+            "tx_prio3_bytes": 4566841312,
+            "tx_prio3_packets": 1747174,
+            "rx_prio5_bytes": 165040,
+            "rx_prio5_packets": 2246,
+            "rx_prio3_pause": 580460,
+            "rx_prio3_pause_duration": 6933331,
+            "tx_prio3_pause": 72,
+            "tx_prio3_pause_duration": 170,
+            "rx_prio3_pause_transition": 181316
+          }
+        }
+      },
+      "3": {
+        "records": [
+          {
+            "host": "strix-3",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.047548499424010515,
+            "max_ms": 1.066953998815734
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.06943300104467198,
+            "max_ms": 0.1192760028061457
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.13080549979349598,
+            "max_ms": 0.1375150022795424
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.2644559972395655,
+            "max_ms": 0.29442999948514625
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 15.558416500425665,
+            "max_ms": 15.647077998437453
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 31.15967149642529,
+            "max_ms": 31.539158000668976
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 62.27712849795353,
+            "max_ms": 62.67083099373849
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 138.75283050219878,
+            "max_ms": 138.9600279944716
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 277.2995630002697,
+            "max_ms": 278.46765899448656
+          },
+          {
+            "host": "strix-3",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "rx_write_requests": 9757
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 598420,
+            "tx_pause_ctrl_phy": 62,
+            "rx_prio0_bytes": 52097851,
+            "rx_prio0_packets": 46294,
+            "tx_prio0_bytes": 395566,
+            "tx_prio0_packets": 878,
+            "rx_prio3_bytes": 4572808620,
+            "rx_prio3_packets": 1749084,
+            "tx_prio3_bytes": 4565010666,
+            "tx_prio3_packets": 1727707,
+            "rx_prio5_bytes": 166196,
+            "rx_prio5_packets": 2262,
+            "rx_prio3_pause": 598420,
+            "rx_prio3_pause_duration": 6971314,
+            "tx_prio3_pause": 62,
+            "tx_prio3_pause_duration": 130,
+            "rx_prio3_pause_transition": 189115
+          }
+        }
+      },
+      "4": {
+        "records": [
+          {
+            "host": "strix-4",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04740800068248063,
+            "max_ms": 1.0681040002964437
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.06887699782964773,
+            "max_ms": 0.12002600124105811
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.1301455013162922,
+            "max_ms": 0.14533499779645354
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.26076650101458654,
+            "max_ms": 0.31609900179319084
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 15.671457498683594,
+            "max_ms": 15.997622002032585
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 31.13081699848408,
+            "max_ms": 32.703528995625675
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 62.10766450021765,
+            "max_ms": 64.38686299952678
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 138.70539150229888,
+            "max_ms": 139.56036300078267
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 277.5540335023834,
+            "max_ms": 279.71055600210093
+          },
+          {
+            "host": "strix-4",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "rx_write_requests": 9653
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 598420,
+            "tx_pause_ctrl_phy": 62,
+            "rx_prio0_bytes": 52089086,
+            "rx_prio0_packets": 46261,
+            "tx_prio0_bytes": 395566,
+            "tx_prio0_packets": 878,
+            "rx_prio3_bytes": 4572808620,
+            "rx_prio3_packets": 1749084,
+            "tx_prio3_bytes": 4565010666,
+            "tx_prio3_packets": 1727707,
+            "rx_prio5_bytes": 166266,
+            "rx_prio5_packets": 2263,
+            "rx_prio3_pause": 598420,
+            "rx_prio3_pause_duration": 6971314,
+            "tx_prio3_pause": 62,
+            "tx_prio3_pause_duration": 130,
+            "rx_prio3_pause_transition": 189115
+          }
+        }
+      }
+    },
+    "verbs-unmarked": {
+      "1": {
+        "records": [
+          {
+            "host": "strix-1",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "0",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04745250043924898,
+            "max_ms": 0.11357900075381622
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.0737155005481327,
+            "max_ms": 0.12640299974009395
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.08335399979841895,
+            "max_ms": 0.16294000306515954
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.12072249955963343,
+            "max_ms": 0.18666400137590244
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.5445630017202348,
+            "max_ms": 28.828297003201442
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 4.410348999954294,
+            "max_ms": 6.221021001692861
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 22.3290129997622,
+            "max_ms": 8589.521211000829
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 33554432
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "roce_slow_restart_cnps": 9,
+            "np_cnp_sent": 317,
+            "rp_cnp_handled": 702,
+            "packet_seq_err": 183,
+            "roce_adp_retrans": 9,
+            "out_of_sequence": 147,
+            "rx_write_requests": 22365
+          },
+          "ethernet": {
+            "tx_pause_ctrl_phy": 126,
+            "rx_discards_phy": 4447,
+            "rx_prio0_bytes": 1645640344,
+            "rx_prio0_packets": 741740,
+            "rx_prio0_discards": 4447,
+            "tx_prio0_bytes": 1519278236,
+            "tx_prio0_packets": 404324,
+            "rx_prio3_bytes": 459049228,
+            "rx_prio3_packets": 113376,
+            "tx_prio3_bytes": 3169310,
+            "tx_prio3_packets": 30539,
+            "rx_prio5_bytes": 1130342,
+            "rx_prio5_packets": 14422,
+            "tx_prio5_bytes": 196,
+            "tx_prio5_packets": 2,
+            "rx_prio6_bytes": 20046,
+            "rx_prio6_packets": 257,
+            "tx_prio6_bytes": 24726,
+            "tx_prio6_packets": 317,
+            "tx_prio3_pause": 126,
+            "tx_prio3_pause_duration": 292
+          }
+        }
+      },
+      "2": {
+        "records": [
+          {
+            "host": "strix-2",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "0",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04717249976238236,
+            "max_ms": 0.1130679993366357
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.074712501373142,
+            "max_ms": 0.12466999760363251
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.08314350088767242,
+            "max_ms": 0.15790100223966874
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.12156949924246874,
+            "max_ms": 0.18667399854166433
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.577231500254129,
+            "max_ms": 29.27907299817889
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 4.614483499608468,
+            "max_ms": 5.7331099997099955
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 34.90864899868029,
+            "max_ms": 8589.015629000642
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 33554432
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "roce_slow_restart_cnps": 128,
+            "np_cnp_sent": 317,
+            "rp_cnp_handled": 702,
+            "packet_seq_err": 250,
+            "roce_adp_retrans": 3,
+            "out_of_sequence": 317,
+            "rx_read_requests": 76,
+            "rx_write_requests": 5647
+          },
+          "ethernet": {
+            "tx_pause_ctrl_phy": 126,
+            "rx_discards_phy": 4447,
+            "rx_prio0_bytes": 1645800339,
+            "rx_prio0_packets": 742324,
+            "rx_prio0_discards": 4447,
+            "tx_prio0_bytes": 1519278786,
+            "tx_prio0_packets": 404329,
+            "rx_prio3_bytes": 387917106,
+            "rx_prio3_packets": 96265,
+            "tx_prio3_bytes": 2862746,
+            "tx_prio3_packets": 25895,
+            "rx_prio5_bytes": 1130634,
+            "rx_prio5_packets": 14426,
+            "tx_prio5_bytes": 196,
+            "tx_prio5_packets": 2,
+            "rx_prio6_bytes": 20046,
+            "rx_prio6_packets": 257,
+            "tx_prio6_bytes": 24726,
+            "tx_prio6_packets": 317,
+            "tx_prio3_pause": 126,
+            "tx_prio3_pause_duration": 292
+          }
+        }
+      },
+      "3": {
+        "records": [
+          {
+            "host": "strix-3",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "0",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04715899922302924,
+            "max_ms": 0.10709599882829934
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.07439199907821603,
+            "max_ms": 0.1269450003746897
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.08387300113099627,
+            "max_ms": 0.1658140026847832
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.12031150254188105,
+            "max_ms": 0.19002400222234428
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.596733502286952,
+            "max_ms": 29.201507997640874
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 4.28531750003458,
+            "max_ms": 8568.56544999755
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 10.311227000784129,
+            "max_ms": 17168.442685004266
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 33554432
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "local_ack_timeout_err": 5,
+            "np_cnp_sent": 257,
+            "rp_cnp_handled": 781,
+            "packet_seq_err": 364,
+            "out_of_sequence": 179,
+            "rx_read_requests": 20,
+            "rx_write_requests": 5617
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 47775,
+            "tx_pause_ctrl_phy": 160,
+            "rx_discards_phy": 3204,
+            "rx_prio0_bytes": 1634596717,
+            "rx_prio0_packets": 740327,
+            "rx_prio0_discards": 3204,
+            "tx_prio0_bytes": 1533513722,
+            "tx_prio0_packets": 407502,
+            "rx_prio3_bytes": 15394720,
+            "rx_prio3_packets": 41804,
+            "tx_prio3_bytes": 543724638,
+            "tx_prio3_packets": 131755,
+            "rx_prio5_bytes": 1132568,
+            "rx_prio5_packets": 14451,
+            "rx_prio6_bytes": 24726,
+            "rx_prio6_packets": 317,
+            "tx_prio6_bytes": 20046,
+            "tx_prio6_packets": 257,
+            "rx_prio3_pause": 47609,
+            "rx_prio3_pause_duration": 397977,
+            "tx_prio3_pause": 160,
+            "tx_prio3_pause_duration": 411,
+            "rx_prio3_pause_transition": 23587
+          }
+        }
+      },
+      "4": {
+        "records": [
+          {
+            "host": "strix-4",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "0",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET,TUNING",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04705800165538676,
+            "max_ms": 0.1183360000140965
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.07507700138376094,
+            "max_ms": 0.12541600153781474
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.08185199840227142,
+            "max_ms": 0.15539500600425526
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.12091600001440383,
+            "max_ms": 0.18897400150308385
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.629991497087758,
+            "max_ms": 29.18019799835747
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 4.4324154951027595,
+            "max_ms": 8568.482274997223
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 33.53368100579246,
+            "max_ms": 8589.30703799706
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 33554432
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "local_ack_timeout_err": 9,
+            "np_cnp_sent": 257,
+            "rp_cnp_handled": 781,
+            "packet_seq_err": 564,
+            "out_of_sequence": 129,
+            "rx_read_requests": 42,
+            "rx_write_requests": 5473
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 43875,
+            "tx_pause_ctrl_phy": 160,
+            "rx_discards_phy": 3204,
+            "rx_prio0_bytes": 1634323711,
+            "rx_prio0_packets": 740267,
+            "rx_prio0_discards": 3204,
+            "tx_prio0_bytes": 1533513722,
+            "tx_prio0_packets": 407502,
+            "rx_prio3_bytes": 15192100,
+            "rx_prio3_packets": 38734,
+            "tx_prio3_bytes": 497272358,
+            "tx_prio3_packets": 120585,
+            "rx_prio5_bytes": 1131310,
+            "rx_prio5_packets": 14434,
+            "rx_prio6_bytes": 24726,
+            "rx_prio6_packets": 317,
+            "tx_prio6_bytes": 20046,
+            "tx_prio6_packets": 257,
+            "rx_prio3_pause": 43674,
+            "rx_prio3_pause_duration": 363905,
+            "tx_prio3_pause": 160,
+            "tx_prio3_pause_duration": 411,
+            "rx_prio3_pause_transition": 21636
+          }
+        }
+      }
+    },
+    "static-marked": {
+      "1": {
+        "records": [
+          {
+            "host": "strix-1",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04526349948719144,
+            "max_ms": 0.13782400128548034
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.07386650031548925,
+            "max_ms": 0.11381000149413012
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.07615549839101732,
+            "max_ms": 0.10071599899674766
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.11385949983377941,
+            "max_ms": 0.1260819990420714
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.504482999938773,
+            "max_ms": 2.7652730022964533
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 5.41839550169243,
+            "max_ms": 5.785656998341437
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 11.21352950030996,
+            "max_ms": 12.524429999757558
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 22.98846400117327,
+            "max_ms": 24.839824000082444
+          },
+          {
+            "host": "strix-1",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-1",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 46.40046200074721,
+            "max_ms": 48.84971799765481
+          },
+          {
+            "host": "strix-1",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "np_ecn_marked_roce_packets": 26997,
+            "np_cnp_sent": 5346,
+            "rp_cnp_handled": 3988,
+            "rx_write_requests": 9604
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 4914,
+            "tx_pause_ctrl_phy": 43163,
+            "rx_prio0_bytes": 931611126,
+            "rx_prio0_packets": 675563,
+            "tx_prio0_bytes": 1523464,
+            "tx_prio0_packets": 12582,
+            "rx_prio3_bytes": 4750503264,
+            "rx_prio3_packets": 1335990,
+            "tx_prio3_bytes": 4605258632,
+            "tx_prio3_packets": 1233154,
+            "rx_prio5_bytes": 22570,
+            "rx_prio5_packets": 307,
+            "rx_prio6_bytes": 311064,
+            "rx_prio6_packets": 3988,
+            "tx_prio6_bytes": 416988,
+            "tx_prio6_packets": 5346,
+            "rx_prio3_pause": 4914,
+            "rx_prio3_pause_duration": 34463,
+            "tx_prio3_pause": 43163,
+            "tx_prio3_pause_duration": 209559,
+            "rx_prio3_pause_transition": 2383
+          }
+        }
+      },
+      "2": {
+        "records": [
+          {
+            "host": "strix-2",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04593000085151289,
+            "max_ms": 0.14168200141284615
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.0783595005486859,
+            "max_ms": 0.1180380022560712
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.07663650103495456,
+            "max_ms": 0.10137699791812338
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.11372449807822704,
+            "max_ms": 0.12880800204584375
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.5476574992353562,
+            "max_ms": 2.7949840005021542
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 5.054930501501076,
+            "max_ms": 6.247639998036902
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 10.497771500013187,
+            "max_ms": 14.22175300103845
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 23.114370000257622,
+            "max_ms": 24.762739998550387
+          },
+          {
+            "host": "strix-2",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-2",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 45.43655849920469,
+            "max_ms": 48.906487001659116
+          },
+          {
+            "host": "strix-2",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "np_ecn_marked_roce_packets": 26997,
+            "np_cnp_sent": 5346,
+            "rp_cnp_handled": 3988,
+            "rx_read_requests": 2551,
+            "rx_write_requests": 16120
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 4914,
+            "tx_pause_ctrl_phy": 43163,
+            "rx_prio0_bytes": 929064951,
+            "rx_prio0_packets": 673954,
+            "tx_prio0_bytes": 1523952,
+            "tx_prio0_packets": 12586,
+            "rx_prio3_bytes": 4750503264,
+            "rx_prio3_packets": 1335990,
+            "tx_prio3_bytes": 4605258632,
+            "tx_prio3_packets": 1233154,
+            "rx_prio5_bytes": 22956,
+            "rx_prio5_packets": 312,
+            "rx_prio6_bytes": 311064,
+            "rx_prio6_packets": 3988,
+            "tx_prio6_bytes": 416988,
+            "tx_prio6_packets": 5346,
+            "rx_prio3_pause": 4914,
+            "rx_prio3_pause_duration": 34463,
+            "tx_prio3_pause": 43163,
+            "tx_prio3_pause_duration": 209559,
+            "rx_prio3_pause_transition": 2383
+          }
+        }
+      },
+      "3": {
+        "records": [
+          {
+            "host": "strix-3",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04542850001598708,
+            "max_ms": 0.13564599794335663
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.07450799967045896,
+            "max_ms": 0.11318599717924371
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.07563750114059076,
+            "max_ms": 0.1022669966914691
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.11361149881849997,
+            "max_ms": 0.12538599548861384
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.546750500187045,
+            "max_ms": 2.9157329990994185
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 5.516492499737069,
+            "max_ms": 5.68755099811824
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 11.105382505775196,
+            "max_ms": 13.508213000022806
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 22.78312600174104,
+            "max_ms": 24.72288200078765
+          },
+          {
+            "host": "strix-3",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-3",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 46.23339000318083,
+            "max_ms": 49.72534500120673
+          },
+          {
+            "host": "strix-3",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "np_ecn_marked_roce_packets": 13496,
+            "np_cnp_sent": 3988,
+            "rp_cnp_handled": 5346,
+            "rx_read_requests": 3002,
+            "rx_write_requests": 19407
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 11149,
+            "tx_pause_ctrl_phy": 28205,
+            "rx_prio0_bytes": 719219147,
+            "rx_prio0_packets": 663424,
+            "tx_prio0_bytes": 399444,
+            "tx_prio0_packets": 851,
+            "rx_prio3_bytes": 4777044882,
+            "rx_prio3_packets": 1339345,
+            "tx_prio3_bytes": 4699564136,
+            "tx_prio3_packets": 1297612,
+            "rx_prio5_bytes": 23376,
+            "rx_prio5_packets": 318,
+            "rx_prio6_bytes": 416988,
+            "rx_prio6_packets": 5346,
+            "tx_prio6_bytes": 311064,
+            "tx_prio6_packets": 3988,
+            "rx_prio3_pause": 11149,
+            "rx_prio3_pause_duration": 82226,
+            "tx_prio3_pause": 28205,
+            "tx_prio3_pause_duration": 132445,
+            "rx_prio3_pause_transition": 5039
+          }
+        }
+      },
+      "4": {
+        "records": [
+          {
+            "host": "strix-4",
+            "stage": "init",
+            "env": {
+              "NCCL_IB_TC": "106",
+              "NCCL_SOCKET_IFNAME": "cx5fabric0",
+              "NCCL_DEBUG_SUBSYS": "INIT,NET",
+              "NCCL_DEBUG": "INFO",
+              "NCCL_NET": "IB",
+              "NCCL_IB_HCA": "=mlx5_1:1",
+              "NCCL_IB_DISABLE": "0"
+            }
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4,
+            "median_ms": 0.04526349948719144,
+            "max_ms": 0.14068499876884744
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8192
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8192,
+            "median_ms": 0.07239749902510084,
+            "max_ms": 0.11449600424384698
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16384
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16384,
+            "median_ms": 0.07708199700573459,
+            "max_ms": 0.10551600280450657
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 65536
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 65536,
+            "median_ms": 0.11302599887130782,
+            "max_ms": 0.12863599840784445
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 4194304
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 4194304,
+            "median_ms": 2.5314845006505493,
+            "max_ms": 2.8754730010405183
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 8388608
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 8388608,
+            "median_ms": 5.391423499531811,
+            "max_ms": 5.691748003300745
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 16777216
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 16777216,
+            "median_ms": 11.195223498361884,
+            "max_ms": 13.282193001941778
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 33554432
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 33554432,
+            "median_ms": 23.06130949727958,
+            "max_ms": 24.981351001770236
+          },
+          {
+            "host": "strix-4",
+            "stage": "start",
+            "bytes": 67108864
+          },
+          {
+            "host": "strix-4",
+            "stage": "pass",
+            "bytes": 67108864,
+            "median_ms": 46.319952998601366,
+            "max_ms": 49.25290400569793
+          },
+          {
+            "host": "strix-4",
+            "stage": "done"
+          }
+        ],
+        "actual_transport": "IB",
+        "counter_deltas": {
+          "rdma": {
+            "np_ecn_marked_roce_packets": 13496,
+            "np_cnp_sent": 3988,
+            "rp_cnp_handled": 5346,
+            "rx_read_requests": 2743,
+            "rx_write_requests": 17659
+          },
+          "ethernet": {
+            "rx_pause_ctrl_phy": 11149,
+            "tx_pause_ctrl_phy": 28205,
+            "rx_prio0_bytes": 719221624,
+            "rx_prio0_packets": 663434,
+            "tx_prio0_bytes": 399444,
+            "tx_prio0_packets": 851,
+            "rx_prio3_bytes": 4777044882,
+            "rx_prio3_packets": 1339345,
+            "tx_prio3_bytes": 4699564136,
+            "tx_prio3_packets": 1297612,
+            "rx_prio5_bytes": 23376,
+            "rx_prio5_packets": 318,
+            "rx_prio6_bytes": 416988,
+            "rx_prio6_packets": 5346,
+            "tx_prio6_bytes": 311064,
+            "tx_prio6_packets": 3988,
+            "rx_prio3_pause": 11149,
+            "rx_prio3_pause_duration": 82226,
+            "tx_prio3_pause": 28205,
+            "tx_prio3_pause_duration": 132445,
+            "rx_prio3_pause_transition": 5039
+          }
+        }
+      }
+    }
+  },
+  "sglang_bf16_repeat": [
+    {
+      "rows": 1,
+      "bytes": 8192,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.03125,
+      "median_ms": 0.17591449977771845
+    },
+    {
+      "rows": 1,
+      "bytes": 8192,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.03125,
+      "median_ms": 0.11184150025655981
+    },
+    {
+      "rows": 1,
+      "bytes": 8192,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.03125,
+      "median_ms": 2.7362849996279692
+    },
+    {
+      "rows": 1,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 4,
+      "bytes": 32768,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.0390625,
+      "median_ms": 0.21247099903121125
+    },
+    {
+      "rows": 4,
+      "bytes": 32768,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.0390625,
+      "median_ms": 0.1888525002868846
+    },
+    {
+      "rows": 4,
+      "bytes": 32768,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.0390625,
+      "median_ms": 2.6879715005634353
+    },
+    {
+      "rows": 4,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 69,
+      "bytes": 565248,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.046875,
+      "median_ms": 0.49504150047141593
+    },
+    {
+      "rows": 69,
+      "bytes": 565248,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.046875,
+      "median_ms": 0.5204429999139393
+    },
+    {
+      "rows": 69,
+      "bytes": 565248,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.046875,
+      "median_ms": 3.161188000376569
+    },
+    {
+      "rows": 69,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 257,
+      "bytes": 2105344,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 1.9101435009361012
+    },
+    {
+      "rows": 257,
+      "bytes": 2105344,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 1.6127154995047022
+    },
+    {
+      "rows": 257,
+      "bytes": 2105344,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 3.9246039996214677
+    },
+    {
+      "rows": 257,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 1024,
+      "bytes": 8388608,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 6.2637819992232835
+    },
+    {
+      "rows": 1024,
+      "bytes": 8388608,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 5.2499595021799905
+    },
+    {
+      "rows": 1024,
+      "bytes": 8388608,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 6.94621399998141
+    },
+    {
+      "rows": 1024,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    }
+  ],
+  "limitations": [
+    "No GPU Direct RDMA on this platform; RCCL stages through host buffers.",
+    "Graph-repeat timings include capture/first replay and are correctness evidence only.",
+    "End-to-end decode/prefill probability consistency is not qualified; see retained full-model results."
+  ],
+  "full_model": {
+    "startup_utc": "2026-09-29T05:16:00Z",
+    "ready_utc": "2026-09-29T05:19:50Z",
+    "api_check": [
+      {
+        "id": "c42583bf5e8a43a9a9e827494daab3d6",
+        "object": "chat.completion",
+        "created": 1790659196,
+        "model": "glm-5.3-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "3973",
+              "reasoning_content": "137*29 = 137*30 - 137 = 4110-137 = 3973",
+              "tool_calls": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "matched_stop": 154827
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 28,
+          "total_tokens": 56,
+          "completion_tokens": 28,
+          "prompt_tokens_details": null,
+          "reasoning_tokens": 24
+        },
+        "metadata": {
+          "weight_version": "default",
+          "weight_versions": [
+            {
+              "version": "default",
+              "start": 0,
+              "end": 28
+            }
+          ]
+        },
+        "wall_seconds": 3.2431452269665897
+      },
+      {
+        "choices": [
+          {
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "",
+              "tool_calls": [
+                {
+                  "id": "call_2e65bfe00d4b46e5b176a4cf",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\": \"marker.txt\"}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 180,
+          "total_tokens": 193,
+          "completion_tokens": 13,
+          "prompt_tokens_details": null,
+          "reasoning_tokens": 1
+        },
+        "first_event_seconds": 2.264715307042934,
+        "wall_seconds": 3.0975918360054493
+      },
+      {
+        "choices": [
+          {
+            "message": {
+              "role": "assistant",
+              "content": "GLM_AGENT_ACCEPTANCE_53",
+              "reasoning_content": ""
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 204,
+          "total_tokens": 213,
+          "completion_tokens": 9,
+          "prompt_tokens_details": {
+            "cached_tokens": 128
+          },
+          "reasoning_tokens": 1
+        },
+        "first_event_seconds": 0.7360701719298959,
+        "wall_seconds": 1.4656470839399844
+      },
+      {
+        "protocol_and_coherence": "passed"
+      }
+    ],
+    "stream": [
+      {
+        "request_index": 0,
+        "ok": true,
+        "start": 705839.029334943,
+        "end": 705842.532877067,
+        "duration_s": 3.5035421239444986,
+        "ttft_s": 0.2696576069574803,
+        "decode_s": 3.2338845169870183,
+        "prompt_tokens": 12,
+        "completion_tokens": 32,
+        "text_bytes": 90,
+        "error": "",
+        "sample": "warmup",
+        "decode_tokens_per_second": 9.585994749398914
+      },
+      {
+        "request_index": 1,
+        "ok": true,
+        "start": 705842.533096195,
+        "end": 705856.050452093,
+        "duration_s": 13.517355898045935,
+        "ttft_s": 0.3541356740752235,
+        "decode_s": 13.163220223970711,
+        "prompt_tokens": 12,
+        "completion_tokens": 128,
+        "text_bytes": 409,
+        "error": "",
+        "sample": "measure-1",
+        "decode_tokens_per_second": 9.648095058740132
+      },
+      {
+        "request_index": 2,
+        "ok": true,
+        "start": 705856.050626402,
+        "end": 705869.590544914,
+        "duration_s": 13.539918511989526,
+        "ttft_s": 0.3545037410221994,
+        "decode_s": 13.185414770967327,
+        "prompt_tokens": 12,
+        "completion_tokens": 128,
+        "text_bytes": 409,
+        "error": "",
+        "sample": "measure-2",
+        "decode_tokens_per_second": 9.631854758155844
+      },
+      {
+        "request_index": 3,
+        "ok": true,
+        "start": 705869.590736533,
+        "end": 705883.203444393,
+        "duration_s": 13.612707859952934,
+        "ttft_s": 0.35514724790118635,
+        "decode_s": 13.257560612051748,
+        "prompt_tokens": 12,
+        "completion_tokens": 128,
+        "text_bytes": 409,
+        "error": "",
+        "sample": "measure-3",
+        "decode_tokens_per_second": 9.579439515030465
+      },
+      {
+        "median_decode_tokens_per_second": 9.631854758155844,
+        "median_ttft_seconds": 0.3545037410221994,
+        "qualification": "Single request, short coding completion; performance only. Does not establish coding quality or a complete roofline."
+      }
+    ],
+    "consistency": [
+      {
+        "prompt_index": 0,
+        "prompt_tokens": 12,
+        "output_tokens": 32,
+        "generated_seconds": 3.6069894769461825,
+        "max_logprob_delta": 0.18206095695495605,
+        "mean_logprob_delta": 0.009723359761437678,
+        "argmax_differences": [
+          {
+            "position": 28,
+            "decoded_id": 264,
+            "prefill_id": 470,
+            "prefill_margin": 0.125
+          }
+        ],
+        "thresholds": {
+          "max": 0.05,
+          "mean": 0.01
+        },
+        "passed": false,
+        "scored": {
+          "text": "",
+          "output_ids": [],
+          "meta_info": {
+            "id": "bf0b845076714003a929ad387ca16018",
+            "finish_reason": {
+              "type": "length",
+              "length": 0
+            },
+            "prompt_tokens": 44,
+            "weight_version": "default",
+            "num_retractions": 0,
+            "input_token_logprobs": [
+              [
+                null,
+                750,
+                null
+              ],
+              [
+                -8.57955265045166,
+                75096,
+                null
+              ],
+              [
+                -0.5881198644638062,
+                1445,
+                null
+              ],
+              [
+                -0.11095499247312546,
+                982,
+                null
+              ],
+              [
+                -0.09287906438112259,
+                262,
+                null
+              ],
+              [
+                -1.9248709678649902,
+                4210,
+                null
+              ],
+              [
+                -1.1681580543518066,
+                5598,
+                null
+              ],
+              [
+                -0.49212387204170227,
+                279,
+                null
+              ],
+              [
+                -0.12495411187410355,
+                54760,
+                null
+              ],
+              [
+                -0.33461764454841614,
+                79043,
+                null
+              ],
+              [
+                -0.0005336767644621432,
+                1372,
+                null
+              ],
+              [
+                -0.9534429907798767,
+                14432,
+                null
+              ],
+              [
+                -0.0012675832258537412,
+                262,
+                null
+              ],
+              [
+                -0.16904966533184052,
+                421,
+                null
+              ],
+              [
+                -0.0027620759792625904,
+                308,
+                null
+              ],
+              [
+                -0.30938902497291565,
+                2651,
+                null
+              ],
+              [
+                -7.652943895664066e-05,
+                220,
+                null
+              ],
+              [
+                -0.10054924339056015,
+                15,
+                null
+              ],
+              [
+                -0.0006086166249588132,
+                510,
+                null
+              ],
+              [
+                -0.0004813704581465572,
+                286,
+                null
+              ],
+              [
+                -0.021029945462942123,
+                470,
+                null
+              ],
+              [
+                -0.01937827467918396,
+                220,
+                null
+              ],
+              [
+                -3.707340147229843e-05,
+                15,
+                null
+              ],
+              [
+                -0.0014819841599091887,
+                198,
+                null
+              ],
+              [
+                -0.00011765265662688762,
+                262,
+                null
+              ],
+              [
+                -0.007460589520633221,
+                4409,
+                null
+              ],
+              [
+                -1.7165992176160216e-05,
+                308,
+                null
+              ],
+              [
+                -0.00025054655270650983,
+                621,
+                null
+              ],
+              [
+                -5.781483559985645e-05,
+                220,
+                null
+              ],
+              [
+                -5.864925333298743e-05,
+                16,
+                null
+              ],
+              [
+                -0.0016182672698050737,
+                510,
+                null
+              ],
+              [
+                -7.676783570786938e-05,
+                286,
+                null
+              ],
+              [
+                -5.721882189391181e-05,
+                470,
+                null
+              ],
+              [
+                -0.0001996556529775262,
+                220,
+                null
+              ],
+              [
+                -0.0005691815749742091,
+                16,
+                null
+              ],
+              [
+                -0.01564737595617771,
+                198,
+                null
+              ],
+              [
+                -0.00039843725971877575,
+                262,
+                null
+              ],
+              [
+                -0.22251011431217194,
+                770,
+                null
+              ],
+              [
+                -0.00045468006283044815,
+                510,
+                null
+              ],
+              [
+                -0.00030214988510124385,
+                286,
+                null
+              ],
+              [
+                -0.7722365856170654,
+                264,
+                null
+              ],
+              [
+                -0.0019696613308042288,
+                11,
+                null
+              ],
+              [
+                -2.6344907382735983e-05,
+                293,
+                null
+              ],
+              [
+                -0.00029940891545265913,
+                284,
+                null
+              ]
+            ],
+            "output_token_logprobs": [],
+            "output_token_logprobs_length": 0,
+            "input_top_logprobs": [
+              null,
+              [
+                [
+                  -3.89205265045166,
+                  1815,
+                  null
+                ],
+                [
+                  -4.89205265045166,
+                  1159,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.5881198644638062,
+                  1445,
+                  null
+                ],
+                [
+                  -2.9631199836730957,
+                  3932,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.11095499247312546,
+                  982,
+                  null
+                ],
+                [
+                  -3.735954999923706,
+                  1648,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.09287906438112259,
+                  262,
+                  null
+                ],
+                [
+                  -3.342879056930542,
+                  220,
+                  null
+                ]
+              ],
+              [
+                [
+                  -1.1748709678649902,
+                  421,
+                  null
+                ],
+                [
+                  -1.9248709678649902,
+                  4210,
+                  null
+                ]
+              ],
+              [
+                [
+                  -1.1681580543518066,
+                  5598,
+                  null
+                ],
+                [
+                  -2.0431580543518066,
+                  47568,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.49212387204170227,
+                  279,
+                  null
+                ],
+                [
+                  -1.3671238422393799,
+                  54760,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.12495411187410355,
+                  54760,
+                  null
+                ],
+                [
+                  -2.6249542236328125,
+                  308,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.33461764454841614,
+                  79043,
+                  null
+                ],
+                [
+                  -1.5846176147460938,
+                  1372,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0005336767644621432,
+                  1372,
+                  null
+                ],
+                [
+                  -8.500534057617188,
+                  8499,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.7034429907798767,
+                  320,
+                  null
+                ],
+                [
+                  -0.9534429907798767,
+                  14432,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0012675832258537412,
+                  262,
+                  null
+                ],
+                [
+                  -7.376267433166504,
+                  1066,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.16904966533184052,
+                  421,
+                  null
+                ],
+                [
+                  -2.1690497398376465,
+                  264,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0027620759792625904,
+                  308,
+                  null
+                ],
+                [
+                  -6.1277618408203125,
+                  537,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.30938902497291565,
+                  2651,
+                  null
+                ],
+                [
+                  -1.8093889951705933,
+                  366,
+                  null
+                ]
+              ],
+              [
+                [
+                  -7.652943895664066e-05,
+                  220,
+                  null
+                ],
+                [
+                  -9.937576293945312,
+                  15,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.10054924339056015,
+                  15,
+                  null
+                ],
+                [
+                  -2.3505492210388184,
+                  16,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0006086166249588132,
+                  510,
+                  null
+                ],
+                [
+                  -7.625608444213867,
+                  25,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0004813704581465572,
+                  286,
+                  null
+                ],
+                [
+                  -8.000481605529785,
+                  260,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.021029945462942123,
+                  470,
+                  null
+                ],
+                [
+                  -3.8960299491882324,
+                  4828,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.01937827467918396,
+                  220,
+                  null
+                ],
+                [
+                  -4.144378185272217,
+                  330,
+                  null
+                ]
+              ],
+              [
+                [
+                  -3.707340147229843e-05,
+                  15,
+                  null
+                ],
+                [
+                  -10.62503719329834,
+                  16,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0014819841599091887,
+                  198,
+                  null
+                ],
+                [
+                  -7.501482009887695,
+                  220,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.00011765265662688762,
+                  262,
+                  null
+                ],
+                [
+                  -9.875117301940918,
+                  286,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.007460589520633221,
+                  4409,
+                  null
+                ],
+                [
+                  -5.382460594177246,
+                  421,
+                  null
+                ]
+              ],
+              [
+                [
+                  -1.7165992176160216e-05,
+                  308,
+                  null
+                ],
+                [
+                  -11.750017166137695,
+                  220,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.00025054655270650983,
+                  621,
+                  null
+                ],
+                [
+                  -8.875250816345215,
+                  2651,
+                  null
+                ]
+              ],
+              [
+                [
+                  -5.781483559985645e-05,
+                  220,
+                  null
+                ],
+                [
+                  -9.8750581741333,
+                  16,
+                  null
+                ]
+              ],
+              [
+                [
+                  -5.864925333298743e-05,
+                  16,
+                  null
+                ],
+                [
+                  -10.4375581741333,
+                  17,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0016182672698050737,
+                  510,
+                  null
+                ],
+                [
+                  -6.626618385314941,
+                  476,
+                  null
+                ]
+              ],
+              [
+                [
+                  -7.676783570786938e-05,
+                  286,
+                  null
+                ],
+                [
+                  -10.562576293945312,
+                  260,
+                  null
+                ]
+              ],
+              [
+                [
+                  -5.721882189391181e-05,
+                  470,
+                  null
+                ],
+                [
+                  -10.937557220458984,
+                  671,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0001996556529775262,
+                  220,
+                  null
+                ],
+                [
+                  -8.750199317932129,
+                  308,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0005691815749742091,
+                  16,
+                  null
+                ],
+                [
+                  -7.5005693435668945,
+                  15,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.01564737595617771,
+                  198,
+                  null
+                ],
+                [
+                  -4.8906474113464355,
+                  271,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.00039843725971877575,
+                  262,
+                  null
+                ],
+                [
+                  -9.375398635864258,
+                  286,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.22251011431217194,
+                  770,
+                  null
+                ],
+                [
+                  -1.9725100994110107,
+                  264,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.00045468006283044815,
+                  510,
+                  null
+                ],
+                [
+                  -8.250454902648926,
+                  25,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.00030214988510124385,
+                  286,
+                  null
+                ],
+                [
+                  -9.3753023147583,
+                  260,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.6472365856170654,
+                  470,
+                  null
+                ],
+                [
+                  -0.7722365856170654,
+                  264,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.0019696613308042288,
+                  11,
+                  null
+                ],
+                [
+                  -7.001969814300537,
+                  8401,
+                  null
+                ]
+              ],
+              [
+                [
+                  -2.6344907382735983e-05,
+                  293,
+                  null
+                ],
+                [
+                  -11.50002670288086,
+                  220,
+                  null
+                ]
+              ],
+              [
+                [
+                  -0.00029940891545265913,
+                  284,
+                  null
+                ],
+                [
+                  -8.500299453735352,
+                  11,
+                  null
+                ]
+              ]
+            ],
+            "output_top_logprobs": [
+              [
+                [
+                  -0.001290918211452663,
+                  220,
+                  null
+                ],
+                [
+                  -6.751290798187256,
+                  320,
+                  null
+                ]
+              ]
+            ],
+            "reasoning_tokens": 0,
+            "completion_tokens": 0,
+            "cached_tokens": 0,
+            "weight_versions": [
+              {
+                "version": "default",
+                "start": 0,
+                "end": 0
+              }
+            ],
+            "cached_tokens_details": null,
+            "dp_rank": null,
+            "e2e_latency": 0.4382710780009802,
+            "response_sent_to_client_ts": 1790659249.2134256
+          }
+        }
+      },
+      {
+        "prompt_index": 1,
+        "prompt_tokens": 2322,
+        "output_tokens": 32,
+        "generated_seconds": 8.298664127010852,
+        "max_logprob_delta": 0.20197653770446777,
+        "mean_logprob_delta": 0.010016960490133897,
+        "argmax_differences": [],
+        "thresholds": {
+          "max": 0.05,
+          "mean": 0.01
+        },
+        "passed": false
+      }
+    ],
+    "cache_branches": [
+      {
+        "case": "fresh-repeat-control",
+        "same_ids": true,
+        "max_logprob_delta": 0.0
+      },
+      {
+        "case": "identical",
+        "cold": {
+          "wall_seconds": 6.812797425081953,
+          "ids": [
+            1061,
+            1062,
+            1063,
+            1064,
+            1065,
+            1066,
+            1067,
+            1068
+          ],
+          "logprobs": [
+            -1.6093124941107817e-05,
+            -0.00030858523678034544,
+            -2.5510464183753356e-05,
+            -3.290122185717337e-05,
+            -0.00045777810737490654,
+            -0.00012492353562265635,
+            -8.403901301790029e-05,
+            -2.169585604860913e-05
+          ],
+          "cached_tokens": 0
+        },
+        "warm": {
+          "wall_seconds": 1.0204558690311387,
+          "ids": [
+            1061,
+            1062,
+            1063,
+            1064,
+            1065,
+            1066,
+            1067,
+            1068
+          ],
+          "logprobs": [
+            -1.6093124941107817e-05,
+            -0.00030858523678034544,
+            -2.5510464183753356e-05,
+            -3.290122185717337e-05,
+            -0.00045777810737490654,
+            -0.00012492353562265635,
+            -8.403901301790029e-05,
+            -2.169585604860913e-05
+          ],
+          "cached_tokens": 3072
+        },
+        "same_ids": true,
+        "max_logprob_delta": 0.0
+      },
+      {
+        "case": "append",
+        "same_ids": true,
+        "max_logprob_delta": 0.0
+      },
+      {
+        "case": "truncate",
+        "same_ids": true,
+        "max_logprob_delta": 0.02006952464580536
+      },
+      {
+        "case": "diverge",
+        "same_ids": true,
+        "max_logprob_delta": 0.00048297352623194456
+      }
+    ],
+    "note": "Decode/prefill probability gates remain failed; 1 argmax difference across 64 sampled positions. Cache-branch checks pass on this launch.",
+    "context_cache": [
+      {
+        "context": 131072,
+        "prompt_tokens": 129017,
+        "output_reserve": 2048,
+        "expected": {
+          "early": "amber-7251",
+          "middle": "cedar-4938",
+          "late": "violet-8614"
+        },
+        "records": 7013
+      },
+      {
+        "phase": "cold",
+        "wall_seconds": 294.7472748289583,
+        "result": {
+          "id": "25a95cac311c436f8918f94294809a2f",
+          "object": "chat.completion",
+          "created": 1790659631,
+          "model": "glm-5.3-flash",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"early\": \"amber-7251\", \"middle\": \"cedar-4938\", \"late\": \"violet-8614\"}",
+                "reasoning_content": null,
+                "tool_calls": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "matched_stop": 154827
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 129017,
+            "total_tokens": 129051,
+            "completion_tokens": 34,
+            "prompt_tokens_details": null,
+            "reasoning_tokens": 1
+          },
+          "metadata": {
+            "weight_version": "default",
+            "weight_versions": [
+              {
+                "version": "default",
+                "start": 0,
+                "end": 34
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "warm",
+        "wall_seconds": 4.069563898956403,
+        "result": {
+          "id": "02ca14d6247644a6a07d03ae08aee0ee",
+          "object": "chat.completion",
+          "created": 1790659635,
+          "model": "glm-5.3-flash",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"early\": \"amber-7251\", \"middle\": \"cedar-4938\", \"late\": \"violet-8614\"}",
+                "reasoning_content": null,
+                "tool_calls": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "matched_stop": 154827
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 129017,
+            "total_tokens": 129051,
+            "completion_tokens": 34,
+            "prompt_tokens_details": {
+              "cached_tokens": 128960
+            },
+            "reasoning_tokens": 1
+          },
+          "metadata": {
+            "weight_version": "default",
+            "weight_versions": [
+              {
+                "version": "default",
+                "start": 0,
+                "end": 34
+              }
+            ]
+          }
+        }
+      },
+      {
+        "context_and_cache": "passed",
+        "cache": "on"
+      }
+    ]
+  },
+  "ci": {
+    "commit": "54a1abf1",
+    "build": 19238,
+    "checks": 19239,
+    "smoke": 19229,
+    "all_passed": true
+  }
+}
