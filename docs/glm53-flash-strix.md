@@ -4,14 +4,15 @@ Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint serves on
 four TP ranks. Fixing duplicate MoE scaling restored coherent answers: the
 arithmetic, streamed tool call and tool-result continuation checks now pass.
 The FP32-router fix also passes component and API checks. Numerical
-consistency still exceeds its investigation limits; the latest run changed
-one of 64 sampled token choices between decode and prefill. Pi completed three
+consistency still exceeds its probability limits; all 64 sampled token choices
+now agree between decode and prefill after enabling stable fused routing. Pi completed three
 updater repairs: one after review feedback and two on the first draft,
 including a task starting above 100K prompt tokens. Three-marker retrieval passed at
 129,017 prompt tokens both uncached and with prefix reuse. The cached repeat
 reused 128,960 tokens and took 4.49 seconds, versus 362 seconds cold.
-Synthetic fresh-repeat, appended-prefix and truncated-prefix checks still
-fail numerical comparisons, with changed token choices on truncation.
+Stable routing makes synthetic fresh-repeat, identical-prefix and appended-prefix
+probabilities exact. Truncation still exceeds the probability limit, although
+all tested cache-branch token IDs now agree.
 General cache correctness, broader coding quality and performance relative
 to the hardware roofline remain unqualified.
 
@@ -135,6 +136,29 @@ MoE CPU-reference tests pass on all four GPUs (relative L2 0.000679–0.001720);
 the prior package fails the requested dtype assertion. Full-model results follow below. Component evidence is in
 `lib/bench/results/glm53-router-fp32-2026-09-29.json`.
 
+Repeated real TP4 captures subsequently isolated another router issue: identical
+FP32 scores entered the grouped `torch.topk(sorted=False)` fallback, but its
+expert order varied. This changes floating-point normalization and MoE summation;
+fully tied scores also changed the selected expert set. The launcher now enables
+`SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK=1`. Its fused Triton router agrees with
+stable CPU selection (lowest expert ID wins ties), repeats exactly in eager and
+graph execution, and preserves the single 2.5 routed-expert scale. The new
+`glm53-router-repeat.py` regression and complete MoE checks pass on all four nodes.
+With the first four real checkpoint layers at TP4, all 28 captured stage/chunk
+outputs and fresh-request probabilities become bitwise identical. A truncated
+cache branch still exceeds the probability limit. Full-model API checks pass;
+fresh, identical and appended requests now reproduce exact probabilities, and
+all tested branch token IDs agree. Decode/prefill maxima are 0.0618/0.1086 with
+all 64 argmax choices agreeing; truncation still differs by 0.0978. The strict
+probability gates remain failed. Evidence is in
+[`glm53-fused-router-2026-09-29.json`](../lib/bench/results/glm53-fused-router-2026-09-29.json).
+
+An independent `--enable-fp32-lm-head` experiment improves the output projection's
+agreement with CPU double precision. It does not make the four-layer fixture
+pass all cache or decode/prefill comparisons, so it remains disabled in the full
+server. Results, including failures, are in
+[`glm53-fp32-head-2026-09-29.json`](../lib/bench/results/glm53-fp32-head-2026-09-29.json).
+
 
 On the FP32-router build, arithmetic and streamed tool use pass again. The
 short/chunked consistency maxima are 0.0848/0.1598 and means 0.00647/0.01220;
@@ -200,8 +224,9 @@ to preserve memory locality. BF16/FP32 tests include empty inputs, hidden-size
 tails and strided tensors; twelve independent CPU-double cases and three
 fallback cases pass on every GPU. The initial 1024-token prototype improved
 4.54 ms to 0.33 ms. Packaged per-node measurements are recorded in
-`lib/bench/results/glm53-mhc-post-2026-09-29.json`; full-model regression is
-pending. A separate per-rank checkpoint reload experiment preserved generated
+`lib/bench/results/glm53-mhc-post-2026-09-29.json`. Full-model API and retrieval
+checks pass with this patch; strict numerical comparisons still fail, as
+reported above. A separate per-rank checkpoint reload experiment preserved generated
 IDs but differed in probabilities (maximum 0.0429 on the four-layer slice),
 so serving continues to use the standard loader pending investigation.
 
@@ -468,7 +493,8 @@ with `--expect-cache on` afterward. These are investigation gates, not a
 claim that all coding tasks or quantization quality have passed.
 
 `glm53-cache-branches.py` adds a fresh/fresh control and repeated, appended,
-truncated and divergent synthetic prefixes. On the graph-enabled runtime,
+truncated and divergent synthetic prefixes. Before stable routing, on the
+graph-enabled runtime,
 the fresh control's maximum log-probability difference was 0.212; appended
 and truncated branches differed by 0.313 and 0.847. The latter also changed
 generated token IDs. Identical and divergent cases passed the 0.05 limit.
@@ -487,6 +513,10 @@ states exhausted the remaining static memory budget during initialization;
 mHC post operation and graphs, so it does not isolate their individual gains
 from the earlier 6.60 tokens/s baseline. Evidence is in
 [`glm53-prefix-graph-2026-09-29.json`](../lib/bench/results/glm53-prefix-graph-2026-09-29.json).
+After enabling the stable fused router alone, the same three-run short-request
+measurement gives 8.81 tokens/s and 0.374-second time to first token. These
+measurements do not establish the hardware-roofline target; see
+[`glm53-fused-router-2026-09-29.json`](../lib/bench/results/glm53-fused-router-2026-09-29.json).
 
 `lib/bench/glm53-hardware.py` measures components without model weights. The
 initial results are in

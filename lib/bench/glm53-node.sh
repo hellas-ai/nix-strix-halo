@@ -28,6 +28,9 @@ PY
 
 export HIP_VISIBLE_DEVICES=0
 export SGLANG_USE_AITER=0
+# The torch.topk(sorted=False) fallback changes expert order on identical
+# scores. The fused router has stable ties/order and preserves the 2.5 scale.
+export SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK=1
 export SGLANG_ROCM_USE_MULTI_STREAM=0
 export SGLANG_OPT_USE_TILELANG_MHC_PRE=0
 export SGLANG_OPT_USE_TILELANG_MHC_POST=0
