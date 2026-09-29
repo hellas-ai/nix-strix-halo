@@ -1,14 +1,14 @@
 {
-  "runtime": "/nix/store/ap29zmw1lrhcvnbwkffll5gs2r6fw3a6-sglang-rocm-gfx1151-0.5.20",
+  "runtime": "/nix/store/vlzym7vnbx9vf4clvqnl1xg09zldmvlp-sglang-rocm-gfx1151-0.5.20",
   "api_math_streaming_and_tool_continuation": "passed",
   "prefill_decode_consistency": [
     {
       "prompt_index": 0,
       "prompt_tokens": 12,
       "output_tokens": 32,
-      "generated_seconds": 7.428119910997339,
-      "max_logprob_delta": 0.08477029204368591,
-      "mean_logprob_delta": 0.006468114328413321,
+      "generated_seconds": 9.990026600076817,
+      "max_logprob_delta": 0.058832406997680664,
+      "mean_logprob_delta": 0.006911935535299563,
       "argmax_differences": [],
       "thresholds": {
         "max": 0.05,
@@ -20,9 +20,9 @@
       "prompt_index": 1,
       "prompt_tokens": 2322,
       "output_tokens": 32,
-      "generated_seconds": 14.578157152980566,
-      "max_logprob_delta": 0.1597996950149536,
-      "mean_logprob_delta": 0.012198243844409262,
+      "generated_seconds": 12.542950051021762,
+      "max_logprob_delta": 0.21474695205688477,
+      "mean_logprob_delta": 0.014213014876361285,
       "argmax_differences": [],
       "thresholds": {
         "max": 0.05,
@@ -31,5 +31,42 @@
       "passed": false
     }
   ],
-  "qualified": false
+  "qualified": false,
+  "previous_runs": [
+    {
+      "runtime": "/nix/store/ap29zmw1lrhcvnbwkffll5gs2r6fw3a6-sglang-rocm-gfx1151-0.5.20",
+      "api_math_streaming_and_tool_continuation": "passed",
+      "prefill_decode_consistency": [
+        {
+          "prompt_index": 0,
+          "prompt_tokens": 12,
+          "output_tokens": 32,
+          "generated_seconds": 7.428119910997339,
+          "max_logprob_delta": 0.08477029204368591,
+          "mean_logprob_delta": 0.006468114328413321,
+          "argmax_differences": [],
+          "thresholds": {
+            "max": 0.05,
+            "mean": 0.01
+          },
+          "passed": false
+        },
+        {
+          "prompt_index": 1,
+          "prompt_tokens": 2322,
+          "output_tokens": 32,
+          "generated_seconds": 14.578157152980566,
+          "max_logprob_delta": 0.1597996950149536,
+          "mean_logprob_delta": 0.012198243844409262,
+          "argmax_differences": [],
+          "thresholds": {
+            "max": 0.05,
+            "mean": 0.01
+          },
+          "passed": false
+        }
+      ],
+      "qualified": false
+    }
+  ]
 }

@@ -6,7 +6,8 @@ arithmetic, streamed tool call and tool-result continuation checks now pass.
 The FP32-router fix also passes component and API checks. Numerical
 consistency still exceeds its initial investigation limits, although all 64
 sampled token choices agree. Pi completed one updater repair after review
-feedback; 128K context, cache reuse and performance qualification remain pending.
+feedback. Three-marker retrieval passed twice at 129,017 prompt tokens; coding
+at that length, cache reuse and performance qualification remain pending.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -174,6 +175,29 @@ an end-to-end speedup. Evidence is in
 `lib/bench/results/glm53-layout-mhc-2026-09-29.json`. TP4 relaunched at 02:17 UTC
 with a 131072-token limit, radix caching and graphs disabled, for regression
 and long-context qualification.
+
+With patches 0014/0015, API checks pass and all 64 sampled token choices still
+agree between prefill and decode. The numerical maxima are 0.0588/0.2147 and
+means 0.00691/0.01421, so the existing strict thresholds remain failed. At
+131072 context capacity, a 129017-token prompt returned all three exact markers
+at 10%, 50% and 90% depth. Two uncached runs returned identical answers in
+478.46 and 400.06 seconds; the first includes compilation overhead. Three
+128-output-token streaming runs measured median steady decode 6.60 tokens/s
+and median first-token latency 0.498 seconds on a 12-token coding prompt.
+Graphs and radix caching were disabled. This establishes a baseline, not the
+requested roofline efficiency or coding quality at 128K. Evidence is in
+`lib/bench/results/glm53-context-performance-2026-09-29.json`.
+
+Patch 0016 fuses the four-stream mHC post mix, avoiding the intermediate
+`[tokens, 4, 4, hidden]` tensor. Hidden columns are adjacent in workgroup order
+to preserve memory locality. BF16/FP32 tests include empty inputs, hidden-size
+tails and strided tensors; twelve independent CPU-double cases and three
+fallback cases pass on every GPU. The initial 1024-token prototype improved
+4.54 ms to 0.33 ms. Packaged per-node measurements are recorded in
+`lib/bench/results/glm53-mhc-post-2026-09-29.json`; full-model regression is
+pending. A separate per-rank checkpoint reload experiment preserved generated
+IDs but differed in probabilities (maximum 0.0429 on the four-layer slice),
+so serving continues to use the standard loader pending investigation.
 
 Hydra also exposed a Tensile wheel metadata mismatch after the nixpkgs update.
 The distribution now uses the packaged ROCm release version, retaining the
