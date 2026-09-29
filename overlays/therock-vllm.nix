@@ -45,6 +45,7 @@ let
     # PyPI sdists do not include all fixtures needed by the upstream tests.
     doCheck = false;
   });
+  xgrammar = final.callPackage ../pkgs/xgrammar-0_2.nix { pythonPackages = py; };
   tritonKernels = prev.fetchFromGitHub {
     owner = "triton-lang";
     repo = "triton";
@@ -242,6 +243,7 @@ let
         py.six
         py.tqdm
         py.watchfiles
+        xgrammar
       ];
       extraDependencies = lib.unique (baseExtraDependencies ++ featureDependencies);
     in
@@ -368,12 +370,19 @@ let
         buildInputs = (old.buildInputs or [ ]) ++ [ final.libdrm.dev ];
         pythonRemoveDeps = (old.pythonRemoveDeps or [ ]) ++ dropVllmDependencyNames;
         dependencies = lib.unique (
-          dropNamedDeps dropVllmDependencyNames (old.dependencies or [ ]) ++ extraDependencies
+          dropNamedDeps (dropVllmDependencyNames ++ [ "xgrammar" ]) (old.dependencies or [ ])
+          ++ extraDependencies
         );
         propagatedBuildInputs = lib.unique (
-          dropNamedDeps dropVllmDependencyNames (old.propagatedBuildInputs or [ ]) ++ extraDependencies
+          dropNamedDeps (dropVllmDependencyNames ++ [ "xgrammar" ]) (old.propagatedBuildInputs or [ ])
+          ++ extraDependencies
         );
         optional-dependencies = optionalDependencies;
+        pythonImportsCheck = (old.pythonImportsCheck or [ ]) ++ [
+          "vllm.entrypoints.cli.main"
+          "vllm.parser.harmony"
+          "xgrammar.openai_tool_call_schema"
+        ];
         passthru = (old.passthru or { }) // {
           vllmFeatureOptions = featureFlags;
           vllmUnsupportedFeatures = unsupportedFeatureReasons;
