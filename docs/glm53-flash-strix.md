@@ -89,7 +89,27 @@ quality-qualified performance result. The consistency probe then found maximum
 log-probability differences of 18.03 and 9.08 on 12-token and 2322-token prompts
 (respective means 3.57 and 1.85), versus investigation limits 0.05/0.01.
 The same generated token IDs were rescored by prefill with caches flushed.
-The cause is under investigation; no coding-agent task has run.
+A checkpoint-backed, four-layer diagnostic identified double routed-expert
+scaling in the HIP Triton path: the runner applies 2.5 and the outer MoE
+module applies it again. Its captured first-MoE output matches a 6.25 scale
+(relative L2 0.00288); against the required 2.5 scale, error is 1.0045.
+Patch 0012 skips the duplicate outer scaling when HIP uses the Triton runner.
+With the patch, the same real-weight/input calculation agrees with an
+independent CPU reference at relative L2 0.000839. This is a layer check;
+full-model quality and consistency must be retested before any coding task.
+
+`lib/bench/glm53-moe-scaling-check.py` exercises the complete MoE module,
+including top-eight routing, INT4 dequantization, clamped activation, the
+shared expert and scaling. The unpatched module fails at relative L2 1.449.
+The corrected single-stream path passes 1/7/33-token cases on all four GPUs
+(relative L2 0.000716–0.001831); multi-stream
+scaling also passes when expert output is out-of-place. The upstream
+multi-stream method reads its shared-expert input after the routed experts
+can overwrite it in-place. The launcher explicitly disables ROCm multi-stream
+while that independent aliasing issue remains unresolved. Captured first-layer
+weights match the canonical checkpoint exactly; its KDA attention also agrees
+with an independent CPU recurrence (relative L2 0.00493). Results are recorded
+in `lib/bench/results/glm53-moe-scaling-2026-09-29.json`.
 
 Hydra also exposed a Tensile wheel metadata mismatch after the nixpkgs update.
 The distribution now uses the packaged ROCm release version, retaining the
