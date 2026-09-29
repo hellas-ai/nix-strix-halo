@@ -1,11 +1,7 @@
 {
   lib,
+  callPackage,
   fetchurl,
-  cargo,
-  openssl,
-  pkg-config,
-  rustPlatform,
-  rustc,
   pythonPackages,
   sglang-rocm,
 }:
@@ -17,6 +13,14 @@ let
     name = "sglang-${revision}.tar.gz";
     url = "https://github.com/sgl-project/sglang/archive/${revision}.tar.gz";
     hash = "sha256-oXyEki1hlrdnqFW7ySzYZNQJiIPRGFrU41VyyzO/mAQ=";
+  };
+  nativeExtensions = callPackage ./native-extensions.nix {
+    inherit
+      src
+      revision
+      version
+      pythonPackages
+      ;
   };
   base = sglang-rocm.override {
     runtimePatches = [
@@ -46,28 +50,13 @@ base.overridePythonAttrs (old: {
   inherit version src;
   sourceRoot = "sglang-${revision}/python";
   format = "pyproject";
-  # The image processor and radix tree use independent Rust workspaces. This
-  # lock vendors their union; cargoSetupHook must still see the original main
-  # workspace lock, with its local packages and dependency resolution intact.
-  cargoDeps =
-    (rustPlatform.importCargoLock { lockFile = ./Cargo-vendor.lock; }).overrideAttrs
-      (previous: {
-        buildCommand = previous.buildCommand + ''
-          rm "$out/Cargo.lock"
-          tar -xOf ${src} sglang-${revision}/rust/Cargo.lock > "$out/Cargo.lock"
-        '';
-      });
-  cargoRoot = "../rust";
-  nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
-    cargo
-    rustc
-    rustPlatform.cargoSetupHook
-    pkg-config
-  ];
-  buildInputs = (old.buildInputs or [ ]) ++ [ openssl.dev ];
+  postPatch = (old.postPatch or "") + ''
+    # The extensions are built separately with the upstream Rust build hooks.
+    substituteInPlace pyproject.toml \
+      --replace-fail '"setuptools-rust>=1.11",' ""
+  '';
   build-system = with pythonPackages; [
     setuptools
-    setuptools-rust
     setuptools-scm
     torch
     wheel
@@ -75,7 +64,17 @@ base.overridePythonAttrs (old: {
   dependencies = map (p: if p == baseKernel then kernel else p) old.dependencies;
   env = (old.env or { }) // {
     SETUPTOOLS_SCM_PRETEND_VERSION = version;
-    SGLANG_BUILD_RUST_EXTS = "multimodal,mem_cache";
+    SGLANG_BUILD_RUST_EXTS = "none";
+  };
+  postInstall = old.postInstall + ''
+    extension_suffix="$(${pythonPackages.python.interpreter} -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"
+    for module_stem in ${lib.escapeShellArgs nativeExtensions.moduleStems}; do
+      ln -s "${nativeExtensions}/${pythonPackages.python.sitePackages}/$module_stem$extension_suffix" \
+        "$out/${pythonPackages.python.sitePackages}/$module_stem$extension_suffix"
+    done
+  '';
+  passthru = (old.passthru or { }) // {
+    inherit nativeExtensions;
   };
   pythonImportsCheck = [
     "sglang"

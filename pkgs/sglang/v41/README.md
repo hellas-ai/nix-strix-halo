@@ -2,7 +2,9 @@
 
 `sglang-v41-rocm` pins the V4.1 serving source and matching native kernels to
 `fdf14605e5791ad3bcb93b27a495d447f2746838`. Both Rust extensions build from that
-source. The candidate preserves the official Flash checkpoint's packed MXFP4
+source in a separate derivation, so Python-only patches reuse the native build.
+The extensions use the runtime's exact Python and Torch and are linked into
+the complete Nix package. The candidate preserves the official Flash checkpoint's packed MXFP4
 experts and FP8/E8M0 dense weights; it adds no weight quantization.
 
 The patches provide portable mHC, FP4 sparse indexing and E8M0 activation
