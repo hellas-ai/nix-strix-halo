@@ -281,7 +281,7 @@ let
               "import pynvml"
 
           substituteInPlace pyproject.toml \
-            --replace-fail '"torch == 2.11.0"' '"torch"'
+            --replace-fail '"torch == 2.13.0"' '"torch"'
 
           substituteInPlace CMakeLists.txt \
             --replace-fail \

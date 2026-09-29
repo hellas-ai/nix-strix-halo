@@ -400,7 +400,7 @@
             inherit lib therockPythonConfig;
             target = rocmTarget;
             vllmSrc = inputs.vllm-src;
-            vllmVersion = "0.25.1";
+            vllmVersion = "0.30.0";
             enabled = enableTherockVllm;
           })
           (import ./overlays/pkgs.nix {
