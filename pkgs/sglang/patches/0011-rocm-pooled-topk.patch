@@ -1,0 +1,89 @@
+--- a/sglang/srt/layers/attention/dsa/kpool_fp8_index.py
++++ b/sglang/srt/layers/attention/dsa/kpool_fp8_index.py
+@@ -570,6 +570,12 @@
+         raise NotImplementedError(
+             "index_kpool topk requires CUDA float32 logits; PyTorch topk fallback "
+             f"is disabled. Got device={logits.device}, dtype={logits.dtype}."
++        )
++
++    if torch.version.hip is not None:
++        return _topk_from_pooled_history_logits_hip(
++            logits, group_lengths, pool_size, topk, page_table, topk_offsets,
++            seq_lens, row_starts, out_rows, page_table_row_index,
+         )
+ 
+     if group_topk in (128, 160, 192, 224, 256, 512):
+@@ -1716,3 +1722,73 @@
+     offsets = tl.program_id(0) * 128 + tl.arange(0, 128)
+     values = tl.load(X + offsets).to(tl.float32)
+     tl.store(Y + offsets, _hadamard128(values))
++
++
++def _topk_from_pooled_history_logits_hip(
++    logits,
++    group_lengths,
++    pool_size,
++    topk,
++    page_table=None,
++    topk_offsets=None,
++    seq_lens=None,
++    row_starts=None,
++    out_rows=None,
++    page_table_row_index=None,
++):
++    """Deterministic ROCm baseline: select pools, expand them, then append the tail."""
++    rows, cols = logits.shape
++    group_topk = topk // pool_size
++    device = logits.device
++    rank = torch.arange(group_topk, device=device, dtype=torch.int64)
++    starts = torch.zeros_like(group_lengths) if row_starts is None else row_starts
++    if cols > group_topk:
++        col = torch.arange(cols, device=device)
++        valid = (col[None, :] >= starts[:, None]) & (
++            col[None, :] < (starts + group_lengths)[:, None]
++        )
++        scores = logits.masked_fill(~valid, -float("inf"))
++        # Stable ties select the lower logical pool. Canonical token order also
++        # keeps attention accumulation independent of the sort implementation.
++        selected = torch.argsort(scores, dim=1, descending=True, stable=True)[
++            :, :group_topk
++        ]
++        selected = (selected - starts[:, None]).sort(dim=1).values
++        selected = torch.where(
++            group_lengths[:, None] <= group_topk, rank[None, :], selected
++        )
++    else:
++        selected = rank[None, :].expand(rows, -1)
++    out_cols = topk + (pool_size - 1 if seq_lens is not None else 0)
++    col = torch.arange(out_cols, device=device, dtype=torch.int64)
++    history_len = (
++        torch.minimum(group_lengths, group_lengths.new_full((), group_topk)) * pool_size
++    )
++    group_rank = (col // pool_size).clamp(max=group_topk - 1)
++    logical = selected[:, group_rank] * pool_size + (col % pool_size)[None, :]
++    valid = col[None, :] < history_len[:, None]
++    if seq_lens is not None:
++        tail_col = col[None, :] - history_len[:, None]
++        tail_valid = (tail_col >= 0) & (tail_col < (seq_lens % pool_size)[:, None])
++        logical = torch.where(
++            tail_valid, group_lengths[:, None] * pool_size + tail_col, logical
++        )
++        valid = valid | tail_valid
++    logical = torch.where(valid, logical, 0)
++    if page_table is not None:
++        page_rows = (
++            torch.arange(rows, device=device)
++            if page_table_row_index is None
++            else page_table_row_index
++        )
++        result = page_table[page_rows[:, None], logical]
++    elif topk_offsets is not None:
++        result = logical + topk_offsets.reshape(-1, 1)
++    else:
++        result = logical
++    result = torch.where(valid, result, -1).to(torch.int32)
++    if out_rows is not None and out_rows != rows:
++        padded = result.new_full((out_rows, out_cols), -1)
++        padded[:rows] = result
++        return padded
++    return result

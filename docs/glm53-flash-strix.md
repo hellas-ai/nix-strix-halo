@@ -1,10 +1,11 @@
 # GLM-5.3-Flash staging and four-Strix serving review
 
-Updated on trex, 2026-09-29 (Europe/Zurich). All four TP ranks completed
-weight loading and allocated their KV caches. Attention initialization then
-failed because a CUDA-only workspace was selected on gfx1151; the package
-now guards that selection by platform. Full startup and generation remain
-under qualification. No coding-agent acceptance is claimed.
+Updated on trex, 2026-09-29 (Europe/Zurich). The full checkpoint loads on all
+four TP ranks and allocates its KV caches. Generation remains unqualified:
+startup and warmup exposed CUDA-only dispatch and incomplete pooled-DSA support
+on ROCm. A reduced four-layer TP4 dummy fixture now exercises KDA, DSA and
+quantized MoE without repeated full-checkpoint reloads. No coding-agent
+acceptance is claimed.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
@@ -44,6 +45,37 @@ reads to avoid scattered mmap faults on network storage. The largest shard
 is 20 GB; serial loading keeps its temporary memory bounded. A separate
 patch makes the post-load barrier deadline configurable, preserving the
 480-second upstream default; this launcher selects 1800 seconds.
+
+The subsequent full launch reached HTTP startup at 23:56 UTC but warmup
+failed: pooled DSA requires 64-token pages while ROCm forced single-token
+pages. The reduced fixture reproduced the issue and a second incompatible
+assertion in the cache allocator. The pooled indexer also called CUDA-only
+DeepGEMM and rejected HIP at dispatch. The ROCm patch preserves the packed
+64-token cache layout, pooled history/tail selection, and causal masks; it
+uses Triton activation quantization and matrix products with FP32 accumulation.
+FP8 operands are converted exactly to BF16, allowing the matrix products to
+use RDNA instructions. `lib/bench/glm53-kpool-check.py` compares scores against
+an independent FP64 CPU calculation: ten ragged/paged cases passed on every
+node, with maximum absolute error 2.61e-7. This validates these component
+scores, not full-model quality or long-context behavior.
+
+The reduced fixture passed KDA and sparse prefill, then exposed further ROCm
+gaps in dense clamping, query rotation and pooled selection. Dense clamping
+now respects the AITER switch and reuses the existing Triton activation; its
+CPU checks match exactly. Triton sparse attention now handles zero RoPE
+dimensions and all 2051 history/tail columns. Eight CPU reference checks pass
+for prefill/decode, zero/64 RoPE dimensions, short/2051-column index tables and
+fully masked rows (relative L2 error 0.00176–0.00229 in BF16).
+
+The query rotation reuses the existing normalized Triton Hadamard transform
+used by pooled keys. Its BF16/FP32 checks pass for empty, contiguous and strided
+inputs against a CPU Hadamard matrix. HIP pooled selection uses a deterministic
+PyTorch baseline in place of the CUDA JIT kernel, preserving short histories,
+ragged row starts, logical/page/offset mapping and compact live tails. Exact
+CPU index checks cover boundary lengths, tied scores, remapped page rows,
+padded output rows and empty history with a live tail. Sorting cost is not yet
+optimized. The TP4 fixture must pass short and >2048-token prefill plus decode
+before another full-model launch.
 
 ## Snapshot
 
