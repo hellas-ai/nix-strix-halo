@@ -1,0 +1,16 @@
+{
+  "backend": "jaccl-ring",
+  "envs": ["MLX_METAL_FAST_SYNCH=1"],
+  "hosts": [
+    {
+      "ssh": "10.55.0.1",
+      "ips": ["10.55.0.1"],
+      "rdma": [null, ["rdma_en1", "rdma_en2"]]
+    },
+    {
+      "ssh": "10.55.0.2",
+      "ips": [],
+      "rdma": [["rdma_en3", "rdma_en5"], null]
+    }
+  ]
+}

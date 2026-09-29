@@ -1,0 +1,398 @@
+{
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
+  "nodes": {
+    "strix-1": {
+      "cases": [
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001675415621456222,
+          "torch_ms": 0.026493180048419163,
+          "triton_ms": 0.019837319996440783
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 3.951676737787909e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001654631400388871,
+          "torch_ms": 0.04447949999303091,
+          "triton_ms": 0.01917289999255445
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.123337457700033e-08
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016582424396349637,
+          "torch_ms": 4.527776160030044,
+          "triton_ms": 0.3316038400225807
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.098032336828562e-08
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016672991141923814,
+          "torch_ms": 0.016914359948714264,
+          "triton_ms": 0.019237840024288744
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.101604675293304e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001657843804389751
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.float32",
+          "relative_l2": 4.116064921150072e-08
+        }
+      ],
+      "cpu_double_reference": "passed",
+      "general_fallback": "passed"
+    },
+    "strix-2": {
+      "cases": [
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001675415621456222,
+          "torch_ms": 0.02783518000796903,
+          "triton_ms": 0.019621399987954646
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 3.951676737787909e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001654631400388871,
+          "torch_ms": 0.04316705999372061,
+          "triton_ms": 0.019046939996769652
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.123337457700033e-08
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016582424396349637,
+          "torch_ms": 4.459521799981303,
+          "triton_ms": 0.3305008600000292
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.098032336828562e-08
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016672991141923814,
+          "torch_ms": 0.017884199987747706,
+          "triton_ms": 0.01937453998834826
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.101604675293304e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001657843804389751
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.float32",
+          "relative_l2": 4.116064921150072e-08
+        }
+      ],
+      "cpu_double_reference": "passed",
+      "general_fallback": "passed"
+    },
+    "strix-3": {
+      "cases": [
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001675415621456222,
+          "torch_ms": 0.03022930002771318,
+          "triton_ms": 0.04782715994224418
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 3.951676737787909e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001654631400388871,
+          "torch_ms": 0.03973480001150165,
+          "triton_ms": 0.045102840012987144
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.123337457700033e-08
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016582424396349637,
+          "torch_ms": 4.449088760011364,
+          "triton_ms": 0.33109000003605615
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.098032336828562e-08
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016672991141923814,
+          "torch_ms": 0.03025290003279224,
+          "triton_ms": 0.04576602004817687
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.101604675293304e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001657843804389751
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.float32",
+          "relative_l2": 4.116064921150072e-08
+        }
+      ],
+      "cpu_double_reference": "passed",
+      "general_fallback": "passed"
+    },
+    "strix-4": {
+      "cases": [
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 0,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 0
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001675415621456222,
+          "torch_ms": 0.030346260027727112,
+          "triton_ms": 0.04662455998186488
+        },
+        {
+          "tokens": 1,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 3.951676737787909e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001654631400388871,
+          "torch_ms": 0.039730779972160235,
+          "triton_ms": 0.0454996000189567
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.123337457700033e-08
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016582424396349637,
+          "torch_ms": 4.4541138599743135,
+          "triton_ms": 0.3311096799734514
+        },
+        {
+          "tokens": 1024,
+          "hidden": 4096,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.098032336828562e-08
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.0016672991141923814,
+          "torch_ms": 0.030482660004054196,
+          "triton_ms": 0.045501220010919496
+        },
+        {
+          "tokens": 7,
+          "hidden": 257,
+          "strided": false,
+          "dtype": "torch.float32",
+          "relative_l2": 4.101604675293304e-08
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.bfloat16",
+          "relative_l2": 0.001657843804389751
+        },
+        {
+          "tokens": 17,
+          "hidden": 4096,
+          "strided": true,
+          "dtype": "torch.float32",
+          "relative_l2": 4.116064921150072e-08
+        }
+      ],
+      "cpu_double_reference": "passed",
+      "general_fallback": "passed"
+    }
+  },
+  "qualification": "Independent component checks passed. Full-model regression pending; isolated timing is not a roofline result."
+}

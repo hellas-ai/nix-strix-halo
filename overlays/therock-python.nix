@@ -45,6 +45,7 @@ final: prev: {
               hipcc = sdk;
               composable_kernel = {
                 src = "${rocmSource}/rocm-libraries/projects/composablekernel";
+                composable_kernel_src = "${rocmSource}/rocm-libraries/projects/composablekernel";
               };
             };
         in

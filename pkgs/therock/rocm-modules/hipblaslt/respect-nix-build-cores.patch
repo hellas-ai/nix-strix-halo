@@ -1,0 +1,16 @@
+diff --git a/tensilelite/Tensile/Common/Parallel.py b/tensilelite/Tensile/Common/Parallel.py
+--- a/tensilelite/Tensile/Common/Parallel.py
++++ b/tensilelite/Tensile/Common/Parallel.py
+@@ -54,6 +54,12 @@ def CPUThreadCount(enable=True):
+             cpu_count = min(os.cpu_count(), 61)
+         else:
+             cpu_count = len(os.sched_getaffinity(0))
++        # Each validation worker loads a large logic tree. Keep the pool
++        # bounded even when Nix allocates all cores on a large shared host.
++        cpu_count = min(cpu_count, 32)
++        build_cores = int(os.environ.get("NIX_BUILD_CORES", "0"))
++        if build_cores > 0:
++            cpu_count = min(cpu_count, build_cores)
+         cpuThreads = globalParameters["CpuThreads"]
+         if cpuThreads == -1:
+             return cpu_count

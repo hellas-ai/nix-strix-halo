@@ -1,0 +1,405 @@
+{
+  "date": "2026-09-29",
+  "node": "strix-3",
+  "architecture": "gfx1151",
+  "runtime": "j95k13kapgc1a26v8q9xh2w57xwc4cmr-sglang-rocm-gfx1151-0.5.20",
+  "shape": {
+    "experts": 288,
+    "top_k": 8,
+    "hidden": 4096,
+    "intermediate_per_rank": 512,
+    "weight_group": 128
+  },
+  "method": "Synthetic complete MoE, 8 invocations per tile configuration, each preceded by a 256 MiB flush. Counters filter the gate/up and down kernels; these timings include counter-collection overhead and are not full-model latency. Same pinned wheel ROCm profiler as the runtime. No GPU power or clock changes.",
+  "counter": "FETCH_SIZE = (GL2C_EA_RDREQ32*32 + GL2C_EA_RDREQ64*64 + GL2C_EA_RDREQ96*96 + GL2C_EA_RDREQ128*128)/1024; output in KiB. L2 external traffic can hit system cache and is not necessarily DRAM traffic.",
+  "calibration_relative_error": 5.0067901611328125e-05,
+  "conclusion": "BK=128 removes most gate/up read amplification: 38.74 MB to 17.97 MB, against 17.04 MB packed weights and scales. Its 256 VGPRs and ~43 GB/s L2 external reads still leave a substantial gap to the 216 GB/s calibrated read probe. This does not alone identify the remaining latency as bandwidth, occupancy or instruction bottleneck.",
+  "results": [
+    {
+      "region": "w4-bk64",
+      "stage": "gate_up",
+      "expected_selected_weight_and_scale_bytes": 17039360,
+      "median_L2_external_read_bytes": 38740352.0,
+      "median_kernel_ms": 1.2029515,
+      "median_L2_external_GB_s": 32.30828859024915,
+      "samples": [
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.230051,
+          "FETCH_SIZE": 38076.0625,
+          "MeanOccupancyPerActiveCU": 34.73734,
+          "MemUnitBusy": 95.685326
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.170012,
+          "FETCH_SIZE": 37772.625,
+          "MeanOccupancyPerActiveCU": 35.056811,
+          "MemUnitBusy": 94.864142
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.149013,
+          "FETCH_SIZE": 37030.875,
+          "MeanOccupancyPerActiveCU": 35.132291,
+          "MemUnitBusy": 90.71301
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.214292,
+          "FETCH_SIZE": 37892.125,
+          "MeanOccupancyPerActiveCU": 34.826349,
+          "MemUnitBusy": 96.118219
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.23497,
+          "FETCH_SIZE": 38040.25,
+          "MeanOccupancyPerActiveCU": 34.75106,
+          "MemUnitBusy": 96.341417
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.207611,
+          "FETCH_SIZE": 38143.875,
+          "MeanOccupancyPerActiveCU": 34.910706,
+          "MemUnitBusy": 93.841889
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.198292,
+          "FETCH_SIZE": 37765.25,
+          "MeanOccupancyPerActiveCU": 35.028446,
+          "MemUnitBusy": 92.684969
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 1.188772,
+          "FETCH_SIZE": 37715.25,
+          "MeanOccupancyPerActiveCU": 34.852326,
+          "MemUnitBusy": 95.694803
+        }
+      ]
+    },
+    {
+      "region": "w4-bk64",
+      "stage": "down",
+      "expected_selected_weight_and_scale_bytes": 8519680,
+      "median_L2_external_read_bytes": 8660416.0,
+      "median_kernel_ms": 0.103258,
+      "median_L2_external_GB_s": 83.87339548136433,
+      "samples": [
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.103837,
+          "FETCH_SIZE": 8458.375,
+          "MeanOccupancyPerActiveCU": 34.557888,
+          "MemUnitBusy": 55.714599
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.102998,
+          "FETCH_SIZE": 8457.625,
+          "MeanOccupancyPerActiveCU": 34.566682,
+          "MemUnitBusy": 54.99129
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.101517,
+          "FETCH_SIZE": 8457.375,
+          "MeanOccupancyPerActiveCU": 34.489949,
+          "MemUnitBusy": 57.746671
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.100997,
+          "FETCH_SIZE": 8457.5,
+          "MeanOccupancyPerActiveCU": 34.630604,
+          "MemUnitBusy": 58.259805
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.104158,
+          "FETCH_SIZE": 8457.375,
+          "MeanOccupancyPerActiveCU": 34.619754,
+          "MemUnitBusy": 56.430897
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.103518,
+          "FETCH_SIZE": 8457.5,
+          "MeanOccupancyPerActiveCU": 34.532009,
+          "MemUnitBusy": 55.78148
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.103997,
+          "FETCH_SIZE": 8457.25,
+          "MeanOccupancyPerActiveCU": 34.51992,
+          "MemUnitBusy": 54.503647
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 168,
+          "scratch_bytes": 0,
+          "duration_ms": 0.101517,
+          "FETCH_SIZE": 8457.375,
+          "MeanOccupancyPerActiveCU": 34.47978,
+          "MemUnitBusy": 55.078924
+        }
+      ]
+    },
+    {
+      "region": "w4-bk128",
+      "stage": "gate_up",
+      "expected_selected_weight_and_scale_bytes": 17039360,
+      "median_L2_external_read_bytes": 17969984.0,
+      "median_kernel_ms": 0.41705000000000003,
+      "median_L2_external_GB_s": 43.10696094639442,
+      "samples": [
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.41819,
+          "FETCH_SIZE": 17593.625,
+          "MeanOccupancyPerActiveCU": 19.647041,
+          "MemUnitBusy": 70.35999
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.40783,
+          "FETCH_SIZE": 17534.25,
+          "MeanOccupancyPerActiveCU": 19.669075,
+          "MemUnitBusy": 65.118444
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.41591,
+          "FETCH_SIZE": 17519.125,
+          "MeanOccupancyPerActiveCU": 19.64659,
+          "MemUnitBusy": 61.40318
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.477429,
+          "FETCH_SIZE": 17557.125,
+          "MeanOccupancyPerActiveCU": 19.713792,
+          "MemUnitBusy": 73.430482
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.41331,
+          "FETCH_SIZE": 17548.75,
+          "MeanOccupancyPerActiveCU": 19.739387,
+          "MemUnitBusy": 70.954956
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.480428,
+          "FETCH_SIZE": 17603.75,
+          "MeanOccupancyPerActiveCU": 19.806309,
+          "MemUnitBusy": 74.608724
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.41119,
+          "FETCH_SIZE": 17548.875,
+          "MeanOccupancyPerActiveCU": 19.587404,
+          "MemUnitBusy": 70.12548
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 32768,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.455469,
+          "FETCH_SIZE": 17498.5,
+          "MeanOccupancyPerActiveCU": 19.683073,
+          "MemUnitBusy": 71.635485
+        }
+      ]
+    },
+    {
+      "region": "w4-bk128",
+      "stage": "down",
+      "expected_selected_weight_and_scale_bytes": 8519680,
+      "median_L2_external_read_bytes": 8664512.0,
+      "median_kernel_ms": 0.119157,
+      "median_L2_external_GB_s": 72.71509854962844,
+      "samples": [
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.122318,
+          "FETCH_SIZE": 8462.25,
+          "MeanOccupancyPerActiveCU": 19.523676,
+          "MemUnitBusy": 51.1023
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.119197,
+          "FETCH_SIZE": 8461.375,
+          "MeanOccupancyPerActiveCU": 19.523637,
+          "MemUnitBusy": 52.625434
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.118957,
+          "FETCH_SIZE": 8461.75,
+          "MeanOccupancyPerActiveCU": 19.525004,
+          "MemUnitBusy": 52.349014
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.120358,
+          "FETCH_SIZE": 8461.375,
+          "MeanOccupancyPerActiveCU": 19.564581,
+          "MemUnitBusy": 51.941258
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.119117,
+          "FETCH_SIZE": 8461.5,
+          "MeanOccupancyPerActiveCU": 19.481972,
+          "MemUnitBusy": 58.417654
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.118557,
+          "FETCH_SIZE": 8461.375,
+          "MeanOccupancyPerActiveCU": 19.511082,
+          "MemUnitBusy": 54.412438
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.119597,
+          "FETCH_SIZE": 8461.375,
+          "MeanOccupancyPerActiveCU": 19.526579,
+          "MemUnitBusy": 54.430738
+        },
+        {
+          "kernel": "fused_moe_kernel_gptq_awq",
+          "grid": 131072,
+          "vgpr": 256,
+          "scratch_bytes": 0,
+          "duration_ms": 0.118997,
+          "FETCH_SIZE": 8461.75,
+          "MeanOccupancyPerActiveCU": 19.535018,
+          "MemUnitBusy": 55.392991
+        }
+      ]
+    },
+    {
+      "region": "calibration-read-256MiB",
+      "stage": "calibration",
+      "expected_read_bytes": 268435456,
+      "median_L2_external_read_bytes": 268448896.0,
+      "median_kernel_ms": 1.244771,
+      "median_L2_external_GB_s": 215.66127102896837,
+      "samples": [
+        {
+          "kernel": "_counter_read",
+          "grid": 8388608,
+          "vgpr": 16,
+          "scratch_bytes": 0,
+          "duration_ms": 1.244771,
+          "FETCH_SIZE": 262157.125,
+          "MeanOccupancyPerActiveCU": 43.816231,
+          "MemUnitBusy": 99.497789
+        }
+      ]
+    }
+  ],
+  "raw_sha256": {
+    "44412_kernel_trace.csv": "aadaad51f0c939e02fa63f057617b34e65733b4ff587851c1969080baf19ca90",
+    "44412_marker_api_trace.csv": "6d022ab0b68e6f5ec2c9bcffe9de5bb2a520a16faa098bd942447c3a7fab2aa8",
+    "44412_counter_collection.csv": "ec05a79007a8497d643d46725597b138d103c61a9dfc413d6149f07ee386af31",
+    "44412_agent_info.csv": "1a588427fb48559192a5e07ad852bc515c35c0846cf0b3bde53b29fd894af616"
+  }
+}

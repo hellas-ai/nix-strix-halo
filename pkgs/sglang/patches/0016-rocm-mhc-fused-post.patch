@@ -1,0 +1,92 @@
+--- a/sglang/kernels/ops/layernorm/mhc.py
++++ b/sglang/kernels/ops/layernorm/mhc.py
+@@ -1836,6 +1836,70 @@
+     )
+ 
+ 
++@triton.jit
++def _mhc_post_hip_kernel(
++    X,
++    R,
++    P,
++    C,
++    O,
++    H: tl.constexpr,
++    XS: tl.constexpr,
++    RS: tl.constexpr,
++    RN: tl.constexpr,
++    PS: tl.constexpr,
++    PN: tl.constexpr,
++    CS: tl.constexpr,
++    CI: tl.constexpr,
++    CJ: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    # Consecutive programs walk hidden columns before advancing the token.
++    # This matters on unified-memory GPUs: token-major program order makes
++    # neighboring workgroups jump across pages instead of sharing cache lines.
++    token = tl.program_id(1) // 4
++    lane = tl.program_id(1) % 4
++    cols = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++    mask = cols < H
++    x = tl.load(X + token * XS + cols, mask, 0).to(tl.float32)
++    post = tl.load(P + token * PS + lane * PN).to(tl.float32)
++    r0 = tl.load(R + token * RS + cols, mask, 0).to(tl.float32)
++    r1 = tl.load(R + token * RS + RN + cols, mask, 0).to(tl.float32)
++    r2 = tl.load(R + token * RS + 2 * RN + cols, mask, 0).to(tl.float32)
++    r3 = tl.load(R + token * RS + 3 * RN + cols, mask, 0).to(tl.float32)
++    c0 = tl.load(C + token * CS + lane * CJ).to(tl.float32)
++    c1 = tl.load(C + token * CS + CI + lane * CJ).to(tl.float32)
++    c2 = tl.load(C + token * CS + 2 * CI + lane * CJ).to(tl.float32)
++    c3 = tl.load(C + token * CS + 3 * CI + lane * CJ).to(tl.float32)
++    out = post * x + (((r0 * c0 + r1 * c1) + r2 * c2) + r3 * c3)
++    tl.store(O + token * 4 * H + lane * H + cols, out, mask)
++
++
++def _mhc_post_hip(x, residual, post_layer_mix, comb_res_mix):
++    """Four-stream FP32 mixing without the [tokens, 4, 4, hidden] temporary."""
++    out = torch.empty(residual.shape, device=x.device, dtype=x.dtype)
++    if x.numel():
++        _mhc_post_hip_kernel[(triton.cdiv(x.shape[1], 512), x.shape[0] * 4)](
++            x,
++            residual,
++            post_layer_mix,
++            comb_res_mix,
++            out,
++            x.shape[1],
++            x.stride(0),
++            residual.stride(0),
++            residual.stride(1),
++            post_layer_mix.stride(0),
++            post_layer_mix.stride(1),
++            comb_res_mix.stride(0),
++            comb_res_mix.stride(1),
++            comb_res_mix.stride(2),
++            512,
++            enable_fp_fusion=False,
++        )
++    return out
++
++
+ def _mhc_post_torch(
+     x: torch.Tensor,
+     residual: torch.Tensor,
+@@ -1914,6 +1978,18 @@
+     assert x.dim() == 2 and residual.dim() == 3
+     assert post_layer_mix.dim() == 3 and comb_res_mix.dim() == 3
+     if not envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get():
++        if (
++            torch.version.hip is not None
++            and x.is_cuda
++            and residual.shape == (x.shape[0], 4, x.shape[1])
++            and post_layer_mix.shape == (x.shape[0], 4, 1)
++            and comb_res_mix.shape == (x.shape[0], 4, 4)
++            and x.stride(-1) == residual.stride(-1) == 1
++            and x.dtype == residual.dtype
++            and x.dtype in (torch.bfloat16, torch.float32)
++            and post_layer_mix.dtype == comb_res_mix.dtype == torch.float32
++        ):
++            return _mhc_post_hip(x, residual, post_layer_mix, comb_res_mix)
+         return _mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
+     return mhc_post(x, residual, post_layer_mix, comb_res_mix)
+ 

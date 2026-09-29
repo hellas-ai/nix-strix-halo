@@ -92,7 +92,9 @@ let
         rocmProvider = "nixpkgs";
       });
 
-      checkJobs = lib.optionalAttrs isGateSystem self.checks.x86_64-linux;
+      checkJobs = lib.optionalAttrs isGateSystem (
+        self.checks.x86_64-linux // { vllm-metal-module = self.checks.aarch64-darwin.vllm-metal-module; }
+      );
 
       # Exercise every package affected by the TheRock source pin or source
       # provider. Keep this as its own aggregate so source updates can run the
@@ -104,6 +106,7 @@ let
           llama-cpp-master-rocm
           llama-cpp-rocm
           mlx-rocm
+          sglang-qwen38-flash-next-rocm
           sglang-rocm
           therock-rocm
           vllm-rocm
@@ -140,6 +143,7 @@ let
           inherit (darwinPackages)
             mlx
             mlx-metal
+            vllm-metal
             ;
 
           llama-cpp-rocm-nixpkgs = nixpkgsRocmPkgs.llama-cpp-rocm;
@@ -149,6 +153,7 @@ let
           gfx1030-llama-cpp-rocm = gfx1030Packages.llama-cpp-rocm;
           gfx1030-llama-cpp-master-rocm = gfx1030Packages.llama-cpp-master-rocm;
           gfx1030-sglang-rocm = gfx1030Packages.sglang-rocm;
+          gfx1030-sglang-qwen38-flash-next-rocm = gfx1030Packages.sglang-qwen38-flash-next-rocm;
           gfx1030-therock-python = gfx1030Packages.therock-python;
           gfx1030-therock-python-wheels = gfx1030Packages.therock-python-wheels;
           gfx1030-therock-rocm = gfx1030Packages.therock-rocm;
@@ -174,6 +179,9 @@ let
       smokeJobs = lib.optionalAttrs isGateSystem {
         ds4-rocm = ds4RocmRuntimeSmoke;
         mlx-metal = darwinBenchmarks.bench-mlx-metal-gemm-smoke;
+        vllm-metal = darwinPackages.vllm-metal.tests.metal;
+        vllm-metal-imports = darwinPackages.vllm-metal.tests.imports;
+        vllm-metal-server = darwinPackages.vllm-metal.tests.server;
         mlx-rocm = x86Benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
         fastflowlm-npu = x86Benchmarks.bench-llama3-2-1b-fastflowlm-short;
         vllm-rocm =

@@ -6,6 +6,10 @@ updates:
       - "/lib/hydra/benchmark"
     schedule:
       interval: "daily"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    # Keep stalled engine updates from filling the queue before core inputs.
+    open-pull-requests-limit: 20
     groups:
       nix-inputs:
         patterns:

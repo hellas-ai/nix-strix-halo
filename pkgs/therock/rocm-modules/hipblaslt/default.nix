@@ -120,6 +120,9 @@ stdenv.mkDerivation (finalAttrs: {
     # parallel-jobs for these invocations
     # https://github.com/ROCm/rocm-libraries/issues/1242
     ./parallel-buildSourceCodeObjectFile.diff
+    # Bound Tensile's memory-heavy pools to 32 workers and honor smaller Nix
+    # allocations; Hydra can allocate all 128 cores on a shared builder.
+    ./respect-nix-build-cores.patch
     # Support loading zstd compressed .dat files, required to keep output under
     # hydra size limit
     ./messagepack-compression-support.patch

@@ -249,17 +249,18 @@ let
     llama-cpp-master = llamaCppMaster;
   };
 
-  darwinPackages = lib.optionalAttrs prev.stdenv.isDarwin {
+  darwinPackages = lib.optionalAttrs prev.stdenv.hostPlatform.isDarwin {
     llama-cpp-master-rdma = setPname "llama-cpp-master-rdma" (withDarwinRdmaRpc llamaCppMaster);
   };
 
-  linuxPackages = lib.optionalAttrs prev.stdenv.isLinux (
+  linuxPackages = lib.optionalAttrs prev.stdenv.hostPlatform.isLinux (
     let
       ecPackages = prev.callPackage ../pkgs/ec-su-axb35.nix {
         ec-su-axb35-src = inputs.ec-su-axb35;
       };
       qwen4PythonPackages = final.${therockPythonConfig.packagesAttr}.overrideScope (
         pyFinal: _pyPrev: {
+          tokenizers = pyFinal.callPackage ../pkgs/tokenizers-qwen4-exp.nix { };
           transformers = pyFinal.callPackage ../pkgs/transformers-5_12_1.nix { };
         }
       );
@@ -318,7 +319,7 @@ let
             nanobind = mlxNanobind;
           };
           inherit (inputs) mlx-src;
-          pname = "mlx-rocm-${suffix}";
+          packageName = "mlx-rocm-${suffix}";
           rdma-core = final.rdma-core-usb4;
           rocmPackages = final.therockRocmPackages.${firstBuildTarget};
           gfx = firstBuildTarget;
@@ -356,7 +357,7 @@ let
         inherit (rocmTarget) packageSuffix;
         hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
       };
-      sglang-qwen38-flash-next-rocm = prev.callPackage ../pkgs/sglang {
+      sglang-qwen38-flash-next-rocm = prev.callPackage ../pkgs/sglang/qwen4-exp.nix {
         pythonPackages = qwen4PythonPackages;
         rocmSdk = final."therock-rocm-${suffix}";
         inherit (rocmTarget) packageSuffix;

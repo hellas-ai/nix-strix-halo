@@ -1,0 +1,328 @@
+{
+  "date": "2026-09-29",
+  "model_quality_qualified": false,
+  "architecture": "gfx1151",
+  "runtime": "/nix/store/551fwg8psrraq7yi3gm5l50zy6pjvzyd-sglang-rocm-gfx1151-0.5.20",
+  "pooled_logits": {
+    "strix-1": [
+      {
+        "case": "ragged-h16-cleanTrue",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h16-cleanFalse",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h32-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h32-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h64-cleanTrue",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "ragged-h64-cleanFalse",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "paged-cleanTrue",
+        "max_absolute_error": 5.960464477539063e-08
+      },
+      {
+        "case": "paged-cleanFalse",
+        "max_absolute_error": 5.960464477539063e-08
+      }
+    ],
+    "strix-2": [
+      {
+        "case": "ragged-h16-cleanTrue",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h16-cleanFalse",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h32-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h32-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h64-cleanTrue",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "ragged-h64-cleanFalse",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "paged-cleanTrue",
+        "max_absolute_error": 5.960464477539063e-08
+      },
+      {
+        "case": "paged-cleanFalse",
+        "max_absolute_error": 5.960464477539063e-08
+      }
+    ],
+    "strix-3": [
+      {
+        "case": "ragged-h16-cleanTrue",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h16-cleanFalse",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h32-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h32-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h64-cleanTrue",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "ragged-h64-cleanFalse",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "paged-cleanTrue",
+        "max_absolute_error": 5.960464477539063e-08
+      },
+      {
+        "case": "paged-cleanFalse",
+        "max_absolute_error": 5.960464477539063e-08
+      }
+    ],
+    "strix-4": [
+      {
+        "case": "ragged-h16-cleanTrue",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h16-cleanFalse",
+        "max_absolute_error": 1.1920928955078125e-07
+      },
+      {
+        "case": "ragged-h32-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h32-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanTrue",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h48-cleanFalse",
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      {
+        "case": "ragged-h64-cleanTrue",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "ragged-h64-cleanFalse",
+        "max_absolute_error": 2.60770320892334e-07
+      },
+      {
+        "case": "paged-cleanTrue",
+        "max_absolute_error": 5.960464477539063e-08
+      },
+      {
+        "case": "paged-cleanFalse",
+        "max_absolute_error": 5.960464477539063e-08
+      }
+    ]
+  },
+  "sparse_attention": [
+    {
+      "backend": "prefill",
+      "rows": 3,
+      "rope_dim": 0,
+      "topk": 3,
+      "relative_l2": 0.0017633710522204638,
+      "max_absolute_error": 0.00856637954711914
+    },
+    {
+      "backend": "decode",
+      "rows": 3,
+      "rope_dim": 0,
+      "topk": 3,
+      "relative_l2": 0.0017633710522204638,
+      "max_absolute_error": 0.00856637954711914
+    },
+    {
+      "backend": "prefill",
+      "rows": 3,
+      "rope_dim": 0,
+      "topk": 2051,
+      "relative_l2": 0.002287536393851042,
+      "max_absolute_error": 0.011089563369750977
+    },
+    {
+      "backend": "decode",
+      "rows": 3,
+      "rope_dim": 0,
+      "topk": 2051,
+      "relative_l2": 0.002287536393851042,
+      "max_absolute_error": 0.011089563369750977
+    },
+    {
+      "backend": "prefill",
+      "rows": 40,
+      "rope_dim": 0,
+      "topk": 2051,
+      "relative_l2": 0.0018070819787681103,
+      "max_absolute_error": 0.008414745330810547
+    },
+    {
+      "backend": "decode",
+      "rows": 40,
+      "rope_dim": 0,
+      "topk": 2051,
+      "relative_l2": 0.0018085688352584839,
+      "max_absolute_error": 0.008414745330810547
+    },
+    {
+      "backend": "prefill",
+      "rows": 3,
+      "rope_dim": 64,
+      "topk": 2051,
+      "relative_l2": 0.0022680144757032394,
+      "max_absolute_error": 0.008872747421264648
+    },
+    {
+      "backend": "decode",
+      "rows": 3,
+      "rope_dim": 64,
+      "topk": 2051,
+      "relative_l2": 0.0022680144757032394,
+      "max_absolute_error": 0.008872747421264648
+    }
+  ],
+  "notes": [
+    "Numerical component checks only. Dummy checkpoint output has no semantic meaning.",
+    "Full checkpoint API/agent/context/performance qualification remains pending."
+  ],
+  "pooled_logits_large_fp8_strix2": [
+    {
+      "case": "ragged-h16-amplitude2-cleanTrue",
+      "max_absolute_error": 1.1920928955078125e-07
+    },
+    {
+      "case": "ragged-h16-amplitude2-cleanFalse",
+      "max_absolute_error": 1.1920928955078125e-07
+    },
+    {
+      "case": "ragged-h32-amplitude2-cleanTrue",
+      "max_absolute_error": 2.384185791015625e-07
+    },
+    {
+      "case": "ragged-h32-amplitude2-cleanFalse",
+      "max_absolute_error": 2.384185791015625e-07
+    },
+    {
+      "case": "ragged-h48-amplitude2-cleanTrue",
+      "max_absolute_error": 2.384185791015625e-07
+    },
+    {
+      "case": "ragged-h48-amplitude2-cleanFalse",
+      "max_absolute_error": 2.384185791015625e-07
+    },
+    {
+      "case": "ragged-h64-amplitude2-cleanTrue",
+      "max_absolute_error": 2.60770320892334e-07
+    },
+    {
+      "case": "ragged-h64-amplitude2-cleanFalse",
+      "max_absolute_error": 2.60770320892334e-07
+    },
+    {
+      "case": "ragged-h32-amplitude100-cleanTrue",
+      "max_absolute_error": 1.4901161193847656e-07
+    },
+    {
+      "case": "ragged-h32-amplitude100-cleanFalse",
+      "max_absolute_error": 1.4901161193847656e-07
+    },
+    {
+      "case": "paged-cleanTrue",
+      "max_absolute_error": 5.960464477539063e-08
+    },
+    {
+      "case": "paged-cleanFalse",
+      "max_absolute_error": 5.960464477539063e-08
+    }
+  ],
+  "dense_clamp": [
+    "PASS dense clamp 1 0.0",
+    "PASS dense clamp 7 0.0",
+    "PASS dense clamp 128 0.0"
+  ],
+  "pooled_state": [
+    "PASS rotation torch.bfloat16 0",
+    "PASS rotation torch.bfloat16 1",
+    "PASS rotation torch.bfloat16 97",
+    "PASS rotation torch.float32 0",
+    "PASS rotation torch.float32 1",
+    "PASS rotation torch.float32 97",
+    "PASS pooled selection logical",
+    "PASS pooled selection offset",
+    "PASS pooled selection page",
+    "PASS pooled selection page-row-index",
+    "PASS empty history with live tail"
+  ],
+  "dummy_tp4": [
+    {
+      "prompt_tokens": 7,
+      "completion_tokens": 8,
+      "finite_output_logprobs": true,
+      "elapsed_seconds_including_jit": 7.826823215000331
+    },
+    {
+      "prompt_tokens": 3073,
+      "completion_tokens": 8,
+      "finite_output_logprobs": true,
+      "elapsed_seconds_including_jit": 10.747555181999815
+    }
+  ]
+}

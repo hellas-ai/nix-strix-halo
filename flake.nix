@@ -9,6 +9,33 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    nix-darwin = {
+      url = "github:nix-darwin/nix-darwin";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        pyproject-nix.follows = "pyproject-nix";
+      };
+    };
+
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        pyproject-nix.follows = "pyproject-nix";
+        uv2nix.follows = "uv2nix";
+      };
+    };
+
     ec-su-axb35 = {
       url = "github:cmetz/ec-su_axb35-linux";
       flake = false;
@@ -20,7 +47,7 @@
     };
 
     llama-cpp-spacemit = {
-      url = "github:spacemit-com/llama.cpp/v0.1.5";
+      url = "github:spacemit-com/llama.cpp/v0.1.9";
       flake = false;
     };
 
@@ -51,6 +78,11 @@
 
     mlx-src = {
       url = "github:NripeshN/mlx/rocm-support";
+      flake = false;
+    };
+
+    mlx-metal-src = {
+      url = "github:ml-explore/mlx/v0.32.1";
       flake = false;
     };
 
@@ -309,7 +341,7 @@
           thunderbolt-ibverbs-bench-tools = tbPkgs.bench-tools;
           thunderbolt-ibverbs-perftest = tbPkgs.perftest;
         }
-        // lib.optionalAttrs prev.stdenv.isLinux {
+        // lib.optionalAttrs prev.stdenv.hostPlatform.isLinux {
           inherit (tbPkgs)
             linux-thunderbolt
             linux-thunderbolt-dev
@@ -539,8 +571,15 @@
         live-iso = mkLiveIsoConfiguration { };
       };
 
-      darwinModules = {
+      darwinModules = rec {
         benchmark-executor = import ./modules/benchmark-executor.nix;
+        vllm-metal =
+          { lib, ... }:
+          {
+            imports = [ ./modules/vllm-metal.nix ];
+            services.vllm-metal.package = lib.mkDefault self.packages.aarch64-darwin.vllm-metal;
+          };
+        default = vllm-metal;
       };
     }
     // {
@@ -564,15 +603,30 @@
           system = pkgs.stdenv.hostPlatform.system;
           s = defaultRocmTarget.packageSuffix;
           aiTools = inputs.nix-ai-tools.packages.${system};
+          piPackage =
+            if pkgs.stdenv.hostPlatform.isDarwin then
+              aiTools.pi.overrideAttrs (old: {
+                nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.darwin.signingUtils ];
+                # Bun's compiled executable retains an invalid linker signature.
+                # Re-sign after fixup so macOS can launch the packaged Pi client.
+                postFixup = (old.postFixup or "") + ''
+                  sign "$out/libexec/pi/pi"
+                '';
+              })
+            else
+              aiTools.pi;
           cudaPkgs = cudaPkgsFor system;
           packageRuntimeEnv = import ./lib/runtime-env.nix { inherit lib; };
           inherit (packageRuntimeEnv) wrapRuntimeEnv;
           jacclPackage = pkgs.callPackage ./pkgs/jaccl (
             {
-              inherit (inputs) mlx-src;
+              mlx-src = if pkgs.stdenv.hostPlatform.isDarwin then inputs.mlx-metal-src else inputs.mlx-src;
             }
-            // lib.optionalAttrs pkgs.stdenv.isLinux {
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
               rdma-core = pkgs.rdma-core-usb4;
+            }
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+              darwinDeploymentTarget = "26.2";
             }
           );
           mkMlxLm =
@@ -591,13 +645,13 @@
                     ++ [
                       mlxPackage
                     ]
-                    ++ lib.optional pkgs.stdenv.isLinux pythonPackages.sentencepiece
+                    ++ lib.optional pkgs.stdenv.hostPlatform.isLinux pythonPackages.sentencepiece
                   );
                   meta = (oldAttrs.meta or { }) // {
                     mainProgram = "mlx_lm";
                   };
                 }
-                // lib.optionalAttrs pkgs.stdenv.isLinux {
+                // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                   doCheck = false;
                   doInstallCheck = false;
                   dontCheckRuntimeDeps = true;
@@ -655,11 +709,13 @@
 
           genericPackages = {
             default = pkgs.llama-cpp;
-            npu-toolchain = pkgs.mlir-aie-env;
             pi-wrap = pkgs.callPackage ./pkgs/pi-wrap {
-              inherit (aiTools) pi;
+              pi = piPackage;
             };
-            inherit (aiTools) pi;
+            pi = piPackage;
+            glm53-pi = pkgs.callPackage ./pkgs/glm53-pi {
+              pi = piPackage;
+            };
             inherit (pkgs)
               llama-cpp
               llama-cpp-master
@@ -718,6 +774,7 @@
               live-iso = self.nixosConfigurations.live-iso.config.system.build.isoImage;
               mlx = mlxRocm;
               mlx-lm = mlxLmRocm;
+              npu-toolchain = pkgs.mlir-aie-env;
               "strix-halo-vllm-pair-bench-${s}" = pkgs.callPackage ./pkgs/strix-halo-vllm-pair-bench {
                 vllmPackage = vllmPairBenchEnv;
                 packageSuffix = s;
@@ -726,26 +783,49 @@
 
           darwinPackages =
             let
+              mkMlxMetalStack =
+                pythonPackages:
+                let
+                  mlxNanobind = pythonPackages.callPackage ./pkgs/mlx/nanobind-2_13.nix { };
+                  mlxMetalBackend = pythonPackages.callPackage ./pkgs/mlx/metal.nix {
+                    mlx-src = inputs.mlx-metal-src;
+                    jaccl = jacclPackage;
+                    nanobind = mlxNanobind;
+                    pname = "mlx-metal";
+                    buildStage = 2;
+                    darwinDeploymentTarget = "26.2";
+                  };
+                  mlxMetal = pythonPackages.callPackage ./pkgs/mlx/metal.nix {
+                    mlx-src = inputs.mlx-metal-src;
+                    jaccl = jacclPackage;
+                    nanobind = mlxNanobind;
+                    pname = "mlx";
+                    buildStage = 1;
+                    backendPackage = mlxMetalBackend;
+                    darwinDeploymentTarget = "26.2";
+                  };
+                in
+                {
+                  inherit mlxMetal mlxMetalBackend;
+                };
+
               # Python 3.14 currently aborts in libffi while building MLX's
               # macOS wheel. Keep the complete Metal stack on Python 3.13.
               mlxPythonPackages = pkgs.python313Packages;
-              mlxNanobind = mlxPythonPackages.callPackage ./pkgs/mlx/nanobind-2_13.nix { };
-              mlxMetalBackend = mlxPythonPackages.callPackage ./pkgs/mlx/metal.nix {
-                inherit (inputs) mlx-src;
-                nanobind = mlxNanobind;
-                pname = "mlx-metal";
-                buildStage = 2;
-              };
-              mlxMetal = mlxPythonPackages.callPackage ./pkgs/mlx/metal.nix {
-                inherit (inputs) mlx-src;
-                nanobind = mlxNanobind;
-                pname = "mlx";
-                buildStage = 1;
-                backendPackage = mlxMetalBackend;
-              };
+              inherit (mkMlxMetalStack mlxPythonPackages) mlxMetal mlxMetalBackend;
               mlxLm = mkMlxLm {
                 mlxPackage = mlxMetal;
                 pythonPackages = mlxPythonPackages;
+              };
+              vllmMlxStack = mkMlxMetalStack pkgs.python312Packages;
+              vllmMetal = pkgs.callPackage ./pkgs/vllm-metal {
+                inherit (inputs)
+                  pyproject-build-systems
+                  pyproject-nix
+                  uv2nix
+                  ;
+                mlxPackage = vllmMlxStack.mlxMetal;
+                mlxMetalPackage = vllmMlxStack.mlxMetalBackend;
               };
             in
             {
@@ -757,12 +837,13 @@
               mlx = mlxMetal;
               mlx-lm = mlxLm;
               mlx-metal = mlxMetalBackend;
+              vllm-metal = vllmMetal;
             };
         in
         genericPackages
         // spacemitK3Packages
-        // lib.optionalAttrs pkgs.stdenv.isLinux linuxPackages
-        // lib.optionalAttrs pkgs.stdenv.isDarwin darwinPackages
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxPackages
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin darwinPackages
       );
 
       apps = perSystem (
@@ -793,6 +874,9 @@
           };
 
           genericApps = {
+            glm53-pi =
+              ap self.packages.${system}.glm53-pi "glm53-pi"
+                "Run Pi against GLM-5.3-Flash on the Strix cluster";
             pi-wrap =
               ap self.packages.${system}.pi-wrap "pi-wrap"
                 "Run pi with provider settings from environment";
@@ -876,6 +960,7 @@
             let
               ds4 = ap self.packages.${system}.ds4;
               mlxLm = self.packages.${system}.mlx-lm;
+              vllmMetal = self.packages.${system}.vllm-metal;
             in
             {
               ds4 = ds4 "ds4" "Run DwarfStar 4 with Metal";
@@ -894,11 +979,12 @@
               mlx-lm-generate = ap mlxLm "mlx_lm.generate" "Generate text with MLX LM";
               mlx-lm-chat = ap mlxLm "mlx_lm.chat" "Run the MLX LM chat CLI";
               mlx-lm-server = ap mlxLm "mlx_lm.server" "Run the MLX LM HTTP server";
+              vllm-metal = ap vllmMetal "vllm" "Run vLLM with the Apple Silicon Metal plugin";
             };
         in
         genericApps
-        // lib.optionalAttrs pkgs.stdenv.isLinux linuxApps
-        // lib.optionalAttrs pkgs.stdenv.isDarwin darwinApps
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxApps
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin darwinApps
       );
 
       checks = perSystem (
@@ -1191,6 +1277,10 @@
             therock-updater-tests = runSourceCheck "therock-updater-tests" [
               pkgs.python3
             ] "python3 -m unittest discover -s pkgs/therock/scripts -p 'test_*.py'";
+            vllm-metal-lock = runSourceCheck "vllm-metal-lock" [ pkgs.uv ] ''
+              uv lock --project pkgs/vllm-metal --check --offline --no-python-downloads \
+                --python ${pkgs.python312}/bin/python3.12
+            '';
             nixfmt = runSourceCheck "nixfmt" [
               pkgs.nixfmt-tree
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
@@ -1218,6 +1308,12 @@
                 '';
           }
         )
+        // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "aarch64-darwin") {
+          vllm-metal-module = pkgs.callPackage ./pkgs/vllm-metal/module-check.nix {
+            inherit (inputs) nix-darwin;
+            module = self.darwinModules.vllm-metal;
+          };
+        }
       );
 
       devShells = perSystem (pkgs: {
@@ -1226,6 +1322,7 @@
             (with pkgs; [
               deadnix
               nix-fast-build
+              nix-prefetch-git
               nixfmt-tree
               statix
             ])
@@ -1235,9 +1332,10 @@
             ++ [
               self.packages.${pkgs.stdenv.hostPlatform.system}.pi-wrap
             ]
-            ++ lib.optionals pkgs.stdenv.isLinux [
+            ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               (pkgs.python3.withPackages (
                 ps: with ps; [
+                  boto3
                   numpy
                   pandas
                   plotly

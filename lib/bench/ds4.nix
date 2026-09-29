@@ -5,7 +5,7 @@
   modelRoot ? null,
   modelPath ? null,
   target ? null,
-  accelerator ? if pkgs.stdenv.isDarwin then "metal" else "rocm",
+  accelerator ? if pkgs.stdenv.hostPlatform.isDarwin then "metal" else "rocm",
   hostProfile ? if accelerator == "metal" then "darwin-metal" else "linux-amd-kfd",
   matrixMetadata ? { },
   extraSystemFeatures ? [ ],
@@ -144,6 +144,8 @@ let
     in
     pkgs.writeShellScript "${namePrefix}-benchmark-runner" ''
       set -euo pipefail
+
+      ${lib.optionalString (!isMetal) (benchLib.hipArchGuard target.runtimeArch)}
 
       # ds4's single-instance lock defaults to /tmp/ds4.lock. The darwin
       # sandbox shares /tmp, so a lock left by an aborted run under another

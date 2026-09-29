@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT_DIR = Path(__file__).parent
@@ -21,6 +24,7 @@ update_rocm = load_script("update-rocm.py")
 update_rocm_source = load_script("update-rocm-source.py")
 update_wheels = load_script("update-python-wheels.py")
 update_third_party = load_script("update-rocm-third-party.py")
+update_stack = load_script("update-rocm-stack.py")
 
 
 class RocmTarballUpdaterTests(unittest.TestCase):
@@ -32,6 +36,43 @@ class RocmTarballUpdaterTests(unittest.TestCase):
           therock-dist-linux-gfx1151-10.1.0.tar.gz
         """
         self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.0"), "10.0.10")
+
+    def test_series_matches_complete_numeric_components(self):
+        index = """
+          therock-dist-linux-gfx1151-10.1.0.tar.gz
+          therock-dist-linux-gfx1151-10.10.0.tar.gz
+        """
+        self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.1"), "10.1.0")
+
+    def test_series_still_matches_patch_versions(self):
+        index = """
+          therock-dist-linux-gfx1151-10.1.0.tar.gz
+          therock-dist-linux-gfx1151-10.1.3.tar.gz
+        """
+        self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.1"), "10.1.3")
+
+    def test_series_allows_prerelease_suffix_on_exact_series_match(self):
+        # Regression: series '10.1.0' must match '10.1.0rc2' (prerelease of the
+        # pinned release), not raise SystemExit.
+        index = "therock-dist-linux-gfx1151-10.1.0rc2.tar.gz"
+        self.assertEqual(
+            update_rocm.find_version(index, "gfx1151", "10.1.0"), "10.1.0rc2"
+        )
+
+    def test_series_matches_prerelease_of_series_head(self):
+        # Regression: series '10.1' must match '10.1rc2' but still exclude
+        # '10.10.0' (incomplete numeric component boundary).
+        index = """
+          therock-dist-linux-gfx1151-10.1rc2.tar.gz
+          therock-dist-linux-gfx1151-10.10.0.tar.gz
+        """
+        self.assertEqual(update_rocm.find_version(index, "gfx1151", "10.1"), "10.1rc2")
+
+    def test_no_matching_series_raises(self):
+        with self.assertRaises(SystemExit):
+            update_rocm.find_version(
+                "therock-dist-linux-gfx1151-10.10.0.tar.gz", "gfx1151", "10.1"
+            )
 
     def test_prefers_release_over_prerelease(self):
         index = """
@@ -50,6 +91,100 @@ class PythonWheelUpdaterTests(unittest.TestCase):
             project,
             href,
             f"{update_wheels.BASE_URL}/{project}/",
+        )
+
+    def make_dist(self, project: str, rocm_version: str):
+        return update_wheels.Distribution(
+            project=project,
+            filename=f"{project}-{rocm_version}-py3-none-linux_x86_64.whl",
+            url=f"{update_wheels.BASE_URL}/{project}/",
+            package_version=rocm_version,
+            rocm_version=rocm_version,
+            python_tag="py3",
+            abi_tag="none",
+            platform_tag="linux_x86_64",
+            kind="wheel",
+        )
+
+    def test_in_rocm_series(self):
+        in_series = update_wheels.in_rocm_series
+        self.assertTrue(in_series("10.1.0", "10.1"))
+        self.assertTrue(in_series("10.1.5", "10.1"))
+        self.assertTrue(in_series("10.1.0rc2", "10.1"))
+        self.assertTrue(in_series("10.1.0rc2", "10.1.0"))
+        self.assertTrue(in_series("10.1.0", "10.1.0"))
+        self.assertFalse(in_series("10.10.0", "10.1"))
+        self.assertFalse(in_series("10.12.0", "10.1"))
+        self.assertFalse(in_series("10.1.1", "10.1.0"))
+        self.assertFalse(in_series("10.0.0", "10.1"))
+        self.assertFalse(in_series("11.1.0", "10.1"))
+
+    def test_choose_rocm_version_does_not_cross_numeric_prefixes(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0"),
+                self.make_dist("rocm-sdk-core", "10.10.0"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.0",
+        )
+
+    def test_choose_rocm_version_series_pin_keeps_prereleases(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0rc2"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1.0",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.0rc2",
+        )
+
+    def test_choose_rocm_version_series_pin_excludes_next_patch(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0"),
+                self.make_dist("rocm-sdk-core", "10.1.1"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1.0",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.0",
+        )
+
+    def test_choose_rocm_version_prefers_latest_in_series(self):
+        dists = {
+            "rocm-sdk-core": [
+                self.make_dist("rocm-sdk-core", "10.1.0"),
+                self.make_dist("rocm-sdk-core", "10.1.9"),
+                self.make_dist("rocm-sdk-core", "10.2.0"),
+            ]
+        }
+        self.assertEqual(
+            update_wheels.choose_rocm_version(
+                dists,
+                series="10.1",
+                python_tag="py3",
+                package_versions={},
+            ),
+            "10.1.9",
         )
 
     def test_parses_rocm_10_frontend_and_sdk_versions(self):
@@ -74,6 +209,35 @@ class PythonWheelUpdaterTests(unittest.TestCase):
         self.assertIsNotNone(triton)
         self.assertEqual(triton.rocm_version, "10.0.0")
 
+    def test_parses_wheel_url_with_query_and_fragment(self):
+        dist = self.parse(
+            "torch",
+            "torch-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl"
+            "?delta=0#sha256=deadbeef",
+        )
+        self.assertIsNotNone(dist)
+        self.assertEqual(dist.kind, "wheel")
+        self.assertEqual(
+            dist.filename,
+            "torch-2.13.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+        )
+        self.assertEqual(
+            dist.url,
+            f"{update_wheels.BASE_URL}/torch/torch-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl"
+            "?delta=0#sha256=deadbeef",
+        )
+
+    def test_parses_sdist_url_with_query_and_fragment(self):
+        dist = self.parse(
+            "rocm-sdk-core",
+            "rocm_sdk_core-10.0.0.tar.gz#sha256=cafebabe",
+        )
+        self.assertIsNotNone(dist)
+        self.assertEqual(dist.kind, "sdist")
+        self.assertEqual(dist.python_tag, "source")
+        self.assertEqual(dist.package_version, "10.0.0")
+        self.assertEqual(dist.url, f"{update_wheels.BASE_URL}/rocm-sdk-core/rocm_sdk_core-10.0.0.tar.gz#sha256=cafebabe")
+
     def test_sorts_patch_and_prerelease_versions(self):
         self.assertGreater(update_wheels.version_key("10.0.10"), update_wheels.version_key("10.0.9"))
         self.assertGreater(update_wheels.version_key("10.0.0"), update_wheels.version_key("10.0.0rc4"))
@@ -87,6 +251,27 @@ class PythonWheelUpdaterTests(unittest.TestCase):
 
 
 class RocmThirdPartyUpdaterTests(unittest.TestCase):
+    def test_reuses_hash_only_for_identical_source(self):
+        source = {"url": "https://example.test/source.tar.gz", "rev": "v2"}
+        previous = source | {"hash": "sha256-existing"}
+        with patch.object(update_third_party.subprocess, "check_output") as fetch:
+            self.assertEqual(update_third_party.source_hash(source, previous, git=False), "sha256-existing")
+            fetch.assert_not_called()
+
+    def test_changed_archive_gets_fresh_unpacked_hash(self):
+        source = {"url": "https://example.test/new.tar.gz", "rev": "v2"}
+        previous = {"url": "https://example.test/old.tar.gz", "rev": "v1", "hash": "stale"}
+        with patch.object(update_third_party.subprocess, "check_output", return_value='{"hash":"sha256-new"}') as fetch:
+            self.assertEqual(update_third_party.source_hash(source, previous, git=False), "sha256-new")
+            self.assertIn("--unpack", fetch.call_args.args[0])
+
+    def test_changed_git_revision_gets_fresh_hash(self):
+        source = {"url": "https://example.test/repo.git", "rev": "new"}
+        previous = source | {"rev": "old", "hash": "stale"}
+        with patch.object(update_third_party.subprocess, "check_output", side_effect=['{"sha256":"base32"}', 'sha256-new\n']) as fetch:
+            self.assertEqual(update_third_party.source_hash(source, previous, git=True), "sha256-new")
+            self.assertEqual(fetch.call_args_list[0].args[0][-1], "new")
+
     def test_parses_rocm_10_esmi_commit_pin(self):
         rev = "d494a3194ceb4cc4dbb2debf9fcbe8773c6d3bef"
         self.assertEqual(
@@ -120,6 +305,48 @@ class RocmSourceUpdaterTests(unittest.TestCase):
             update_rocm_source.source_fetch_policy(sources, "gfx1151", None, None),
             (["--example"], nested),
         )
+
+
+class RocmStackUpdaterTests(unittest.TestCase):
+    def test_updates_all_binary_targets_using_their_own_series(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            (path / "rocm.json").write_text(json.dumps({"linux": {
+                "gfx1151": {"version": "10.0.0"}, "gfx1030": {"version": "9.2.4"},
+            }}))
+            with patch.object(update_stack, "SOURCES", path), patch.object(update_stack, "run_script") as run:
+                update_stack.refresh("rocm")
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual(run.call_args_list[0].args[-3:], ("gfx1030", "--series", "9.2"))
+                self.assertEqual(run.call_args_list[1].args[-3:], ("gfx1151", "--series", "10.0"))
+
+    def test_wheel_updates_do_not_override_the_pinned_python_abi(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            (path / "python-wheels.json").write_text(json.dumps({"targets": {
+                "gfx1151": {"series": "10.0", "pythonTag": "cp313"},
+                "gfx1030": {"series": "10.0", "pythonTag": "cp313"},
+            }}))
+            with patch.object(update_stack, "SOURCES", path), patch.object(update_stack, "run_script") as run:
+                update_stack.refresh("python-wheels")
+                self.assertEqual(run.call_count, 2)
+                for call in run.call_args_list:
+                    self.assertNotIn("--python-tag", call.args)
+
+    def test_source_refresh_includes_third_party_after_lock_and_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            (path / "rocm-source.json").write_text('{"targets":{"gfx1151":{"version":"10.0"}}}')
+            events = []
+            with patch.object(update_stack, "SOURCES", path), \
+                 patch.object(update_stack, "run_script", side_effect=lambda *args: events.append(args)), \
+                 patch.object(update_stack.subprocess, "run", side_effect=lambda cmd, **kw: events.append(tuple(cmd))), \
+                 patch.object(update_stack.subprocess, "check_output", return_value='/nix/store/staged-source\n'):
+                update_stack.refresh("therock-source")
+            self.assertEqual([event[0] for event in events], [
+                "update-rocm-source.py", "update-source-tree.py", "nix", "update-rocm-third-party.py",
+            ])
+            self.assertEqual(events[-1][-1], "/nix/store/staged-source")
 
 
 if __name__ == "__main__":

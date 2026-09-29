@@ -1,0 +1,38 @@
+--- a/sglang/srt/layers/attention/dsa/dsa_indexer.py
++++ b/sglang/srt/layers/attention/dsa/dsa_indexer.py
+@@ -191,6 +191,12 @@
+ 
+ 
+ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
++    if _is_hip and x.size(-1) == 128:
++        from sglang.srt.layers.attention.dsa.kpool_fp8_index import (
++            rotate_activation_128,
++        )
++
++        return rotate_activation_128(x)
+     if _is_hip:
+         from fast_hadamard_transform import hadamard_transform
+     elif _is_xpu:
+--- a/sglang/srt/layers/attention/dsa/kpool_fp8_index.py
++++ b/sglang/srt/layers/attention/dsa/kpool_fp8_index.py
+@@ -1699,3 +1699,20 @@
+         HAS_EFFECTIVE_N=effective_n_per_batch is not None,
+         MAX_CLOSED_POOLS=max_closed_pools,
+     )
++
++
++def rotate_activation_128(x: torch.Tensor) -> torch.Tensor:
++    """Use the pooled key rotation for queries too, without a CUDA extension."""
++    assert x.shape[-1] == 128
++    flat = x.contiguous().view(-1, 128)
++    output = torch.empty_like(flat)
++    if flat.shape[0]:
++        _rotate_activation_128_kernel[(flat.shape[0],)](flat, output, num_warps=4)
++    return output.view(x.shape)
++
++
++@triton.jit
++def _rotate_activation_128_kernel(X, Y):
++    offsets = tl.program_id(0) * 128 + tl.arange(0, 128)
++    values = tl.load(X + offsets).to(tl.float32)
++    tl.store(Y + offsets, _hadamard128(values))

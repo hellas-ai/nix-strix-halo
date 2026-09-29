@@ -1,0 +1,251 @@
+--- a/sglang/srt/mem_cache/memory_pool.py
++++ b/sglang/srt/mem_cache/memory_pool.py
+@@ -4859,7 +4859,10 @@
+         )
+         assert len(self.skip_topk_layers) == layer_num
+ 
+-        if _is_hip:
++        if self.index_kpool > 1:
++            # Pooled DSA uses the same packed 64-token layout on CUDA and HIP.
++            assert self.page_size == 64
++        elif _is_hip:
+             if aiter_can_use_preshuffle_paged_mqa():
+                 assert self.page_size % 16 == 0, (
+                     f"HIP preshuffle requires page_size to be a multiple of 16, got {self.page_size}"
+--- a/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
++++ b/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
+@@ -23,6 +23,11 @@
+         import deep_gemm
+     except ImportError as e:
+         deep_gemm = e
++
++if is_hip():
++    from sglang.kernels.ops.attention.dsa import rocm_kpool_mqa as mqa_logits
++elif is_cuda():
++    mqa_logits = deep_gemm
+ 
+ if is_npu():
+     try:
+@@ -823,7 +828,7 @@
+                 block_tables,
+                 seqlens_32,
+                 blocksize,
+-                build_schedule_metadata=not use_tilelang_paged_mqa,
++                build_schedule_metadata=is_cuda() and not use_tilelang_paged_mqa,
+             )
+         )
+         pool_max_seq_len = pool_block_tables.shape[1] * blocksize
+@@ -843,7 +848,7 @@
+                 clean_logits=False,
+             )
+         else:
+-            logits = deep_gemm.fp8_paged_mqa_logits(
++            logits = mqa_logits.fp8_paged_mqa_logits(
+                 q_fp8,
+                 kv_cache_fp8,
+                 weights,
+@@ -922,7 +927,7 @@
+                 scale_out=k_scale,
+             )
+             k_fp8 = k_u8.view(torch.float8_e4m3fn)
+-            logits = deep_gemm.fp8_mqa_logits(
++            logits = mqa_logits.fp8_mqa_logits(
+                 q_fp8[:n_real].contiguous(),
+                 (k_fp8.contiguous(), k_scale.contiguous()),
+                 weights[:n_real].contiguous(),
+@@ -1154,7 +1159,7 @@
+                     and zero_starts_by_batch[i] is not None
+                     else torch.zeros((q_len,), dtype=torch.int32, device=q_fp8.device)
+                 )
+-                local_logits = deep_gemm.fp8_mqa_logits(
++                local_logits = mqa_logits.fp8_mqa_logits(
+                     q_fp8[q_slice].contiguous(),
+                     (k_fp8.contiguous(), k_scale.contiguous()),
+                     weights[q_slice].contiguous(),
+@@ -1399,9 +1404,7 @@
+         layer_id: int,
+         return_indices: bool = True,
+     ) -> Optional[torch.Tensor]:
+-        if is_hip():
+-            from sglang.kernels.ops.attention.dsa.tilelang_kernel import act_quant
+-        elif not is_npu():
++        if not is_npu():
+             from sglang.kernels.ops.attention.dsa.triton_kernel import act_quant
+ 
+         if TYPE_CHECKING:
+@@ -1410,7 +1413,8 @@
+         metadata = get_attn_backend().get_indexer_metadata(layer_id, forward_batch)
+ 
+         enable_dual_stream = (
+-            self.alt_stream is not None
++            is_cuda()
++            and self.alt_stream is not None
+             and get_is_capture_mode()
+             and q_lora.shape[0] > 0
+             and q_lora.shape[0] <= DUAL_STREAM_TOKEN_THRESHOLD
+@@ -1536,7 +1540,7 @@
+         if weights is None:
+             weights = self._get_logits_head_gate(x, q_scale)
+ 
+-        if is_cuda():
++        if is_cuda() or is_hip():
+             if (
+                 forward_batch.forward_mode.is_decode_or_idle()
+                 or forward_batch.forward_mode.is_target_verify()
+@@ -1564,5 +1568,5 @@
+                         kpool_extend_cache=kpool_extend_cache,
+                     )
+         else:
+-            raise NotImplementedError("kpool indexer is only supported on CUDA")
++            raise NotImplementedError("kpool indexer is only supported on CUDA or HIP")
+         return topk_result
+--- /dev/null
++++ b/sglang/kernels/ops/attention/dsa/rocm_kpool_mqa.py
+@@ -0,0 +1,147 @@
++"""Portable pooled-DSA logits for ROCm, with BF16 dots and FP32 accumulation.
++
++FP8 values are exactly representable in BF16. Dequantizing operands before the
++matrix product avoids requiring CDNA FP8 matrix instructions on RDNA devices.
++Query scales are already folded into weights by IndexerKPool.
++"""
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _mqa_logits(
++    Q,
++    K,
++    S,
++    W,
++    Starts,
++    Ends,
++    Pages,
++    Out,
++    Q0: tl.constexpr,
++    Q1: tl.constexpr,
++    W0: tl.constexpr,
++    P0: tl.constexpr,
++    N: tl.constexpr,
++    H: tl.constexpr,
++    PAGED: tl.constexpr,
++    BH: tl.constexpr,
++    BK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    cols = tl.program_id(1) * BK + tl.arange(0, BK)
++    heads = tl.arange(0, BH)
++    dims = tl.arange(0, 128)
++    end = tl.load(Ends + row)
++    if PAGED:
++        start = 0
++    else:
++        start = tl.load(Starts + row)
++    valid = (cols < N) & (cols >= start) & (cols < end)
++    q = tl.load(
++        Q + row * Q0 + heads[:, None] * Q1 + dims[None, :],
++        mask=heads[:, None] < H,
++        other=0.0,
++    ).to(tl.bfloat16)
++    if PAGED:
++        page = tl.load(Pages + row * P0 + cols // 64, mask=valid, other=0)
++        # Each physical page stores 64 FP8 keys, then 64 FP32 scales.
++        k_offsets = (
++            page[None, :] * (64 * 132) + (cols[None, :] % 64) * 128 + dims[:, None]
++        )
++        s_offsets = page * (64 * 33) + 64 * 32 + cols % 64
++    else:
++        k_offsets = cols[None, :] * 128 + dims[:, None]
++        s_offsets = cols
++    k = tl.load(K + k_offsets, mask=valid[None, :], other=0.0).to(tl.bfloat16)
++    scale = tl.load(S + s_offsets, mask=valid, other=0)
++    weights = tl.load(W + row * W0 + heads, mask=heads < H, other=0)
++    dots = tl.dot(q, k)
++    logits = tl.sum(tl.maximum(dots, 0.0) * weights[:, None], axis=0) * scale
++    logits = tl.where(valid, logits, -float("inf"))
++    tl.store(Out + row * N + cols, logits, mask=cols < N)
++
++
++def _validate(q, weights):
++    assert q.dtype == torch.float8_e4m3fn and q.shape[-1] == 128
++    assert q.stride(-1) == 1 and weights.stride(-1) == 1
++    assert weights.dtype == torch.float32 and weights.shape == q.shape[:2]
++
++
++def fp8_mqa_logits(q, kv, weights, starts, ends, clean_logits=True):
++    k, scales = kv
++    _validate(q, weights)
++    assert k.dtype == q.dtype and k.is_contiguous() and k.shape[1] == 128
++    assert scales.dtype == torch.float32 and scales.is_contiguous()
++    assert scales.numel() == k.shape[0]
++    assert starts.is_contiguous() and ends.is_contiguous()
++    assert starts.numel() == ends.numel() == q.shape[0]
++    output = torch.empty((q.shape[0], k.shape[0]), device=q.device, dtype=torch.float32)
++    if output.numel():
++        _mqa_logits[(q.shape[0], triton.cdiv(k.shape[0], 64))](
++            q,
++            k,
++            scales,
++            weights,
++            starts,
++            ends,
++            starts,
++            output,
++            q.stride(0),
++            q.stride(1),
++            weights.stride(0),
++            0,
++            k.shape[0],
++            q.shape[1],
++            False,
++            max(16, triton.next_power_of_2(q.shape[1])),
++            64,
++        )
++    return output
++
++
++def fp8_paged_mqa_logits(
++    q,
++    cache,
++    weights,
++    context_lens,
++    page_table,
++    schedule_metadata,
++    max_seq_len,
++    clean_logits=True,
++):
++    assert q.ndim == 4 and q.shape[1] == 1
++    q = q[:, 0]
++    _validate(q, weights)
++    assert cache.dtype == torch.uint8 and cache.is_contiguous()
++    assert cache.shape[1:] == (64, 1, 132)
++    ends = context_lens.reshape(-1)
++    assert ends.is_contiguous() and ends.numel() == q.shape[0]
++    assert page_table.shape[0] == q.shape[0] and page_table.stride(1) == 1
++    assert max_seq_len <= page_table.shape[1] * 64
++    output = torch.empty(
++        (q.shape[0], max_seq_len), device=q.device, dtype=torch.float32
++    )
++    if output.numel():
++        _mqa_logits[(q.shape[0], triton.cdiv(max_seq_len, 64))](
++            q,
++            cache.view(torch.float8_e4m3fn),
++            cache.view(torch.float32),
++            weights,
++            ends,
++            ends,
++            page_table,
++            output,
++            q.stride(0),
++            q.stride(1),
++            weights.stride(0),
++            page_table.stride(0),
++            max_seq_len,
++            q.shape[1],
++            True,
++            max(16, triton.next_power_of_2(q.shape[1])),
++            64,
++        )
++    return output

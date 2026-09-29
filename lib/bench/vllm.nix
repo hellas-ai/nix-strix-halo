@@ -210,6 +210,8 @@ let
     pkgs.writeShellScript "vllm-${target.packageSuffix}-${case.mode}-${case.scenario}-runner" ''
       set -euo pipefail
 
+      ${benchLib.hipArchGuard target.runtimeArch}
+
       export HOME="$TMPDIR/home"
       export XDG_CACHE_HOME="$TMPDIR/cache"
       export VLLM_CACHE_ROOT="$TMPDIR/vllm-cache"

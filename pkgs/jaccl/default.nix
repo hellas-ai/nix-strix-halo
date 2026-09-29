@@ -164,7 +164,8 @@ let
 
       src.local_id = port_attr.lid;' \
           '  ibv_gid gid = {};
-      int gid_index = -1;
+      int gid_index = 0;
+      bool have_gid = false;
       for (int i = 0; i < port_attr.gid_tbl_len; i++) {
         ibv_gid tmp;
         if (ibv().query_gid(ctx, 1, i, &tmp) == 0) {
@@ -172,15 +173,27 @@ let
               *(uint16_t*)&tmp.raw[10] == 0xffff) {
             gid = tmp;
             gid_index = i;
+            have_gid = true;
             break;
           }
         }
       }
-      if (gid_index < 0) {
-        throw std::runtime_error("[jaccl] No IPv4-mapped GID found for RDMA device");
+      if (!have_gid) {
+        throw std::runtime_error(
+            "[jaccl] RDMA device has no IPv4-mapped GID; assign an IPv4 "
+            "address to its Thunderbolt interface");
       }
-
       src.local_id = port_attr.lid;'
+        # MLX 0.32.1 already checks for a missing IPv4 GID. Preserve that
+        # diagnostic while recording the index selected by its newer loop.
+        replace_if_present "$out/jaccl/rdma.cpp" \
+          '  bool found_gid = false;' \
+          '  int gid_index = 0;
+      bool found_gid = false;'
+        replace_if_present "$out/jaccl/rdma.cpp" \
+          '        found_gid = true;' \
+          '        gid_index = i;
+            found_gid = true;'
         replace_if_present "$out/jaccl/rdma.cpp" \
           '  src.packet_sequence_number = 7;
       src.global_identifier = gid;' \
@@ -190,6 +203,18 @@ let
         replace_if_present "$out/jaccl/rdma.cpp" \
           '    attr.ah_attr.grh.sgid_index = 1;' \
           '    attr.ah_attr.grh.sgid_index = src.source_gid_index;'
+        # These edits must land together. Fail at source preparation if a new
+        # upstream layout would otherwise leave a partial GID-index patch.
+        for expected in \
+          'int gid_index = 0;' \
+          'gid_index = i;' \
+          'src.source_gid_index = gid_index;' \
+          'attr.ah_attr.grh.sgid_index = src.source_gid_index;'; do
+          if ! grep -Fq "$expected" "$out/jaccl/rdma.cpp"; then
+            echo "jaccl: incomplete dynamic GID patch: $expected" >&2
+            exit 1
+          fi
+        done
         replace_if_present "$out/jaccl/rdma.cpp" \
           '    // Search for the name and try to open the device
         for (int i = 0; i < num_devices; i++) {
@@ -293,7 +318,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "jaccl";
-  version = "0.32.0-mlx";
+  version = "${import ../../lib/mlx-version.nix mlx-src}-mlx";
   src = jaccl-src;
 
   nativeBuildInputs = [
@@ -322,6 +347,12 @@ stdenv.mkDerivation {
     fi
     export SDKROOT=${lib.escapeShellArg darwinSdkRoot}
     export MACOSX_DEPLOYMENT_TARGET=${lib.escapeShellArg darwinDeploymentTarget}
+  '';
+
+  postInstall = ''
+    cat > "$out/lib/cmake/jaccl/jacclConfig.cmake" <<'EOF'
+    include("''${CMAKE_CURRENT_LIST_DIR}/jacclTargets.cmake")
+    EOF
   '';
 
   meta = with lib; {

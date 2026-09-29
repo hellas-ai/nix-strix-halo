@@ -1,0 +1,311 @@
+{
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
+  "transport": "TCP RCCL, cx5fabric0, NCCL_IB_DISABLE=1",
+  "dtype": "bfloat16",
+  "world_size": 4,
+  "purpose": "Isolate full-model fresh-repeat variation from collective repeatability. Fixed random input per rank; eight repetitions per shape and API, with allocation offsets varied by 256 bytes.",
+  "results_rank_zero": [
+    {
+      "rows": 1,
+      "bytes": 8192,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.03125,
+      "median_ms": 0.2400720004516188
+    },
+    {
+      "rows": 1,
+      "bytes": 8192,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.03125,
+      "median_ms": 0.22994349819782656
+    },
+    {
+      "rows": 1,
+      "bytes": 8192,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.03125,
+      "median_ms": 2.091279500746168
+    },
+    {
+      "rows": 1,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 4,
+      "bytes": 32768,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.0390625,
+      "median_ms": 0.34291100018890575
+    },
+    {
+      "rows": 4,
+      "bytes": 32768,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.0390625,
+      "median_ms": 0.2756925005087396
+    },
+    {
+      "rows": 4,
+      "bytes": 32768,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.0390625,
+      "median_ms": 2.0711725010187365
+    },
+    {
+      "rows": 4,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 69,
+      "bytes": 565248,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.046875,
+      "median_ms": 0.7551899998361478
+    },
+    {
+      "rows": 69,
+      "bytes": 565248,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.046875,
+      "median_ms": 0.7577244978165254
+    },
+    {
+      "rows": 69,
+      "bytes": 565248,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.046875,
+      "median_ms": 3.1907140000839718
+    },
+    {
+      "rows": 69,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 257,
+      "bytes": 2105344,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 2.288703499289113
+    },
+    {
+      "rows": 257,
+      "bytes": 2105344,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 2.0603630000550766
+    },
+    {
+      "rows": 257,
+      "bytes": 2105344,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 3.822326501904172
+    },
+    {
+      "rows": 257,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    },
+    {
+      "rows": 1024,
+      "bytes": 8388608,
+      "method": "torch",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 6.924386500031687
+    },
+    {
+      "rows": 1024,
+      "bytes": 8388608,
+      "method": "pynccl",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 8.50379400071688
+    },
+    {
+      "rows": 1024,
+      "bytes": 8388608,
+      "method": "graph",
+      "repeat_changed_elements": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "repeat_max_delta": 0.0,
+      "reference_max_delta": 0.05859375,
+      "median_ms": 8.36987799993949
+    },
+    {
+      "rows": 1024,
+      "method_differences": {
+        "torch": 0,
+        "pynccl": 0,
+        "graph": 0
+      }
+    }
+  ],
+  "all_rank_process_exit_codes": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "qualification": "All measured repeats and torch/PyNccl/graph outputs matched bitwise for every tested shape. Does not prove independence from batch size or rule out different collective shapes in the model. Graph timing includes first replay/instantiation and is unsuitable for a steady-state roofline; eager 8 KiB median is about 0.23-0.24 ms including synchronization."
+}

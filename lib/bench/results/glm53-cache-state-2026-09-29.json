@@ -1,0 +1,943 @@
+{
+  "runtime": "/nix/store/p9qnnabzqhx8a73lahcz9fh7m6dcx53f-sglang-rocm-gfx1151-0.5.20",
+  "fixture": "First four real checkpoint layers, TP4, radix on, graphs off, stable fused router, BF16 output head",
+  "captured_rank": "strix-1",
+  "request": "Cache 3073 synthetic tokens, truncate to 2119 including two replacement tokens; compare cached 2048 + 71 extension to fresh 1024 + 1024 + 71",
+  "results": [
+    {
+      "cached": "cached-layer0-after-000.pt",
+      "fresh": "fresh-layer0-after-002.pt",
+      "tensors": {
+        "output": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "ssm": {
+          "shape": [
+            1,
+            16,
+            128,
+            128
+          ],
+          "dtype": "torch.float32",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "conv": {
+          "shape": [
+            1,
+            3,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer0-before-000.pt",
+      "fresh": "fresh-layer0-before-002.pt",
+      "tensors": {
+        "qkv": {
+          "shape": [
+            71,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "a": {
+          "shape": [
+            1,
+            71,
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "b": {
+          "shape": [
+            1,
+            71,
+            16
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "ssm": {
+          "shape": [
+            1,
+            16,
+            128,
+            128
+          ],
+          "dtype": "torch.float32",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "conv": {
+          "shape": [
+            1,
+            3,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer0-kernel-input-000.pt",
+      "fresh": "fresh-layer0-kernel-input-002.pt",
+      "tensors": {
+        "q": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "k": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "v": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "g": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "beta": {
+          "shape": [
+            1,
+            71,
+            16
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer1-after-000.pt",
+      "fresh": "fresh-layer1-after-002.pt",
+      "tensors": {
+        "output": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "ssm": {
+          "shape": [
+            1,
+            16,
+            128,
+            128
+          ],
+          "dtype": "torch.float32",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "conv": {
+          "shape": [
+            1,
+            3,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer1-before-000.pt",
+      "fresh": "fresh-layer1-before-002.pt",
+      "tensors": {
+        "qkv": {
+          "shape": [
+            71,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "a": {
+          "shape": [
+            1,
+            71,
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "b": {
+          "shape": [
+            1,
+            71,
+            16
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "ssm": {
+          "shape": [
+            1,
+            16,
+            128,
+            128
+          ],
+          "dtype": "torch.float32",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "conv": {
+          "shape": [
+            1,
+            3,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer1-kernel-input-000.pt",
+      "fresh": "fresh-layer1-kernel-input-002.pt",
+      "tensors": {
+        "q": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "k": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "v": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "g": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "beta": {
+          "shape": [
+            1,
+            71,
+            16
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer2-after-000.pt",
+      "fresh": "fresh-layer2-after-002.pt",
+      "tensors": {
+        "output": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "ssm": {
+          "shape": [
+            1,
+            16,
+            128,
+            128
+          ],
+          "dtype": "torch.float32",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "conv": {
+          "shape": [
+            1,
+            3,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer2-before-000.pt",
+      "fresh": "fresh-layer2-before-002.pt",
+      "tensors": {
+        "qkv": {
+          "shape": [
+            71,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "a": {
+          "shape": [
+            1,
+            71,
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "b": {
+          "shape": [
+            1,
+            71,
+            16
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "ssm": {
+          "shape": [
+            1,
+            16,
+            128,
+            128
+          ],
+          "dtype": "torch.float32",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "conv": {
+          "shape": [
+            1,
+            3,
+            6144
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    },
+    {
+      "cached": "cached-layer2-kernel-input-000.pt",
+      "fresh": "fresh-layer2-kernel-input-002.pt",
+      "tensors": {
+        "q": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "k": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "v": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "g": {
+          "shape": [
+            1,
+            71,
+            16,
+            128
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        },
+        "beta": {
+          "shape": [
+            1,
+            71,
+            16
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "max_delta": 0.0,
+          "relative_l2": 0.0
+        }
+      }
+    }
+  ],
+  "qualification": "For the matched final 71-token chunk, all three KDA layers have bitwise-identical raw projections, restored conv/FP32 SSM states, convolved Q/K/V, gate/beta inputs, kernel outputs and final states. The four-layer output logprobs still differ by 0.0626993 with identical token IDs. Does not yet isolate DSA versus subsequent projections/MoE.",
+  "dsa_matched_chunk": [
+    {
+      "file": "cached-attention-after-000.pt",
+      "tensors": {
+        "out": {
+          "shape": [
+            1,
+            71,
+            16,
+            512
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        }
+      }
+    },
+    {
+      "file": "cached-attention-before-000.pt",
+      "tensors": {
+        "q": {
+          "shape": [
+            71,
+            16,
+            512
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "k": {
+          "shape": [
+            71,
+            1,
+            512
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "v": {
+          "shape": [
+            71,
+            1,
+            512
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "q_rope": {
+          "shape": [
+            71,
+            16,
+            0
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "k_rope": {
+          "shape": [
+            71,
+            1,
+            0
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "topk_indices": {
+          "shape": [
+            71,
+            2051
+          ],
+          "dtype": "torch.int32",
+          "changed": 2476,
+          "finite_max_delta": 1024.0,
+          "relative_l2": 0.1066076010465622,
+          "nonfinite_mismatch": 0
+        }
+      }
+    },
+    {
+      "file": "cached-indexer-input-000.pt",
+      "tensors": {
+        "logits": {
+          "shape": [
+            71,
+            576
+          ],
+          "dtype": "torch.float32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "group_lengths": {
+          "shape": [
+            71
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "page_table": {
+          "shape": [
+            2,
+            4100
+          ],
+          "dtype": "torch.int32",
+          "changed": 79,
+          "finite_max_delta": 1024.0,
+          "relative_l2": 0.08921217918395996,
+          "nonfinite_mismatch": 0
+        },
+        "seq_lens": {
+          "shape": [
+            71
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "row_starts": {
+          "shape": [
+            71
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "page_table_row_index": {
+          "shape": [
+            71
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        }
+      }
+    },
+    {
+      "file": "cached-indexer-output-000.pt",
+      "tensors": {
+        "indices": {
+          "shape": [
+            71,
+            2051
+          ],
+          "dtype": "torch.int32",
+          "changed": 2476,
+          "finite_max_delta": 1024.0,
+          "relative_l2": 0.1066076010465622,
+          "nonfinite_mismatch": 0
+        }
+      }
+    },
+    {
+      "file": "cached-layer-after-000.pt",
+      "tensors": {
+        "hidden": {
+          "shape": [
+            71,
+            4096
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        }
+      }
+    },
+    {
+      "file": "cached-layer-before-000.pt",
+      "tensors": {
+        "hidden": {
+          "shape": [
+            71,
+            16384
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        }
+      }
+    },
+    {
+      "file": "cached-metadata-000.pt",
+      "tensors": {
+        "cache_seqlens_int32": {
+          "shape": [
+            1
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "cu_seqlens_q": {
+          "shape": [
+            2
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "cu_seqlens_k": {
+          "shape": [
+            2
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "page_table_1": {
+          "shape": [
+            1,
+            2119
+          ],
+          "dtype": "torch.int32",
+          "changed": 71,
+          "finite_max_delta": 1024.0,
+          "relative_l2": 0.14657630026340485,
+          "nonfinite_mismatch": 0
+        },
+        "real_page_table": {
+          "shape": [
+            1,
+            34
+          ],
+          "dtype": "torch.int32",
+          "changed": 2,
+          "finite_max_delta": 16.0,
+          "relative_l2": 0.1934249848127365,
+          "nonfinite_mismatch": 0
+        },
+        "dsa_cache_seqlens_int32": {
+          "shape": [
+            71
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "dsa_cu_seqlens_q": {
+          "shape": [
+            72
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "dsa_cu_seqlens_k": {
+          "shape": [
+            72
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "dsa_seqlens_expanded": {
+          "shape": [
+            71
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "indexer_seq_lens_cpu": {
+          "shape": [
+            1
+          ],
+          "dtype": "torch.int64",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "indexer_seq_lens": {
+          "shape": [
+            1
+          ],
+          "dtype": "torch.int64",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "token_to_batch_idx": {
+          "shape": [
+            71
+          ],
+          "dtype": "torch.int32",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        }
+      }
+    },
+    {
+      "file": "cached-sparse-input-000.pt",
+      "tensors": {
+        "q_nope": {
+          "shape": [
+            71,
+            16,
+            512
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "q_rope": {
+          "shape": [
+            71,
+            16,
+            0
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "indices": {
+          "shape": [
+            71,
+            1,
+            2051
+          ],
+          "dtype": "torch.int32",
+          "changed": 2476,
+          "finite_max_delta": 1024.0,
+          "relative_l2": 0.1066076010465622,
+          "nonfinite_mismatch": 0
+        },
+        "valid_mask": {
+          "shape": [
+            71,
+            1,
+            2051
+          ],
+          "dtype": "torch.bool",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "selected_kv": {
+          "shape": [
+            145516,
+            512
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        },
+        "pool_shapes": [
+          [
+            4160,
+            1,
+            512
+          ],
+          [
+            4160,
+            1,
+            512
+          ]
+        ]
+      }
+    },
+    {
+      "file": "cached-sparse-output-000.pt",
+      "tensors": {
+        "out": {
+          "shape": [
+            1,
+            71,
+            16,
+            512
+          ],
+          "dtype": "torch.bfloat16",
+          "changed": 0,
+          "finite_max_delta": 0.0,
+          "relative_l2": 0.0,
+          "nonfinite_mismatch": 0
+        }
+      }
+    }
+  ],
+  "dsa_interpretation": "Physical page/slot indices differ after reallocation. Selected KV values, validity masks, query/key/value tensors, indexer logits, attention outputs and complete layer output are bitwise identical for the matched final 71-token chunk."
+}
