@@ -25,6 +25,13 @@ let
     DS4_METAL_DSV4_KV_SOURCE = "dsv4_kv.metal";
     DS4_METAL_DSV4_ROPE_SOURCE = "dsv4_rope.metal";
     DS4_METAL_DSV4_MISC_SOURCE = "dsv4_misc.metal";
+    DS4_METAL_DSV41_SOURCE = "dsv41.metal";
+    DS4_METAL_DEEPSEEK4_VISION_SOURCE = "deepseek4_vision.metal";
+    DS4_METAL_GLM53_BF16_SOURCE = "glm53_bf16.metal";
+    DS4_METAL_GLM53_KDA_SOURCE = "glm53_kda.metal";
+    DS4_METAL_GLM53_VISION_SOURCE = "glm53_vision.metal";
+    DS4_METAL_QWEN4_SOURCE = "qwen4.metal";
+    DS4_METAL_QWEN4_VISION_SOURCE = "qwen4_vision.metal";
     DS4_METAL_ARGSORT_SOURCE = "argsort.metal";
     DS4_METAL_CPY_SOURCE = "cpy.metal";
     DS4_METAL_CONCAT_SOURCE = "concat.metal";
