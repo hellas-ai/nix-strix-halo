@@ -154,6 +154,27 @@ input tokens and 2,453 output tokens, with no prefix reuse. This is one useful
 review-and-repair result, not near-perfect first-pass correctness. Evidence is
 in `lib/bench/results/glm53-pi-acceptance-2026-09-29.json`.
 
+At 02:07 UTC, the PyTorch/ROCm profiler segfaulted while finalizing the
+trace on strix-2, stopping TP4; the nodes and storage stayed up. Three ranks
+saved CPU traces, but no device-kernel timing was captured, so those traces
+cannot establish GPU utilization or roofline efficiency. The CPU trace shows
+substantial overhead in repeated mHC reductions. Patch 0015 reuses the existing
+Triton Sinkhorn kernel for the supported ROCm fallback parameters, retaining
+FP32 projection and the general fallback for other parameterizations. Six
+independent CPU-double cases and two fallback cases pass on every GPU.
+
+Patch 0014 packs head-major ROCm query tensors before sparse attention. The
+absorbed BMM's head stride previously included the prompt length, causing
+Triton to compile another kernel for each unseen final prefill chunk. In an
+isolated test, the old path took 2.75 seconds at its next unseen length; the
+packed path took 0.012 seconds, with BF16 relative L2 around 0.00194 against
+CPU double precision. Twelve sparse prefill/decode cases now pass on every
+GPU, including head-major zero/64-RoPE layouts. These tests do not yet establish
+an end-to-end speedup. Evidence is in
+`lib/bench/results/glm53-layout-mhc-2026-09-29.json`. TP4 relaunched at 02:17 UTC
+with a 131072-token limit, radix caching and graphs disabled, for regression
+and long-context qualification.
+
 Hydra also exposed a Tensile wheel metadata mismatch after the nixpkgs update.
 The distribution now uses the packaged ROCm release version, retaining the
 independent upstream algorithm/CMake version. A full local Tensile build passes

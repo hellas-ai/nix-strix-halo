@@ -11,7 +11,14 @@ from sglang.kernels.ops.attention.dsa.triton_sparse_mla_decode import (
 
 torch.manual_seed(941)
 torch.set_num_threads(4)
-for rows, tail_dim, topk in [(3, 0, 3), (3, 0, 2051), (40, 0, 2051), (3, 64, 2051)]:
+for rows, tail_dim, topk, head_major in [
+    (3, 0, 3, False),
+    (3, 0, 2051, False),
+    (40, 0, 2051, False),
+    (3, 64, 2051, False),
+    (43, 0, 2051, True),
+    (47, 64, 2051, True),
+]:
     heads, dim, slots = 16, 512, 4096
     query = torch.randn(rows, heads, dim + tail_dim).bfloat16()
     cache = torch.randn(slots, 1, dim + tail_dim).bfloat16()
@@ -29,6 +36,10 @@ for rows, tail_dim, topk in [(3, 0, 3), (3, 0, 2051), (40, 0, 2051), (3, 64, 205
     probabilities = scores.softmax(-1).nan_to_num(0)
     expected = torch.einsum("rhk,rkd->rhd", probabilities, gathered[..., :dim]).float()
     query_gpu = query.cuda()
+    if head_major:
+        # The absorbed ROCm BMM produces a head-major allocation; final chunk
+        # lengths change its head stride even though attention geometry is fixed.
+        query_gpu = query_gpu.transpose(0, 1).contiguous().transpose(0, 1)
     for name, function in [
         ("prefill", triton_sparse_mla_fwd),
         ("decode", triton_sparse_mla_decode_splitk),
@@ -57,6 +68,7 @@ for rows, tail_dim, topk in [(3, 0, 3), (3, 0, 2051), (40, 0, 2051), (3, 64, 205
                     "rows": rows,
                     "rope_dim": tail_dim,
                     "topk": topk,
+                    "head_major": head_major,
                     "relative_l2": relative_l2,
                     "max_absolute_error": (result - expected).abs().max().item(),
                 }
