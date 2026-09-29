@@ -16,6 +16,10 @@ updates:
           - "*"
         group-by: "dependency-name"
     ignore:
+      # MLX shares a native ABI with the pinned vLLM Metal release wheel.
+      # Update its source and pkgs/vllm-metal/uv.lock together after the
+      # wheel adopts that MLX release; source-only bumps cannot build.
+      - dependency-name: "mlx-metal-src"
       # TheRock source inputs are generated from pkgs/therock/sources/rocm-source.json
       # and must be bumped atomically by pkgs/therock/scripts/update-source-tree.py.
       - dependency-name: "therock-src-*"
