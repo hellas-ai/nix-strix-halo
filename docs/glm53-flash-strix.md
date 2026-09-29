@@ -9,7 +9,7 @@ sampled token choices agree on TCP; the RoCE launch has one disagreement. Pi com
 coding repairs: one after review feedback and three on the first draft,
 including a task starting above 100K prompt tokens. Three-marker retrieval passed at
 129,017 prompt tokens both uncached and with prefix reuse. The cached repeat
-reused 128,960 tokens and took 4.45 seconds, versus 358 seconds cold.
+reused 128,960 tokens and took 4.07 seconds, versus 295 seconds cold on RoCE.
 Stable routing makes synthetic fresh-repeat, identical-prefix and appended-prefix
 probabilities exact. All five cache-branch checks pass on the latest RoCE
 launch, including truncation (maximum delta 0.0201); this is one tested workload.
@@ -45,6 +45,8 @@ benchmark measures 9.63 tokens/s and 0.355-second time to first token, versus
 8.81 tokens/s and 0.374 seconds on TCP. Decode/prefill probability maxima
 are 0.1821/0.2020 for the short/chunked cases, with one argmax disagreement;
 the strict numerical gate remains failed. All five cache-branch cases pass.
+The 129,017-token three-marker retrieval also passes with exact cold/warm
+answers: 294.75 seconds cold and 4.07 seconds warm, reusing 128,960 tokens.
 
 At 22:05 UTC on September 28, all four Strix clients lost their NVMe/RDMA
 storage connections while copying/checking local checkpoint caches, with no
