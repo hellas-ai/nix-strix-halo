@@ -78,15 +78,24 @@ All 73 files passed upstream digest, size, safetensors interval and index
 verification at 07:25 UTC; see
 [`glm53-official-fp8-staging-2026-09-29.json`](../lib/bench/results/glm53-official-fp8-staging-2026-09-29.json).
 Set `GLM_MODEL_VARIANT=fp8` to select this checkpoint and Triton FP8 GEMMs;
-the launcher requires its pinned verification manifest. Full serving and
-quality comparison are still pending. At about 06:08 UTC, the user
+the launcher requires its pinned verification manifest. The initial full-model
+FP8 run passes arithmetic, streamed tools and tool-result continuation, but its
+generic kernels reach only **1.97 tok/s**. Decode/prefill probability maxima
+are 0.1918/0.1235, with zero sampled token-choice disagreements; both means
+also exceed the unchanged 0.01 limit. Repeated, identical and appended cache
+checks are exact, while truncation reaches 0.0798 and fails the 0.05 gate.
+This is an untuned, numerically unqualified baseline, not evidence of quality
+equivalence between checkpoints. See
+[`glm53-official-fp8-baseline-2026-09-29.json`](../lib/bench/results/glm53-official-fp8-baseline-2026-09-29.json).
+At about 06:08 UTC, the user
 reset the Strix power strip; the 13.68 tok/s measurements completed before
 that reset. All four nodes and watchdogs recovered, and all four AWQ caches
 passed full checksums again by 06:31 UTC. The post-reset GPU trace confirms
 the tuned runtime's reduced mHC/expert costs. The official FP8 dense kernel
-passes decode/prefill CPU-reference probes; full FP8 serving and quality remain
-unqualified. A source-derived estimate gives 80.47 GB of FP8 weights per rank,
-excluding loader peak, caches, graphs and workspace.
+passes decode/prefill CPU-reference probes; full FP8 quality remains unqualified.
+Strix-1 reports 75.82 GiB used after weight loading and 32.51 GiB available
+after allocating 128 Mamba-cache slots and 131,072 KV tokens. This establishes
+capacity for the trial; the FP8 128K functional check is still pending.
 
 After a further user reboot of strix-1, the accepted runtime reproduced both
 consistency prompts' token probabilities bitwise and measured 13.83 tok/s.

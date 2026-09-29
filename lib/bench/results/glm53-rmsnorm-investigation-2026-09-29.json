@@ -318,5 +318,111 @@
         "prefill_logprobs_equal": true
       }
     ]
-  }
+  },
+  "first_prefill_differences": [
+    {
+      "prompt_index": 0,
+      "changed_prompt_logprobs": 3,
+      "first_changes": [
+        {
+          "logprob_position": 9,
+          "baseline": [
+            -0.3671465218067169,
+            79043,
+            null
+          ],
+          "candidate": [
+            -0.40170344710350037,
+            79043,
+            null
+          ]
+        },
+        {
+          "logprob_position": 10,
+          "baseline": [
+            -0.0005872909096069634,
+            1372,
+            null
+          ],
+          "candidate": [
+            -0.0005840741214342415,
+            1372,
+            null
+          ]
+        },
+        {
+          "logprob_position": 11,
+          "baseline": [
+            -1.1799423694610596,
+            14432,
+            null
+          ],
+          "candidate": [
+            -1.0431716442108154,
+            14432,
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "prompt_index": 1,
+      "changed_prompt_logprobs": 2105,
+      "first_changes": [
+        {
+          "logprob_position": 10,
+          "baseline": [
+            -2.6585254669189453,
+            11,
+            null
+          ],
+          "candidate": [
+            -2.6541013717651367,
+            11,
+            null
+          ]
+        },
+        {
+          "logprob_position": 11,
+          "baseline": [
+            -7.91586446762085,
+            13020,
+            null
+          ],
+          "candidate": [
+            -7.977034568786621,
+            13020,
+            null
+          ]
+        },
+        {
+          "logprob_position": 12,
+          "baseline": [
+            -0.3580802083015442,
+            11,
+            null
+          ],
+          "candidate": [
+            -0.3293372690677643,
+            11,
+            null
+          ]
+        },
+        {
+          "logprob_position": 13,
+          "baseline": [
+            -0.8501066565513611,
+            323,
+            null
+          ],
+          "candidate": [
+            -0.8450707793235779,
+            323,
+            null
+          ]
+        }
+      ]
+    }
+  ],
+  "prefill_observation": "The initial eager prefill already differs, starting at input-logprob positions 9 and 10 in the two prompts. A decode-graph-only explanation cannot account for this."
 }

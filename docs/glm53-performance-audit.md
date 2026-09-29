@@ -50,6 +50,16 @@ reached 241.5 GB/s; using that rate gives an even more optimistic 24.52 ms /
 Neither an achieved GEMV rate nor measured full-model latency defines the
 hardware ceiling.
 
+The official FP8 checkpoint changes this byte estimate to **6.15 GB of weights
+per rank per token**, plus the same minimum recurrent-state traffic: about 5%
+more than the community AWQ checkpoint. More expert bytes are partly offset
+by dense weights that the official checkpoint stores in FP8. The ideal bound
+at 228 GB/s is 36.65 tok/s. Its initial generic-kernel result is only 1.97
+tok/s, so this small byte-count difference does not explain the slowdown.
+The compiled dense and expert kernels use FP16 WMMA after FP8 conversion;
+the generic block-FP8 path nevertheless pads batch-one work to 64-row tiles.
+Smaller tiles require reference checks and a separate full-model measurement.
+
 ## What the full GPU trace establishes
 
 The device trace was collected **before** the two latest kernel changes,
