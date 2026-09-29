@@ -693,6 +693,7 @@
             "mlx-rocm"
             "multikernel-demo-initrd"
             "sglang-rocm"
+            "sglang-v41-rocm"
             "strix-halo-mes-firmware"
             "therock-amdsmi"
             "therock-python"

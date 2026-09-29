@@ -18,6 +18,9 @@
   rocmSdk,
   packageSuffix ? "rocm",
   hsaOverrideGfxVersion ? null,
+  runtimePatches ? map (name: ./patches + "/${name}") (
+    builtins.filter (lib.hasSuffix ".patch") (builtins.attrNames (builtins.readDir ./patches))
+  ),
 }:
 
 let
@@ -306,9 +309,9 @@ pythonPackages.buildPythonApplication rec {
   ];
 
   postInstall = ''
-    for patch_file in ${./patches}/*.patch; do
-      patch --batch --fuzz=0 -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
-    done
+    ${lib.concatMapStringsSep "\n" (patch: ''
+      patch --batch --fuzz=0 -p1 -d "$out/${pythonSitePackages}" < ${patch}
+    '') runtimePatches}
     # Keep component checks in the same Python/ROCm environment as serving.
     cat > "$out/bin/sglang-python" <<'PY'
     #!${pythonPackages.python.interpreter}

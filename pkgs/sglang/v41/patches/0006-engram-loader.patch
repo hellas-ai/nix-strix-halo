@@ -1,0 +1,39 @@
+--- a/sglang/srt/model_loader/loader.py
++++ b/sglang/srt/model_loader/loader.py
+@@ -620,7 +620,24 @@
+             hf_weights_files = list(resolved_source.weight_files)
+             use_safetensors = resolved_source.use_safetensors
+ 
+-        if self.load_config.load_format == LoadFormat.NPCACHE:
++        from sglang.srt.layers.engram_store import (
++            file_backed_engram_enabled,
++            weights_without_engram,
++        )
++
++        if file_backed_engram_enabled():
++            if not use_safetensors or self.load_config.load_format not in (
++                LoadFormat.AUTO, LoadFormat.SAFETENSORS
++            ):
++                raise ValueError("file-backed Engram requires the default safetensors loader")
++            if (get_model().weight_loader_disable_mmap
++                    or get_model().weight_loader_prefetch_checkpoints
++                    or startup_prefetch_active):
++                raise ValueError(
++                    "file-backed Engram requires mmap loading with checkpoint prefetch disabled"
++                )
++            weights_iterator = weights_without_engram(hf_weights_files)
++        elif self.load_config.load_format == LoadFormat.NPCACHE:
+             # Currently np_cache only support *.bin checkpoints
+             assert use_safetensors is False
+             weights_iterator = np_cache_weights_iterator(
+@@ -800,6 +817,10 @@
+         num_threads: int,
+     ) -> CheckpointFilePrefetchHandle:
+         """Start CPU-only page-cache staging for already-resolved sources."""
++        from sglang.srt.layers.engram_store import file_backed_engram_enabled
++
++        if file_backed_engram_enabled():
++            raise ValueError("checkpoint prefetch is incompatible with file-backed Engram")
+         if not all(source.use_safetensors for source in resolved_sources):
+             raise ValueError(
+                 "Startup weight-loading overlap requires safetensors checkpoints"
