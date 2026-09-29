@@ -1,0 +1,62 @@
+--- a/sglang/srt/mem_cache/kv_cache_builder.py
++++ b/sglang/srt/mem_cache/kv_cache_builder.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import math
+ 
+ from sglang.srt.runtime_context import get_exec
+ 
+@@ -335,6 +336,41 @@
+         mtp_draft_device_pools=mtp_draft_device_pools,
+     )
+ 
++    # A packed DSA index page holds page_size pooled keys, each covering
++    # index_kpool tokens. Sharing a shorter prefix can rebind the first token
++    # page to an older branch and silently restore its later pooled keys.
++    # Keep the physical KV allocator page unchanged, but share/free the full
++    # packed-index span atomically in the radix tree.
++    text_config = model_config.hf_text_config
++    index_kpool = getattr(text_config, "index_kpool", 1)
++    if (
++        is_dsa
++        and getattr(text_config, "index_kpool_compress", False)
++        and index_kpool > 1
++        and not disable_radix_cache
++    ):
++        if get_parallel().dcp_enabled or enable_hierarchical_cache:
++            raise NotImplementedError(
++                "Compressed DSA index prefix sharing with DCP or HiCache "
++                "requires packed-index page ownership support."
++            )
++        params.page_size *= index_kpool
++        if envs.SGLANG_DSA_PREFIX_SHARING_CHUNK.get():
++            if not effective_chunked_prefill_size or effective_chunked_prefill_size < 0:
++                raise ValueError(
++                    "SGLANG_DSA_PREFIX_SHARING_CHUNK requires chunked prefill."
++                )
++            # Conservative workaround for hybrid prefill batch-shape drift:
++            # do not substitute a partial chunk computed by another request.
++            params.page_size = math.lcm(
++                params.page_size, effective_chunked_prefill_size
++            )
++        logger.info(
++            "Compressed DSA index radix page size: %d (physical KV page: %d)",
++            params.page_size,
++            page_size,
++        )
++
+     tree_cache = create_tree_cache(
+         TreeCacheBuildContext(
+             server_args=server_args,
+--- a/sglang/srt/environ.py
++++ b/sglang/srt/environ.py
+@@ -1570,6 +1570,7 @@
+     )
+     # Enabled for supported CUDA KPool geometry; set to 0 to use ordinary metadata.
+     SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION = EnvBool(True)
++    SGLANG_DSA_PREFIX_SHARING_CHUNK = EnvBool(False)
+     SGLANG_DSA_TOPK_FLASHINFER_DETERMINISTIC = EnvBool(False)
+     SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK = EnvStr(None)
+     SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD = EnvIntWithAlias(
