@@ -44,6 +44,95 @@ For access from a client, tunnel to the head rank, for example
 `http://127.0.0.1:31041` on that client. Configured 128K context and C1/C2
 graphs require workload-specific validation before deployment.
 
+To use packaged Pi or OpenCode through that tunnel, create session-local client
+configuration; these commands leave your global configuration files alone.
+They match the coding checks' provider settings (Pi 0.87.1, OpenCode 1.18.32).
+The clients must be on `PATH`; this flake exposes Pi, but does not package
+OpenCode.
+Run the clients from the working tree you want them to inspect or edit.
+
+```sh
+DS41_CLIENT_CONFIG="$(mktemp -d)"
+mkdir -p "$DS41_CLIENT_CONFIG/pi"
+cat > "$DS41_CLIENT_CONFIG/pi/models.json" <<'JSON'
+{
+  "providers": {
+    "strix-ds41": {
+      "baseUrl": "http://127.0.0.1:31041/v1",
+      "api": "openai-completions", "apiKey": "local",
+      "compat": {"supportsDeveloperRole": false, "supportsReasoningEffort": true},
+      "models": [{
+        "id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash",
+        "reasoning": true, "input": ["text"],
+        "contextWindow": 131072, "maxTokens": 8192,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+      }]
+    }
+  }
+}
+JSON
+cat > "$DS41_CLIENT_CONFIG/pi/temperature-zero.ts" <<'JS'
+export default function(pi) {
+  pi.on('before_provider_request', event => ({ ...event.payload, temperature: 0 }));
+}
+JS
+PI_CODING_AGENT_DIR="$DS41_CLIENT_CONFIG/pi" pi \
+  --offline --provider strix-ds41 --model deepseek-v4.1-flash --thinking low \
+  --no-extensions --extension "$DS41_CLIENT_CONFIG/pi/temperature-zero.ts" \
+  --no-skills --no-prompt-templates --no-context-files --no-session \
+  --print 'Inspect this repository and explain how to run its tests.'
+```
+
+For interactive Pi, omit `--print`, its prompt argument and `--no-session`.
+`--no-context-files` isolated the coding checks; omit it for normal repository
+instructions. Pi's recipe retains the text-only model declaration used in its
+coding check.
+OpenCode's declaration also enables image attachments; add `--file image.png`
+before `--` when needed. Its configured tool permissions allow file/shell tools
+and deny external-directory and web tools; these permissions are not a process
+or network sandbox:
+
+```sh
+DS41_CLIENT_CONFIG="$(mktemp -d)"
+cat > "$DS41_CLIENT_CONFIG/opencode.json" <<'JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "strix-ds41/v41", "small_model": "strix-ds41/v41",
+  "enabled_providers": ["strix-ds41"],
+  "autoupdate": false, "share": "disabled", "lsp": false, "formatter": false,
+  "permission": {
+    "*": "allow", "external_directory": "deny", "webfetch": "deny", "websearch": "deny"
+  },
+  "provider": {
+    "strix-ds41": {
+      "npm": "@ai-sdk/openai-compatible", "name": "DeepSeek V4.1 Flash",
+      "options": {"baseURL": "http://127.0.0.1:31041/v1", "apiKey": "local"},
+      "models": {
+        "v41": {
+          "id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash",
+          "reasoning": true, "tool_call": true, "attachment": true,
+          "modalities": {"input": ["text", "image"], "output": ["text"]},
+          "limit": {"context": 131072, "output": 8192}
+        }
+      }
+    }
+  }
+}
+JSON
+OPENCODE_CONFIG="$DS41_CLIENT_CONFIG/opencode.json" \
+OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_CLAUDE_CODE=1 \
+OPENCODE_DISABLE_AUTOUPDATE=1 OTEL_SDK_DISABLED=true \
+  opencode run --pure --auto --variant low --model strix-ds41/v41 -- \
+  'Inspect this repository and explain how to run its tests.'
+```
+
+`local` is a dummy client key for this unauthenticated loopback endpoint. Both
+clients use Chat Completions and native low reasoning effort (50), which is not
+a thinking-token or time limit. The 131,072-token context includes output;
+reserve room for the 8,192-token output budget. These settings preserve the
+configured capacity, not a guarantee for arbitrary 128K coding sessions; the
+qualification and serial/paired numerical limitations below still apply.
+
 Enable file-backed Engram with `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` and
 `SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=file`. It requires the default safetensors
 loader, mmap enabled, and checkpoint prefetch disabled. Prefill remains eager.
