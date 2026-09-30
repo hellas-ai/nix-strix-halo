@@ -114,12 +114,27 @@ or full-model test.
 copy-error propagation using the installed loader source. Run it with
 `HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES=''` for its CPU-only checks.
 
-Component qualification is in progress. Full-model text/image correctness,
-TP4 performance, 128K cache reuse and useful Pi/OpenCode acceptance remain
-unqualified. The complete vision tower and image projection match the pinned
-official reference bitwise on three image inputs. Run `tests/vision.py` with
-the runtime path and checkpoint directory to repeat that comparison; it reads
-only the vision shard. This package is a candidate for full serving qualification.
+The complete vision tower and image projection match the pinned official
+reference bitwise on three image inputs. Run `tests/vision.py` with the runtime
+path and checkpoint directory to repeat that comparison; it reads only the
+vision shard. Full serving produced correct text/image smoke outputs and useful
+Pi/OpenCode benchmark fixes that were independently reviewed and tested. These
+bounded checks are not a general coding-quality guarantee.
+
+With the launcher's 512-token prefill chunk, two related 130,563-token prompts
+passed all ten retrieval-answer checks across cold loads, repeats, branching,
+switching back and paired submissions. Repeats retained 130,560 cached tokens;
+the branch reused 65,024 shared-prefix tokens. Both paired rounds retained the
+full cached prompts, with actual two-request graph decode observed in one round.
+This establishes capacity and cache behavior for that workload, not unrelated
+concurrent cold 128K prompts or batched prefill.
+
+Cross-batch numerical differences remain unresolved, including with the eager
+baseline. The 128K run failed strict logprob invariance between serial and paired
+requests and between paired rounds, despite correct answers. This reproducibility
+requirement is not an independently derived accuracy bound. The package remains
+a serving candidate pending a full-model reference comparison; measured speed
+does not establish proximity to the hardware roofline.
 
 The native top512 selector preserves strict FP32 score ordering and breaks exact
 cutoff ties by smaller logical token ID, including compact candidate rows. When
