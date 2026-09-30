@@ -68,3 +68,11 @@ unqualified. The complete vision tower and image projection match the pinned
 official reference bitwise on three image inputs. Run `tests/vision.py` with
 the runtime path and checkpoint directory to repeat that comparison; it reads
 only the vision shard. This package is a candidate for full serving qualification.
+
+The native top512 selector preserves strict FP32 score ordering and breaks exact
+cutoff ties by smaller logical token ID, including compact candidate rows. When
+a coarse score bin exceeds the native scratch capacity, it rescans the original
+row rather than selecting from truncated scratch. `tests/topk.py` checks strict
+winners, synthetic cutoff ties under candidate/page permutations, masked tails,
+128K overflow and changed-input graph replay. Level-one candidate-block cutoff
+ties retain their upstream unspecified policy.

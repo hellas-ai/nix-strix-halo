@@ -35,16 +35,18 @@ let
       ./patches/0009-bounded-weight-loading.patch
       ./patches/0010-swa-autotune-head-tiles.patch
       ./patches/0011-rccl-graph-usage-mode.patch
+      ./patches/0012-topk-logical-ties.patch
     ];
   };
   baseKernel = lib.findFirst (
     p: lib.hasPrefix "sglang-kernel-" (p.pname or "")
   ) (throw "DeepSeek V4.1 requires the native SGLang kernel package") base.dependencies;
-  kernel = baseKernel.overridePythonAttrs (_: {
+  kernel = baseKernel.overridePythonAttrs (old: {
     pname = "sglang-kernel-v41-gfx1151";
     version = "0.4.7-${builtins.substring 0 8 revision}";
     inherit src;
     sourceRoot = "sglang-${revision}/python/sglang/kernels/aot";
+    patches = (old.patches or [ ]) ++ [ ./kernel-patches/0001-topk-logical-ties-overflow.patch ];
   });
 in
 base.overridePythonAttrs (old: {
