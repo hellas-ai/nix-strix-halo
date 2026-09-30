@@ -43,6 +43,7 @@ let
       ./patches/0017-v41-native-shared-expert-gemv.patch
       ./patches/0018-c2-gemv-eight-row-tiles.patch
       ./patches/0019-native-gemv-exact-fp8-conversion.patch
+      ./patches/0020-native-hc-post-c2.patch
     ];
   };
   baseKernel = lib.findFirst (

@@ -63,8 +63,12 @@ larger batches retain their ordinary paths. Native C1/C2 projections use the
 existing activation quantizer and FP8/E8M0 weights, with FP32 reduction and
 BF16 output. This applies only to marked V4.1 Engram, TP4 attention, and TP4/EP1
 separate shared-expert projections. The FP32 mHC projection has its own exact
-C1/C2 shape guard; RMS, mixing and Sinkhorn operations are unchanged. These
+C1/C2 shape guard; RMS and Sinkhorn operations are unchanged. These
 reductions can round differently from the generic matrix kernels.
+
+Portable gfx1151 C2 mHC post-residual mixing uses one kernel for HC4/H5120,
+with separate FP32 products/additions and final BF16 rounding. Explicit
+FlashInfer/TileLang choices and all other shapes retain their existing paths.
 
 `--model-loader-extra-config '{"enable_multithread_load":false}'` disables both
 iterator threads and model-side weight-copy threads. With threading enabled,
@@ -117,8 +121,9 @@ included here.
 `tests/fp8.py` checks all six guarded projection shapes with exact native-format
 operands, the original quantizer, C1/C2 graph replay and generic fallbacks.
 `tests/mhc.py` includes a FP64 projection reference with an FP32 reduction-error
-bound. `tests/engram.py` checks prepared-row embedding and bounded graph input
-generations; its local ownership checks do not replace a multi-rank collective
+bound, plus post-residual bitwise, signed-zero, reduction-order, graph and
+fallback controls against installed Torch. `tests/engram.py` checks prepared-row
+embedding and bounded graph input generations; its local ownership checks do not replace a multi-rank collective
 or full-model test.
 
 `tests/weight-loading.py` checks bounded source ownership, serial loading and

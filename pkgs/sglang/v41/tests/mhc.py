@@ -10,10 +10,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ["SGLANG_USE_AITER"] = "0"
+os.environ["SGLANG_OPT_USE_FLASHINFER_MHC"] = "0"
 os.environ["SGLANG_OPT_USE_TILELANG_MHC_PRE"] = "0"
 os.environ["SGLANG_OPT_USE_TILELANG_MHC_POST"] = "0"
 
 import torch
+from sglang.kernels.ops.layernorm import mhc
+from sglang.kernels.ops.layernorm import native_hc_post as native_post
 from sglang.kernels.ops.layernorm import native_hc_projection as native
 from sglang.srt.configs.deepseek_v41 import DeepseekV41Config
 from sglang.srt.layers.layernorm import RMSNorm
@@ -98,6 +101,153 @@ def norm_reference(x, weight, eps):
     x = x.to(torch.bfloat16).float()
     x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps)
     return (x * weight.cpu().float()).to(torch.bfloat16)
+
+
+def post_check(actual, args, case, literal=None):
+    owned = actual.detach().cpu().clone()
+    baseline = mhc.hc_post(*args, 4).view_as(args[1]).cpu()
+    bad = (owned.view(torch.int16) != baseline.view(torch.int16)).nonzero()
+    print(
+        json.dumps(
+            {
+                "event": "hc_post_bitwise",
+                "case": case,
+                "unequal": len(bad),
+                "first": [
+                    [index, float(owned[tuple(index)]), float(baseline[tuple(index)])]
+                    for index in bad[:16].tolist()
+                ],
+            }
+        ),
+        flush=True,
+    )
+    assert not len(bad), case
+    x, residual, post, comb = [t.detach().cpu().double() for t in args]
+    expected = post.unsqueeze(-1) * x.unsqueeze(1)
+    expected += torch.einsum("sij,sih->sjh", comb, residual)
+    torch.testing.assert_close(owned.double(), expected, rtol=0.01, atol=0.03)
+    if literal is not None:
+        assert torch.equal(owned.view(torch.int16), literal.cpu().view(torch.int16))
+    return owned
+
+
+def check_post(layer):
+    def inputs(rows=2, dtype=torch.bfloat16):
+        return (
+            torch.randn(rows, 5120, device="cuda", dtype=dtype),
+            torch.randn(rows, 4, 5120, device="cuda", dtype=dtype),
+            torch.rand(rows, 4, device="cuda") * 2,
+            torch.rand(rows, 4, 4, device="cuda") / 4,
+        )
+
+    def check(args, case, literal=None):
+        before = [t.cpu().clone() for t in args]
+        with patch.object(
+            native_post, "native_hc_post_c2", wraps=native_post.native_hc_post_c2
+        ) as spy:
+            actual = Layer.hc_post(layer, *args)
+            assert spy.call_count == 1
+        result = post_check(actual, args, case, literal)
+        for old, current in zip(before, args, strict=True):
+            assert torch.equal(old.view(torch.uint8), current.cpu().view(torch.uint8))
+        return result
+
+    x, residual, post, comb = inputs()
+    pattern = torch.arange(5120)
+    zero = torch.zeros(5120, dtype=torch.bfloat16)
+    x.copy_(torch.where((pattern & 16) != 0, -zero, zero).expand(2, -1))
+    residual.copy_(
+        torch.stack(
+            [torch.where((pattern & (1 << i)) != 0, -zero, zero) for i in range(4)]
+        ).expand(2, -1, -1)
+    )
+    post.fill_(1)
+    comb.fill_(1)
+    args = (x, residual, post, comb)
+    check(args, "all32_signed_zero_patterns", torch.zeros_like(residual))
+    x.zero_()
+    post.zero_()
+    for i, value in enumerate([65536.0, 2**-9, -65536.0, 2**-9]):
+        residual[:, i].fill_(value)
+    check(args, "sequential_reduction", torch.full_like(residual, 2**-9))
+    residual.zero_()
+    comb.fill_(0.5)
+    residual[:, 0].fill_(2**-133)
+    residual[:, 1].fill_(2**-133)
+    check(args, "gradual_underflow", torch.full_like(residual, 2**-133))
+    x.fill_(1)
+    residual.zero_()
+    post.fill_(1 + 2**-8)
+    comb.zero_()
+    check(args, "BF16_even_midpoint", torch.ones_like(residual))
+    original = inputs()
+    expected = check(original, "random")
+    swapped = check(tuple(t.flip(0).contiguous() for t in original), "row_swap")
+    assert torch.equal(swapped.view(torch.int16), expected.flip(0).view(torch.int16))
+
+    for name, values in (
+        ("C1", inputs(1)),
+        ("C3", inputs(3)),
+        ("FP16", inputs(dtype=torch.float16)),
+    ):
+        with patch.object(
+            native_post, "native_hc_post_c2", wraps=native_post.native_hc_post_c2
+        ) as spy:
+            actual = Layer.hc_post(layer, *values)
+            assert spy.call_count == 0, name
+        expected = mhc.hc_post(*values, 4).view_as(values[1])
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8)), name
+    for name in ("strided", "raw_text_model", "other_model", "previous_false"):
+        values = list(inputs())
+        old_type, old_previous = (
+            layer.config.model_type,
+            layer.hc_pre_from_prev_sublayer,
+        )
+        try:
+            if name == "strided":
+                storage = torch.zeros(2, 10240, device="cuda", dtype=torch.bfloat16)
+                storage[:, ::2].copy_(values[0])
+                values[0] = storage[:, ::2]
+            if name == "raw_text_model":
+                layer.config.model_type = "deepseek_v41_text"
+            if name == "other_model":
+                layer.config.model_type = "deepseek_v4"
+            if name == "previous_false":
+                layer.hc_pre_from_prev_sublayer = False
+            with patch.object(
+                native_post, "native_hc_post_c2", wraps=native_post.native_hc_post_c2
+            ) as spy:
+                actual = Layer.hc_post(layer, *values)
+                assert spy.call_count == 0, name
+            post_check(actual, values, "fallback:" + name)
+        finally:
+            layer.config.model_type, layer.hc_pre_from_prev_sublayer = (
+                old_type,
+                old_previous,
+            )
+
+    buffers = tuple(t.clone() for t in original)
+    changed = inputs()
+    graphs = []
+    for call in (
+        lambda *v: mhc.hc_post(*v, 4).view_as(v[1]),
+        lambda *v: Layer.hc_post(layer, *v),
+    ):
+        call(*buffers)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = call(*buffers)
+        graphs.append((graph, output))
+    for name, values in (("A", original), ("B", changed), ("A_again", original)):
+        for target, value in zip(buffers, values, strict=True):
+            target.copy_(value)
+        graphs[0][0].replay()
+        old = graphs[0][1].cpu().clone()
+        graphs[1][0].replay()
+        actual = post_check(graphs[1][1], buffers, "graph:" + name)
+        assert torch.equal(actual.view(torch.int16), old.view(torch.int16))
+        eager = Layer.hc_post(layer, *buffers).cpu()
+        assert torch.equal(actual.view(torch.int16), eager.view(torch.int16))
 
 
 def main():
@@ -246,6 +396,7 @@ def main():
                     ),
                     flush=True,
                 )
+    check_post(layer)
     print(
         json.dumps(
             {
