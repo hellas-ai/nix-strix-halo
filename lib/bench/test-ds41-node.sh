@@ -92,28 +92,31 @@ cache_log=$harness/cache.log
 rm "$tools/mkdir"
 cat > "$tools/mkdir" <<EOF
 #!$bash_bin
-printf '%s\\n' "\$XDG_CACHE_HOME" "\$SGLANG_CACHE_DIR" "\$TRITON_CACHE_DIR" \\
+printf '%s\\n' "\$XDG_CACHE_HOME" "\$SGLANG_CACHE_DIR" "\$TRITON_CACHE_DIR" "\$SGLANG_JIT_CACHE_DIR" \\
   "\$TORCHINDUCTOR_CACHE_DIR" "\$AITER_JIT_DIR" "\$AITER_ROOT_DIR" > "$cache_log"
 exit 73
 EOF
 chmod +x "$tools/mkdir"
 
 check_cache_paths() {
-  local expected_triton=$1 rc=0
-  shift
+  local expected_triton=$1 expected_native=$2 rc=0
+  shift 2
   rm -f "$cache_log"
   run_launcher "$@" >"$harness/cache-output.log" 2>&1 || rc=$?
   [[ $rc == 73 ]] || fail "launcher did not reach the cache probe: exit $rc"
-  printf '%s\n' "$cache/runtime/cache" "$cache/runtime/sglang" "$expected_triton" \
+  printf '%s\n' "$cache/runtime/cache" "$cache/runtime/sglang" "$expected_triton" "$expected_native" \
     "$cache/runtime/torch" "$cache/runtime/aiter-jit" "$cache/runtime/aiter-root" \
     > "$harness/expected-cache.log"
   cmp -s "$harness/expected-cache.log" "$cache_log" || fail "unexpected cache paths"
   [[ ! -e "$served_log" ]] || fail "cache probe started serving"
 }
 
-check_cache_paths "$cache/runtime/triton"
-check_cache_paths "$cache/runtime/triton" TRITON_CACHE_DIR=
-check_cache_paths "$tmp/shared triton" "TRITON_CACHE_DIR=$tmp/shared triton"
+check_cache_paths "$cache/runtime/triton" "$cache/runtime/sglang-jit"
+check_cache_paths "$cache/runtime/triton" "$cache/runtime/sglang-jit" TRITON_CACHE_DIR= SGLANG_JIT_CACHE_DIR=
+check_cache_paths "$tmp/shared triton" "$cache/runtime/sglang-jit" "TRITON_CACHE_DIR=$tmp/shared triton"
+check_cache_paths "$cache/runtime/triton" "$tmp/shared native jit" "SGLANG_JIT_CACHE_DIR=$tmp/shared native jit"
+check_cache_paths "$tmp/shared triton" "$tmp/shared native jit" \
+  "TRITON_CACHE_DIR=$tmp/shared triton" "SGLANG_JIT_CACHE_DIR=$tmp/shared native jit"
 
 rm -f "$cache_log"
 rc=0
@@ -123,5 +126,14 @@ grep -Fq 'TRITON_CACHE_DIR must be an absolute directory' "$harness/cache-output
   fail "missing invalid cache path diagnostic"
 [[ ! -e "$cache_log" && ! -e "$served_log" ]] ||
   fail "invalid cache path reached cache creation or serving"
+
+rm -f "$cache_log"
+rc=0
+run_launcher SGLANG_JIT_CACHE_DIR=relative/native >"$harness/cache-output.log" 2>&1 || rc=$?
+[[ $rc == 2 ]] || fail "relative native JIT cache was not rejected: exit $rc"
+grep -Fq 'SGLANG_JIT_CACHE_DIR must be an absolute directory' "$harness/cache-output.log" ||
+  fail "missing invalid native JIT cache path diagnostic"
+[[ ! -e "$cache_log" && ! -e "$served_log" ]] ||
+  fail "invalid native JIT cache path reached cache creation or serving"
 
 echo "ds41-node launcher check passed"

@@ -49,6 +49,7 @@ let
       ./patches/0023-mxfp4-live-row-pairs.patch
       ./patches/0024-native-fp8-c4-c8.patch
       ./patches/0025-chunked-owned-row-admission.patch
+      ./patches/0026-software-fp8-rounding.patch
     ];
   };
   baseKernel = lib.findFirst (

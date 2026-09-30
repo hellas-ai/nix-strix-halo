@@ -39,17 +39,21 @@ fi
 # Keep compiled kernels and support caches off small writable store overlays.
 runtime_name=$(basename -- "$(dirname -- "$(dirname -- "$(realpath -- "$DS41_BINARY")")")")
 cache_dir=$DS41_CACHE_ROOT/$runtime_name
-# A caller may reuse Triton binaries after checking compiler/GPU/Python ABI
-# identity; all other caches remain isolated by runtime output.
+# A caller may reuse compiled kernels after checking compiler/GPU/Python ABI
+# identity. Both compiler caches default to this runtime output's namespace.
 TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-$cache_dir/triton}
 [[ "$TRITON_CACHE_DIR" = /* ]] || {
   echo 'TRITON_CACHE_DIR must be an absolute directory' >&2; exit 2;
 }
-export TRITON_CACHE_DIR
+SGLANG_JIT_CACHE_DIR=${SGLANG_JIT_CACHE_DIR:-$cache_dir/sglang-jit}
+[[ "$SGLANG_JIT_CACHE_DIR" = /* ]] || {
+  echo 'SGLANG_JIT_CACHE_DIR must be an absolute directory' >&2; exit 2;
+}
+export TRITON_CACHE_DIR SGLANG_JIT_CACHE_DIR
 export XDG_CACHE_HOME="$cache_dir/cache" SGLANG_CACHE_DIR="$cache_dir/sglang"
 export TORCHINDUCTOR_CACHE_DIR="$cache_dir/torch"
 export AITER_JIT_DIR="$cache_dir/aiter-jit" AITER_ROOT_DIR="$cache_dir/aiter-root"
-mkdir -p -- "$XDG_CACHE_HOME" "$SGLANG_CACHE_DIR" "$TRITON_CACHE_DIR" \
+mkdir -p -- "$XDG_CACHE_HOME" "$SGLANG_CACHE_DIR" "$TRITON_CACHE_DIR" "$SGLANG_JIT_CACHE_DIR" \
   "$TORCHINDUCTOR_CACHE_DIR" "$AITER_JIT_DIR" "$AITER_ROOT_DIR"
 
 # Bind RCCL/Gloo to the model fabric. The node's HCA name may differ by boot.

@@ -1,7 +1,10 @@
 """Bounded zero-row/layout and UE8M0 boundary checks for the portable quant path."""
 
+import bisect
 import json
+import math
 import os
+import random
 import struct
 import sys
 from pathlib import Path
@@ -86,6 +89,156 @@ def check_e4m3fn_conversion():
         )
         assert not failures, case
     return 256
+
+
+def fp8_store_corpus():
+    # Enumerate the format independently of either converter. At a midpoint,
+    # the even encoded significand wins; clipping is the existing finite policy.
+    levels = [
+        struct.unpack("<f", struct.pack("<I", expected_conversion_bits(code)))[0]
+        for code in range(127)
+    ]
+
+    def bits(value):
+        return struct.unpack("<I", struct.pack("<f", value))[0]
+
+    def oracle(raw):
+        value = struct.unpack("<f", struct.pack("<I", raw))[0]
+        assert math.isfinite(value)
+        sign = (raw >> 31) << 7
+        value = min(abs(value), 448.0)
+        upper = bisect.bisect_left(levels, value)
+        if levels[upper] == value:
+            return sign | upper
+        lower = upper - 1
+        down, up = value - levels[lower], levels[upper] - value
+        return sign | (lower if down < up or (down == up and lower % 2 == 0) else upper)
+
+    cases = [expected_conversion_bits(code) for code in (*range(127), *range(128, 255))]
+    for lower in range(126):
+        midpoint = (levels[lower] + levels[lower + 1]) / 2
+        for sign in (1, -1):
+            raw = bits(sign * midpoint)
+            cases.extend((raw, raw - 1, raw + 1))
+    cases.extend(
+        bits(value)
+        for value in (
+            256,
+            288,
+            416,
+            248,
+            1.0625,
+            1.1875,
+            5 * 2**-10,
+            2**-10,
+            3 * 2**-11,
+            2**-9,
+            0.0,
+            -0.0,
+            512,
+            -512,
+        )
+    )
+    random_bits = random.Random(20261001)
+    for _ in range(4096):
+        raw = random_bits.getrandbits(32)
+        while (raw >> 23) & 255 == 255:
+            raw = random_bits.getrandbits(32)
+        cases.append(raw)
+    assert len(cases) == 5120
+    return cases, bytes(oracle(raw) for raw in cases), bits, oracle
+
+
+def check_fp8_store(runtime):
+    import inspect
+
+    from sglang.kernels.ops.attention.dsv4.elementwise import fused_k_norm_rope_flashmla
+    from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
+    from sglang.kernels.ops.quantization.fp8_cvt import cvt_fp8_e4m3
+
+    for function in (cvt_fp8_e4m3, fused_k_norm_rope_flashmla):
+        assert Path(inspect.getfile(function)).resolve().is_relative_to(runtime)
+    cases, expected, bits, oracle = fp8_store_corpus()
+    raw = bytearray(struct.pack("<" + "I" * len(cases), *cases))
+    inputs = torch.frombuffer(raw, dtype=torch.float32).clone().cuda()
+    actual = bytes(cvt_fp8_e4m3(inputs).cpu().tolist())
+    helper_bad = [i for i, (a, b) in enumerate(zip(actual, expected)) if a != b]
+    assert len(actual) == len(expected)
+
+    # The actual fused serving writer: exact RMS=1, identity RoPE, one V4 row.
+    # The final BF16 values, seven meaningful scales and padding are independent
+    # checks, so a broken FP8 payload cannot hide a layout or scale regression.
+    weight = torch.ones(512, dtype=torch.bfloat16)
+    values = [
+        448.0,
+        256.0,
+        288.0,
+        416.0,
+        1.0625,
+        1.1875,
+        5 * 2**-10,
+        3 * 2**-11,
+        -0.0,
+        -256.0,
+    ]
+    weight[: len(values)] = torch.tensor(values, dtype=torch.bfloat16)
+    kv = torch.ones((1, 512), dtype=torch.bfloat16, device="cuda")
+    frequencies = torch.ones((1, 32), dtype=torch.complex64, device="cuda")
+    page_size = 16
+    assert (
+        KVLayout.V4.data_bytes,
+        KVLayout.V4.scale_bytes,
+        KVLayout.V4.tile_size,
+        KVLayout.V4.page_bytes(page_size),
+    ) == (576, 8, 64, 9792)
+    assert KVLayout.V4.scale_offset(page_size) == 9216
+    cache = torch.full((1, 9792), 0xA5, dtype=torch.uint8, device="cuda")
+    fused_k_norm_rope_flashmla(
+        kv,
+        weight.cuda(),
+        0.0,
+        frequencies,
+        torch.zeros(1, dtype=torch.int32, device="cuda"),
+        torch.zeros(1, dtype=torch.int32, device="cuda"),
+        cache,
+        page_size,
+        layout=KVLayout.V4,
+    )
+    stored = bytes(cache.cpu().flatten().tolist())
+    row = bytes(
+        oracle(bits(value / (1.0 if i < 64 else 2**-8)))
+        for i, value in enumerate(weight[:448].tolist())
+    )
+    expected_rope = bytes(weight[448:].view(torch.uint8).tolist())
+    expected_scales = bytes([127] + [119] * 6 + [0xA5])
+    kv_bad = sum(a != b for a, b in zip(stored[:448], row))
+    rope_bad = sum(a != b for a, b in zip(stored[448:576], expected_rope))
+    scale_bad = sum(a != b for a, b in zip(stored[9216:9224], expected_scales))
+    print(
+        json.dumps(
+            {
+                "event": "cpp_fp8_store",
+                "finite_cases": len(cases),
+                "helper_bad": len(helper_bad),
+                "helper_examples": [
+                    {
+                        "input_bits": f"{cases[i]:08x}",
+                        "got": actual[i],
+                        "expected": expected[i],
+                    }
+                    for i in helper_bad[:12]
+                ],
+                "v4_fp8_bad": kv_bad,
+                "v4_bf16_bad": rope_bad,
+                "v4_scale_bad": scale_bad,
+                "zero_policy": "E4M3FN signed zero",
+                "nan_policy": "not asserted",
+            }
+        ),
+        flush=True,
+    )
+    assert not helper_bad and kv_bad == rope_bad == scale_bad == 0
+    return len(cases)
 
 
 @torch.inference_mode()
@@ -353,6 +506,7 @@ def main():
     ws = torch.ones((2, 2), device="cuda", dtype=torch.float32) * 2**-10
     y = triton_w8a8_block_fp8_linear(x, w, [32, 32], ws, act_scale_ue8m0=True)
     assert torch.isfinite(y).all() and y.shape == (2, 33)
+    store_codes = check_fp8_store(runtime)
     conversion_codes = check_e4m3fn_conversion()
     native_shapes = check_native_gemv()
     check_dense_native_rows()
@@ -365,6 +519,7 @@ def main():
                 "bad_layout_rejected": True,
                 "native_gemv_shapes": native_shapes,
                 "e4m3fn_conversion_codes": conversion_codes,
+                "cpp_fp8_store_codes": store_codes,
             }
         ),
         flush=True,

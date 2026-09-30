@@ -39,11 +39,14 @@ read-only XFS mount, snapshot UUID and live NVMe/RDMA paths before serving; it
 does not mount or recover storage. It holds `/tmp/ds41-gpu.lock` while serving
 to prevent another cooperating launcher from using the same GPU. The API binds
 only to node-local localhost.
-`TRITON_CACHE_DIR` may override the runtime-specific Triton cache with an
-absolute path. Reuse a directory only after verifying matching GPU architecture,
-compiler/toolchain and Python/Torch/Triton ABI identity; the launcher checks the
-path, not that identity. Unset or empty values retain the runtime-specific
-default, and all other caches remain runtime-specific.
+`TRITON_CACHE_DIR` and `SGLANG_JIT_CACHE_DIR` may override their runtime-specific
+compiler caches with absolute paths. Reuse a directory only after verifying
+matching GPU architecture, compiler/toolchain and Python/Torch/Triton ABI
+identity; the launcher checks the paths, not that identity. Unset or empty values
+use `$DS41_CACHE_ROOT/<runtime>/triton` and `.../sglang-jit`, respectively.
+The native C++ JIT reads `SGLANG_JIT_CACHE_DIR`, independently of
+`SGLANG_CACHE_DIR`; it also validates cached builds against transitive header
+contents. Other caches remain runtime-specific.
 For access from a client, tunnel to the head rank, for example
 `ssh -N -L 31041:127.0.0.1:31041 strix-3`, then use
 `http://127.0.0.1:31041` on that client. Configured 128K context and C1/C2
@@ -237,7 +240,11 @@ included here.
 `tests/fp8.py` checks all six guarded projection shapes with exact native-format
 operands, the original quantizer, C1/C2/C4/C8 graph replay and generic fallbacks.
 Dense exact-dyadic operands independently exercise every reduction term; C4/C8
-also compare bitwise with separate native C2 calls. The CPU-only
+also compare bitwise with separate native C2 calls. The same test checks the
+installed C++ FP8 converter against an independent nearest-even oracle, including
+top-range values, midpoint ties, underflow and signed zero. It also verifies the
+actual fused V4 KV writer’s FP8 payload, BF16 RoPE values and scale bytes. These
+component checks do not establish full-model numerical equivalence. The CPU-only
 `tests/graph-buckets.py` checks effective capture geometry, variant boundaries
 and unpadded eligibility at package build time using explicit metadata stubs.
 `tests/mhc.py` includes a FP64 projection reference with an FP32 reduction-error
