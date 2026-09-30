@@ -2,6 +2,7 @@
 
 import json
 import os
+import struct
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -9,11 +10,82 @@ from unittest.mock import patch
 os.environ["SGLANG_USE_AITER"] = "0"
 
 import torch
+import triton
+import triton.language as tl
+from sglang.kernels.ops.gemm.deepseek_v41_gemv import _e4m3fn_to_fp32
 from sglang.kernels.ops.quantization.fp8_kernel import (
     _run_per_token_group_quant_8bit_kernel,
     sglang_per_token_group_quant_fp8,
 )
 from sglang.srt.layers.quantization.fp8_utils import triton_w8a8_block_fp8_linear
+
+
+@triton.jit
+def conversion_probe(codes, old, new):
+    offset = tl.arange(0, 256)
+    value = tl.load(codes + offset)
+    tl.store(old + offset, value.to(tl.float32))
+    tl.store(new + offset, _e4m3fn_to_fp32(value))
+
+
+def expected_conversion_bits(code):
+    sign = (code & 128) << 24
+    exponent, mantissa = (code >> 3) & 15, code & 7
+    if exponent == 15 and mantissa == 7:
+        return sign | 0x7FC00000
+    value = (
+        mantissa * 2.0**-9 if exponent == 0 else (8 + mantissa) * 2.0 ** (exponent - 10)
+    )
+    return sign | struct.unpack("<I", struct.pack("<f", value))[0]
+
+
+def check_e4m3fn_conversion():
+    # Compare bits, including both NaN signs and negative zero. Floating
+    # equality would either reject NaNs or hide signed-zero differences.
+    raw = torch.arange(256, dtype=torch.int16).to(torch.uint8)
+    codes = raw.cuda().view(torch.float8_e4m3fn)
+    old = torch.empty(256, dtype=torch.float32, device="cuda")
+    new = torch.empty_like(old)
+
+    def run():
+        conversion_probe[(1,)](codes, old, new, num_warps=4, enable_fp_fusion=False)
+
+    run()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for case, payload in (("A", raw), ("B", raw.flip(0)), ("A_repeat", raw)):
+        codes.view(torch.uint8).copy_(payload)
+        graph.replay()
+        torch.cuda.synchronize()
+        actual = new.view(torch.int32).cpu().tolist()
+        original = old.view(torch.int32).cpu().tolist()
+        failures = []
+        for code, candidate, baseline in zip(payload.tolist(), actual, original):
+            literal = expected_conversion_bits(code)
+            if len({candidate & 0xFFFFFFFF, baseline & 0xFFFFFFFF, literal}) != 1:
+                failures.append(
+                    {
+                        "code": code,
+                        "candidate_bits": candidate & 0xFFFFFFFF,
+                        "baseline_bits": baseline & 0xFFFFFFFF,
+                        "literal_bits": literal,
+                    }
+                )
+        print(
+            json.dumps(
+                {
+                    "event": "e4m3fn_conversion",
+                    "case": case,
+                    "codes": 256,
+                    "failures": failures,
+                }
+            ),
+            flush=True,
+        )
+        assert not failures, case
+    return 256
 
 
 @torch.inference_mode()
@@ -189,6 +261,7 @@ def main():
     ws = torch.ones((2, 2), device="cuda", dtype=torch.float32) * 2**-10
     y = triton_w8a8_block_fp8_linear(x, w, [32, 32], ws, act_scale_ue8m0=True)
     assert torch.isfinite(y).all() and y.shape == (2, 33)
+    conversion_codes = check_e4m3fn_conversion()
     native_shapes = check_native_gemv()
     print(
         json.dumps(
@@ -198,6 +271,7 @@ def main():
                 "power2_boundary": True,
                 "bad_layout_rejected": True,
                 "native_gemv_shapes": native_shapes,
+                "e4m3fn_conversion_codes": conversion_codes,
             }
         ),
         flush=True,
