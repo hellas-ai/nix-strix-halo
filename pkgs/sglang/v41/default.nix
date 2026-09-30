@@ -44,6 +44,7 @@ let
       ./patches/0018-c2-gemv-eight-row-tiles.patch
       ./patches/0019-native-gemv-exact-fp8-conversion.patch
       ./patches/0020-native-hc-post-c2.patch
+      ./patches/0021-mxfp4-routed-scale-ownership.patch
     ];
   };
   baseKernel = lib.findFirst (
@@ -84,6 +85,12 @@ base.overridePythonAttrs (old: {
       ln -s "${nativeExtensions}/${pythonPackages.python.sitePackages}/$module_stem$extension_suffix" \
         "$out/${pythonPackages.python.sitePackages}/$module_stem$extension_suffix"
     done
+  '';
+  # Run after the inherited wrapper construction so the exact wheel and library
+  # environment is available. The regression uses CPU tensors and device stubs.
+  postFixup = (old.postFixup or "") + ''
+    HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 \
+      "$out/bin/sglang-python" ${./tests/routed-scaling.py} "$out"
   '';
   passthru = (old.passthru or { }) // {
     inherit nativeExtensions;

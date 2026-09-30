@@ -225,6 +225,12 @@ or full-model test.
 copy-error propagation using the installed loader source. Run it with
 `HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES=''` for its CPU-only checks.
 
+The portable MXFP4 method owns routed scaling; its model callers add the shared
+output without applying the routed factor again. `tests/routed-scaling.py` runs
+at package build time on CPU tensors, exercising the installed caller and quant
+method with GPU math and communication stubs. It checks once-only scaling and
+preserves legacy paths; it is not a full-model accuracy test.
+
 The complete vision tower and image projection match the pinned official
 reference bitwise on three image inputs. Run `tests/vision.py` with the runtime
 path and checkpoint directory to repeat that comparison; it reads only the
