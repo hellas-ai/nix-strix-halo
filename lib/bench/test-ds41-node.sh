@@ -64,6 +64,7 @@ run_launcher() {
     DS41_BINARY="$runtime_bin/sglang" \
     DS41_MODEL_PATH="$model" \
     DS41_CACHE_ROOT="$cache" \
+    "$@" \
     "$bash_bin" "$launcher"
 }
 
@@ -83,5 +84,44 @@ if run_launcher >/dev/null 2>&1; then
   fail "launcher served without a preflight interpreter"
 fi
 [[ ! -e "$served_log" ]] || fail "serving started without a preflight interpreter"
+
+# Observe the real launcher's exported paths at mkdir, then stop before any
+# host RDMA/lock checks. This does not depend on the test host lacking an HCA.
+write_preflight 0
+cache_log=$harness/cache.log
+rm "$tools/mkdir"
+cat > "$tools/mkdir" <<EOF
+#!$bash_bin
+printf '%s\\n' "\$XDG_CACHE_HOME" "\$SGLANG_CACHE_DIR" "\$TRITON_CACHE_DIR" \\
+  "\$TORCHINDUCTOR_CACHE_DIR" "\$AITER_JIT_DIR" "\$AITER_ROOT_DIR" > "$cache_log"
+exit 73
+EOF
+chmod +x "$tools/mkdir"
+
+check_cache_paths() {
+  local expected_triton=$1 rc=0
+  shift
+  rm -f "$cache_log"
+  run_launcher "$@" >"$harness/cache-output.log" 2>&1 || rc=$?
+  [[ $rc == 73 ]] || fail "launcher did not reach the cache probe: exit $rc"
+  printf '%s\n' "$cache/runtime/cache" "$cache/runtime/sglang" "$expected_triton" \
+    "$cache/runtime/torch" "$cache/runtime/aiter-jit" "$cache/runtime/aiter-root" \
+    > "$harness/expected-cache.log"
+  cmp -s "$harness/expected-cache.log" "$cache_log" || fail "unexpected cache paths"
+  [[ ! -e "$served_log" ]] || fail "cache probe started serving"
+}
+
+check_cache_paths "$cache/runtime/triton"
+check_cache_paths "$cache/runtime/triton" TRITON_CACHE_DIR=
+check_cache_paths "$tmp/shared triton" "TRITON_CACHE_DIR=$tmp/shared triton"
+
+rm -f "$cache_log"
+rc=0
+run_launcher TRITON_CACHE_DIR=relative/triton >"$harness/cache-output.log" 2>&1 || rc=$?
+[[ $rc == 2 ]] || fail "relative Triton cache was not rejected: exit $rc"
+grep -Fq 'TRITON_CACHE_DIR must be an absolute directory' "$harness/cache-output.log" ||
+  fail "missing invalid cache path diagnostic"
+[[ ! -e "$cache_log" && ! -e "$served_log" ]] ||
+  fail "invalid cache path reached cache creation or serving"
 
 echo "ds41-node launcher check passed"

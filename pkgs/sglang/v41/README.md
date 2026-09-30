@@ -39,6 +39,11 @@ read-only XFS mount, snapshot UUID and live NVMe/RDMA paths before serving; it
 does not mount or recover storage. It holds `/tmp/ds41-gpu.lock` while serving
 to prevent another cooperating launcher from using the same GPU. The API binds
 only to node-local localhost.
+`TRITON_CACHE_DIR` may override the runtime-specific Triton cache with an
+absolute path. Reuse a directory only after verifying matching GPU architecture,
+compiler/toolchain and Python/Torch/Triton ABI identity; the launcher checks the
+path, not that identity. Unset or empty values retain the runtime-specific
+default, and all other caches remain runtime-specific.
 For access from a client, tunnel to the head rank, for example
 `ssh -N -L 31041:127.0.0.1:31041 strix-3`, then use
 `http://127.0.0.1:31041` on that client. Configured 128K context and C1/C2
