@@ -261,7 +261,10 @@ into four gates:
 
 The separate `hydraBenchmarkJobs` output is used by the background benchmark
 jobset. Those benchmark sweeps are useful for regression data but are not
-required for PR merge.
+required for PR merge. Hydra evaluates this jobset from the root flake
+directly (`hydraBenchmarkJobs` in `flake.nix`); the previous nested flake at
+`lib/hydra/benchmark` has been retired so the benchmark jobs share the root
+flake's locked inputs.
 
 ```bash
 nix build .#hydraJobs.x86_64-linux.ci.checks
