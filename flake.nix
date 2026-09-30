@@ -1293,6 +1293,9 @@
               pkgs.nixfmt-tree
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
             cuda-host-driver-runtime = cudaHostDriverRuntime;
+            benchmark-hardware-lease = import ./lib/bench/tests/hardware-lease.nix {
+              inherit pkgs benchLib;
+            };
             multikernel-demo-initrd = multikernelInitrd;
             multikernel-kerf = multikernelKerf;
             multikernel-kernel-config = multikernelKernelConfig;
