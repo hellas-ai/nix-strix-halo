@@ -34,6 +34,7 @@ let
       ./patches/0008-vision-reference-precision.patch
       ./patches/0009-bounded-weight-loading.patch
       ./patches/0010-swa-autotune-head-tiles.patch
+      ./patches/0011-rccl-graph-usage-mode.patch
     ];
   };
   baseKernel = lib.findFirst (
