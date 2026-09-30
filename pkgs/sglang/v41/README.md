@@ -238,6 +238,12 @@ vision shard. Full serving produced correct text/image smoke outputs and useful
 Pi/OpenCode benchmark fixes that were independently reviewed and tested. These
 bounded checks are not a general coding-quality guarantee.
 
+After correcting routed scaling, a short executable-answer control still gave
+two wrong answers out of eight with thinking disabled. With thinking enabled
+at effort 50, all five cold, cached and paired requests passed their answer and
+cache checks. These checks support using thinking for coding; they do not
+establish full-model reference parity or correctness on arbitrary tasks.
+
 With the launcher's 512-token prefill chunk, two related 130,563-token prompts
 passed all ten retrieval-answer checks across cold loads, repeats, branching,
 switching back and paired submissions. Repeats retained 130,560 cached tokens;
