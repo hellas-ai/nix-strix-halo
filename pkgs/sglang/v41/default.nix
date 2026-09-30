@@ -36,6 +36,7 @@ let
       ./patches/0010-swa-autotune-head-tiles.patch
       ./patches/0011-rccl-graph-usage-mode.patch
       ./patches/0012-topk-logical-ties.patch
+      ./patches/0015-stable-candidate-block-ties.patch
     ];
   };
   baseKernel = lib.findFirst (

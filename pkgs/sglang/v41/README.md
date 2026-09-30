@@ -74,5 +74,11 @@ cutoff ties by smaller logical token ID, including compact candidate rows. When
 a coarse score bin exceeds the native scratch capacity, it rescans the original
 row rather than selecting from truncated scratch. `tests/topk.py` checks strict
 winners, synthetic cutoff ties under candidate/page permutations, masked tails,
-128K overflow and changed-input graph replay. Level-one candidate-block cutoff
-ties retain their upstream unspecified policy.
+128K overflow and changed-input graph replay.
+
+On gfx1151, level-one candidate blocks also preserve strict score order and
+resolve equal-score cutoffs by smaller logical block ID, with the newest causal
+block still included. `tests/candidate-blocks.py` checks this policy against an
+independent reference, including partial blocks, causal masks, signed zero,
+128K inputs and changing scores/lengths during graph replay. These component
+checks do not qualify full-model 128K cache reuse.
