@@ -53,7 +53,7 @@ Run the clients from the working tree you want them to inspect or edit.
 
 ```sh
 DS41_CLIENT_CONFIG="$(mktemp -d)"
-mkdir -p "$DS41_CLIENT_CONFIG/pi"
+mkdir -p "$DS41_CLIENT_CONFIG/pi/sessions"
 cat > "$DS41_CLIENT_CONFIG/pi/models.json" <<'JSON'
 {
   "providers": {
@@ -64,26 +64,31 @@ cat > "$DS41_CLIENT_CONFIG/pi/models.json" <<'JSON'
       "models": [{
         "id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash",
         "reasoning": true, "input": ["text"],
-        "contextWindow": 131072, "maxTokens": 8192,
+        "contextWindow": 131072, "maxTokens": 16384,
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
       }]
     }
   }
 }
 JSON
-cat > "$DS41_CLIENT_CONFIG/pi/temperature-zero.ts" <<'JS'
+cat > "$DS41_CLIENT_CONFIG/pi/settings.json" <<'JSON'
+{"compaction": {"reserveTokens": 16384}}
+JSON
+cat > "$DS41_CLIENT_CONFIG/pi/sampling.ts" <<'JS'
 export default function(pi) {
-  pi.on('before_provider_request', event => ({ ...event.payload, temperature: 0 }));
+  pi.on('before_provider_request', event =>
+    ({ ...event.payload, temperature: 1.0, top_p: 0.95 }));
 }
 JS
 PI_CODING_AGENT_DIR="$DS41_CLIENT_CONFIG/pi" pi \
   --offline --provider strix-ds41 --model deepseek-v4.1-flash --thinking low \
-  --no-extensions --extension "$DS41_CLIENT_CONFIG/pi/temperature-zero.ts" \
-  --no-skills --no-prompt-templates --no-context-files --no-session \
+  --no-extensions --extension "$DS41_CLIENT_CONFIG/pi/sampling.ts" \
+  --no-skills --no-prompt-templates --no-context-files \
+  --session-dir "$DS41_CLIENT_CONFIG/pi/sessions" \
   --print 'Inspect this repository and explain how to run its tests.'
 ```
 
-For interactive Pi, omit `--print`, its prompt argument and `--no-session`.
+For interactive Pi, omit `--print` and its prompt argument.
 `--no-context-files` isolated the coding checks; omit it for normal repository
 instructions. Pi's recipe retains the text-only model declaration used in its
 coding check.
@@ -129,7 +134,8 @@ OPENCODE_DISABLE_AUTOUPDATE=1 OTEL_SDK_DISABLED=true \
 `local` is a dummy client key for this unauthenticated loopback endpoint. Both
 clients use Chat Completions and native low reasoning effort (50), which is not
 a thinking-token or time limit. The 131,072-token context includes output;
-reserve room for the 8,192-token output budget. These settings preserve the
+Pi reserves 16,384 tokens for output, while OpenCode's output budget is 8,192.
+These settings preserve the
 configured capacity, not a guarantee for arbitrary 128K coding sessions; the
 qualification and serial/paired numerical limitations below still apply.
 
