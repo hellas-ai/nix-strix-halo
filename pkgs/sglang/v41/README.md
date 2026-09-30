@@ -11,7 +11,7 @@ The patches provide portable mHC, FP4 sparse indexing and E8M0 activation
 quantization on gfx1151. File-backed Engram reads only requested native rows,
 checks tensor metadata, and skips the large embedding tensors before the weight
 loader materializes them. This allows the native TP4 weights to fit in the four
-128 GB machines. Runtime memory and loader peaks still need measurement.
+128 GB machines. Peak memory and available cache capacity depend on the workload.
 
 After staging weights on Trex, publish a frozen, read-only SPDK model snapshot
 and point each rank at that snapshot mounted over NVMe/RDMA. Trex's writable
@@ -36,7 +36,9 @@ DS41_NODE_RANK=0 lib/bench/ds41-node.sh
 published snapshot), `DS41_PORT` (default `31041`), and `DS41_CACHE_ROOT` are
 configurable. The script verifies the pinned revision, manifest, file sizes,
 read-only XFS mount, snapshot UUID and live NVMe/RDMA paths before serving; it
-does not mount or recover storage. The API binds only to node-local localhost.
+does not mount or recover storage. It holds `/tmp/ds41-gpu.lock` while serving
+to prevent another cooperating launcher from using the same GPU. The API binds
+only to node-local localhost.
 For access from a client, tunnel to the head rank, for example
 `ssh -N -L 31041:127.0.0.1:31041 strix-3`, then use
 `http://127.0.0.1:31041` on that client. Configured 128K context and C1/C2

@@ -62,7 +62,8 @@ export OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLIN
 export TRITON_CACHE_AUTOTUNING=1 SGLANG_WARMUP_TIMEOUT=1800
 export NCCL_GRAPH_MIXING_SUPPORT=1 ROCPROFILER_QUEUE_INTERPOSITION=0
 
-exec "$DS41_BINARY" serve \
+# Cooperate with the component-test and serving controller's per-node lease.
+exec flock --nonblock /tmp/ds41-gpu.lock "$DS41_BINARY" serve \
   --model-path "$DS41_MODEL_PATH" \
   --served-model-name deepseek-v4.1-flash \
   --load-format safetensors \
