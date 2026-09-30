@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
 """Bounded zero-row/layout and UE8M0 boundary checks for the portable quant path."""
 
 import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
-os.environ['SGLANG_USE_AITER'] = '0'
+os.environ["SGLANG_USE_AITER"] = "0"
 
 import torch
 from sglang.kernels.ops.quantization.fp8_kernel import (
@@ -16,51 +16,193 @@ from sglang.kernels.ops.quantization.fp8_kernel import (
 from sglang.srt.layers.quantization.fp8_utils import triton_w8a8_block_fp8_linear
 
 
+@torch.inference_mode()
+def check_native_gemv():
+    from sglang.kernels.ops.gemm import deepseek_v41_gemv as native
+    from sglang.srt.layers.quantization import fp8_utils
+
+    # Two literal nonzero FP8 weights per output row, in different scale
+    # groups. All operands and sums are exact dyadic values, so this checks
+    # every output without treating the generic WMMA result as an oracle.
+    shapes = (
+        (25600, 6144, "engram_wkv_c1", True, "engram_gemv"),
+        (5120, 2048, "native_wob_c1", True, "native_wob_gemv"),
+        (1792, 5120, "native_wqkv_a_c1", True, "native_wqkv_a_gemv"),
+        (8192, 1280, "native_wqb_c1", True, "native_wqb_gemv"),
+        (1152, 5120, "native_v41_shared", "gate_up", "native_shared_expert_gemv"),
+        (5120, 576, "native_v41_shared", "down", "native_shared_expert_gemv"),
+    )
+    torch.manual_seed(9041)
+    for n, k, flag, value, c1_name in shapes:
+        rows = torch.arange(n)
+        col = rows.remainder(k)
+        other = (col + k // 2).remainder(k)
+        codes = torch.zeros((n, k), dtype=torch.uint8, device="cuda")
+        codes[rows.cuda(), col.cuda()] = 0x38  # E4M3FN +1
+        codes[rows.cuda(), other.cuda()] = 0xB8  # E4M3FN -1
+        weight = codes.view(torch.float8_e4m3fn)
+        exponents = (torch.arange(n // 32)[:, None] + torch.arange(k // 32)) % 3 - 1
+        scales_cpu = torch.ldexp(
+            torch.ones_like(exponents, dtype=torch.float32), exponents
+        )
+        scales = scales_cpu.cuda()
+        a = (torch.randint(-4, 5, (2, k)).float() / 2).to(torch.bfloat16)
+        b = a.flip(0).roll(17, dims=1).contiguous()
+
+        def reference(x, col=col, other=other, scales_cpu=scales_cpu, rows=rows):
+            x = x.cpu().float()
+            return (
+                x[:, col] * scales_cpu[rows // 32, col // 32]
+                - x[:, other] * scales_cpu[rows // 32, other // 32]
+            ).to(torch.bfloat16)
+
+        def linear(x, weight=weight, scales=scales, **kwargs):
+            return triton_w8a8_block_fp8_linear(
+                x, weight, [32, 32], scales, act_scale_ue8m0=True, **kwargs
+            )
+
+        outputs = {}
+        for m in (1, 2):
+            wrapper = (
+                c1_name if m == 1 or flag == "native_v41_shared" else "native_c2_gemv"
+            )
+            x = a[:m].cuda()
+            with patch.object(
+                native, wrapper, wraps=getattr(native, wrapper)
+            ) as selected:
+                with patch.object(
+                    fp8_utils,
+                    "sglang_per_token_group_quant_fp8",
+                    wraps=sglang_per_token_group_quant_fp8,
+                ) as quantized:
+                    actual = linear(x, **{flag: value})
+                assert selected.call_count == quantized.call_count == 1
+            torch.testing.assert_close(actual.cpu(), reference(a[:m]), rtol=0, atol=0)
+            q, qs = sglang_per_token_group_quant_fp8(x, 32, scale_ue8m0=True)
+            torch.testing.assert_close(
+                q.float() * qs.repeat_interleave(32, dim=1), x.float(), rtol=0, atol=0
+            )
+            prequant = linear(q, input_scale=qs, **{flag: value})
+            assert torch.equal(actual.view(torch.int16), prequant.view(torch.int16))
+            outputs[m] = actual.clone()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = linear(x, **{flag: value})
+            for host in (b[:m], a[:m]):
+                x.copy_(host)
+                graph.replay()
+                torch.testing.assert_close(
+                    captured.cpu(), reference(host), rtol=0, atol=0
+                )
+        assert torch.equal(
+            outputs[1].view(torch.int16), outputs[2][:1].view(torch.int16)
+        )
+
+        # Equal shapes without a model opt-in and prefill sizes keep the
+        # original GEMM. Compare identical generic calls, not its rounding
+        # order against the specialized reduction's arithmetic reference.
+        with patch.object(
+            fp8_utils,
+            "w8a8_block_fp8_matmul_triton",
+            wraps=fp8_utils.w8a8_block_fp8_matmul_triton,
+        ) as fallback:
+            linear(a[:1].cuda())
+            assert fallback.call_count == 1
+            for m in (3, 4):
+                x = a.repeat(2, 1)[:m].cuda()
+                plain = linear(x)
+                marked = linear(x, **{flag: value})
+                assert torch.equal(plain.view(torch.int16), marked.view(torch.int16))
+            assert fallback.call_count == 5
+        print(
+            json.dumps(
+                {
+                    "event": "native_gemv",
+                    "shape": [n, k],
+                    "c1_c2_exact": True,
+                    "graph_changed_input": True,
+                    "unmarked_and_prefill_fallback": True,
+                }
+            ),
+            flush=True,
+        )
+    return len(shapes)
+
+
 def internal(x, q, s):
     return _run_per_token_group_quant_8bit_kernel(
-        x, q, s, 32, 1e-10, -448., 448.,
-        scale_ue8m0=True, fuse_silu_and_mul=False, masked_m=None)
+        x,
+        q,
+        s,
+        32,
+        1e-10,
+        -448.0,
+        448.0,
+        scale_ue8m0=True,
+        fuse_silu_and_mul=False,
+        masked_m=None,
+    )
 
 
 def main():
     import inspect
+
     import sglang
+
     runtime = Path(sys.argv[1]).resolve()
-    assert Path(inspect.getfile(_run_per_token_group_quant_8bit_kernel)).resolve().is_relative_to(runtime)
+    assert (
+        Path(inspect.getfile(_run_per_token_group_quant_8bit_kernel))
+        .resolve()
+        .is_relative_to(runtime)
+    )
     assert Path(sglang.__file__).resolve().is_relative_to(runtime)
     torch.cuda.set_per_process_memory_fraction(0.03)
-    assert torch.cuda.get_device_properties(0).gcnArchName.split(':')[0] == 'gfx1151'
-    x0 = torch.empty((0, 64), device='cuda', dtype=torch.bfloat16)
+    assert torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] == "gfx1151"
+    x0 = torch.empty((0, 64), device="cuda", dtype=torch.bfloat16)
     q0, s0 = sglang_per_token_group_quant_fp8(x0, 32, scale_ue8m0=True)
     assert q0.shape == (0, 64) and s0.shape == (0, 2)
     internal(x0, q0, s0)  # raw branch also has an empty-grid guard
-    x = torch.zeros((2, 64), device='cuda', dtype=torch.bfloat16)
+    x = torch.zeros((2, 64), device="cuda", dtype=torch.bfloat16)
     x[0, 0] = 1.75
     x[1, 31] = -3.5
     q, s = sglang_per_token_group_quant_fp8(x, 32, scale_ue8m0=True)
-    torch.testing.assert_close(s.cpu(), torch.tensor([[2**-8, 2**-42],
-                                                       [2**-7, 2**-42]], dtype=torch.float32),
-                               rtol=0, atol=0)
-    assert float(q[0, 0].float()) == 448. and float(q[1, 31].float()) == -448.
+    torch.testing.assert_close(
+        s.cpu(),
+        torch.tensor([[2**-8, 2**-42], [2**-7, 2**-42]], dtype=torch.float32),
+        rtol=0,
+        atol=0,
+    )
+    assert float(q[0, 0].float()) == 448.0 and float(q[1, 31].float()) == -448.0
     try:
-        internal(x, torch.empty_like(q), torch.empty((2, 1), device='cuda'))
+        internal(x, torch.empty_like(q), torch.empty((2, 1), device="cuda"))
     except AssertionError:
         pass
     else:
-        raise AssertionError('bad scale shape accepted')
+        raise AssertionError("bad scale shape accepted")
     try:
-        internal(x, torch.empty_like(q), torch.empty((2, 4), device='cuda')[:, ::2])
+        internal(x, torch.empty_like(q), torch.empty((2, 4), device="cuda")[:, ::2])
     except AssertionError:
         pass
     else:
-        raise AssertionError('noncontiguous scale accepted')
-    w = torch.ones((33, 64), device='cuda', dtype=torch.float32).to(torch.float8_e4m3fn)
-    ws = torch.ones((2, 2), device='cuda', dtype=torch.float32) * 2**-10
-    y = triton_w8a8_block_fp8_linear(x, w, [32,32], ws, act_scale_ue8m0=True)
-    assert torch.isfinite(y).all() and y.shape == (2,33)
-    print(json.dumps({'event': 'complete', 'empty_rows': True,
-                      'power2_boundary': True, 'bad_layout_rejected': True}), flush=True)
+        raise AssertionError("noncontiguous scale accepted")
+    w = torch.ones((33, 64), device="cuda", dtype=torch.float32).to(torch.float8_e4m3fn)
+    ws = torch.ones((2, 2), device="cuda", dtype=torch.float32) * 2**-10
+    y = triton_w8a8_block_fp8_linear(x, w, [32, 32], ws, act_scale_ue8m0=True)
+    assert torch.isfinite(y).all() and y.shape == (2, 33)
+    native_shapes = check_native_gemv()
+    print(
+        json.dumps(
+            {
+                "event": "complete",
+                "empty_rows": True,
+                "power2_boundary": True,
+                "bad_layout_rejected": True,
+                "native_gemv_shapes": native_shapes,
+            }
+        ),
+        flush=True,
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -21,9 +21,25 @@ lookup performance; a separate NFS export exercises a different storage path.
 
 Enable file-backed Engram with `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` and
 `SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=file`. It requires the default safetensors
-loader, mmap enabled, and checkpoint prefetch disabled. Both prefill and decode
-must run eagerly: graph capture rejects this synchronous lookup path rather
-than replaying stale embeddings.
+loader, mmap enabled, and checkpoint prefetch disabled. Prefill remains eager.
+Decode graphs support exact one- and two-request batches with TP4, DP1/CP1/PP1,
+no speculation and one compute stream. Use `--cuda-graph-backend-decode full`,
+`--cuda-graph-backend-prefill disabled`, `--max-running-requests 2`, and
+`--cuda-graph-config '{"decode":{"backend":"full","bs":[1,2],"max_bs":2}}'`.
+Engram hashing
+and bounded file reads happen before replay; captured code consumes refreshed
+native row buffers. A failure after the history commit terminates the worker
+so the serving controller can stop the TP group; that decode step cannot be
+retried in place. Unsupported file-backed graph configurations are rejected.
+
+Graph selection also distinguishes the indexer's sequence-length branches;
+mixed-length batches select a branch that handles every request. Prefill and
+larger batches retain their ordinary paths. Native C1/C2 projections use the
+existing activation quantizer and FP8/E8M0 weights, with FP32 reduction and
+BF16 output. This applies only to marked V4.1 Engram, TP4 attention, and TP4/EP1
+separate shared-expert projections. The FP32 mHC projection has its own exact
+C1/C2 shape guard; RMS, mixing and Sinkhorn operations are unchanged. These
+reductions can round differently from the generic matrix kernels.
 
 `--model-loader-extra-config '{"enable_multithread_load":false}'` disables both
 iterator threads and model-side weight-copy threads. With threading enabled,
@@ -33,7 +49,8 @@ so CPU dequantization cannot run arbitrarily far ahead of device copies.
 Use `SGLANG_USE_AITER=0`, `SGLANG_HACK_FLASHMLA_BACKEND=triton`,
 `SGLANG_DSV4_KV_LAYOUT=v4`, `SGLANG_DSV4_COMPRESSED_KV_LAYOUT=fp8`,
 `--moe-runner-backend triton`, `--fp8-gemm-backend triton`,
-`--disable-custom-all-reduce`. The V4.1 vision tower uses a model-specific
+`--disable-shared-experts-fusion`, and `--disable-custom-all-reduce`.
+The V4.1 vision tower uses a model-specific
 rank-3 SDPA path and computes RoPE tables on the GPU to preserve the official
 BF16 rounding behavior.
 Disable both TileLang mHC overrides. The automatic HIP attention selection can
@@ -57,6 +74,13 @@ They use independent numerical or bit-level references and changing-input
 graph replay where applicable. `ENGRAM_CPU_ONLY=1` runs the row-store checks
 without a GPU. Fixtures are synthetic and small; no checkpoint or run logs are
 included here.
+
+`tests/fp8.py` checks all six guarded projection shapes with exact native-format
+operands, the original quantizer, C1/C2 graph replay and generic fallbacks.
+`tests/mhc.py` includes a FP64 projection reference with an FP32 reduction-error
+bound. `tests/engram.py` checks prepared-row embedding and bounded graph input
+generations; its local ownership checks do not replace a multi-rank collective
+or full-model test.
 
 `tests/weight-loading.py` checks bounded source ownership, serial loading and
 copy-error propagation using the installed loader source. Run it with

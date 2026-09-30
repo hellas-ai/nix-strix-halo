@@ -36,7 +36,11 @@ let
       ./patches/0010-swa-autotune-head-tiles.patch
       ./patches/0011-rccl-graph-usage-mode.patch
       ./patches/0012-topk-logical-ties.patch
+      ./patches/0013-engram-decode-graphs.patch
+      ./patches/0014-v41-native-fp8-gemv.patch
       ./patches/0015-stable-candidate-block-ties.patch
+      ./patches/0016-native-hc-projection.patch
+      ./patches/0017-v41-native-shared-expert-gemv.patch
     ];
   };
   baseKernel = lib.findFirst (
