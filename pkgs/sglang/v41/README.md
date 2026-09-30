@@ -78,6 +78,9 @@ Use `SGLANG_USE_AITER=0`, `SGLANG_HACK_FLASHMLA_BACKEND=triton`,
 The V4.1 vision tower uses a model-specific
 rank-3 SDPA path and computes RoPE tables on the GPU to preserve the official
 BF16 rounding behavior.
+Native input modalities are text and images. Audio needs a separate recognizer;
+video and PDFs need conversion to frames, text, or page images. Output is text,
+reasoning, and tool calls.
 Disable both TileLang mHC overrides. The automatic HIP attention selection can
 choose an unqualified TileLang path, so the explicit Triton setting matters.
 For TP4's 16 attention heads per rank, single-scope SWA autotuning retains the

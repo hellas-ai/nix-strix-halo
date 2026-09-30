@@ -21,6 +21,7 @@ TheRock-published Python wheels.
 | `llama-cpp-master{,-rocm,-vulkan,-cuda}` | same matrix off llama.cpp HEAD |
 | `vllm-rocm` | source-built vLLM 0.23 against TheRock |
 | `sglang-rocm` | SGLang 0.5.20 against TheRock; [GLM-5.3-Flash bring-up plan](docs/glm53-flash-strix.md) |
+| `sglang-v41-rocm` | native DeepSeek V4.1-Flash candidate; [TP4 launcher and qualification limits](pkgs/sglang/v41/README.md) |
 | `mlx-rocm` | MLX with the ROCm backend |
 | `ds4-rocm` | DwarfStar 4 HIP build |
 | `fastflowlm` | XDNA2 NPU CLI (`flm`) |
