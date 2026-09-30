@@ -48,6 +48,7 @@ let
       ./patches/0022-engram-graph-buckets.patch
       ./patches/0023-mxfp4-live-row-pairs.patch
       ./patches/0024-native-fp8-c4-c8.patch
+      ./patches/0025-chunked-owned-row-admission.patch
     ];
   };
   baseKernel = lib.findFirst (
@@ -96,6 +97,8 @@ base.overridePythonAttrs (old: {
       "$out/bin/sglang-python" ${./tests/routed-scaling.py} "$out"
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
       "$out/bin/sglang-python" ${./tests/graph-buckets.py} "$out"
+    HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
+      "$out/bin/sglang-python" ${./tests/scheduler-owned-row.py} "$out"
   '';
   passthru = (old.passthru or { }) // {
     inherit nativeExtensions;
