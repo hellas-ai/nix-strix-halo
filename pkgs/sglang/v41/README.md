@@ -136,11 +136,13 @@ qualification and serial/paired numerical limitations below still apply.
 Enable file-backed Engram with `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` and
 `SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=file`. It requires the default safetensors
 loader, mmap enabled, and checkpoint prefetch disabled. Prefill remains eager.
-Decode graphs support exact one- and two-request batches with TP4, DP1/CP1/PP1,
+Decode graphs support exact capture sets `[1,2]` or `[1,2,4,8]` with TP4, DP1/CP1/PP1,
 no speculation and one compute stream. Use `--cuda-graph-backend-decode full`,
 `--cuda-graph-backend-prefill disabled`, `--max-running-requests 2`, and
 `--cuda-graph-config '{"decode":{"backend":"full","bs":[1,2],"max_bs":2}}'`.
-Engram hashing
+For capacity eight and all four capture buckets, use `--max-running-requests 8`
+and `--cuda-graph-config '{"decode":{"backend":"full","bs":[1,2,4,8],"max_bs":8}}'`.
+Other batch sizes remain eager; graph rows are never padded. Engram hashing
 and bounded file reads happen before replay; captured code consumes refreshed
 native row buffers. A failure after the history commit terminates the worker
 so the serving controller can stop the TP group; that decode step cannot be
@@ -148,12 +150,16 @@ retried in place. Unsupported file-backed graph configurations are rejected.
 
 Graph selection also distinguishes the indexer's sequence-length branches;
 mixed-length batches select a branch that handles every request. Prefill and
-larger batches retain their ordinary paths. Native C1/C2 projections use the
+uncaptured batch sizes retain their ordinary paths. Variant eligibility follows
+the effective capture buckets, independently of request-pool capacity. Native
+C1/C2/C4/C8 projections use the
 existing activation quantizer and FP8/E8M0 weights, with FP32 reduction and
 BF16 output. This applies only to marked V4.1 Engram, TP4 attention, and TP4/EP1
 separate shared-expert projections. The FP32 mHC projection has its own exact
 C1/C2 shape guard; RMS and Sinkhorn operations are unchanged. These
-reductions can round differently from the generic matrix kernels.
+reductions can round differently from the generic matrix kernels. C4/C8 reuse
+each native weight tile across the token rows with independent FP32 accumulators;
+they preserve the existing C1/C2 kernels and quantizer.
 
 Portable gfx1151 C2 mHC post-residual mixing uses one kernel for HC4/H5120,
 with separate FP32 products/additions and final BF16 rounding. Explicit
@@ -190,10 +196,12 @@ nix build .#sglang-v41-rocm
 result/bin/sglang-python pkgs/sglang/v41/tests/engram.py "$(readlink -f result)"
 ```
 
-For native TP4 C2 routed experts, an exact-shape gfx1151 kernel evaluates only
+For native TP4 C2/C4/C8 routed experts, an exact-shape gfx1151 kernel evaluates only
 live gate/up rows and shares weight reads between routes to the same expert.
-It applies to contiguous BF16 `[2, 5120]`, six routes, 384 experts and local
-intermediate size 576; the N128 implementation remains the fallback. Native
+It applies to contiguous BF16 `[C, 5120]` with C in 2/4/8, six routes, 384 experts and local
+intermediate size 576. C4/C8 reuse the unchanged C2 body within adjacent token
+pairs; each pair owns separate input, route and output slices. Other shapes
+retain the ordinary N128/N256 dispatch. Native
 packed weights/scales, activation and down projection are unchanged. The FP32
 reduction order differs, so bitwise equality to the fallback is not promised.
 Filtered expert routes (`-1`) produce zero without reading weight memory.
@@ -203,6 +211,8 @@ activations separately.
 `tests/mxfp4.py` retains all 44 reference cases and checks the new reduction
 against a native-operand FP64 reference and operation-derived error bound,
 including cancellation, route changes, graph replay and other-shape fallbacks.
+C4/C8 add shared, disjoint, duplicate and filtered routes, pairwise C2 projection
+comparisons, and the same independent projection/downstream acceptance gates.
 Its finite-fixture premises fail closed; it is not a full-model quality proof.
 Run under an external 600-second timeout and 8 GiB host memory limit; the test
 limits GPU allocation to 3% and uses about 1.8 GB of packed synthetic weights.
@@ -214,11 +224,16 @@ without a GPU. Fixtures are synthetic and small; no checkpoint or run logs are
 included here.
 
 `tests/fp8.py` checks all six guarded projection shapes with exact native-format
-operands, the original quantizer, C1/C2 graph replay and generic fallbacks.
+operands, the original quantizer, C1/C2/C4/C8 graph replay and generic fallbacks.
+Dense exact-dyadic operands independently exercise every reduction term; C4/C8
+also compare bitwise with separate native C2 calls. The CPU-only
+`tests/graph-buckets.py` checks effective capture geometry, variant boundaries
+and unpadded eligibility at package build time using explicit metadata stubs.
 `tests/mhc.py` includes a FP64 projection reference with an FP32 reduction-error
 bound, plus post-residual bitwise, signed-zero, reduction-order, graph and
 fallback controls against installed Torch. `tests/engram.py` checks prepared-row
-embedding and bounded graph input generations; its local ownership checks do not replace a multi-rank collective
+embedding, bounded graph input generations, and cross-stream bucket transitions
+with owned output snapshots; its local ownership checks do not replace a multi-rank collective
 or full-model test.
 
 `tests/weight-loading.py` checks bounded source ownership, serial loading and

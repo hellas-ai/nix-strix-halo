@@ -512,7 +512,7 @@ def n128_control(candidate):
     assert isinstance(guard, ast.If)
     assert (
         ast.unparse(guard.test)
-        == "a.shape == (2, 5120) and top_k == 6 and (not mul_routed_weight)"
+        == "a.shape in ((2, 5120), (4, 5120), (8, 5120)) and top_k == 6 and (not mul_routed_weight)"
     )
     assert isinstance(guard.body[0], ast.ImportFrom)
     assert guard.body[0].module == "sglang.kernels.ops.gemm.dsv41_mxfp4_gate_up"
@@ -1159,6 +1159,128 @@ def padded_route_cases(candidate, baseline, buffers):
     ids.copy_(saved)
 
 
+def check_gate_up_pairs(candidate, baseline, ref, original_buffers):
+    """Exercise pair ownership with the existing independent numerical gates."""
+    _x, w13, w2, s13, s2, _weights, _ids = original_buffers
+    torch.manual_seed(734)
+    x = torch.randn((8, 5120), device="cuda", dtype=torch.bfloat16)
+    weights = torch.rand((8, 6), device="cuda")
+    weights /= weights.sum(-1, keepdim=True)
+    ids = torch.empty((8, 6), device="cuda", dtype=torch.int32)
+    initial_x, initial_weights = x.clone(), weights.clone()
+    shared = [[0, 7, 63, 127, 255, 383]] * 8
+    disjoint = [[row * 6 + i for i in range(6)] for row in range(8)]
+    disjoint[-1][-1] = 383
+    duplicate = [
+        [0, 0, 7, 7, -1, 383],
+        [0, 7, 63, 63, 383, -1],
+        [0, 0, 7, 7, 63, 383],
+        [0, 7, 63, 127, 255, 383],
+        [-1] * 6,
+        [0] * 6,
+        [383] * 6,
+        [383, 0, 383, 0, 383, 0],
+    ]
+    for tokens in (4, 8):
+        xx, ww, ii = x[:tokens], weights[:tokens], ids[:tokens]
+        buffers = (xx, w13, w2, s13, s2, ww, ii)
+        records = {}
+        patterns = [("shared", shared), ("disjoint", disjoint)]
+        if tokens == 8:
+            patterns.append(("duplicate_padding", duplicate))
+        for label, pattern in patterns:
+            name = f"C{tokens}:{label}"
+            xx.copy_(
+                initial_x[:tokens]
+                if label == "shared"
+                else initial_x[:tokens].flip(0) * 0.75
+            )
+            ww.copy_(
+                initial_weights[:tokens]
+                if label == "shared"
+                else initial_weights[:tokens].flip(0)
+            )
+            ii.copy_(torch.tensor(pattern[:tokens], device=ii.device, dtype=ii.dtype))
+            before = [tensor_sha(v) for v in (xx, ww, ii)]
+            new = snapshot_result(live_call(candidate, buffers, stages=True))
+            old = snapshot_result(call(baseline, *buffers, stages=True))
+            for start in range(0, tokens, 2):
+                pair = (
+                    xx[start : start + 2],
+                    w13,
+                    w2,
+                    s13,
+                    s2,
+                    ww[start : start + 2],
+                    ii[start : start + 2],
+                )
+                actual = (
+                    new[0][start : start + 2],
+                    [v[start : start + 2] for v in new[1]],
+                )
+                old_pair = (
+                    old[0][start : start + 2],
+                    [v[start : start + 2] for v in old[1]],
+                )
+                paired = snapshot_result(live_call(candidate, pair, stages=True))
+                case = name + f":pair{start // 2}"
+                same_bits(actual[1][0], paired[1][0], case + ":projection")
+                same_bits(actual[1][1], paired[1][1], case + ":activation")
+                live_reference(pair, actual, old_pair, case)
+                # The original oracle has no -1 sentinel. Its corresponding
+                # reference route is expert0 with zero weight; valid routes,
+                # operands and all acceptance predicates stay unchanged.
+                safe_pair = (
+                    *pair[:5],
+                    torch.where(pair[6] == -1, 0, pair[5]),
+                    torch.where(pair[6] == -1, 0, pair[6]),
+                )
+                oracle(ref, *safe_pair, actual[0], None, True, case)
+            masked = ii.cpu() == -1
+            if masked.any():
+                for stage, value in enumerate(new[1]):
+                    same_bits(
+                        value[masked],
+                        torch.zeros_like(value[masked]),
+                        name + f":zero-stage{stage}",
+                    )
+            combined = call(candidate, *buffers, no_combine=False)[0]
+            expected_sum = new[0].cuda().sum(1)
+            same_bits(combined, expected_sum, name + ":combine")
+            scaled = call(candidate, *buffers, factor=1.5, no_combine=False)[0]
+            same_bits(scaled, expected_sum * 1.5, name + ":scale-once")
+            assert before == [tensor_sha(v) for v in (xx, ww, ii)]
+            records[label] = (new, xx.clone(), ww.clone(), ii.clone())
+
+        def restore(record, xx=xx, ww=ww, ii=ii):
+            for target, source in zip((xx, ww, ii), record[1:]):
+                target.copy_(source)
+
+        restore(records["shared"])
+        live_call(candidate, buffers, stages=True)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = live_call(candidate, buffers, stages=True)
+        other = "disjoint" if tokens == 4 else "duplicate_padding"
+        for label in ("shared", other, "shared"):
+            restore(records[label])
+            graph.replay()
+            # Own all output bytes before replaying another graph generation.
+            actual = snapshot_result(captured)
+            compare_snapshots(actual, records[label][0], f"C{tokens}:graph:{label}")
+            COUNTS["graphs"] += 1
+        emit(
+            event="pair_gate_up",
+            tokens=tokens,
+            cases=len(patterns),
+            native_c2_projection_exact=True,
+            independent_envelope=True,
+            original_downstream_oracle=True,
+            changed_graph=True,
+        )
+        del graph, captured, records
+
+
 def check_gate_up():
     candidate = moe
     baseline = n128_control(candidate)
@@ -1232,6 +1354,7 @@ def check_gate_up():
     )
     padded_route_cases(candidate, baseline, buffers)
     expansion_controls(candidate, baseline, buffers)
+    check_gate_up_pairs(candidate, baseline, ref, buffers)
     after = {
         name: tensor_sha(t)
         for name, t in [("w13", w13), ("w2", w2), ("s13", s13), ("s2", s2)]

@@ -45,6 +45,9 @@ let
       ./patches/0019-native-gemv-exact-fp8-conversion.patch
       ./patches/0020-native-hc-post-c2.patch
       ./patches/0021-mxfp4-routed-scale-ownership.patch
+      ./patches/0022-engram-graph-buckets.patch
+      ./patches/0023-mxfp4-live-row-pairs.patch
+      ./patches/0024-native-fp8-c4-c8.patch
     ];
   };
   baseKernel = lib.findFirst (
@@ -91,6 +94,8 @@ base.overridePythonAttrs (old: {
   postFixup = (old.postFixup or "") + ''
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 \
       "$out/bin/sglang-python" ${./tests/routed-scaling.py} "$out"
+    HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
+      "$out/bin/sglang-python" ${./tests/graph-buckets.py} "$out"
   '';
   passthru = (old.passthru or { }) // {
     inherit nativeExtensions;

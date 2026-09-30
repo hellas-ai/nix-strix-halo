@@ -113,11 +113,11 @@ def check_graph_staging(embedding, literal):
         for i in range(2)
     ]
     provider = NativeEngramGraphPrestage(
-        SimpleNamespace(engram_hasher=hasher, layers=layers), 2, "cuda"
+        SimpleNamespace(engram_hasher=hasher, layers=layers), 8, "cuda"
     )
     store = embedding.file_store
     previous_limit = store.max_batch_rows
-    store.max_batch_rows = 64
+    store.max_batch_rows = 8 * 24
 
     def batch(ids):
         bs = ids.shape[0]
@@ -133,7 +133,8 @@ def check_graph_staging(embedding, literal):
         )
 
     try:
-        for bs in (1, 2):
+        graphs = {}
+        for bs in (1, 2, 4, 8):
 
             def forward(bs=bs):
                 return tuple(
@@ -152,6 +153,7 @@ def check_graph_staging(embedding, literal):
                 torch.cuda.graph(graph),
             ):
                 outputs = forward()
+            graphs[bs] = (graph, outputs)
             for shift in (0, 97, 0):
                 ids = (np.arange(bs * 48).reshape(bs, 2, 24) * 13 + shift) % len(
                     literal
@@ -175,6 +177,33 @@ def check_graph_staging(embedding, literal):
                         literal[ids[:, i]], np.ones((bs, 24), bool), 0, 0, 0
                     )
                     check_values(expected, "cuda", value=value)
+        # Alternate streams and bucket widths without a global synchronization.
+        # Clone each result before retiring its generation, so later graph work
+        # cannot overwrite the values that the independent row oracle checks.
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        torch.cuda.synchronize()
+        retained = []
+        for step, bs in enumerate((8, 1, 4, 2, 8)):
+            ids = (np.arange(bs * 48).reshape(bs, 2, 24) * 17 + step * 97) % len(
+                literal
+            )
+            with torch.cuda.stream(streams[step % 2]):
+                current = batch(torch.from_numpy(ids).cuda())
+                generation = provider.prepare(current, bs)
+                provider.install(current, generation)
+                graph, outputs = graphs[bs]
+                graph.replay()
+                owned = tuple(value.clone() for value in outputs)
+                provider.retire_after_replay(generation)
+            retained.append((ids, owned))
+        torch.cuda.synchronize()
+        for ids, values in retained:
+            for i, value in enumerate(values):
+                expected = impl.RowBatch(
+                    literal[ids[:, i]], np.ones(ids[:, i].shape, bool), 0, 0, 0
+                )
+                check_values(expected, "cuda", value=value)
+        assert len(provider.host_frames) == 2
         calls = hasher.calls
         fails(
             ValueError,
@@ -199,7 +228,8 @@ def check_graph_staging(embedding, literal):
         json.dumps(
             {
                 "event": "prepared_graph_rows",
-                "c1_c2_ABA": True,
+                "c1_c2_c4_c8_ABA": True,
+                "cross_stream_bucket_transitions": [8, 1, 4, 2, 8],
                 "stale_generation_rejected": True,
                 "read_failure_propagated": True,
                 "synthetic_hasher": True,

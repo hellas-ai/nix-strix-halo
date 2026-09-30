@@ -118,7 +118,7 @@ def check_native_gemv():
             torch.ones_like(exponents, dtype=torch.float32), exponents
         )
         scales = scales_cpu.cuda()
-        a = (torch.randint(-4, 5, (2, k)).float() / 2).to(torch.bfloat16)
+        a = (torch.randint(-4, 5, (8, k)).float() / 2).to(torch.bfloat16)
         b = a.flip(0).roll(17, dims=1).contiguous()
 
         def reference(x, col=col, other=other, scales_cpu=scales_cpu, rows=rows):
@@ -134,9 +134,13 @@ def check_native_gemv():
             )
 
         outputs = {}
-        for m in (1, 2):
+        for m in (1, 2, 4, 8):
             wrapper = (
-                c1_name if m == 1 or flag == "native_v41_shared" else "native_c2_gemv"
+                "native_c4_c8_gemv"
+                if m in (4, 8)
+                else c1_name
+                if m == 1 or flag == "native_v41_shared"
+                else "native_c2_gemv"
             )
             x = a[:m].cuda()
             with patch.object(
@@ -156,11 +160,27 @@ def check_native_gemv():
             )
             prequant = linear(q, input_scale=qs, **{flag: value})
             assert torch.equal(actual.view(torch.int16), prequant.view(torch.int16))
-            outputs[m] = actual.clone()
+            outputs[m] = actual.cpu().clone()
+            if m in (4, 8):
+                paired = torch.cat(
+                    [
+                        linear(
+                            q[start : start + 2],
+                            input_scale=qs[start : start + 2],
+                            **{flag: value},
+                        )
+                        .cpu()
+                        .clone()
+                        for start in range(0, m, 2)
+                    ]
+                )
+                assert torch.equal(
+                    outputs[m].view(torch.int16), paired.view(torch.int16)
+                )
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 captured = linear(x, **{flag: value})
-            for host in (b[:m], a[:m]):
+            for host in (a[:m], b[:m], a[:m]):
                 x.copy_(host)
                 graph.replay()
                 torch.testing.assert_close(
@@ -180,18 +200,25 @@ def check_native_gemv():
         ) as fallback:
             linear(a[:1].cuda())
             assert fallback.call_count == 1
-            for m in (3, 4):
+            for m in (3, 5, 6, 7, 9):
                 x = a.repeat(2, 1)[:m].cuda()
                 plain = linear(x)
                 marked = linear(x, **{flag: value})
                 assert torch.equal(plain.view(torch.int16), marked.view(torch.int16))
-            assert fallback.call_count == 5
+            assert fallback.call_count == 11
+            bias = torch.linspace(-1, 1, n, device="cuda", dtype=torch.bfloat16)
+            x = a[:4].cuda()
+            plain = linear(x, bias=bias)
+            marked = linear(x, bias=bias, **{flag: value})
+            assert torch.equal(plain.view(torch.int16), marked.view(torch.int16))
+            assert fallback.call_count == 13
         print(
             json.dumps(
                 {
                     "event": "native_gemv",
                     "shape": [n, k],
-                    "c1_c2_exact": True,
+                    "c1_c2_c4_c8_literal_exact": True,
+                    "c4_c8_native_c2_bitwise": True,
                     "graph_changed_input": True,
                     "unmarked_and_prefill_fallback": True,
                 }
@@ -199,6 +226,71 @@ def check_native_gemv():
             flush=True,
         )
     return len(shapes)
+
+
+@torch.inference_mode()
+def check_dense_native_rows():
+    """Dense exact-dyadic sums exercise every K term independently of native C2.
+
+    Every product is an integer multiple of 1/8 and has magnitude <=8.
+    K=2048 bounds every intermediate sum by 16384, below the FP32 exact
+    lattice limit; therefore every reduction order has the same exact sum.
+    This literal finite-normal case does not establish arbitrary-input parity.
+    """
+    n, k = 5120, 2048
+    torch.manual_seed(2048)
+    codes = torch.tensor([0x30, 0x38, 0x40, 0xB8], dtype=torch.uint8)
+    values = torch.tensor([0.5, 1, 2, -1], dtype=torch.float64)
+    indices = torch.randint(0, 4, (n, k))
+    weight = codes[indices].cuda().view(torch.float8_e4m3fn)
+    exponents = (torch.arange(n // 32)[:, None] + torch.arange(k // 32)) % 3 - 1
+    scales = torch.ldexp(torch.ones_like(exponents, dtype=torch.float32), exponents)
+    decoded = values[indices] * scales.double().repeat_interleave(
+        32, 0
+    ).repeat_interleave(32, 1)
+    x = (torch.randint(-4, 5, (8, k)).float() / 2).bfloat16()
+    expected = (x.double() @ decoded.T).bfloat16()
+    wscale = scales.cuda()
+    for m in (4, 8):
+        inputs = x[:m].cuda()
+        q, qs = sglang_per_token_group_quant_fp8(inputs, 32, scale_ue8m0=True)
+        torch.testing.assert_close(
+            q.float() * qs.repeat_interleave(32, 1), inputs.float(), rtol=0, atol=0
+        )
+        actual = triton_w8a8_block_fp8_linear(
+            inputs, weight, [32, 32], wscale, act_scale_ue8m0=True, native_wob_c1=True
+        )
+        owned = actual.cpu().clone()
+        torch.testing.assert_close(owned, expected[:m], rtol=0, atol=0)
+        paired = torch.cat(
+            [
+                triton_w8a8_block_fp8_linear(
+                    q[start : start + 2],
+                    weight,
+                    [32, 32],
+                    wscale,
+                    input_scale=qs[start : start + 2],
+                    act_scale_ue8m0=True,
+                    native_wob_c1=True,
+                )
+                .cpu()
+                .clone()
+                for start in range(0, m, 2)
+            ]
+        )
+        assert torch.equal(owned.view(torch.int16), paired.view(torch.int16))
+        print(
+            json.dumps(
+                {
+                    "event": "dense_native_exact",
+                    "tokens": m,
+                    "shape": [n, k],
+                    "fp64_exact": True,
+                    "native_c2_bitwise": True,
+                }
+            ),
+            flush=True,
+        )
 
 
 def internal(x, q, s):
@@ -263,6 +355,7 @@ def main():
     assert torch.isfinite(y).all() and y.shape == (2, 33)
     conversion_codes = check_e4m3fn_conversion()
     native_shapes = check_native_gemv()
+    check_dense_native_rows()
     print(
         json.dumps(
             {
