@@ -1278,6 +1278,10 @@
               bash -n lib/bench/ds41-node.sh
               python3 lib/bench/test-ds41-model-check.py
             '';
+            vllm-bench-tests = runSourceCheck "vllm-bench-tests" [ pkgs.python3 ] ''
+              python3 lib/bench/test-vllm-transport-matrix.py
+              python3 lib/bench/test-vllm-stream-client.py
+            '';
             therock-updater-tests = runSourceCheck "therock-updater-tests" [
               pkgs.python3
             ] "python3 -m unittest discover -s pkgs/therock/scripts -p 'test_*.py'";
@@ -1306,6 +1310,7 @@
                 }
                 ''
                   bash -n ${./lib/bench/vllm-transport-matrix.sh}
+                  python3 -m py_compile ${./lib/bench/vllm-transport-matrix.py}
                   python3 -m py_compile ${./lib/bench/vllm-stream-client.py}
                   strix-halo-vllm-pair-bench-ci --scenario qwen-peak --dry-run | tee "$out"
                   grep -q "dry-run: not invoking" "$out"
