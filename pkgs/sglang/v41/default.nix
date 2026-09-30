@@ -41,6 +41,7 @@ let
       ./patches/0015-stable-candidate-block-ties.patch
       ./patches/0016-native-hc-projection.patch
       ./patches/0017-v41-native-shared-expert-gemv.patch
+      ./patches/0018-c2-gemv-eight-row-tiles.patch
     ];
   };
   baseKernel = lib.findFirst (
