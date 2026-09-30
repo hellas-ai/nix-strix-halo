@@ -71,7 +71,7 @@
              from sglang.srt.layers.moe.moe_runner.ascend import AscendQuantInfo
 --- /dev/null
 +++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,279 @@
 +"""AMD Triton MXFP4 MoE fallback.
 +
 +This keeps routed-expert weights in their checkpoint-native packed E2M1/E8M0
@@ -103,6 +103,15 @@
 +    top_k: int,
 +    mul_routed_weight: bool,
 +) -> None:
++    if a.shape == (2, 5120) and top_k == 6 and not mul_routed_weight:
++        from sglang.kernels.ops.gemm.dsv41_mxfp4_gate_up import try_gate_up_live_rows
++
++        if try_gate_up_live_rows(
++            a, weight, output, weight_mx_scale, topk_ids,
++            config, top_k, mul_routed_weight,
++        ):
++            return
++
 +    from aiter.ops.triton.moe.moe_op_mxfp4 import fused_moe_mxfp4
 +
 +    num_experts = weight.shape[0]
@@ -342,3 +351,105 @@
 +        hidden_states.copy_(combined)
 +        return hidden_states
 +    return combined
+--- /dev/null
++++ b/sglang/kernels/ops/gemm/dsv41_mxfp4_gate_up.py
+@@ -0,0 +1,99 @@
++"""Native C2 routed gate/up for the exact gfx1151 DeepSeek V4.1 TP4 geometry."""
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _e2m1_to_fp32(code):
++    magnitude = code & 7
++    bits = tl.where(magnitude < 2, magnitude * 0x3F000000,
++                    (magnitude << 22) + 0x3F000000)
++    return (bits | ((code & 8) << 28)).to(tl.float32, bitcast=True)
++
++
++@triton.jit
++def _flush_bf16_subnormal(value):
++    # Values are expanded BF16 operands represented in FP32.
++    bits = value.to(tl.uint32, bitcast=True)
++    return tl.where((bits & 0x7F800000) == 0,
++                    (bits & 0x80000000).to(tl.float32, bitcast=True), value)
++
++
++@triton.jit
++def _gate_up_live_rows(A, W, S, IDS, Y, ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
++    # Lowest flattened route owns this expert, including repeated valid IDs.
++    route = tl.program_id(1)
++    token = route // 6
++    expert = tl.load(IDS + route)
++    if expert == -1:
++        padding_rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
++        tl.store(Y + route * 1152 + padding_rows,
++                 tl.full((ROWS,), 0, tl.bfloat16))
++        return
++    routes = tl.arange(0, 16)
++    experts = tl.load(IDS + routes, mask=routes < 12, other=-1)
++    matching = (routes < 12) & (experts == expert)
++    owner = tl.min(tl.where(matching, routes, 16))
++    if route != owner:
++        return
++    paired = tl.sum((matching & (routes // 6 != token)).to(tl.int32)) > 0
++    first = tl.program_id(0) * ROWS
++    rows = first + tl.arange(0, ROWS)
++    cols = tl.arange(0, BLOCK_K)
++    accumulator = tl.zeros((ROWS,), tl.float32)
++    accumulator_other = tl.zeros((ROWS,), tl.float32)
++    for start in range(0, 5120, BLOCK_K):
++        packed = tl.load(W + expert.to(tl.int64) * (1152 * 2560)
++                         + rows[:, None] * 2560 + (start + cols[None, :]) // 2)
++        code = (packed.to(tl.uint32) >> ((cols[None, :] % 2) * 4)) & 15
++        scale = tl.load(S + expert.to(tl.int64) * (1152 * 160)
++                        + rows[:, None] * 160 + (start + cols[None, :]) // 32)
++        # Match installed dot_scaled's E8M0-byte->BF16 bitcast and BF16 product.
++        # Reserved scale values retain the installed BF16 classifications.
++        scale_fp32 = (scale.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
++        weight = (_e2m1_to_fp32(code) * scale_fp32).to(tl.bfloat16).to(tl.float32)
++        # Installed DOT2_BF16_BF16 scaling flushes expanded subnormal weights.
++        weight = _flush_bf16_subnormal(weight)
++        activation = tl.load(A + token * 5120 + start + cols).to(tl.float32)
++        activation = _flush_bf16_subnormal(activation)
++        accumulator += tl.sum(weight * activation[None, :], axis=1)
++        if paired:
++            activation_other = tl.load(A + (1 - token) * 5120 + start + cols).to(tl.float32)
++            activation_other = _flush_bf16_subnormal(activation_other)
++            accumulator_other += tl.sum(weight * activation_other[None, :], axis=1)
++    offsets = routes[:, None] * 1152 + rows[None, :]
++    tl.store(Y + offsets, accumulator[None, :].to(tl.bfloat16),
++             mask=(matching & (routes // 6 == token))[:, None])
++    if paired:
++        tl.store(Y + offsets, accumulator_other[None, :].to(tl.bfloat16),
++                 mask=(matching & (routes // 6 != token))[:, None])
++
++
++def try_gate_up_live_rows(a, weight, output, scales, ids, config, top_k, mul_routed_weight):
++    """Return False for every geometry outside the already-qualified N128 guard."""
++    expected_config = {
++        "BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,
++        "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 2,
++        "waves_per_eu": 0, "matrix_instr_nonkdim": 16, "kpack": 1,
++    }
++    if top_k != 6 or mul_routed_weight or any(config.get(k) != v for k, v in expected_config.items()):
++        return False
++    expected = ((a, (2, 5120), (torch.bfloat16,)),
++                (weight, (384, 1152, 2560), (torch.int8, torch.uint8)),
++                (scales, (384, 1152, 160), (torch.uint8, torch.float8_e8m0fnu)),
++                (ids, (2, 6), (torch.int32,)),
++                (output, (2, 6, 1152), (torch.bfloat16,)))
++    for tensor, shape, dtypes in expected:
++        if tensor.shape != shape or tensor.dtype not in dtypes or not tensor.is_contiguous():
++            return False
++        if tensor.device != a.device or tensor.device.type != "cuda":
++            return False
++    if not torch.version.hip or torch.cuda.get_device_properties(a.device).gcnArchName.split(":")[0] != "gfx1151":
++        return False
++    _gate_up_live_rows[(1152 // 8, 12)](
++        a, weight.view(torch.uint8), scales.view(torch.uint8), ids, output,
++        ROWS=8, BLOCK_K=512, num_warps=4, num_stages=1, enable_fp_fusion=False,
++    )
++    return True

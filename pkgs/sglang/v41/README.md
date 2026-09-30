@@ -190,16 +190,22 @@ nix build .#sglang-v41-rocm
 result/bin/sglang-python pkgs/sglang/v41/tests/engram.py "$(readlink -f result)"
 ```
 
-For native TP4 C2 routed experts, the gate/up kernel uses N128 instead of N256
-only for BF16 `[2, 5120]`, six routes, 384 experts and local intermediate size 576
-with the qualified gfx1151 configuration. Down and other shapes keep their
-existing configuration; native packed weights, scales and quantization are
-unchanged. `tests/mxfp4.py` retains its 44 reference cases and adds shared,
-disjoint, partially overlapping and swapped C2 routes, an N256 differential
-control, independent FP64 references, changed-input graph replay and fallback
-checks. Run under an external 600-second timeout and 8 GiB host memory limit;
-the test limits GPU allocation to 3% and uses about 1.8 GB of packed synthetic
-weights. It is a component check, not a full-model speed or quality guarantee.
+For native TP4 C2 routed experts, an exact-shape gfx1151 kernel evaluates only
+live gate/up rows and shares weight reads between routes to the same expert.
+It applies to contiguous BF16 `[2, 5120]`, six routes, 384 experts and local
+intermediate size 576; the N128 implementation remains the fallback. Native
+packed weights/scales, activation and down projection are unchanged. The FP32
+reduction order differs, so bitwise equality to the fallback is not promised.
+Filtered expert routes (`-1`) produce zero without reading weight memory.
+Expanded subnormal weights follow the installed BF16 scaling path's flush-to-zero
+behavior. Focused baseline controls check reserved scale bytes and subnormal
+activations separately.
+`tests/mxfp4.py` retains all 44 reference cases and checks the new reduction
+against a native-operand FP64 reference and operation-derived error bound,
+including cancellation, route changes, graph replay and other-shape fallbacks.
+Its finite-fixture premises fail closed; it is not a full-model quality proof.
+Run under an external 600-second timeout and 8 GiB host memory limit; the test
+limits GPU allocation to 3% and uses about 1.8 GB of packed synthetic weights.
 
 The other checks cover MXFP4 experts, mHC, FP4 indexing and FP8 quantization.
 They use independent numerical or bit-level references and changing-input

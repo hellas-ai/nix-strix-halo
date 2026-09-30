@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Check packed E2M1/E8M0 experts against a literal CPU FP64 reference."""
 
+import ast
 import gc
 import hashlib
+import inspect
 import json
+import math
 import os
+import struct
 import sys
 import types
 from pathlib import Path
@@ -312,6 +316,172 @@ def main():
                       "max_memory_allocated": torch.cuda.max_memory_allocated()}), flush=True)
 
 
+def direct_bf16_scalar(value):
+    """Exact nearest-even conversion of a finite binary64 to BF16 bits."""
+    assert math.isfinite(value)
+    raw = struct.unpack("<Q", struct.pack("<d", value))[0]
+    sign, exponent, fraction = (
+        (raw >> 48) & 32768,
+        (raw >> 52) & 2047,
+        raw & (2**52 - 1),
+    )
+    mantissa = fraction if exponent == 0 else 2**52 + fraction
+    power = -1074 if exponent == 0 else exponent - 1023 - 52
+    return round_dyadic_bf16(
+        -mantissa if sign else mantissa, power, negative_zero=bool(sign)
+    )
+
+
+def round_dyadic_bf16(integer, power, negative_zero=False):
+    sign = 32768 if integer < 0 or (integer == 0 and negative_zero) else 0
+    integer = abs(integer)
+    if not integer:
+        return sign
+    exponent = integer.bit_length() - 1 + power
+    if exponent > 127:
+        return sign | 0x7F80
+    spacing = max(exponent - 7, -133)
+    shift = spacing - power
+    if shift > 0:
+        quotient, remainder = divmod(integer, 1 << shift)
+        half = 1 << (shift - 1)
+        quotient += remainder > half or (remainder == half and quotient & 1)
+    else:
+        quotient = integer << -shift
+    if exponent < -126:
+        bits = quotient
+    else:
+        if quotient == 256:
+            quotient, exponent = 128, exponent + 1
+        bits = 0x7F80 if exponent > 127 else ((exponent + 127) << 7) | (quotient - 128)
+    return sign | bits
+
+
+def direct_bf16(values):
+    bits = [direct_bf16_scalar(x) for x in values.reshape(-1).tolist()]
+    return (
+        torch.tensor(bits, dtype=torch.int32)
+        .to(torch.int16)
+        .view(torch.bfloat16)
+        .reshape(values.shape)
+    )
+
+
+def bf16_value(bits):
+    return struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+
+
+def cell_intersects(bits, lower, upper):
+    """Closed interval versus exact RNE cell, including midpoint parity."""
+    value = bf16_value(bits)
+    assert (
+        math.isfinite(value)
+        and math.isfinite(lower)
+        and math.isfinite(upper)
+        and lower <= upper
+    )
+    if value == 0:
+        previous, following = -(2.0**-133), 2.0**-133
+    elif bits & 32768:
+        previous, following = bf16_value(bits + 1), bf16_value(bits - 1)
+    else:
+        previous, following = bf16_value(bits - 1), bf16_value(bits + 1)
+    assert math.isfinite(previous) and math.isfinite(following), (
+        "BF16 overflow edge outside fixture"
+    )
+    low_mid, high_mid = (previous + value) / 2, (following + value) / 2
+    even = bits & 1 == 0
+    return (upper > low_mid or (upper == low_mid and even)) and (
+        lower < high_mid or (lower == high_mid and even)
+    )
+
+
+def upward(value):
+    assert torch.isfinite(value).all() and (value >= 0).all()
+    return torch.where(
+        value == 0, value, torch.nextafter(value, torch.full_like(value, math.inf))
+    )
+
+
+def gamma(n):
+    u = 2.0**-24
+    return math.nextafter(n * u / (1 - n * u), math.inf)
+
+
+def lattice(values):
+    """Exact least-set-bit exponent for each finite normal BF16, zero sentinel."""
+    assert values.device.type == "cpu" and values.dtype == torch.bfloat16
+    bits = values.contiguous().view(torch.int16).to(torch.int32) & 65535
+    exponent, mantissa = (bits >> 7) & 255, bits & 127
+    zero = (exponent == 0) & (mantissa == 0)
+    assert ((exponent > 0) & (exponent < 255) | zero).all(), (
+        "nonfinite/subnormal BF16 operand"
+    )
+    significant = mantissa | 128
+    trailing = torch.zeros_like(significant)
+    for _ in range(7):
+        even = significant & 1 == 0
+        trailing += even
+        significant = torch.where(even, significant >> 1, significant)
+    return torch.where(zero, 1024, exponent - 134 + trailing)
+
+
+def decode_native(packed, scales):
+    assert packed.device.type == scales.device.type == "cpu"
+    assert packed.dtype == scales.dtype == torch.uint8
+    assert ((scales >= 1) & (scales <= 254)).all(), (
+        "finite-normal reference excludes reserved scale bytes0/255"
+    )
+    exact = unpack(packed, scales)
+    expanded = exact.to(torch.bfloat16)
+    assert torch.equal(expanded.double(), exact), (
+        "native BF16 weight expansion is not exact"
+    )
+    return expanded
+
+
+def exact_dot(a, w, envelope=False):
+    """Prove every FP64 partial exact, then sum; never fall back on a looser proof."""
+    assert a.ndim == 1 and w.ndim == 2 and a.numel() == w.shape[1]
+    aq, wq = lattice(a), lattice(w)
+    active_a = aq != 1024
+    q = aq.min() + wq.min(dim=1).values
+    active = (w != 0).any(dim=1) & active_a.any()
+    q = torch.where(active, q, 0)
+    quantum = torch.ldexp(torch.ones(w.shape[0], dtype=torch.float64), q)
+    maximum = a.double().abs().max() * w.double().abs().amax(dim=1)
+    worst_l1 = upward(maximum * a.numel())
+    assert ((q >= -126) | ~active).all(), (
+        "FP32 nonzero intermediate normality not proved"
+    )
+    assert (worst_l1 < 2.0**126).all(), "FP32 overflow exclusion failed"
+    units = upward(worst_l1 / quantum)
+    assert (units < 2.0**52).all(), "exact FP64 dyadic headroom not proved"
+    product = w.double() * a.double()[None, :]
+    # BF16 products fit<=16 significant bits; lattice+L1 prove all partial sums exact.
+    exact = product.sum(dim=1)
+    proof = {
+        "max_lattice_units": float(units.max()),
+        "minimum_quantum_exponent": int(q.min()),
+        "K": a.numel(),
+    }
+    if not envelope:
+        return exact, proof
+    assert a.numel() == 5120
+    blocks = product.reshape(w.shape[0], 10, 512)
+    s, l1 = blocks.sum(dim=2), blocks.abs().sum(dim=2)
+    b = upward(l1 * gamma(9))
+    error, partial = b[:, 0], s[:, 0]
+    for j in range(1, 10):
+        partial = partial + s[:, j]
+        propagated = upward(upward(error + b[:, j]) * (1 + 2.0**-24))
+        fresh = upward(partial.abs() * 2.0**-24)
+        error = upward(propagated + fresh)
+    conservative = upward(l1.sum(dim=1) * gamma(18))
+    assert (error <= conservative).all(), "tight recurrence exceeds conservative bound"
+    return exact, error, proof
+
+
 # Separate globals preserve an N256 differential control without changing the
 # installed module or embedding another implementation. The independent FP64
 # reference above remains the acceptance oracle.
@@ -329,6 +499,37 @@ def n256_control(candidate):
     baseline.fused_experts_mxfp4.__kwdefaults__ = fn.__kwdefaults__
     assert baseline.fused_experts_mxfp4.__globals__ is baseline.__dict__
     assert candidate.fused_experts_mxfp4.__globals__ is vars(candidate)
+    return baseline
+
+
+def n128_control(candidate):
+    """Isolate the installed fallback; remove only its asserted live-row guard."""
+    baseline = types.ModuleType("mxfp4_n128_control")
+    baseline.__dict__.update(vars(candidate))
+    tree = ast.parse(inspect.getsource(candidate._run_mxfp4_gemm))
+    fn = tree.body[0]
+    guard = fn.body[0]
+    assert isinstance(guard, ast.If)
+    assert (
+        ast.unparse(guard.test)
+        == "a.shape == (2, 5120) and top_k == 6 and (not mul_routed_weight)"
+    )
+    assert isinstance(guard.body[0], ast.ImportFrom)
+    assert guard.body[0].module == "sglang.kernels.ops.gemm.dsv41_mxfp4_gate_up"
+    assert guard.body[0].names[0].name == "try_gate_up_live_rows"
+    assert isinstance(guard.body[1], ast.If)
+    assert isinstance(guard.body[1].body[0], ast.Return)
+    fn.body.pop(0)
+    exec(compile(tree, "<installed-n128-fallback>", "exec"), baseline.__dict__)  # noqa: S102 -- asserted installed function
+    fused = candidate.fused_experts_mxfp4
+    baseline.fused_experts_mxfp4 = types.FunctionType(
+        fused.__code__,
+        baseline.__dict__,
+        fused.__name__,
+        fused.__defaults__,
+        fused.__closure__,
+    )
+    baseline.fused_experts_mxfp4.__kwdefaults__ = fused.__kwdefaults__
     return baseline
 
 
@@ -433,6 +634,9 @@ def call(
 
     def spy(*args, **kwargs):
         calls.append((args, kwargs))
+        if snapshots:
+            snapshots.append(args[0].reshape(x.shape[0], 6, 576).clone())
+        args[2].fill_(float("nan"))
         original(*args, **kwargs)
         snapshots.append(args[2].clone())
 
@@ -532,9 +736,154 @@ def snapshot_result(result):
 
 def compare_snapshots(candidate, baseline, case):
     same_bits(candidate[0], baseline[0], case + ":output")
-    assert len(candidate[1]) == len(baseline[1]) == 2
-    for i in range(2):
+    assert len(candidate[1]) == len(baseline[1]) == 3
+    for i in range(3):
         same_bits(candidate[1][i], baseline[1][i], case + ":stage" + str(i))
+
+
+def check_reference_contract():
+    """Literal rounding, cancellation and fail-closed premise controls."""
+    value = 1 + 2.0**-8 + 2.0**-40
+    assert direct_bf16_scalar(value) == 0x3F81
+    assert (
+        torch.tensor(value, dtype=torch.float32).bfloat16().view(torch.int16).item()
+        == 0x3F80
+    )
+    assert direct_bf16_scalar(1 + 2.0**-8) == 0x3F80
+    assert direct_bf16_scalar(-0.0) == 0x8000
+    assert cell_intersects(0x3F80, 1, 1)
+    assert not cell_intersects(0x3F81, 1, 1)
+    assert not cell_intersects(0x3F81, 1 + 2.0**-8, 1 + 2.0**-8)
+    a = torch.zeros(5120, dtype=torch.bfloat16)
+    a[0], a[512] = 1, -1
+    w = torch.zeros((1, 5120), dtype=torch.bfloat16)
+    w[0, 0], w[0, 512] = 1, 1
+    exact, radius, _ = exact_dot(a, w, True)
+    assert exact.item() == 0 and 0 < radius.item() < 0.001
+    assert cell_intersects(0, -radius.item(), radius.item())
+    assert not cell_intersects(0x3F80, -radius.item(), radius.item())
+    a[0] = 2.0**-133
+    try:
+        exact_dot(a, w, True)
+    except AssertionError as error:
+        assert str(error) == "nonfinite/subnormal BF16 operand"
+    else:
+        raise AssertionError("Subnormal fixture premise was accepted")
+    a.fill_(1)
+    w[0, 0], w[0, 512] = 2.0**100, 2.0**-100
+    try:
+        exact_dot(a, w, True)
+    except AssertionError as error:
+        assert str(error) == "exact FP64 dyadic headroom not proved"
+    else:
+        raise AssertionError("Unproved exact reference was accepted")
+    emit(event="reference_contract", passed=True)
+
+
+def live_reference(buffers, actual, baseline, case):
+    """Gate/up accuracy contract; the existing oracle checks the downstream path."""
+    x, w13, _w2, s13, _s2, _weights, ids = buffers
+    x, ids = x.cpu(), ids.cpu()
+    projection, activation, _routed = actual[1]
+    assert all(
+        torch.isfinite(v).all()
+        for v in (actual[0], *actual[1], baseline[0], *baseline[1])
+    )
+    violations, count, better, worse, direct_mismatches = [], 0, 0, 0, 0
+    for expert in ids.unique(sorted=True).tolist():
+        if expert == -1:
+            continue
+        decoded13 = decode_native(w13[expert].cpu(), s13[expert].cpu())
+        for token in range(2):
+            routes = (ids[token] == expert).nonzero().flatten().tolist()
+            if not routes:
+                continue
+            first = routes[0]
+            for route in routes[1:]:
+                same_bits(
+                    projection[token, first],
+                    projection[token, route],
+                    case + ":duplicate",
+                )
+                same_bits(
+                    activation[token, first],
+                    activation[token, route],
+                    case + ":duplicate-activation",
+                )
+            for start in range(0, 1152, 128):
+                exact, bound, _ = exact_dot(
+                    x[token], decoded13[start : start + 128], True
+                )
+                for route in routes:
+                    observed = projection[token, route, start : start + 128]
+                    old = baseline[1][0][token, route, start : start + 128]
+                    ce, be = (
+                        (observed.double() - exact).abs(),
+                        (old.double() - exact).abs(),
+                    )
+                    better += int((ce < be).sum())
+                    worse += int((ce > be).sum())
+                    count += observed.numel()
+                    rounded = direct_bf16(exact)
+                    direct_mismatches += int(
+                        (observed.view(torch.int16) != rounded.view(torch.int16)).sum()
+                    )
+                    codes = (
+                        observed.view(torch.int16).to(torch.int32) & 65535
+                    ).tolist()
+                    for offset, (code, value, radius) in enumerate(
+                        zip(codes, exact.tolist(), bound.tolist())
+                    ):
+                        if not cell_intersects(
+                            code,
+                            math.nextafter(value - radius, -math.inf),
+                            math.nextafter(value + radius, math.inf),
+                        ):
+                            violations.append(
+                                (
+                                    token,
+                                    route,
+                                    start + offset,
+                                    float(observed[offset]),
+                                    value,
+                                    radius,
+                                )
+                            )
+    emit(
+        event="live_reference",
+        case=case,
+        values=count,
+        candidate_closer=better,
+        baseline_closer=worse,
+        equal=count - better - worse,
+        interval_violations=len(violations),
+        first_violations=violations[:16],
+        direct_round_mismatches=direct_mismatches,
+        baseline_scope="Common projection reference only; downstream gate is the existing full-pipeline oracle",
+    )
+    assert not violations, case + ": operation-derived projection envelope"
+    COUNTS["oracle"] += 1
+
+
+def live_call(candidate, buffers, **kwargs):
+    """Observe the real dispatch with restoration even on failure."""
+    from sglang.kernels.ops.gemm import dsv41_mxfp4_gate_up as helper
+
+    original = helper.try_gate_up_live_rows
+    selections = []
+
+    def observe(*args, **kw):
+        selected = original(*args, **kw)
+        selections.append(selected)
+        return selected
+
+    helper.try_gate_up_live_rows = observe
+    try:
+        result = call(candidate, *buffers, **kwargs)
+    finally:
+        helper.try_gate_up_live_rows = original
+    assert selections == [True], selections
+    return result
 
 
 def correctness_case(candidate, baseline, ref, buffers, name, ids_value, swap=False):
@@ -554,8 +903,8 @@ def correctness_case(candidate, baseline, ref, buffers, name, ids_value, swap=Fa
     stage1_tie_routes = set()
     for factor, no_combine in [(None, True), (None, False), (1.5, True), (1.5, False)]:
         label = name + f":factor{factor}:routes{no_combine}"
-        new = call(
-            candidate, *buffers, factor=factor, no_combine=no_combine, stages=True
+        new = live_call(
+            candidate, buffers, factor=factor, no_combine=no_combine, stages=True
         )
         new_snapshot = snapshot_result(new)  # Own bytes before baseline/reference work.
         old = call(
@@ -565,8 +914,16 @@ def correctness_case(candidate, baseline, ref, buffers, name, ids_value, swap=Fa
         configs_new = [record[1]["config"] for record in new[2]]
         configs_old = [record[1]["config"] for record in old[2]]
         emit(event="dispatch", case=label, candidate=configs_new, baseline=configs_old)
-        compare_snapshots(new_snapshot, old_snapshot, label)
-        assert configs_new[0] == configs_old[0] | {"BLOCK_SIZE_N": 128}
+        if factor is None and no_combine:
+            live_reference(buffers, new_snapshot, old_snapshot, label)
+            if name in ("shared", "disjoint", "partial", "row_swap"):
+                n256 = snapshot_result(
+                    call(n256_control(baseline), *buffers, stages=True)
+                )
+                compare_snapshots(old_snapshot, n256, label + ":retained-n128-n256")
+        assert (
+            configs_new[0] == configs_old[0] and configs_new[0]["BLOCK_SIZE_N"] == 128
+        )
         assert (
             configs_new[1] == configs_old[1] and configs_new[1]["BLOCK_SIZE_N"] == 256
         )
@@ -655,7 +1012,7 @@ def graph_cases(candidate, baseline, ref, buffers, routes_a, routes_b):
         new = snapshot_result(outputs[0])
         graphs[1].replay()
         old = snapshot_result(outputs[1])
-        compare_snapshots(new, old, "graph:" + label)
+        live_reference(buffers, new, old, "graph:" + label)
         eager = snapshot_result(call(candidate, *buffers, stages=True))
         compare_snapshots(new, eager, "graph:eager:" + label)
         oracle(ref, *buffers, new[0], None, True, "graph:" + label)
@@ -663,9 +1020,148 @@ def graph_cases(candidate, baseline, ref, buffers, routes_a, routes_b):
     del graphs, outputs
 
 
+def expansion_controls(candidate, baseline, buffers):
+    """Exact basis/classification probes of the installed BF16 arithmetic."""
+    x, w13, _w2, s13, _s2, _weights, ids = buffers
+    saved_x, saved_ids = x.clone(), ids.clone()
+    ids.copy_(torch.tensor([[0, 7, 63, 127, 255, 383]] * 2, device=ids.device))
+    active = ids[0].long()
+    saved_w, saved_s = w13[active].clone(), s13[active].clone()
+    # Retain actual aligner allocations and invoke gate/up alone: activation
+    # and down projection must not hide the exceptional classifications.
+    _, _, records = call(baseline, *buffers, stages=True)
+    args, kwargs = records[0]
+    outputs = [torch.empty_like(args[2]), torch.empty_like(args[2])]
+    failures = []
+    for name in (
+        "subnormal-weight",
+        "scale-zero",
+        "subnormal-activation",
+        "scale255-zero",
+        "scale255-nonzero",
+    ):
+        packed = torch.zeros((1152, 2560), dtype=torch.uint8, device=x.device)
+        scales = torch.full((1152, 160), 127, dtype=torch.uint8, device=x.device)
+        x.zero_()
+        expected = None
+        if name == "subnormal-weight":
+            packed[:, 0] = 1
+            scales[:, 0] = 1
+            x[0, 0], x[1, 0] = 2.0**126, -(2.0**126)
+            expected = "zero"
+        elif name == "scale-zero":
+            packed[:, :16] = 0x22
+            scales[:, 0] = 0
+            x[0, :32], x[1, :32] = 1, -1
+            expected = "zero"
+        elif name == "subnormal-activation":
+            packed[:, 0] = 2
+            scales[:, 0] = 253
+            x[0, 0], x[1, 0] = 2.0**-127, -(2.0**-127)
+        else:
+            scales[:, 0] = 255
+            x[0, :32], x[1, :32] = 1, -1
+            if name == "scale255-nonzero":
+                # All32 lanes in the Inf-scale block must be nonzero;
+                # otherwise0*Inf creates NaNs and conceals the Inf case.
+                packed[:, :16] = 0x22
+                expected = "infinity"
+            else:
+                expected = "nan"
+        for expert in active.tolist():
+            w13[expert].copy_(packed)
+            s13[expert].copy_(scales)
+        input_codes = (x[:, 0].cpu().view(torch.int16).to(torch.int32) & 65535).tolist()
+        if name == "subnormal-activation":
+            assert input_codes == [0x40, 0x8040], input_codes
+        emit(
+            event="expansion_input",
+            case=name,
+            activation_codes=input_codes,
+            packed_first_block=packed[0, :16].cpu().tolist(),
+            scale=int(scales[0, 0]),
+        )
+        snapshots = []
+        for module, output in zip((candidate, baseline), outputs):
+            output.fill_(123)  # A finite sentinel also detects unwritten NaNs.
+            operands = list(args)
+            operands[2] = output
+            module._run_mxfp4_gemm(*operands, **kwargs)
+            snapshots.append(output.cpu().clone())
+        new, old = snapshots
+        emit(
+            event="expansion_control",
+            case=name,
+            candidate_first=[float(new[t, 0, 0]) for t in range(2)],
+            baseline_first=[float(old[t, 0, 0]) for t in range(2)],
+            candidate_nan=int(new.isnan().sum()),
+            baseline_nan=int(old.isnan().sum()),
+            candidate_inf=int(new.isinf().sum()),
+            baseline_inf=int(old.isinf().sum()),
+            activation_literal_basis=[0.5, -0.5]
+            if name == "subnormal-activation"
+            else None,
+        )
+        checks = {
+            "nan_mask": torch.equal(new.isnan(), old.isnan()),
+            "positive_inf_mask": torch.equal(new.isposinf(), old.isposinf()),
+            "negative_inf_mask": torch.equal(new.isneginf(), old.isneginf()),
+            "finite_bits": bf16_bits_equal(new[old.isfinite()], old[old.isfinite()]),
+        }
+        if expected == "zero":
+            checks["expected_zero_bits"] = bf16_bits_equal(new, torch.zeros_like(new))
+        elif expected == "nan":
+            checks["expected_nan"] = bool(new.isnan().all())  # No NaN-payload gate.
+        elif expected == "infinity":
+            checks["expected_infinity"] = bool(
+                new[0].isposinf().all() and new[1].isneginf().all()
+            )
+        failed = [key for key, passed in checks.items() if not passed]
+        emit(event="expansion_verdict", case=name, checks=checks, failed=failed)
+        if failed:
+            failures.append({"case": name, "failed": failed})
+    w13.index_copy_(0, active, saved_w)
+    s13.index_copy_(0, active, saved_s)
+    x.copy_(saved_x)
+    ids.copy_(saved_ids)
+    emit(event="expansion_summary", failures=failures, passed=not failures)
+    assert not failures, failures
+
+
+def padded_route_cases(candidate, baseline, buffers):
+    """Filtered EP routes are +0, including dynamic graph transitions."""
+    ids = buffers[-1]
+    saved = ids.clone()
+    mixed = [[-1, 0, -1, 7, 63, -1], [7, -1, 0, -1, -1, 255]]
+    live_call(candidate, buffers, stages=True)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = live_call(candidate, buffers, stages=True)
+    for label, pattern in (
+        ("mixed", mixed),
+        ("all-filtered", [[-1] * 6] * 2),
+        ("mixed-return", mixed),
+    ):
+        ids.copy_(torch.tensor(pattern, dtype=ids.dtype, device=ids.device))
+        new = snapshot_result(live_call(candidate, buffers, stages=True))
+        old = snapshot_result(call(baseline, *buffers, stages=True))
+        mask = ids.cpu() == -1
+        for implementation, snapshot in (("candidate", new), ("n128", old)):
+            for index, tensor in enumerate((snapshot[0], *snapshot[1])):
+                zero = torch.zeros_like(tensor[mask])
+                same_bits(tensor[mask], zero, f"{label}:{implementation}:zero{index}")
+        # Normal valid routes retain the independent gate/up envelope; the
+        # unchanged downstream oracle is exercised by the ordinary route cases.
+        live_reference(buffers, new, old, "padding:" + label)
+        graph.replay()
+        compare_snapshots(snapshot_result(captured), new, "padding-graph:" + label)
+        COUNTS["graphs"] += 1
+    ids.copy_(saved)
+
+
 def check_gate_up():
     candidate = moe
-    baseline = n256_control(candidate)
+    baseline = n128_control(candidate)
     ref = sys.modules[__name__]
     check_gate_up_guards(candidate)
     gc.collect()
@@ -695,16 +1191,47 @@ def check_gate_up():
         "shared": [[0, 7, 63, 127, 255, 383]] * 2,
         "disjoint": [[0, 1, 7, 63, 127, 255], [2, 8, 64, 128, 256, 383]],
         "partial": [[0, 7, 63, 127, 255, 383], [0, 7, 63, 128, 256, 382]],
+        "duplicate": [[0, 0, 7, 7, 63, 63], [63, 63, 127, 127, 255, 255]],
     }
     for name, values in patterns.items():
         correctness_case(candidate, baseline, ref, buffers, name, values)
     correctness_case(
         candidate, baseline, ref, buffers, "row_swap", patterns["disjoint"], swap=True
     )
+    saved_x, saved_weights = x.clone(), weights.clone()
+    active = torch.tensor(patterns["shared"][0], device=x.device)
+    saved_w, saved_s = w13[active].clone(), s13[active].clone()
+    for scale in (1, 254):
+        packed = torch.full((1152, 2560), 0x88, dtype=torch.uint8, device=x.device)
+        packed[:, 0] = 0x82
+        packed[::2, 256] = 0x82
+        for expert in patterns["shared"][0]:
+            w13[expert].copy_(packed)
+            s13[expert].fill_(scale)
+        power, ratio = (2.0**126, 0.5) if scale == 1 else (2.0**-126, 2)
+        x.zero_()
+        x[0, 0], x[0, 512] = power, -power
+        x[1, 0], x[1, 512] = power * ratio, -power * ratio
+        ids.copy_(torch.tensor(patterns["shared"], device=ids.device))
+        observed = snapshot_result(live_call(candidate, buffers, stages=True))
+        expected = torch.zeros((2, 6, 1152), dtype=torch.bfloat16)
+        expected[0, :, 1::2] = 1 if scale == 1 else 2
+        expected[1, :, 1::2] = expected[0, :, 1::2] * ratio
+        same_bits(observed[1][0], expected, "normal-cancellation:" + str(scale))
+        correctness_case(
+            candidate, baseline, ref, buffers, "scale" + str(scale), patterns["shared"]
+        )
+    w13.index_copy_(0, active, saved_w)
+    s13.index_copy_(0, active, saved_s)
+    x.copy_(saved_x)
+    weights.copy_(saved_weights)
+    del active, saved_w, saved_s
     fallback_cases(candidate, baseline, buffers)
     graph_cases(
         candidate, baseline, ref, buffers, patterns["shared"], patterns["disjoint"]
     )
+    padded_route_cases(candidate, baseline, buffers)
+    expansion_controls(candidate, baseline, buffers)
     after = {
         name: tensor_sha(t)
         for name, t in [("w13", w13), ("w2", w2), ("s13", s13), ("s2", s2)]
@@ -721,4 +1248,5 @@ def check_gate_up():
 
 if __name__ == "__main__":
     main()
+    check_reference_contract()
     check_gate_up()
