@@ -1,5 +1,16 @@
 --- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
 +++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -18,8 +18,8 @@
+     groups = tl.arange(0, BLOCK_K // 32)
+     accumulator = tl.zeros((ROWS,), tl.float32)
+     for start in range(0, K, BLOCK_K):
+-        q = tl.load(Q + start + cols).to(tl.float32)
+-        w = tl.load(W + rows[:, None] * K + start + cols[None, :]).to(tl.float32)
++        q = _e4m3fn_to_fp32(tl.load(Q + start + cols))
++        w = _e4m3fn_to_fp32(tl.load(W + rows[:, None] * K + start + cols[None, :]))
+         products = w * q[None, :]
+         dots = tl.sum(tl.reshape(products, (ROWS, BLOCK_K // 32, 32)), axis=2)
+         a_scale = tl.load(QS + start // 32 + groups)
 @@ -34,4 +34,20 @@
  @triton.jit
 +def _e4m3fn_to_fp32(value):
