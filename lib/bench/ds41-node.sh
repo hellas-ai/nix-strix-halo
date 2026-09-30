@@ -22,7 +22,19 @@ DS41_CACHE_ROOT=${DS41_CACHE_ROOT:-/tmp/ds41-compiler-cache/gfx1151}
 }
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-python3 "$script_dir/ds41-model-check.py" "$DS41_MODEL_PATH"
+
+# A minimal Strix node need not expose python3 on PATH. Prefer the interpreter
+# that ships alongside the runtime (sglang-python) so the mandatory identity/RDMA
+# preflight always runs; fall back to PATH python3 only for non-Nix runtimes.
+runtime_bin_dir=$(dirname -- "$(realpath -- "$DS41_BINARY")")
+preflight_python=$runtime_bin_dir/sglang-python
+if [[ ! -x "$preflight_python" ]]; then
+  preflight_python=$(command -v python3) || {
+    echo 'no runtime sglang-python or PATH python3 for the model preflight' >&2
+    exit 2
+  }
+fi
+"$preflight_python" "$script_dir/ds41-model-check.py" "$DS41_MODEL_PATH"
 
 # Keep compiled kernels and support caches off small writable store overlays.
 runtime_name=$(basename -- "$(dirname -- "$(dirname -- "$(realpath -- "$DS41_BINARY")")")")

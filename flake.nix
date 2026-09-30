@@ -1277,6 +1277,7 @@
             ds41-launcher = runSourceCheck "ds41-launcher" [ pkgs.python3 ] ''
               bash -n lib/bench/ds41-node.sh
               python3 lib/bench/test-ds41-model-check.py
+              bash lib/bench/test-ds41-node.sh
             '';
             vllm-bench-tests = runSourceCheck "vllm-bench-tests" [ pkgs.python3 ] ''
               python3 lib/bench/test-vllm-transport-matrix.py
