@@ -1274,6 +1274,10 @@
           {
             deadnix = runSourceCheck "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
             statix = runSourceCheck "statix" [ pkgs.statix ] "statix check .";
+            ds41-launcher = runSourceCheck "ds41-launcher" [ pkgs.python3 ] ''
+              bash -n lib/bench/ds41-node.sh
+              python3 lib/bench/test-ds41-model-check.py
+            '';
             therock-updater-tests = runSourceCheck "therock-updater-tests" [
               pkgs.python3
             ] "python3 -m unittest discover -s pkgs/therock/scripts -p 'test_*.py'";

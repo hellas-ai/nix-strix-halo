@@ -19,6 +19,29 @@ and point each rank at that snapshot mounted over NVMe/RDMA. Trex's writable
 Verify the namespace UUID and RDMA transport before measuring loading or Engram
 lookup performance; a separate NFS export exercises a different storage path.
 
+`lib/bench/ds41-node.sh` is a candidate foreground launcher for this native
+TP4/EP1 configuration. Build `.#sglang-v41-rocm` once and make that **same Nix
+output** visible on all four ranks: copy it to the writable node stores with
+`nix copy --to ssh://HOST "$(readlink -f result)"`, or expose the identical
+output through a configured read-only shared store. Keep the launcher and its
+adjacent `ds41-model-check.py` together on each node. On Strix-3 (rank 0),
+Strix-4 (rank 1), Strix-2 (rank 2), and Strix-1 (rank 3), run the matching rank:
+
+```sh
+DS41_BINARY=/nix/store/EXACT_SGLANG_OUTPUT/bin/sglang \
+DS41_NODE_RANK=0 lib/bench/ds41-node.sh
+```
+
+`DS41_HEAD_ADDR` (default `192.168.25.103:51041`), `DS41_MODEL_PATH` (the
+published snapshot), `DS41_PORT` (default `31041`), and `DS41_CACHE_ROOT` are
+configurable. The script verifies the pinned revision, manifest, file sizes,
+read-only XFS mount, snapshot UUID and live NVMe/RDMA paths before serving; it
+does not mount or recover storage. The API binds only to node-local localhost.
+For access from a client, tunnel to the head rank, for example
+`ssh -N -L 31041:127.0.0.1:31041 strix-3`, then use
+`http://127.0.0.1:31041` on that client. Configured 128K context and C1/C2
+graphs require workload-specific validation before deployment.
+
 Enable file-backed Engram with `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` and
 `SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=file`. It requires the default safetensors
 loader, mmap enabled, and checkpoint prefetch disabled. Prefill remains eager.
