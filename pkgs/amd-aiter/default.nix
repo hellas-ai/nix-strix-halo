@@ -39,6 +39,10 @@ amd-aiter.overridePythonAttrs (old: {
     HIP_VISIBLE_DEVICES= ROCR_VISIBLE_DEVICES= ${python.interpreter} \
       ${./tests/library-registration.py} \
       "$out/${python.sitePackages}/aiter/jit/utils/torch_guard.py"
+
+    # Interrupted JIT owners must not strand later processes on a stale lock.
+    ${python.interpreter} ${./tests/file-baton.py} \
+      "$out/${python.sitePackages}/aiter/jit"
   '';
 
   passthru = (old.passthru or { }) // {
