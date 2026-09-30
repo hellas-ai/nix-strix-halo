@@ -90,8 +90,7 @@ pythonPackages.buildPythonPackage {
   '';
   passthru = {
     inherit moduleStems revision;
-    torch = pythonPackages.torch;
-    python = pythonPackages.python;
+    inherit (pythonPackages) torch python;
   };
   meta = {
     description = "Pinned SGLang Rust extensions built against the runtime Python and Torch";
