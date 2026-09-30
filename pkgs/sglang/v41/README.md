@@ -97,6 +97,17 @@ nix build .#sglang-v41-rocm
 result/bin/sglang-python pkgs/sglang/v41/tests/engram.py "$(readlink -f result)"
 ```
 
+For native TP4 C2 routed experts, the gate/up kernel uses N128 instead of N256
+only for BF16 `[2, 5120]`, six routes, 384 experts and local intermediate size 576
+with the qualified gfx1151 configuration. Down and other shapes keep their
+existing configuration; native packed weights, scales and quantization are
+unchanged. `tests/mxfp4.py` retains its 44 reference cases and adds shared,
+disjoint, partially overlapping and swapped C2 routes, an N256 differential
+control, independent FP64 references, changed-input graph replay and fallback
+checks. Run under an external 600-second timeout and 8 GiB host memory limit;
+the test limits GPU allocation to 3% and uses about 1.8 GB of packed synthetic
+weights. It is a component check, not a full-model speed or quality guarantee.
+
 The other checks cover MXFP4 experts, mHC, FP4 indexing and FP8 quantization.
 They use independent numerical or bit-level references and changing-input
 graph replay where applicable. `ENGRAM_CPU_ONLY=1` runs the row-store checks

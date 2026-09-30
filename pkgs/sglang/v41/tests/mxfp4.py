@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Check packed E2M1/E8M0 experts against a literal CPU FP64 reference."""
 
+import gc
+import hashlib
 import json
 import os
 import sys
+import types
 from pathlib import Path
 
 os.environ["SGLANG_USE_AITER"] = "0"
@@ -305,9 +308,417 @@ def main():
                 ),
                 flush=True,
             )
-    print(json.dumps({"event": "complete", "cases": 44,
+    print(json.dumps({"event": "reference_complete", "cases": 44,
                       "max_memory_allocated": torch.cuda.max_memory_allocated()}), flush=True)
+
+
+# Separate globals preserve an N256 differential control without changing the
+# installed module or embedding another implementation. The independent FP64
+# reference above remains the acceptance oracle.
+COUNTS = {"bitwise": 0, "oracle": 0, "graphs": 0}
+
+
+def n256_control(candidate):
+    baseline = types.ModuleType("mxfp4_n256_control")
+    baseline.__dict__.update(vars(candidate))
+    baseline.gate_up_moe_config = lambda config, *args: config
+    fn = candidate.fused_experts_mxfp4
+    baseline.fused_experts_mxfp4 = types.FunctionType(
+        fn.__code__, baseline.__dict__, fn.__name__, fn.__defaults__, fn.__closure__
+    )
+    baseline.fused_experts_mxfp4.__kwdefaults__ = fn.__kwdefaults__
+    assert baseline.fused_experts_mxfp4.__globals__ is baseline.__dict__
+    assert candidate.fused_experts_mxfp4.__globals__ is vars(candidate)
+    return baseline
+
+
+def check_gate_up_guards(candidate):
+    config = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 8,
+        "num_stages": 2,
+        "waves_per_eu": 0,
+        "matrix_instr_nonkdim": 16,
+        "kpack": 1,
+    }
+    before = config.copy()
+    shape = [2, 6, 384, 5120, 576]
+    assert candidate.gate_up_moe_config(config, "gfx1151", *shape) == (
+        config | {"BLOCK_SIZE_N": 128}
+    )
+    assert config == before
+    for arch in ("gfx950", "gfx1100"):
+        assert candidate.gate_up_moe_config(config, arch, *shape) is config
+    for dim in range(len(shape)):
+        other = shape.copy()
+        other[dim] += 1
+        assert candidate.gate_up_moe_config(config, "gfx1151", *other) is config
+    for key, value in config.items():
+        other = config | {key: value + 1}
+        assert candidate.gate_up_moe_config(other, "gfx1151", *shape) is other
+    emit(event="gate_up_guards", controls=17)
+
+
+def emit(**row):
+    print(json.dumps(row, sort_keys=True), flush=True)
+
+
+def same_bits(a, b, case):
+    a, b = a.detach().cpu().contiguous(), b.detach().cpu().contiguous()
+    if a.shape != b.shape or a.dtype != b.dtype:
+        emit(
+            event="bitwise",
+            case=case,
+            shape_dtype_failure=True,
+            candidate_shape=list(a.shape),
+            baseline_shape=list(b.shape),
+            candidate_dtype=str(a.dtype),
+            baseline_dtype=str(b.dtype),
+        )
+        raise AssertionError(case)
+    raw_a, raw_b = a.view(torch.uint8).reshape(-1), b.view(torch.uint8).reshape(-1)
+    bad = (raw_a != raw_b).nonzero().flatten()
+    values = [
+        {
+            "byte": int(i),
+            "element": int(i) // a.element_size(),
+            "candidate_byte": int(raw_a[i]),
+            "baseline_byte": int(raw_b[i]),
+            "candidate_value": float(a.reshape(-1)[int(i) // a.element_size()]),
+            "baseline_value": float(b.reshape(-1)[int(i) // b.element_size()]),
+        }
+        for i in bad[:16]
+    ]
+    emit(
+        event="bitwise",
+        case=case,
+        shape=list(a.shape),
+        dtype=str(a.dtype),
+        unequal_bytes=bad.numel(),
+        first=values,
+    )
+    assert not bad.numel(), case
+    COUNTS["bitwise"] += 1
+
+
+def tensor_sha(tensor):
+    raw = tensor.detach().contiguous().view(torch.uint8).reshape(-1)
+    digest = hashlib.sha256()
+    for start in range(0, raw.numel(), 64 * 1024**2):
+        owned = raw[start : start + 64 * 1024**2].cpu()
+        digest.update(memoryview(owned.numpy()))
+    return digest.hexdigest()
+
+
+def call(
+    module,
+    x,
+    w13,
+    w2,
+    s13,
+    s2,
+    weights,
+    ids,
+    *,
+    factor=None,
+    no_combine=True,
+    stages=False,
+    router_on_input=False,
+):
+    calls, snapshots = [], []
+    original = module._run_mxfp4_gemm
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        original(*args, **kwargs)
+        snapshots.append(args[2].clone())
+
+    if stages:
+        module._run_mxfp4_gemm = spy
+    try:
+        out = module.fused_experts_mxfp4(
+            x,
+            w13,
+            w2,
+            weights,
+            ids,
+            s13,
+            s2,
+            activation="silu",
+            is_gated=True,
+            inplace=False,
+            no_combine=no_combine,
+            apply_router_weight_on_input=router_on_input,
+            routed_scaling_factor=factor,
+            swiglu_limit=10,
+        )
+    finally:
+        module._run_mxfp4_gemm = original
+    return out, snapshots, calls
+
+
+def oracle(
+    ref,
+    x,
+    w13,
+    w2,
+    s13,
+    s2,
+    weights,
+    ids,
+    actual,
+    factor,
+    no_combine,
+    case,
+    unscaled=None,
+    stage1_tie_routes=None,
+):
+    expected = ref.reference(x, w13, w2, s13, s2, weights, ids, factor, no_combine)
+    actual_cpu = actual.detach().cpu().clone()
+    error = float(
+        (actual_cpu.float() - expected.float()).norm() / expected.float().norm()
+    )
+    bad = (
+        (
+            ~torch.isclose(actual_cpu, expected, rtol=0.03, atol=0.002 * (factor or 1))
+        ).nonzero()
+        if no_combine
+        else torch.empty((0, 3), dtype=torch.int64)
+    )
+    emit(
+        event="oracle",
+        case=case,
+        relative_l2=error,
+        finite=bool(torch.isfinite(actual_cpu).all()),
+        per_route_bad=len(bad),
+        first_bad=bad[:16].tolist(),
+        ids=ids.cpu().tolist(),
+    )
+    assert torch.isfinite(actual_cpu).all() and error < 0.002, case
+    ties = set()
+    if len(bad):
+        ties = ref.verify_stage1_ties(
+            x,
+            w13,
+            w2,
+            s13,
+            s2,
+            weights,
+            ids,
+            actual_cpu if factor is None else unscaled,
+            bad,
+        )
+        if factor is not None:
+            emit(
+                event="scaled_ties",
+                case=case,
+                ties=sorted(ties),
+                prior=sorted(stage1_tie_routes),
+            )
+            assert ties <= stage1_tie_routes
+    COUNTS["oracle"] += 1
+    return ties
+
+
+def snapshot_result(result):
+    out, stages, _ = result
+    return out.detach().cpu().clone(), [
+        value.detach().cpu().clone() for value in stages
+    ]
+
+
+def compare_snapshots(candidate, baseline, case):
+    same_bits(candidate[0], baseline[0], case + ":output")
+    assert len(candidate[1]) == len(baseline[1]) == 2
+    for i in range(2):
+        same_bits(candidate[1][i], baseline[1][i], case + ":stage" + str(i))
+
+
+def correctness_case(candidate, baseline, ref, buffers, name, ids_value, swap=False):
+    x, w13, w2, s13, s2, weights, ids = buffers
+    ids.copy_(torch.tensor(ids_value, device=ids.device, dtype=ids.dtype))
+    if swap:
+        x.copy_(x.flip(0))
+        weights.copy_(weights.flip(0))
+        ids.copy_(ids.flip(0))
+    before = {
+        key: tensor_sha(t) for key, t in [("x", x), ("weights", weights), ("ids", ids)]
+    }
+    emit(
+        event="case_inputs", case=name, ids=ids.cpu().tolist(), before=before, seed=734
+    )
+    retained = {}
+    stage1_tie_routes = set()
+    for factor, no_combine in [(None, True), (None, False), (1.5, True), (1.5, False)]:
+        label = name + f":factor{factor}:routes{no_combine}"
+        new = call(
+            candidate, *buffers, factor=factor, no_combine=no_combine, stages=True
+        )
+        new_snapshot = snapshot_result(new)  # Own bytes before baseline/reference work.
+        old = call(
+            baseline, *buffers, factor=factor, no_combine=no_combine, stages=True
+        )
+        old_snapshot = snapshot_result(old)
+        configs_new = [record[1]["config"] for record in new[2]]
+        configs_old = [record[1]["config"] for record in old[2]]
+        emit(event="dispatch", case=label, candidate=configs_new, baseline=configs_old)
+        compare_snapshots(new_snapshot, old_snapshot, label)
+        assert configs_new[0] == configs_old[0] | {"BLOCK_SIZE_N": 128}
+        assert (
+            configs_new[1] == configs_old[1] and configs_new[1]["BLOCK_SIZE_N"] == 256
+        )
+        ties = oracle(
+            ref,
+            *buffers,
+            new_snapshot[0],
+            factor,
+            no_combine,
+            label,
+            unscaled=retained.get((None, True)),
+            stage1_tie_routes=stage1_tie_routes,
+        )
+        if factor is None and no_combine:
+            stage1_tie_routes = ties
+        retained[(factor, no_combine)] = new_snapshot[0]
+        if factor is None and not no_combine:
+            same_bits(
+                new_snapshot[0], retained[(None, True)].sum(1), label + ":route_sum"
+            )
+        elif factor is not None:
+            same_bits(
+                new_snapshot[0],
+                retained[(None, no_combine)] * factor,
+                label + ":scale_once",
+            )
+    after = {
+        key: tensor_sha(t) for key, t in [("x", x), ("weights", weights), ("ids", ids)]
+    }
+    emit(event="inputs", case=name, before=before, after=after)
+    assert before == after
+
+
+def fallback_cases(candidate, baseline, buffers):
+    x, w13, w2, s13, s2, weights, ids = buffers
+    for name, rows, dtype, router in [
+        ("C1", 1, torch.bfloat16, False),
+        ("C3", 3, torch.bfloat16, False),
+        ("FP16", 2, torch.float16, False),
+        ("router_on_input", 2, torch.bfloat16, True),
+    ]:
+        xx = torch.randn((rows, 5120), device=x.device, dtype=dtype)
+        ww = torch.full((rows, 6), 1 / 6, device=x.device, dtype=torch.float32)
+        ii = torch.tensor(
+            [[0, 7, 63, 127, 255, 383]] * rows, device=x.device, dtype=torch.int32
+        )
+        args = (xx, w13, w2, s13, s2, ww, ii)
+        new = call(candidate, *args, stages=True, router_on_input=router)
+        snap = snapshot_result(new)
+        old = call(baseline, *args, stages=True, router_on_input=router)
+        compare_snapshots(snap, snapshot_result(old), "fallback:" + name)
+        assert [v[1]["config"] for v in new[2]] == [v[1]["config"] for v in old[2]]
+        emit(event="fallback", case=name, config=[v[1]["config"] for v in new[2]])
+
+
+def graph_cases(candidate, baseline, ref, buffers, routes_a, routes_b):
+    x, w13, w2, s13, s2, weights, ids = buffers
+    x_a, weights_a = x.clone(), weights.clone()
+    ids.copy_(torch.tensor(routes_a, dtype=ids.dtype, device=ids.device))
+    graphs, outputs = [], []
+    for module in (candidate, baseline):
+        call(module, *buffers, stages=True)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            result = call(module, *buffers, stages=True)
+        graphs.append(graph)
+        outputs.append(result)
+    for label, use_b in [("A", False), ("B", True), ("A-again", False)]:
+        x.copy_(x_a.flip(0) * 0.75 if use_b else x_a)
+        weights.copy_(weights_a.flip(0) if use_b else weights_a)
+        ids.copy_(
+            torch.tensor(
+                routes_b if use_b else routes_a, dtype=ids.dtype, device=ids.device
+            )
+        )
+        emit(
+            event="graph_inputs",
+            case=label,
+            ids=ids.cpu().tolist(),
+            hashes={
+                key: tensor_sha(t)
+                for key, t in [("x", x), ("weights", weights), ("ids", ids)]
+            },
+        )
+        graphs[0].replay()
+        new = snapshot_result(outputs[0])
+        graphs[1].replay()
+        old = snapshot_result(outputs[1])
+        compare_snapshots(new, old, "graph:" + label)
+        eager = snapshot_result(call(candidate, *buffers, stages=True))
+        compare_snapshots(new, eager, "graph:eager:" + label)
+        oracle(ref, *buffers, new[0], None, True, "graph:" + label)
+        COUNTS["graphs"] += 1
+    del graphs, outputs
+
+
+def check_gate_up():
+    candidate = moe
+    baseline = n256_control(candidate)
+    ref = sys.modules[__name__]
+    check_gate_up_guards(candidate)
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.manual_seed(734)
+    x = torch.randn((2, 5120), device="cuda", dtype=torch.bfloat16)
+    w13 = torch.randint(256, (384, 1152, 2560), dtype=torch.uint8, device="cuda")
+    w2 = torch.randint(256, (384, 5120, 288), dtype=torch.uint8, device="cuda")
+    s13 = torch.randint(117, 122, (384, 1152, 160), dtype=torch.uint8, device="cuda")
+    s2 = torch.randint(117, 122, (384, 5120, 18), dtype=torch.uint8, device="cuda")
+    weights = torch.rand((2, 6), device="cuda")
+    weights /= weights.sum(-1, keepdim=True)
+    ids = torch.empty((2, 6), dtype=torch.int32, device="cuda")
+    buffers = (x, w13, w2, s13, s2, weights, ids)
+    before = {
+        name: tensor_sha(t)
+        for name, t in [("w13", w13), ("w2", w2), ("s13", s13), ("s2", s2)]
+    }
+    emit(
+        event="native_input_initial",
+        hashes=before,
+        seed=734,
+        shape=[2, 384, 5120, 576],
+        topk=6,
+    )
+    patterns = {
+        "shared": [[0, 7, 63, 127, 255, 383]] * 2,
+        "disjoint": [[0, 1, 7, 63, 127, 255], [2, 8, 64, 128, 256, 383]],
+        "partial": [[0, 7, 63, 127, 255, 383], [0, 7, 63, 128, 256, 382]],
+    }
+    for name, values in patterns.items():
+        correctness_case(candidate, baseline, ref, buffers, name, values)
+    correctness_case(
+        candidate, baseline, ref, buffers, "row_swap", patterns["disjoint"], swap=True
+    )
+    fallback_cases(candidate, baseline, buffers)
+    graph_cases(
+        candidate, baseline, ref, buffers, patterns["shared"], patterns["disjoint"]
+    )
+    after = {
+        name: tensor_sha(t)
+        for name, t in [("w13", w13), ("w2", w2), ("s13", s13), ("s2", s2)]
+    }
+    emit(event="native_inputs", before=before, after=after)
+    assert before == after
+    emit(
+        event="complete",
+        original_reference_cases=44,
+        **COUNTS,
+        max_memory_allocated=torch.cuda.max_memory_allocated(),
+    )
 
 
 if __name__ == "__main__":
     main()
+    check_gate_up()
