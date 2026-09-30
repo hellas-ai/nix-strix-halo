@@ -129,12 +129,13 @@ full cached prompts, with actual two-request graph decode observed in one round.
 This establishes capacity and cache behavior for that workload, not unrelated
 concurrent cold 128K prompts or batched prefill.
 
-Cross-batch numerical differences remain unresolved, including with the eager
-baseline. The 128K run failed strict logprob invariance between serial and paired
-requests and between paired rounds, despite correct answers. This reproducibility
-requirement is not an independently derived accuracy bound. The package remains
-a serving candidate pending a full-model reference comparison; measured speed
-does not establish proximity to the hardware roofline.
+Numerical differences between serial and paired runs remain unresolved, including
+with the eager baseline. The eager head-boundary comparison changed both batching
+and prefix-cache reuse. The 128K run failed strict logprob invariance between
+serial and paired requests and between paired rounds, despite correct answers.
+This reproducibility requirement is not an independently derived accuracy bound.
+The package remains a serving candidate pending a full-model reference comparison;
+measured speed does not establish proximity to the hardware roofline.
 
 The native top512 selector preserves strict FP32 score ordering and breaks exact
 cutoff ties by smaller logical token ID, including compact candidate rows. When
