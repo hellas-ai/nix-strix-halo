@@ -275,6 +275,24 @@ nix build .#hydraJobs.x86_64-linux.ci.smoke
 nix build .#hydraBenchmarkJobs.x86_64-linux.bench-mlx-rocm-gfx1151-gemm-smoke
 ```
 
+Linux benchmarks built with `lib/bench/lib.nix` that require `gfx1151` or
+`xdna2` share the DS4.1 launcher's hardware lock. Add the following to each
+participating host's existing runner configuration, using its runner name:
+
+```nix
+benchmark.runners.strix-halo.extraSandboxPaths = [
+  "/run/benchmark-gpu.lock=/tmp/ds41-gpu.lock"
+];
+systemd.tmpfiles.rules = [ "f /tmp/ds41-gpu.lock 0644 root root -" ];
+```
+
+The sandbox must expose the same host inode; do not replace or delete the file
+while a job holds it. Benchmarks open it read-only and wait up to 600 seconds
+for an exclusive lock, failing if the mount is absent or the wait expires.
+Deploy the host configuration before admitting these benchmarks, and re-evaluate
+older jobs to pick up the wrapper. Other hardware programs must acquire the same
+lock to participate in this coordination.
+
 ## Development
 
 ```bash
