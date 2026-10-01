@@ -50,6 +50,7 @@ let
       ./patches/0024-native-fp8-c4-c8.patch
       ./patches/0025-chunked-owned-row-admission.patch
       ./patches/0026-software-fp8-rounding.patch
+      ./patches/0027-openai-byte-tokenizer-cache.patch
     ];
   };
   baseKernel = lib.findFirst (
@@ -100,6 +101,8 @@ base.overridePythonAttrs (old: {
       "$out/bin/sglang-python" ${./tests/graph-buckets.py} "$out"
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
       "$out/bin/sglang-python" ${./tests/scheduler-owned-row.py} "$out"
+    HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
+      "$out/bin/sglang-python" ${./tests/openai-byte-tokenizer-cache.py}
   '';
   passthru = (old.passthru or { }) // {
     inherit nativeExtensions;

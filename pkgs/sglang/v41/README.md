@@ -247,6 +247,11 @@ actual fused V4 KV writer’s FP8 payload, BF16 RoPE values and scale bytes. The
 component checks do not establish full-model numerical equivalence. The CPU-only
 `tests/graph-buckets.py` checks effective capture geometry, variant boundaries
 and unpadded eligibility at package build time using explicit metadata stubs.
+`tests/openai-byte-tokenizer-cache.py` checks selected and alternative logprob
+bytes, including UTF-8 fragments and added Unicode tokens. Byte-level detection
+uses decoder metadata and caches both outcomes, avoiding repeated vocabulary
+copies during streaming. These CPU checks run at package build time; they do
+not measure serving throughput.
 `tests/mhc.py` includes a FP64 projection reference with an FP32 reduction-error
 bound, plus post-residual bitwise, signed-zero, reduction-order, graph and
 fallback controls against installed Torch. `tests/engram.py` checks prepared-row
