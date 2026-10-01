@@ -42,7 +42,10 @@ configurable. The script verifies the pinned revision, manifest, file sizes,
 read-only XFS mount, snapshot UUID and live NVMe/RDMA paths before serving; it
 does not mount or recover storage. It holds `/tmp/ds41-gpu.lock` while serving
 to prevent another cooperating launcher from using the same GPU. The API binds
-only to node-local localhost.
+only to node-local localhost. Serving is capped at four running requests, with
+decode graphs for batches of one, two and four. Shortest-prefill-first scheduling,
+1536-token chunks and up to two prefill requests let a short request make progress
+while a long prompt is still being processed.
 `TRITON_CACHE_DIR` and `SGLANG_JIT_CACHE_DIR` may override their runtime-specific
 compiler caches with absolute paths. Reuse a directory only after verifying
 matching GPU architecture, compiler/toolchain and Python/Torch/Triton ABI
@@ -338,6 +341,14 @@ remain or increase; agreement at two positions does not establish general
 model accuracy. TP partial rounding, shared-expert arithmetic and other backend
 differences still require assessment. The earlier long-context evidence above
 does not qualify the new arithmetic path.
+
+A mixed 32K/short-request check on the corrected arithmetic path passed both
+answer checks and observed a two-request ragged prefill batch. The short request
+emitted output before the long prompt finished prefill. This qualifies that
+scheduling behavior at actual concurrency two under the four-request cap;
+it does not establish interactive latency, four-way throughput or 128K behavior.
+Cold kernel compilation and long prefill steps still cause substantial delays.
+
 The package remains a serving candidate pending numerical qualification;
 measured speed does not establish proximity to the hardware roofline.
 
