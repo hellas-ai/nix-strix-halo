@@ -1,0 +1,71 @@
+The ROCm Triton WNA16 path transposes each packed MoE parameter after the
+checkpoint has filled VRAM.  A direct GPU contiguous() temporarily holds both
+layouts and needs up to another 200 MiB.  Qwen3.8-Flash-Next TP4 has only about
+114 MiB free per V620 at that point, so the otherwise resident model fails.
+
+Perform the one-time layout conversion through host memory.  Removing the old
+registered parameter and releasing its cached segment before copying the new
+layout back makes the GPU peak equal to the larger of the two layouts instead
+of their sum.  Explicit synchronization brackets the free/reallocate boundary
+because ROCm otherwise occasionally faults an in-flight H2D copy on this very
+tight residency path.  The tensors are identical byte-for-byte after the same
+transpose/contiguous/view operations; only the temporary location changes.
+
+--- a/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16_moe.py
++++ b/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16_moe.py
+@@ -508,26 +508,38 @@ class CompressedTensorsWNA16TritonMoE(CompressedTensorsWNA16MoE):
+         if getattr(layer, "is_triton_converted", False):
+             return
+
+-        num_experts = layer.w13_weight_packed.shape[0]
++        def transpose_parameter_on_host(name: str, view_uint8: bool = False) -> None:
++            parameter = getattr(layer, name)
++            device = parameter.device
++            torch.cuda.synchronize(device)
++            host_tensor = parameter.detach().to(device="cpu", non_blocking=False)
++            torch.cuda.synchronize(device)
+
+-        # Convert w13 weights: [E, K//8, N] int32 -> [E, N, K//2] uint8
+-        w13 = layer.w13_weight_packed.data
+-        w13 = w13.transpose(1, 2).contiguous().view(torch.uint8)
+-        layer.w13_weight_packed = torch.nn.Parameter(w13, requires_grad=False)
++            # Loader bookkeeping can retain the Parameter object after it is
++            # removed from the module.  Empty its data first so those external
++            # references cannot keep the full GPU storage alive.
++            parameter.data = parameter.data.new_empty(0)
++            setattr(layer, name, None)
++            del parameter
++            torch.cuda.empty_cache()
+
+-        # Convert w2 weights: [E, K//8, N] int32 -> [E, N, K//2] uint8
+-        w2 = layer.w2_weight_packed.data
+-        w2 = w2.transpose(1, 2).contiguous().view(torch.uint8)
+-        layer.w2_weight_packed = torch.nn.Parameter(w2, requires_grad=False)
++            host_tensor = host_tensor.transpose(1, 2).contiguous()
++            if view_uint8:
++                host_tensor = host_tensor.view(torch.uint8)
++            converted = host_tensor.to(device=device, non_blocking=False)
++            torch.cuda.synchronize(device)
++            setattr(
++                layer,
++                name,
++                torch.nn.Parameter(converted, requires_grad=False),
++            )
+
+-        # Convert w13 scales: [E, K//group_size, N] -> [E, N, K//group_size]
+-        w13_scale = layer.w13_weight_scale.data
+-        w13_scale = w13_scale.transpose(1, 2).contiguous()
+-        layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
++        # [E, K//8, N] int32 -> [E, N, K//2] uint8.
++        transpose_parameter_on_host("w13_weight_packed", view_uint8=True)
++        transpose_parameter_on_host("w2_weight_packed", view_uint8=True)
+
+-        # Convert w2 scales: [E, K//group_size, N] -> [E, N, K//group_size]
+-        w2_scale = layer.w2_weight_scale.data
+-        w2_scale = w2_scale.transpose(1, 2).contiguous()
+-        layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
++        # [E, K//group_size, N] -> [E, N, K//group_size].
++        transpose_parameter_on_host("w13_weight_scale")
++        transpose_parameter_on_host("w2_weight_scale")
+
+         layer.is_triton_converted = True
