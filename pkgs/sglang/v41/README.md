@@ -102,8 +102,9 @@ instructions. Pi's recipe retains the text-only model declaration used in its
 coding check.
 OpenCode's declaration also enables image attachments; add `--file image.png`
 before `--` when needed. Its configured tool permissions allow file/shell tools
-and deny external-directory and web tools; these permissions are not a process
-or network sandbox:
+and OpenCode's `/tmp/opencode` scratch directory, while denying other external
+directories and web tools. These permissions are not a process or network
+sandbox:
 
 ```sh
 DS41_CLIENT_CONFIG="$(mktemp -d)"
@@ -114,7 +115,9 @@ cat > "$DS41_CLIENT_CONFIG/opencode.json" <<'JSON'
   "enabled_providers": ["strix-ds41"],
   "autoupdate": false, "share": "disabled", "lsp": false, "formatter": false,
   "permission": {
-    "*": "allow", "external_directory": "deny", "webfetch": "deny", "websearch": "deny"
+    "*": "allow",
+    "external_directory": {"*": "deny", "/tmp/opencode/*": "allow"},
+    "webfetch": "deny", "websearch": "deny"
   },
   "provider": {
     "strix-ds41": {
