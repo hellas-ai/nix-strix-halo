@@ -1,0 +1,57 @@
+--- a/sglang/srt/layers/attention/graph_variants.py
++++ b/sglang/srt/layers/attention/graph_variants.py
+@@ -143,7 +143,7 @@
+             # Match the runner's exact qualified/proposed capture sets,
+             # including pool/alignment filters; other sizes remain eager.
+             and get_batch_sizes_to_capture(model_runner, captured_req_width)[0]
+-            in ([1, 2], [1, 2, 4, 8])
++            in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
+         )
+     if not (
+         (capture_forward_mode == ForwardMode.DECODE or dspark_target_verify)
+--- a/sglang/srt/layers/engram_graph_prestage.py
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -2,7 +2,8 @@
+ 
+ The model's existing GPU hasher remains the sole owner of hash arithmetic and
+ request-history commits.  This module moves its two native-row reads out of the
+-captured forward.  It supports exact C1/C2 or C1/C2/C4/C8 decode buckets,
++captured forward.  It supports exact prefix decode buckets through C1, C2,
++C4, or C8,
+ without row padding.
+ """
+ 
+@@ -13,9 +14,9 @@
+ 
+ class NativeEngramGraphPrestage:
+     def __init__(self, model, max_bs: int, device):
+-        if max_bs not in (2, 8) or model.engram_hasher is None:
+-            raise ValueError("Engram graph prestage requires max_bs 2 or 8 and a hasher")
+-        self.capture_bs = (1, 2) if max_bs == 2 else (1, 2, 4, 8)
++        if max_bs not in (1, 2, 4, 8) or model.engram_hasher is None:
++            raise ValueError("Engram graph prestage requires max_bs 1, 2, 4, or 8 and a hasher")
++        self.capture_bs = tuple(bs for bs in (1, 2, 4, 8) if bs <= max_bs)
+         layers = {}
+         for layer in model.layers:
+             engram = getattr(layer, "engram", None)
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -343,7 +343,7 @@
+                 if (
+                     self.capture_forward_mode != ForwardMode.DECODE
+                     or self.captured_req_width != 1
+-                    or self.capture_bs not in ([1, 2], [1, 2, 4, 8])
++                    or self.capture_bs not in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
+                     or self.enable_pdmux
+                     or self.enable_two_batch_overlap
+                     or model_runner.spec_algorithm.is_speculative()
+@@ -354,7 +354,8 @@
+                 ):
+                     raise ValueError(
+                         "file-backed Engram graphs require TP4, non-speculative DP1/CP1 "
+-                        "decode, exact [1,2] or [1,2,4,8] buckets and one compute stream"
++                        "decode, exact prefix [1]/[1,2]/[1,2,4]/[1,2,4,8] buckets "
++                        "and one compute stream"
+                     )
+                 self.engram_graph_prestage = NativeEngramGraphPrestage(
+                     inner_model, self.max_bs, self.device

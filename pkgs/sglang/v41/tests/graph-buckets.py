@@ -135,8 +135,8 @@ assert variants.capture_labels == (
     "candidate_filtered",
 )
 
-# The combined proposal supports exactly the two published capture sets.
-for buckets in ([1, 2], [1, 2, 4, 8]):
+# Each supported capacity captures its exact prefix without padding rows.
+for buckets in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8]):
     state["bs"] = buckets
     exec_context.graph.cuda_graph_config.decode.bs = buckets
     assert helper(runner, 1)[0] == buckets
@@ -171,16 +171,20 @@ for buckets in ([1, 2], [1, 2, 4, 8]):
                     == label
                 )
 
-# Incomplete or alignment-filtered capture geometry still declines.
-state["bs"] = [1, 2, 4]
-exec_context.graph.cuda_graph_config.decode.bs = state["bs"]
-assert helper(runner, 1)[0] == [1, 2, 4]
-assert factory(runner, ForwardMode.DECODE, 1) is None
+# Missing an interior bucket remains unsupported.
+for buckets in ([1, 4], [1, 2, 8]):
+    state["bs"] = buckets
+    exec_context.graph.cuda_graph_config.decode.bs = buckets
+    assert helper(runner, 1)[0] == buckets
+    assert factory(runner, ForwardMode.DECODE, 1) is None
+
+# Pool filtering to a supported prefix remains eligible; alignment that removes
+# C1 does not. Selection follows effective capture geometry, not pool capacity.
 state["bs"] = [1, 2]
 exec_context.graph.cuda_graph_config.decode.bs = state["bs"]
 runner.req_to_token_pool.size = 1
 assert helper(runner, 1)[0] == [1]
-assert factory(runner, ForwardMode.DECODE, 1) is None
+assert factory(runner, ForwardMode.DECODE, 1) is not None
 runner.req_to_token_pool.size = 8
 state["alignment"] = 2
 assert helper(runner, 1)[0] == [2]
@@ -207,7 +211,7 @@ method = next(
 )
 first_guard = method.body[0]
 guard = compile(ast.Expression(first_guard.test), "decode_can_run_graph_guard", "eval")
-for buckets in ([1, 2], [1, 2, 4, 8]):
+for buckets in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8]):
     self_ = types.SimpleNamespace(engram_graph_prestage=object(), capture_bs=buckets)
     for bs in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
         batch = types.SimpleNamespace(
@@ -218,5 +222,5 @@ for buckets in ([1, 2], [1, 2, 4, 8]):
             bs not in buckets
         )
 print(
-    "PASS: exact capture sets2/8; limits512/1024/16384 for each bucket and row reversal; unsupported geometry declined; actual early eligibility excludes padding"
+    "PASS: exact capacity prefixes1/2/4/8; limits512/1024/16384 for each bucket and row reversal; unsupported geometry declined; actual early eligibility excludes padding"
 )

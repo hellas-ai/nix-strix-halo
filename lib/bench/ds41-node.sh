@@ -100,10 +100,10 @@ exec flock --nonblock /tmp/ds41-gpu.lock "$DS41_BINARY" serve \
   --attention-backend dsv4 --dsv4-attn-backend flashmla \
   --kv-cache-dtype fp8_e4m3 --page-size 256 --mm-attention-backend sdpa \
   --cuda-graph-backend-prefill disabled --cuda-graph-backend-decode full \
-  --cuda-graph-config '{"decode":{"backend":"full","bs":[1,2],"max_bs":2}}' \
+  --cuda-graph-config '{"decode":{"backend":"full","bs":[1,2,4],"max_bs":4}}' \
   --disable-custom-all-reduce \
   --context-length 131072 --max-total-tokens 262144 \
-  --max-running-requests 2 --prefill-max-requests 1 \
+  --max-running-requests 4 --prefill-max-requests 1 \
   --chunked-prefill-size 512 --prefill-decode-interval 1 \
   --swa-full-tokens-ratio 1.0 --mem-fraction-static 0.82 \
   --reasoning-parser deepseek-v41 --tool-call-parser deepseekv41 \

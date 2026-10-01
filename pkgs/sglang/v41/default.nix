@@ -51,6 +51,7 @@ let
       ./patches/0025-chunked-owned-row-admission.patch
       ./patches/0026-software-fp8-rounding.patch
       ./patches/0027-openai-byte-tokenizer-cache.patch
+      ./patches/0028-engram-capacity-prefixes.patch
     ];
   };
   baseKernel = lib.findFirst (

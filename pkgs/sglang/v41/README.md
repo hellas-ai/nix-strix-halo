@@ -49,7 +49,7 @@ The native C++ JIT reads `SGLANG_JIT_CACHE_DIR`, independently of
 contents. Other caches remain runtime-specific.
 For access from a client, tunnel to the head rank, for example
 `ssh -N -L 31041:127.0.0.1:31041 strix-3`, then use
-`http://127.0.0.1:31041` on that client. Configured 128K context and C1/C2
+`http://127.0.0.1:31041` on that client. Configured 128K context and C1/C2/C4
 graphs require workload-specific validation before deployment.
 
 To use packaged Pi or OpenCode through that tunnel, create session-local client
@@ -153,12 +153,12 @@ qualification and serial/paired numerical limitations below still apply.
 Enable file-backed Engram with `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` and
 `SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=file`. It requires the default safetensors
 loader, mmap enabled, and checkpoint prefetch disabled. Prefill remains eager.
-Decode graphs support exact capture sets `[1,2]` or `[1,2,4,8]` with TP4, DP1/CP1/PP1,
-no speculation and one compute stream. Use `--cuda-graph-backend-decode full`,
-`--cuda-graph-backend-prefill disabled`, `--max-running-requests 2`, and
-`--cuda-graph-config '{"decode":{"backend":"full","bs":[1,2],"max_bs":2}}'`.
-For capacity eight and all four capture buckets, use `--max-running-requests 8`
-and `--cuda-graph-config '{"decode":{"backend":"full","bs":[1,2,4,8],"max_bs":8}}'`.
+Decode graphs support exact prefix capture sets `[1]`, `[1,2]`, `[1,2,4]`, or
+`[1,2,4,8]` with TP4, DP1/CP1/PP1, no speculation and one compute stream.
+The launcher caps active requests at four and captures `[1,2,4]`. Its settings are
+`--cuda-graph-backend-decode full`, `--cuda-graph-backend-prefill disabled`,
+`--max-running-requests 4`, and
+`--cuda-graph-config '{"decode":{"backend":"full","bs":[1,2,4],"max_bs":4}}'`.
 Other batch sizes remain eager; graph rows are never padded. Engram hashing
 and bounded file reads happen before replay; captured code consumes refreshed
 native row buffers. A failure after the history commit terminates the worker
