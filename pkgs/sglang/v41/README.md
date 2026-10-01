@@ -299,10 +299,12 @@ and prefix-cache reuse. The 128K run failed strict logprob invariance between
 serial and paired requests and between paired rounds, despite correct answers.
 This reproducibility requirement is not an independently derived accuracy bound.
 A full-depth text comparison against the official high-level model with CPU
-mathematical adapters agrees on the top token for an eight-token prefill and
-one teacher-forced decode, but the probability distributions differ substantially.
+mathematical adapters agrees on the top token for an eight-token prefill but
+disagrees on a teacher-forced decode. The probability distributions differ
+substantially in both phases.
 Activation and KV quantization, TP partial rounding, head dtype and backend
-arithmetic differ between those paths; the cause has not been localized.
+arithmetic differ between those paths; the remaining differences have not been
+fully explained.
 The package remains a serving candidate pending numerical qualification;
 measured speed does not establish proximity to the hardware roofline.
 
