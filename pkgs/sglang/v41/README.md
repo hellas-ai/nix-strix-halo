@@ -19,18 +19,22 @@ and point each rank at that snapshot mounted over NVMe/RDMA. Trex's writable
 Verify the namespace UUID and RDMA transport before measuring loading or Engram
 lookup performance; a separate NFS export exercises a different storage path.
 
-`lib/bench/ds41-node.sh` is a candidate foreground launcher for this native
-TP4/EP1 configuration. Build `.#sglang-v41-rocm` once and make that **same Nix
-output** visible on all four ranks: copy it to the writable node stores with
+`ds41-node` packages the candidate foreground launcher, its model preflight and
+the pinned runtime for this native TP4/EP1 configuration. Build `.#ds41-node`
+once and make that **same Nix output** visible on all four ranks: copy it to the
+writable node stores with
 `nix copy --to ssh://HOST "$(readlink -f result)"`, or expose the identical
-output through a configured read-only shared store. Keep the launcher and its
-adjacent `ds41-model-check.py` together on each node. On Strix-3 (rank 0),
+output through a configured read-only shared store. On Strix-3 (rank 0),
 Strix-4 (rank 1), Strix-2 (rank 2), and Strix-1 (rank 3), run the matching rank:
 
 ```sh
-DS41_BINARY=/nix/store/EXACT_SGLANG_OUTPUT/bin/sglang \
-DS41_NODE_RANK=0 lib/bench/ds41-node.sh
+DS41_NODE_RANK=0 /nix/store/EXACT_DS41_NODE_OUTPUT/bin/ds41-node
 ```
+
+The source launcher remains `lib/bench/ds41-node.sh`; direct use requires
+`DS41_BINARY=/nix/store/EXACT_SGLANG_OUTPUT/bin/sglang` and its adjacent
+`ds41-model-check.py`. The package supplies that binary and the shell utilities,
+so it also works with a systemd unit's minimal `PATH`.
 
 `DS41_HEAD_ADDR` (default `192.168.25.103:51041`), `DS41_MODEL_PATH` (the
 published snapshot), `DS41_PORT` (default `31041`), and `DS41_CACHE_ROOT` are
@@ -179,7 +183,7 @@ reductions can round differently from the generic matrix kernels. C4/C8 reuse
 each native weight tile across the token rows with independent FP32 accumulators;
 they preserve the existing C1/C2 kernels and quantizer.
 
-Portable gfx1151 C2 mHC post-residual mixing uses one kernel for HC4/H5120,
+Portable gfx1151 C1/C2/C4 mHC post-residual mixing uses one kernel for HC4/H5120,
 with separate FP32 products/additions and final BF16 rounding. Explicit
 FlashInfer/TileLang choices and all other shapes retain their existing paths.
 
@@ -189,7 +193,7 @@ the existing `num_threads` setting (default 8) also bounds outstanding copies,
 so CPU dequantization cannot run arbitrarily far ahead of device copies.
 
 Use `SGLANG_USE_AITER=0`, `SGLANG_HACK_FLASHMLA_BACKEND=triton`,
-`SGLANG_DSV4_KV_LAYOUT=v4`, `SGLANG_DSV4_COMPRESSED_KV_LAYOUT=fp8`,
+`SGLANG_DSV4_KV_LAYOUT=v41`, `SGLANG_DSV4_COMPRESSED_KV_LAYOUT=fp8`,
 `--moe-runner-backend triton`, `--fp8-gemm-backend triton`,
 `--disable-shared-experts-fusion`, and `--disable-custom-all-reduce`.
 The V4.1 vision tower uses a model-specific
@@ -219,8 +223,8 @@ live gate/up rows and shares weight reads between routes to the same expert.
 It applies to contiguous BF16 `[C, 5120]` with C in 2/4/8, six routes, 384 experts and local
 intermediate size 576. C4/C8 reuse the unchanged C2 body within adjacent token
 pairs; each pair owns separate input, route and output slices. Other shapes
-retain the ordinary N128/N256 dispatch. Native
-packed weights/scales, activation and down projection are unchanged. The FP32
+retain the ordinary N128/N256 dispatch. This gate/up optimization preserves
+the native packed weights and scales. The FP32
 reduction order differs, so bitwise equality to the fallback is not promised.
 Filtered expert routes (`-1`) produce zero without reading weight memory.
 Expanded subnormal weights follow the installed BF16 scaling path's flush-to-zero
@@ -274,6 +278,32 @@ at package build time on CPU tensors, exercising the installed caller and quant
 method with GPU math and communication stubs. It checks once-only scaling and
 preserves legacy paths; it is not a full-model accuracy test.
 
+The native V4.1 TP4 path uses the official group-32 FP8 activation operands,
+FP32 SwiGLU and weighted activation before the down projection. It accumulates
+routes in logical expert order and keeps FP32 through shared-expert addition
+and TP reduction before casting to BF16. Other models and parallelism layouts
+retain their existing paths. The V4.1 KV writer floors each group's maximum
+before dividing by 448, and its Triton reader honors padded page strides and
+the stored scale bytes. The V4 KV path remains available.
+
+For native gfx1151 TP4 prefill with 16–31 average assignments per expert, the
+portable MoE uses 32-row tiles instead of the generic 256-row tile. This avoids
+excessive padding at 1,024–2,047 input tokens while preserving the existing
+matrix arithmetic and the smaller-batch dispatch.
+
+`tests/v41-kv.py` checks the native writers, byte layout and all four Triton
+reader paths against independent quantization and attention references,
+including graph replay and a legacy V4 control. `tests/routed-policy.py` checks
+C1/C2/C4 operands, weighted activation, sparse native projections and route
+accumulation against literal quantization and exact projection references.
+Its projection checks allow an explicit FP32 accuracy budget and BF16 rounding;
+they do not assume bitwise agreement with CPU matrix arithmetic or establish a
+hardware error bound. Operand quantization and route accumulation remain exact
+checks at their respective boundaries.
+`tests/routed-policy-cpu.py` runs at package build time and checks dispatch,
+shared-expert/TP accumulation and the prefill tile guard. These component
+checks do not establish full-model accuracy.
+
 The complete vision tower and image projection match the pinned official
 reference bitwise on three image inputs. Run `tests/vision.py` with the runtime
 path and checkpoint directory to repeat that comparison; it reads only the
@@ -287,8 +317,8 @@ at effort 50, all five cold, cached and paired requests passed their answer and
 cache checks. These checks support using thinking for coding; they do not
 establish full-model reference parity or correctness on arbitrary tasks.
 
-With the launcher's 512-token prefill chunk, two related 130,563-token prompts
-passed all ten retrieval-answer checks across cold loads, repeats, branching,
+With the earlier V4 KV policy and a 512-token prefill chunk, two related
+130,563-token prompts passed all ten retrieval-answer checks across cold loads, repeats, branching,
 switching back and paired submissions. Repeats retained 130,560 cached tokens;
 the branch reused 65,024 shared-prefix tokens. Both paired rounds retained the
 full cached prompts, with actual two-request graph decode observed in one round.
@@ -301,12 +331,13 @@ and prefix-cache reuse. The 128K run failed strict logprob invariance between
 serial and paired requests and between paired rounds, despite correct answers.
 This reproducibility requirement is not an independently derived accuracy bound.
 A full-depth text comparison against the official high-level model with CPU
-mathematical adapters agrees on the top token for an eight-token prefill but
-disagrees on a teacher-forced decode. The probability distributions differ
-substantially in both phases.
-Activation and KV quantization, TP partial rounding, head dtype and backend
-arithmetic differ between those paths; the remaining differences have not been
-fully explained.
+mathematical adapters originally disagreed on a teacher-forced decode. The
+V4.1 KV and routed-operand corrections bring both checked top tokens into
+agreement and reduce distribution differences. Some intermediate errors
+remain or increase; agreement at two positions does not establish general
+model accuracy. TP partial rounding, shared-expert arithmetic and other backend
+differences still require assessment. The earlier long-context evidence above
+does not qualify the new arithmetic path.
 The package remains a serving candidate pending numerical qualification;
 measured speed does not establish proximity to the hardware roofline.
 

@@ -131,8 +131,8 @@ def post_check(actual, args, case, literal=None):
     return owned
 
 
-def check_post(layer):
-    def inputs(rows=2, dtype=torch.bfloat16):
+def check_post(layer, rows):
+    def inputs(rows=rows, dtype=torch.bfloat16):
         return (
             torch.randn(rows, 5120, device="cuda", dtype=dtype),
             torch.randn(rows, 4, 5120, device="cuda", dtype=dtype),
@@ -147,7 +147,7 @@ def check_post(layer):
         ) as spy:
             actual = Layer.hc_post(layer, *args)
             assert spy.call_count == 1
-        result = post_check(actual, args, case, literal)
+        result = post_check(actual, args, f"C{rows}:" + case, literal)
         for old, current in zip(before, args, strict=True):
             assert torch.equal(old.view(torch.uint8), current.cpu().view(torch.uint8))
         return result
@@ -155,11 +155,11 @@ def check_post(layer):
     x, residual, post, comb = inputs()
     pattern = torch.arange(5120)
     zero = torch.zeros(5120, dtype=torch.bfloat16)
-    x.copy_(torch.where((pattern & 16) != 0, -zero, zero).expand(2, -1))
+    x.copy_(torch.where((pattern & 16) != 0, -zero, zero).expand(rows, -1))
     residual.copy_(
         torch.stack(
             [torch.where((pattern & (1 << i)) != 0, -zero, zero) for i in range(4)]
-        ).expand(2, -1, -1)
+        ).expand(rows, -1, -1)
     )
     post.fill_(1)
     comb.fill_(1)
@@ -186,7 +186,7 @@ def check_post(layer):
     assert torch.equal(swapped.view(torch.int16), expected.flip(0).view(torch.int16))
 
     for name, values in (
-        ("C1", inputs(1)),
+        ("C0", inputs(0)),
         ("C3", inputs(3)),
         ("FP16", inputs(dtype=torch.float16)),
     ):
@@ -205,7 +205,7 @@ def check_post(layer):
         )
         try:
             if name == "strided":
-                storage = torch.zeros(2, 10240, device="cuda", dtype=torch.bfloat16)
+                storage = torch.zeros(rows, 10240, device="cuda", dtype=torch.bfloat16)
                 storage[:, ::2].copy_(values[0])
                 values[0] = storage[:, ::2]
             if name == "raw_text_model":
@@ -219,7 +219,7 @@ def check_post(layer):
             ) as spy:
                 actual = Layer.hc_post(layer, *values)
                 assert spy.call_count == 0, name
-            post_check(actual, values, "fallback:" + name)
+            post_check(actual, values, f"C{rows}:fallback:" + name)
         finally:
             layer.config.model_type, layer.hc_pre_from_prev_sublayer = (
                 old_type,
@@ -244,10 +244,40 @@ def check_post(layer):
         graphs[0][0].replay()
         old = graphs[0][1].cpu().clone()
         graphs[1][0].replay()
-        actual = post_check(graphs[1][1], buffers, "graph:" + name)
+        actual = post_check(graphs[1][1], buffers, f"C{rows}:graph:" + name)
         assert torch.equal(actual.view(torch.int16), old.view(torch.int16))
         eager = Layer.hc_post(layer, *buffers).cpu()
         assert torch.equal(actual.view(torch.int16), eager.view(torch.int16))
+    # Each new row is also compared to the existing exact C2 geometry.
+    parts = []
+    for row in range(rows):
+        pair = tuple(
+            t[row : row + 1].repeat((2,) + (1,) * (t.ndim - 1)) for t in original
+        )
+        parts.append(native_post.native_hc_post_c2(*pair)[:1].cpu().clone())
+    whole = Layer.hc_post(layer, *original).cpu().clone()
+    assert torch.equal(whole.view(torch.int16), torch.cat(parts).view(torch.int16))
+    if rows > 1:
+        separate = tuple(t.clone() for t in original)
+        for tensor in separate:
+            tensor[0].add_(0.125)
+        own = post_check(
+            Layer.hc_post(layer, *separate), separate, f"C{rows}:one_row_change"
+        )
+        assert torch.equal(own[1:].view(torch.int16), whole[1:].view(torch.int16))
+    print(
+        json.dumps(
+            {
+                "event": "post_rows_complete",
+                "rows": rows,
+                "bitwise_C2_rows": True,
+                "unchanged_FP64_gate": True,
+                "fallbacks": 7,
+                "graph_replays": 3,
+            }
+        ),
+        flush=True,
+    )
 
 
 def projection_bits(actual, expected, case):
@@ -591,7 +621,8 @@ def main():
                     ),
                     flush=True,
                 )
-    check_post(layer)
+    for rows in (1, 2, 4):
+        check_post(layer, rows)
     check_projection_rows(layer)
     check_projection_literals()
     print(

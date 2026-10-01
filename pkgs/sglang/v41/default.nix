@@ -53,6 +53,11 @@ let
       ./patches/0027-openai-byte-tokenizer-cache.patch
       ./patches/0028-engram-capacity-prefixes.patch
       ./patches/0029-native-hc-projection-rows.patch
+      ./patches/0030-v41-triton-kv-reader.patch
+      ./patches/0031-v41-kv-scale-floor.patch
+      ./patches/0032-v41-routed-operand-policy.patch
+      ./patches/0033-mxfp4-prefill-m32.patch
+      ./patches/0034-native-hc-post-c1-c4.patch
     ];
   };
   baseKernel = lib.findFirst (
@@ -99,6 +104,8 @@ base.overridePythonAttrs (old: {
   postFixup = (old.postFixup or "") + ''
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 \
       "$out/bin/sglang-python" ${./tests/routed-scaling.py} "$out"
+    HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 \
+      "$out/bin/sglang-python" ${./tests/routed-policy-cpu.py} "$out"
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
       "$out/bin/sglang-python" ${./tests/graph-buckets.py} "$out"
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \

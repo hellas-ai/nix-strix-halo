@@ -358,6 +358,9 @@ let
         pythonPackages = final.${therockPythonConfig.packagesAttr};
         inherit (final) sglang-rocm;
       };
+      ds41-node = prev.callPackage ../pkgs/ds41-node {
+        inherit (final) sglang-v41-rocm;
+      };
     }
   );
 in

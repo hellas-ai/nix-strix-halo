@@ -1,0 +1,22 @@
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+@@ -90,6 +90,19 @@
+     """Avoid padding sparse expert assignments to a dense prefill tile."""
+     tokens_per_expert = (num_tokens * top_k) // max(num_experts, 1)
+     if tokens_per_expert >= 16:
++        # Native V4.1 TP4 prefill: the generic M256 tile pads 16–31 average
++        # assignments per expert. Keep one M32 tile in the balanced case and
++        # leave all other AITER geometry unchanged.
++        if (
++            arch == "gfx1151"
++            and (top_k, num_experts, hidden_size, intermediate_size)
++            == (6, 384, 5120, 576)
++            and tokens_per_expert < 32
++            and config.get("BLOCK_SIZE_M") == 256
++            and config.get("BLOCK_SIZE_N") == 256
++            and config.get("BLOCK_SIZE_K") == 64
++        ):
++            return {**config, "BLOCK_SIZE_M": 32}
+         return config
+
+     if config["BLOCK_SIZE_M"] > 16:

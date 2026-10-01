@@ -677,6 +677,7 @@
             "amdgpu-smu-exporter"
             "amdtop"
             "ds4-rocm"
+            "ds41-node"
             "ec-su-axb35"
             "ec-su-axb35-monitor"
             "fastflowlm"
@@ -924,6 +925,7 @@
               ap self.packages.${system}.mlx-lm "mlx_lm.server"
                 "Run the MLX LM HTTP server on ROCm";
             sglang-rocm = ap pkgs.sglang-rocm "sglang" "Run SGLang with ROCm";
+            ds41-node = ap pkgs.ds41-node "ds41-node" "Run a DeepSeek V4.1 Flash TP4 rank";
 
             live-iso-vm =
               let
