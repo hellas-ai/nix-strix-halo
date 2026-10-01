@@ -44,8 +44,10 @@ does not mount or recover storage. It holds `/tmp/ds41-gpu.lock` while serving
 to prevent another cooperating launcher from using the same GPU. The API binds
 only to node-local localhost. Serving is capped at four running requests, with
 decode graphs for batches of one, two and four. Shortest-prefill-first scheduling,
-1536-token chunks and up to two prefill requests let a short request make progress
-while a long prompt is still being processed.
+1536-token chunks and up to two prefill requests admit short work while a long
+prompt is being processed. Up to 32 decode steps between prefill chunks give
+running requests time to generate; new requests can still wait through a chunk
+and the remaining decode interval.
 `TRITON_CACHE_DIR` and `SGLANG_JIT_CACHE_DIR` may override their runtime-specific
 compiler caches with absolute paths. Reuse a directory only after verifying
 matching GPU architecture, compiler/toolchain and Python/Torch/Triton ABI
@@ -186,8 +188,9 @@ reductions can round differently from the generic matrix kernels. C4/C8 reuse
 each native weight tile across the token rows with independent FP32 accumulators;
 they preserve the existing C1/C2 kernels and quantizer.
 
-Portable gfx1151 C1/C2/C4 mHC post-residual mixing uses one kernel for HC4/H5120,
-with separate FP32 products/additions and final BF16 rounding. Explicit
+Portable gfx1151 mHC post-residual mixing uses one kernel for HC4/H5120 at
+1/2/4 decode rows and 512/1306/1536 prefill rows, with separate FP32
+products/additions and final BF16 rounding. Explicit
 FlashInfer/TileLang choices and all other shapes retain their existing paths.
 
 `--model-loader-extra-config '{"enable_multithread_load":false}'` disables both
@@ -294,6 +297,13 @@ portable MoE uses 32-row tiles instead of the generic 256-row tile. This avoids
 excessive padding at 1,024–2,047 input tokens while preserving the existing
 matrix arithmetic and the smaller-batch dispatch.
 
+The seven native TP4 FP8 projection shapes also use an exact E4M3FN-to-FP16
+conversion for gfx1151 prefill. It avoids the generic conversion overhead while
+preserving the matrix tile, scale operations and accumulation order. The weights
+and activation quantizer are unchanged. `tests/prefill-dispatch.py` checks the
+installed FP8 and mHC guards on CPU; `tests/fp8.py` checks all 256 conversion
+encodings and changing-input graph replay on the GPU.
+
 `tests/v41-kv.py` checks the native writers, byte layout and all four Triton
 reader paths against independent quantization and attention references,
 including graph replay and a legacy V4 control. `tests/routed-policy.py` checks
@@ -342,12 +352,19 @@ model accuracy. TP partial rounding, shared-expert arithmetic and other backend
 differences still require assessment. The earlier long-context evidence above
 does not qualify the new arithmetic path.
 
-A mixed 32K/short-request check on the corrected arithmetic path passed both
-answer checks and observed a two-request ragged prefill batch. The short request
-emitted output before the long prompt finished prefill. This qualifies that
-scheduling behavior at actual concurrency two under the four-request cap;
-it does not establish interactive latency, four-way throughput or 128K behavior.
-Cold kernel compilation and long prefill steps still cause substantial delays.
+The 32K mixed-request check passed both answers with the 32-step decode interval,
+including a two-request ragged prefill batch and short output before long prefill
+finished. This qualifies scheduling at actual concurrency two under the
+four-request cap. Individual prefill chunks still interrupt streaming.
+
+A preceding 128K run on the corrected arithmetic path returned all four long
+answers correctly and reused 130,560 tokens on repeat requests. Its one-step
+decode interval starved the concurrent short request until its deadline. The
+branch-cache test also assumed a stronger retention guarantee than paged SWA
+provides: reuse requires both the shared full-attention prefix and its sliding
+window to remain resident. Pool capacity alone does not guarantee that. Cold
+and cached logprobs differed despite identical output tokens. The new prefill
+kernels and decode interval still require combined 128K and coding qualification.
 
 The package remains a serving candidate pending numerical qualification;
 measured speed does not establish proximity to the hardware roofline.

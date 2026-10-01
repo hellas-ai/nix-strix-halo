@@ -105,7 +105,7 @@ exec flock --nonblock /tmp/ds41-gpu.lock "$DS41_BINARY" serve \
   --context-length 131072 --max-total-tokens 262144 \
   --max-running-requests 4 --prefill-max-requests 2 \
   --schedule-policy shortest-prefill-first \
-  --chunked-prefill-size 1536 --prefill-decode-interval 1 \
+  --chunked-prefill-size 1536 --prefill-decode-interval 32 \
   --swa-full-tokens-ratio 1.0 --mem-fraction-static 0.82 \
   --reasoning-parser deepseek-v41 --tool-call-parser deepseekv41 \
   --default-chat-template-kwargs '{"reasoning_effort":50}' \
