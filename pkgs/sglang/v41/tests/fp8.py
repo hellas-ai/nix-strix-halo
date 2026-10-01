@@ -91,6 +91,73 @@ def check_e4m3fn_conversion():
     return 256
 
 
+@triton.jit
+def conversion_fp16_probe(raw, old, new):
+    i = tl.arange(0, 256)
+    x = tl.load(raw + i)
+    tl.store(old + i, x.to(tl.float16))
+    tl.store(new + i, _e4m3fn_to_fp32(x).to(tl.float16))
+
+
+def expected_fp16_conversion_bits(code):
+    sign = (code & 128) << 8
+    if code & 127 == 127:
+        return sign | 0x7E00
+    value = struct.unpack("<f", struct.pack("<I", expected_conversion_bits(code)))[0]
+    return struct.unpack("<H", struct.pack("<e", value))[0]
+
+
+def check_e4m3fn_fp16_conversion():
+    # Compare bits, including both NaN signs and negative zero. Floating
+    # equality would either reject NaNs or hide signed-zero differences.
+    raw = torch.arange(256, dtype=torch.int16).to(torch.uint8)
+    codes = raw.cuda().view(torch.float8_e4m3fn)
+    old = torch.empty(256, dtype=torch.float16, device="cuda")
+    new = torch.empty_like(old)
+
+    def run():
+        conversion_fp16_probe[(1,)](
+            codes, old, new, num_warps=4, enable_fp_fusion=False
+        )
+
+    run()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for case, payload in (("A", raw), ("B", raw.flip(0)), ("A_repeat", raw)):
+        codes.view(torch.uint8).copy_(payload)
+        graph.replay()
+        torch.cuda.synchronize()
+        actual = new.view(torch.int16).cpu().tolist()
+        original = old.view(torch.int16).cpu().tolist()
+        failures = []
+        for code, candidate, baseline in zip(payload.tolist(), actual, original):
+            literal = expected_fp16_conversion_bits(code)
+            if len({candidate & 0xFFFF, baseline & 0xFFFF, literal}) != 1:
+                failures.append(
+                    {
+                        "code": code,
+                        "candidate_bits": candidate & 0xFFFF,
+                        "baseline_bits": baseline & 0xFFFF,
+                        "literal_bits": literal,
+                    }
+                )
+        print(
+            json.dumps(
+                {
+                    "event": "e4m3fn_fp16_conversion",
+                    "case": case,
+                    "codes": 256,
+                    "failures": failures,
+                }
+            ),
+            flush=True,
+        )
+        assert not failures, case
+    return 256
+
+
 def fp8_store_corpus():
     # Enumerate the format independently of either converter. At a midpoint,
     # the even encoded significand wins; clipping is the existing finite policy.
@@ -508,6 +575,7 @@ def main():
     assert torch.isfinite(y).all() and y.shape == (2, 33)
     store_codes = check_fp8_store(runtime)
     conversion_codes = check_e4m3fn_conversion()
+    assert check_e4m3fn_fp16_conversion() == conversion_codes
     native_shapes = check_native_gemv()
     check_dense_native_rows()
     print(

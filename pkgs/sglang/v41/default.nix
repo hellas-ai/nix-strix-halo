@@ -58,6 +58,8 @@ let
       ./patches/0032-v41-routed-operand-policy.patch
       ./patches/0033-mxfp4-prefill-m32.patch
       ./patches/0034-native-hc-post-c1-c4.patch
+      ./patches/0035-fp8-prefill-exact-conversion.patch
+      ./patches/0036-native-hc-post-prefill.patch
     ];
   };
   baseKernel = lib.findFirst (
@@ -108,6 +110,8 @@ base.overridePythonAttrs (old: {
       "$out/bin/sglang-python" ${./tests/routed-policy-cpu.py} "$out"
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
       "$out/bin/sglang-python" ${./tests/graph-buckets.py} "$out"
+    HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
+      "$out/bin/sglang-python" ${./tests/prefill-dispatch.py} "$out"
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
       "$out/bin/sglang-python" ${./tests/scheduler-owned-row.py} "$out"
     HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" \
