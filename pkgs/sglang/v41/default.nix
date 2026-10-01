@@ -52,6 +52,7 @@ let
       ./patches/0026-software-fp8-rounding.patch
       ./patches/0027-openai-byte-tokenizer-cache.patch
       ./patches/0028-engram-capacity-prefixes.patch
+      ./patches/0029-native-hc-projection-rows.patch
     ];
   };
   baseKernel = lib.findFirst (

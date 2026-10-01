@@ -250,6 +250,201 @@ def check_post(layer):
         assert torch.equal(actual.view(torch.int16), eager.view(torch.int16))
 
 
+def projection_bits(actual, expected, case):
+    a, b = [t.detach().cpu().contiguous() for t in (actual, expected)]
+    assert a.shape == b.shape and a.dtype == b.dtype, case
+    wrong = a.view(torch.uint8) != b.view(torch.uint8)
+    print(
+        json.dumps(
+            {
+                "event": "hc_rows_bitwise",
+                "case": case,
+                "unequal_bytes": int(wrong.sum()),
+            }
+        ),
+        flush=True,
+    )
+    assert not wrong.any(), case
+
+
+def check_projection_rows(layer):
+    weight = torch.randn(24, 20480, device="cuda") * 0.01
+    a = torch.randn(8, 4, 5120, device="cuda", dtype=torch.bfloat16)
+    b = (a.flip(0).roll(17, 2) * 0.5).contiguous()
+    scale = torch.tensor([0.1, 0.2, 0.125], device="cuda")
+    bias = torch.randn(24, device="cuda")
+    originals = [t.cpu().clone() for t in (a, b, weight, scale, bias)]
+    references, row_controls = [], []
+    for x in (a, b):
+        flat = x.flatten(1).float()
+        references.append(projection_reference(flat, weight))
+        c1 = torch.cat([native.native_hc_projection(row[None], weight) for row in flat])
+        c2 = torch.cat(
+            [
+                native.native_hc_projection_c2(flat[i : i + 2], weight)
+                for i in range(0, 8, 2)
+            ]
+        )
+        projection_bits(c2, c1, "original_C1_C2")
+        row_controls.append(c1)
+    records = []
+    for rows in range(3, 9):
+        expected = []
+        for i, x in enumerate((a[:rows], b[:rows])):
+            flat = x.flatten(1).float()
+            actual = native.native_hc_projection_rows(flat, weight)
+            projection_bits(actual, row_controls[i][:rows], f"C{rows}:projection:{i}")
+            ref, bound = (v[:rows] for v in references[i])
+            errors = (actual.cpu().double() - ref).abs()
+            wrong = (~torch.isfinite(actual.cpu())) | (errors > bound)
+            print(
+                json.dumps(
+                    {
+                        "event": "hc_rows_reference",
+                        "rows": rows,
+                        "pattern": i,
+                        "violations": int(wrong.sum()),
+                        "max_abs_error": float(errors.max()),
+                        "max_error_bound": float(bound.max()),
+                    }
+                ),
+                flush=True,
+            )
+            assert not wrong.any()
+            with patch.object(
+                native,
+                "native_hc_projection_rows",
+                wraps=native.native_hc_projection_rows,
+            ) as spy:
+                stats = Layer._hc_mix_stats(layer, x, weight, scale, bias)
+                assert spy.call_count == 1
+            with patch.object(
+                native, "native_hc_projection_rows", return_value=row_controls[i][:rows]
+            ):
+                controls = Layer._hc_mix_stats(layer, x, weight, scale, bias)
+            ideal = coeff_reference(x, weight, scale, bias, layer.rms_norm_eps)
+            for actual_stat, control, reference in zip(
+                stats, controls, ideal, strict=True
+            ):
+                projection_bits(actual_stat, control, f"C{rows}:stats:{i}")
+                torch.testing.assert_close(
+                    actual_stat.cpu().double(), reference, rtol=1e-4, atol=2e-6
+                )
+            expected.append(tuple(v.cpu().clone() for v in stats))
+        flat = a[:rows].flatten(1).float()
+        swapped = native.native_hc_projection_rows(flat.flip(0).contiguous(), weight)
+        projection_bits(swapped, row_controls[0][:rows].flip(0), f"C{rows}:swapped")
+        flat[-1].copy_(b[rows - 1].flatten().float())
+        changed = native.native_hc_projection_rows(flat, weight)
+        projection_bits(
+            changed[:-1], row_controls[0][: rows - 1], f"C{rows}:other_rows"
+        )
+        buffer = a[:rows].clone()
+        Layer._hc_mix_stats(layer, buffer, weight, scale, bias)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = Layer._hc_mix_stats(layer, buffer, weight, scale, bias)
+        for pattern in (0, 1, 0):
+            buffer.copy_((a, b)[pattern][:rows])
+            graph.replay()
+            for result, control in zip(output, expected[pattern], strict=True):
+                projection_bits(result, control, f"C{rows}:graph:{pattern}")
+        records.append((graph, buffer, output, expected[0]))
+    # Later capture allocations must not replace an earlier graph's live owners.
+    for graph, buffer, output, expected in reversed(records):
+        projection_bits(buffer, a[: len(buffer)], "retained_input")
+        graph.replay()
+        for actual, control in zip(output, expected, strict=True):
+            projection_bits(actual, control, "retained_graph")
+    for current, original in zip((a, b, weight, scale, bias), originals, strict=True):
+        projection_bits(current, original, "immutable_inputs")
+
+    storage = torch.empty(3, 4, 10240, device="cuda", dtype=torch.float32)
+    storage[:, :, ::2].copy_(a[:3])
+    for case, x, w, model in (
+        ("C0", a[:0], weight, "deepseek_v41"),
+        ("C9", torch.cat((a, a[:1])), weight, "deepseek_v41"),
+        ("strided_input", storage[:, :, ::2], weight, "deepseek_v41"),
+        ("strided_weight", a[:3], weight.t().contiguous().t(), "deepseek_v41"),
+        ("other_model", a[:3], weight, "deepseek_v4"),
+    ):
+        with (
+            patch.object(layer.config, "model_type", model),
+            patch.object(
+                native,
+                "native_hc_projection_rows",
+                wraps=native.native_hc_projection_rows,
+            ) as spy,
+        ):
+            actual = Layer._hc_mix_stats(layer, x, w, scale, bias)
+            assert spy.call_count == 0, case
+        with patch.object(layer.config, "model_type", "deepseek_v4"):
+            expected = Layer._hc_mix_stats(layer, x, w, scale, bias)
+        for result, control in zip(actual, expected, strict=True):
+            projection_bits(result, control, case)
+    for x, w in (
+        (a[:2].flatten(1).float(), weight),
+        (a.flatten(1).half(), weight),
+        (a.flatten(1).float(), weight.t().contiguous().t()),
+    ):
+        try:
+            native.native_hc_projection_rows(x, w)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid direct HC operands accepted")
+
+
+def check_projection_literals():
+    weight = torch.zeros(24, 20480, device="cuda")
+    x = torch.zeros(8, 20480, device="cuda")
+    weight[:, [0, 5120, 10240, 15360]] = torch.tensor([1, -1, 2, 0.5], device="cuda")
+    for i in range(8):
+        x[i, [0, 5120, 10240, 15360]] = torch.tensor(
+            [i + 1, i + 1, i, 2], device="cuda", dtype=torch.float32
+        )
+    expected = (2 * torch.arange(8, device="cuda") + 1).float()[:, None].expand(-1, 24)
+    for rows in range(3, 9):
+        projection_bits(
+            native.native_hc_projection_rows(x[:rows], weight),
+            expected[:rows],
+            f"C{rows}:split_cancellation",
+        )
+    x.zero_()
+    weight.zero_()
+    x[:, 0] = 2**-126
+    weight[:, 0] = 0.5
+    projection_bits(
+        native.native_hc_projection_rows(x, weight),
+        torch.full((8, 24), 2**-127, device="cuda"),
+        "projection_underflow",
+    )
+    x.zero_()
+    x[1::2, 0] = -0.0
+    weight.fill_(1)
+    c1 = torch.cat([native.native_hc_projection(row[None], weight) for row in x])
+    projection_bits(
+        native.native_hc_projection_rows(x, weight), c1, "projection_signed_zero"
+    )
+    x.zero_()
+    weight.zero_()
+    weight[:, 0] = 1
+    x[0, 0], x[1, 0], x[2, 0] = float("inf"), -float("inf"), float("nan")
+    c1 = torch.cat([native.native_hc_projection(row[None], weight) for row in x])
+    for rows in range(3, 9):
+        actual = native.native_hc_projection_rows(x[:rows], weight)
+        expected = c1[:rows]
+        assert torch.equal(torch.isnan(actual), torch.isnan(expected))
+        assert torch.equal(torch.isinf(actual), torch.isinf(expected))
+        assert torch.equal(
+            torch.signbit(actual)[torch.isinf(actual)],
+            torch.signbit(expected)[torch.isinf(expected)],
+        )
+        assert torch.equal(
+            actual[torch.isfinite(expected)], expected[torch.isfinite(expected)]
+        )
+
+
 def main():
     runtime = Path(sys.argv[1]).resolve()
     assert Path(inspect.getfile(Layer)).resolve().is_relative_to(runtime)
@@ -397,6 +592,8 @@ def main():
                     flush=True,
                 )
     check_post(layer)
+    check_projection_rows(layer)
+    check_projection_literals()
     print(
         json.dumps(
             {

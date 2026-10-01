@@ -173,7 +173,8 @@ C1/C2/C4/C8 projections use the
 existing activation quantizer and FP8/E8M0 weights, with FP32 reduction and
 BF16 output. This applies only to marked V4.1 Engram, TP4 attention, and TP4/EP1
 separate shared-expert projections. The FP32 mHC projection has its own exact
-C1/C2 shape guard; RMS and Sinkhorn operations are unchanged. These
+C1–C8 shape guard; C3–C8 share weight loads while preserving each row’s
+C1/C2 reduction order. RMS and Sinkhorn operations are unchanged. These
 reductions can round differently from the generic matrix kernels. C4/C8 reuse
 each native weight tile across the token rows with independent FP32 accumulators;
 they preserve the existing C1/C2 kernels and quantizer.
@@ -256,8 +257,9 @@ uses decoder metadata and caches both outcomes, avoiding repeated vocabulary
 copies during streaming. These CPU checks run at package build time; they do
 not measure serving throughput.
 `tests/mhc.py` includes a FP64 projection reference with an FP32 reduction-error
-bound, plus post-residual bitwise, signed-zero, reduction-order, graph and
-fallback controls against installed Torch. `tests/engram.py` checks prepared-row
+bound, C3–C8 comparisons to the original C1/C2 projection, row independence,
+changed-data graphs and shape fallbacks, plus post-residual bitwise, signed-zero,
+reduction-order, graph and fallback controls against installed Torch. `tests/engram.py` checks prepared-row
 embedding, bounded graph input generations, and cross-stream bucket transitions
 with owned output snapshots; its local ownership checks do not replace a multi-rank collective
 or full-model test.
