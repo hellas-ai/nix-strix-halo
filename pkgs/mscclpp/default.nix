@@ -55,7 +55,13 @@ stdenv.mkDerivation {
   postFixup = ''
     for so in $out/lib/libmscclpp*.so*; do
       [ -L "$so" ] && continue
-      patchelf --add-rpath ${lib.makeLibraryPath [ numactl rdma-core rocmSdk ]} "$so"
+      patchelf --add-rpath ${
+        lib.makeLibraryPath [
+          numactl
+          rdma-core
+          rocmSdk
+        ]
+      } "$so"
     done
   '';
   meta.description = "MSCCL++ with host-memory IB registration on Strix Halo (gfx1151)";

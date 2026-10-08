@@ -192,15 +192,17 @@ base.overridePythonAttrs (old: {
   postFixup = (old.postFixup or "") + ''
     # The preflight/result-gate tests use CPU tensors and device stubs. The
     # native ABI test loads the prebuilt library without initializing a GPU.
-    for test_script in ${lib.escapeShellArgs [
-      ./tests/engram-deferred-history-cpu.py
-      ./tests/engram-preflight-status-cpu.py
-      ./tests/engram-native-preflight-cpu.py
-      ./tests/engram-external-graph-rows-cpu.py
-      ./tests/engram-result-gate-cpu.py
-      ./tests/engram-mapped-preflight-cpu.py
-      ./tests/engram-mapped-native-abi-cpu.py
-]}; do
+    for test_script in ${
+      lib.escapeShellArgs [
+        ./tests/engram-deferred-history-cpu.py
+        ./tests/engram-preflight-status-cpu.py
+        ./tests/engram-native-preflight-cpu.py
+        ./tests/engram-external-graph-rows-cpu.py
+        ./tests/engram-result-gate-cpu.py
+        ./tests/engram-mapped-preflight-cpu.py
+        ./tests/engram-mapped-native-abi-cpu.py
+      ]
+    }; do
       HIP_VISIBLE_DEVICES="" ROCR_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 \
         ROCPROFILER_REGISTER_FORCE_LOAD=0 ROCP_TOOL_LIBRARIES="" \
         DS41_ENGRAM_SOURCE_ROOT="$out/${pythonPackages.python.sitePackages}" \
