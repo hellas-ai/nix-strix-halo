@@ -13,6 +13,8 @@
 #   0004       expert guard/grid for batches 1-4 (vendored, not applied yet)
 #   0005       opt-in MSCCL++ small-message all-reduce (the DS4 v41 0090 patch rebased onto this SGLang;
 #              SGLANG_DSV41_MSAR=1, see sglang/srt/distributed/device_communicators/dsv41_msar.py)
+#   0006       opt-in single-launch Triton (add+)RMSNorm for ROCm without vLLM/AITER (SGLANG_ROCM_TRITON_RMSNORM=1),
+#              replacing ~11 torch kernels per norm
 let
   basePatches =
     let
@@ -28,6 +30,7 @@ let
       ./patches/0002-glm53-fp8-prefill-config.patch
       ./patches/0003-glm53-fp8-moe-gemv.patch
       ./patches/0005-glm53-mscclpp-allreduce.patch
+      ./patches/0006-rocm-triton-rmsnorm.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
