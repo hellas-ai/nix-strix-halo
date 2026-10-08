@@ -701,6 +701,7 @@
             "rocm-pm4-rocr"
             "rocm-pm4-rocr-split"
             "rocm-pm4-rocr-tmpring"
+            "sglang-glm53-rocm"
             "sglang-rocm"
             "sglang-v41-rocm"
             "strix-halo-mes-firmware"

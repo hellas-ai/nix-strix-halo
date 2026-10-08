@@ -354,6 +354,26 @@ let
       vllm-rocm = final."vllm-rocm-therock-${suffix}";
     }
     // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython && suffix == "gfx1151") {
+      # GLM-5.3-Flash campaign runtime: sglang-rocm plus the GLM FP8 decode/prefill patches in
+      # pkgs/sglang/glm53/patches (contiguous dense GEMV, prefill tiles, TP4 expert GEMV). Same kernels as sglang-rocm.
+      sglang-glm53-rocm = prev.callPackage ../pkgs/sglang {
+        pythonPackages = final.${therockPythonConfig.packagesAttr};
+        rocmSdk = final."therock-rocm-${suffix}";
+        inherit (rocmTarget) packageSuffix;
+        hsaOverrideGfxVersion = rocmTarget.hsaOverride or null;
+        runtimePatches =
+          let
+            dir = ../pkgs/sglang/patches;
+            glm = ../pkgs/sglang/glm53/patches;
+            names = d: lib.sort (a: b: a < b) (builtins.filter (lib.hasSuffix ".patch") (builtins.attrNames (builtins.readDir d)));
+          in
+          map (n: dir + "/${n}") (names dir)
+          ++ map (n: glm + "/${n}") [
+            "0001-glm53-fp8-contiguous-decode.patch"
+            "0002-glm53-fp8-prefill-config.patch"
+            "0003-glm53-fp8-moe-gemv.patch"
+          ];
+      };
       sglang-v41-rocm = prev.callPackage ../pkgs/sglang/v41 {
         pythonPackages = final.${therockPythonConfig.packagesAttr};
         rocmSdk = final."therock-rocm-${suffix}";
