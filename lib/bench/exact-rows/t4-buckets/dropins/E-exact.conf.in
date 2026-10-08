@@ -1,0 +1,12 @@
+# Arm E (graph buckets: exact). Replace @WORKER@ with the ds41-node store path of the build under test.
+# The padded and exact arms differ ONLY in DS41_GRAPH_BUCKETS; install the same lease-holder drop-in name on all four nodes.
+[Service]
+ExecStart=
+ExecStart=@WORKER@/bin/ds41-node
+Environment=DS41_GRAPH_BUCKETS=exact
+# Correctness phase only (journal line per replay: key_size, raw_bs); remove for performance cells.
+Environment=SGLANG_LOG_DECODE_GRAPH_KEY=1
+# Gamma 1 (DSpark verify width 2, buckets [1,2,4] vs [1,2,3,4]): add
+#   Environment=DS41_DSPARK_GAMMA=1
+# Eight-concurrency variant ([1,2,4,8] vs [1..8]): add
+#   Environment=DS41_MAX_RUNNING_REQUESTS=8

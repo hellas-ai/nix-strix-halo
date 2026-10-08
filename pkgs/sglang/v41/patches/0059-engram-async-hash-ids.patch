@@ -1,0 +1,77 @@
+--- a/sglang/srt/layers/engram_graph_prestage.py
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -3,9 +3,14 @@
+ The canonical hasher owns hash arithmetic and request history. Decode commits
+ when hashing; fixed-width target verification only hashes, leaving commits to
+ acceptance. File reads happen before graph replay, for live token rows only.
+-Captured padding rows are refreshed with zeros on every replay.
++Captured padding rows are refreshed with zeros on every replay. The optional
++async hash-ID transfer lets the host prepare the next frame while the device
++copies the IDs, then parks the scheduler while waiting for file-lookup inputs.
+ """
+ 
++import os
++import time
++
+ import torch
+ 
+ from sglang.srt.layers.engram_store import ROW_BYTES
+@@ -45,6 +50,14 @@
+             raise ValueError("Engram graph prestage requires two native file stores")
+         self.hasher = model.engram_hasher
+         self.stores = (layers[0], layers[1])
++        # Keep the original blocking path as the default. Both decode and
++        # fixed-width verification enter prepare(), including DSpark verify.
++        self.async_hash_ids = os.environ.get("SGLANG_ENGRAM_ASYNC_HASH_IDS") == "1"
++        if self.async_hash_ids:
++            self.host_hash_ids = torch.empty(
++                (max_rows, 2, 24), dtype=torch.int64, pin_memory=True
++            )
++            self.hash_copy_done = torch.cuda.Event()
+         self.gpu_rows = torch.zeros(
+             (max_rows, 2, 24, ROW_BYTES), dtype=torch.uint8, device=device
+         )
+@@ -64,6 +77,15 @@
+         self.generation = 0
+         self.pending = None
+ 
++    @staticmethod
++    def _wait_without_spinning(event) -> None:
++        # HIP's synchronous D2H copy enters an active HSA signal wait on this
++        # runtime. Poll with a short sleep so the scheduler does not burn a
++        # core while the dependency is outstanding. The event is recorded on
++        # the same stream as the copy; a true query means host IDs are ready.
++        while not event.query():
++            time.sleep(0.0001)
++
+     def can_stage(self, forward_batch) -> bool:
+         """Check the raw, unpadded batch before any hash or history mutation."""
+         bs = forward_batch.batch_size
+@@ -111,14 +133,25 @@
+         ids = self.hasher(forward_batch.input_ids, forward_batch)
+         if ids.shape != (rows, 2, 24):
+             raise RuntimeError("unexpected canonical Engram hash layout")
+-        ids_cpu = ids.to(device="cpu")  # one D2H synchronization for both layers
++        if self.async_hash_ids:
++            ids_cpu = self.host_hash_ids[:rows]
++            ids_cpu.copy_(ids, non_blocking=True)
++            self.hash_copy_done.record(torch.cuda.current_stream())
++        else:
++            ids_cpu = ids.to(device="cpu")  # one D2H synchronization for both layers
+ 
+         frame_index = (generation - 1) % 2
+         if self.frame_inflight[frame_index]:
+-            self.frame_done[frame_index].synchronize()  # H2D still owns this frame
++            # The previous H2D still owns this page-locked frame.
++            if self.async_hash_ids:
++                self._wait_without_spinning(self.frame_done[frame_index])
++            else:
++                self.frame_done[frame_index].synchronize()
+             self.frame_inflight[frame_index] = False
+         frame = self.host_frames[frame_index]
+         frame.zero_()
++        if self.async_hash_ids:
++            self._wait_without_spinning(self.hash_copy_done)
+         target = frame.numpy()
+         for layer_index, store in enumerate(self.stores):
+             packed = store.lookup(ids_cpu[:, layer_index].reshape(-1)).packed

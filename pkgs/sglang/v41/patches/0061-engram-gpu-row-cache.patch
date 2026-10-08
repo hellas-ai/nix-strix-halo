@@ -1,0 +1,379 @@
+--- /dev/null
++++ b/sglang/srt/layers/engram_gpu_row_cache.py
+@@ -0,0 +1,117 @@
++"""Bounded exact-byte GPU row cache for immutable file-backed Engram shards.
++
++The canonical GPU hasher still owns IDs and history. This cache only changes
++where native packed bytes are read after the IDs are known. Unowned IDs map to
++a permanent zero row; global OOB IDs remain errors. It never evicts an in-flight
++row, and a full cache makes the caller use its existing native-file path.
++"""
++
++from __future__ import annotations
++
++import numpy as np
++import torch
++import threading
++
++from sglang.srt.layers.engram_store import ROW_BYTES
++
++
++class EngramGpuRowCacheFull(Exception):
++    pass
++
++
++class NativeEngramGpuRowCache:
++    def __init__(self, store, device, capacity_rows=262144):
++        if not 1 <= capacity_rows <= 1048576:
++            raise ValueError("Engram GPU row cache capacity outside bounded range")
++        self.store = store
++        self.device = device
++        self.capacity_rows = capacity_rows
++        self.rows = torch.zeros(
++            (capacity_rows + 1, ROW_BYTES), dtype=torch.uint8, device=device
++        )
++        self.stream = torch.cuda.Stream(device=device)
++        # The zero slot is initialized on the model's stream. A background
++        # cache fill must not race that initialization on a new HIP stream.
++        self.latest_ready = torch.cuda.Event()
++        self.latest_ready.record(torch.cuda.current_stream(device))
++        self.stream.wait_event(self.latest_ready)
++        self._pending_hosts = []
++        self.next_slot = 1
++        self.slots: dict[int, int] = {}
++        self._lock = threading.Lock()
++
++    def stage_slots(self, ids_cpu: torch.Tensor):
++        with self._lock:
++            return self._stage_slots_locked(ids_cpu)
++
++    def _stage_slots_locked(self, ids_cpu: torch.Tensor):
++        """Return exact CPU slot IDs and an event protecting any newly filled rows.
++
++        The caller must only use CPU IDs whose pinned D2H completion it has
++        observed. Calls for the same cache are serialized by its owning model
++        scheduler; prefill has one worker per distinct Engram layer. The lock
++        also covers a decode step that overlaps an outstanding prefill fill.
++        """
++        if ids_cpu.device.type != "cpu" or ids_cpu.dtype != torch.int64:
++            raise ValueError("Engram GPU cache needs complete CPU int64 hash IDs")
++        # Keep each pinned H2D source alive until its HIP event completes.
++        self._pending_hosts = [
++            (event, host)
++            for event, host in self._pending_hosts
++            if not event.query()
++        ]
++        ids = ids_cpu.contiguous().numpy().reshape(-1)
++        store = self.store
++        if np.any((ids < 0) | (ids >= store.num_embeddings)):
++            raise IndexError("active Engram ID outside the table")
++        owned = (ids >= store.row_start) & (ids < store.row_end)
++        unique = np.unique(ids[owned])
++        missing = [int(value) for value in unique if int(value) not in self.slots]
++        if self.next_slot + len(missing) > self.capacity_rows + 1:
++            raise EngramGpuRowCacheFull()
++
++        if missing:
++            packed = np.concatenate(
++                [
++                    store.lookup(np.asarray(missing[first : first + store.max_batch_rows], dtype=np.int64)).packed
++                    for first in range(0, len(missing), store.max_batch_rows)
++                ],
++                axis=0,
++            )
++            if packed.shape != (len(missing), ROW_BYTES):
++                raise RuntimeError("Engram native store returned wrong packed row layout")
++            first_slot = self.next_slot
++            pinned = self._pin_rows(packed)
++            with torch.cuda.stream(self.stream):
++                self.rows[first_slot : first_slot + len(missing)].copy_(
++                    pinned, non_blocking=True
++                )
++                self.latest_ready = torch.cuda.Event()
++                self.latest_ready.record(self.stream)
++            self._pending_hosts.append((self.latest_ready, pinned))
++            for offset, value in enumerate(missing):
++                self.slots[value] = first_slot + offset
++            self.next_slot += len(missing)
++
++        result = np.zeros(ids.shape, dtype=np.int64)
++        result[owned] = np.fromiter(
++            (self.slots[int(value)] for value in ids[owned]),
++            dtype=np.int64,
++            count=int(owned.sum()),
++        )
++        # A second caller can hit keys published by a still-running H2D fill.
++        # It must inherit the same completion dependency, even with no misses.
++        return torch.from_numpy(result.reshape(ids_cpu.shape)), self.latest_ready
++
++    @staticmethod
++    def _pin_rows(packed):
++        return torch.from_numpy(packed).pin_memory()
++
++    def gather(self, slots_cpu: torch.Tensor, ready=None):
++        """Gather packed bytes on GPU; main-stream order protects graph inputs."""
++        if ready is not None:
++            torch.cuda.current_stream(self.device).wait_event(ready)
++        slots = slots_cpu.to(device=self.device, dtype=torch.int64)
++        return self.rows.index_select(0, slots.reshape(-1)).reshape(
++            *slots.shape, ROW_BYTES
++        )
+--- a/sglang/srt/layers/engram_graph_prestage.py
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -14,6 +14,7 @@
+ import torch
+ 
+ from sglang.srt.layers.engram_store import ROW_BYTES
++from sglang.srt.layers.engram_gpu_row_cache import EngramGpuRowCacheFull
+ 
+ 
+ class NativeEngramGraphPrestage:
+@@ -50,9 +51,19 @@
+             raise ValueError("Engram graph prestage requires two native file stores")
+         self.hasher = model.engram_hasher
+         self.stores = (layers[0], layers[1])
++        self.use_gpu_row_cache = os.environ.get("SGLANG_ENGRAM_GPU_ROW_CACHE") == "1"
++        self.caches = (
++            tuple(model.get_engram_row_cache(i, self.stores[i], device) for i in range(2))
++            if self.use_gpu_row_cache
++            else None
++        )
++        self.pending_cache_slots = None
+         # Keep the original blocking path as the default. Both decode and
+         # fixed-width verification enter prepare(), including DSpark verify.
+-        self.async_hash_ids = os.environ.get("SGLANG_ENGRAM_ASYNC_HASH_IDS") == "1"
++        self.async_hash_ids = (
++            self.use_gpu_row_cache
++            or os.environ.get("SGLANG_ENGRAM_ASYNC_HASH_IDS") == "1"
++        )
+         if self.async_hash_ids:
+             self.host_hash_ids = torch.empty(
+                 (max_rows, 2, 24), dtype=torch.int64, pin_memory=True
+@@ -140,6 +151,21 @@
+         else:
+             ids_cpu = ids.to(device="cpu")  # one D2H synchronization for both layers
+ 
++        if self.use_gpu_row_cache:
++            self._wait_without_spinning(self.hash_copy_done)
++            try:
++                self.pending_cache_slots = tuple(
++                    cache.stage_slots(ids_cpu[:, index].reshape(-1))
++                    for index, cache in enumerate(self.caches)
++                )
++            except EngramGpuRowCacheFull:
++                self.pending_cache_slots = None
++            if self.pending_cache_slots is not None:
++                # A cache hit needs no native-file read or packed-row H2D.
++                # Keep the generation contract; install() gathers only after
++                # the preceding graph releases its output staging tensor.
++                self.pending = (generation, bs, graph_bs, -1, forward_batch)
++                return generation
+         frame_index = (generation - 1) % 2
+         if self.frame_inflight[frame_index]:
+             # The previous H2D still owns this page-locked frame.
+@@ -150,7 +176,7 @@
+             self.frame_inflight[frame_index] = False
+         frame = self.host_frames[frame_index]
+         frame.zero_()
+-        if self.async_hash_ids:
++        if self.async_hash_ids and not self.use_gpu_row_cache:
+             self._wait_without_spinning(self.hash_copy_done)
+         target = frame.numpy()
+         for layer_index, store in enumerate(self.stores):
+@@ -174,14 +200,24 @@
+         if self.gpu_inflight:
+             torch.cuda.current_stream().wait_event(self.graph_done)
+             self.gpu_inflight = False
+-        # prepare() cleared every padding token row, including all positions
+-        # of padded verify requests, before filling the live token rows.
+         graph_rows = graph_bs * self.req_width
+-        self.gpu_rows[:graph_rows].copy_(
+-            self.host_frames[frame_index][:graph_rows], non_blocking=True
+-        )
+-        self.frame_done[frame_index].record(torch.cuda.current_stream())
+-        self.frame_inflight[frame_index] = True
++        if frame_index == -1:
++            self.gpu_rows[:graph_rows].zero_()
++            rows = bs * self.req_width
++            for layer_index, (slots, ready) in enumerate(self.pending_cache_slots):
++                packed = self.caches[layer_index].gather(slots, ready)
++                self.gpu_rows[:rows, layer_index].copy_(
++                    packed.reshape(rows, 24, ROW_BYTES)
++                )
++            self.pending_cache_slots = None
++        else:
++            # prepare() cleared every padding token row, including all
++            # positions of padded verify requests, before filling live rows.
++            self.gpu_rows[:graph_rows].copy_(
++                self.host_frames[frame_index][:graph_rows], non_blocking=True
++            )
++            self.frame_done[frame_index].record(torch.cuda.current_stream())
++            self.frame_inflight[frame_index] = True
+         forward_batch.engram_packed_rows = self.gpu_rows[: bs * self.req_width]
+         self.pending = None
+         self.active_generation = generation
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -4,6 +4,7 @@
+ import functools
+ import json
+ import logging
++import os
+ import time
+ from array import array
+ from contextlib import contextmanager, nullcontext
+@@ -24,6 +25,7 @@
+ import torch
+ import torch.nn as nn
+ import torch.nn.functional as F
++import numpy as np
+ 
+ import sglang.srt.models.deepseek_v2 as deepseek_v2
+ from sglang.kernels.ops.attention.dsv4 import (
+@@ -105,6 +107,11 @@
+     is_dp_gatherv_active,
+ )
+ from sglang.srt.layers.engram import Engram, EngramHasher, EngramLayout
++from sglang.srt.layers.engram_store import ROW_BYTES
++from sglang.srt.layers.engram_gpu_row_cache import (
++    EngramGpuRowCacheFull,
++    NativeEngramGpuRowCache,
++)
+ from sglang.srt.layers.layernorm import RMSNorm
+ from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
+ from sglang.srt.layers.logits_processor import LogitsMetadata, LogitsProcessor
+@@ -4524,6 +4531,25 @@
+     return full
+ 
+ 
++def _read_prefetched_engram_rows(host_ids, ready_event, cache):
++    """Fill one layer's GPU row cache after its pinned hash IDs arrive."""
++    while not ready_event.query():
++        time.sleep(0.0001)
++    try:
++        slots, rows_ready = cache.stage_slots(host_ids)
++        return slots, rows_ready, None
++    except EngramGpuRowCacheFull:
++        # Full cache is a performance fallback, never a correctness failure.
++        flat = host_ids.reshape(-1).numpy()
++        parts = [
++            cache.store.lookup(flat[first : first + cache.store.max_batch_rows]).packed
++            for first in range(0, flat.size, cache.store.max_batch_rows)
++        ]
++        return None, None, torch.from_numpy(
++            np.concatenate(parts).reshape(*host_ids.shape, ROW_BYTES)
++        )
++
++
+ class DeepseekV4Model(nn.Module):
+     fall_back_to_pt_during_load = False
+ 
+@@ -4658,6 +4684,18 @@
+                 1,
+             }, f"late layers must not compress on their own, got ratios {late_ratios}"
+ 
++    def get_engram_row_cache(self, layer_index, store, device):
++        """Share exact native-byte rows between prefill and decode prestaging."""
++        if not hasattr(self, "_engram_row_caches"):
++            self._engram_row_caches = {}
++        cache = self._engram_row_caches.get(layer_index)
++        if cache is None:
++            cache = NativeEngramGpuRowCache(store, device)
++            self._engram_row_caches[layer_index] = cache
++        elif cache.store is not store:
++            raise RuntimeError("Engram row cache belongs to a different file store")
++        return cache
++
+     def get_input_embeddings(self) -> nn.Module:
+         return self.embed_tokens
+ 
+@@ -4765,6 +4803,53 @@
+                 )
+             else:
+                 hash_ids = self.engram_hasher(input_ids, forward_batch)
++        prefetch = {}
++        if (
++            os.environ.get("SGLANG_ENGRAM_PREFILL_PREFETCH") == "1"
++            and hash_ids is not None
++            and hash_ids.is_cuda
++            and hash_ids.shape[0] > 0
++            and forward_batch.forward_mode.is_extend()
++            and not cp_extend
++            and get_parallel().attn_dp_size == 1
++            and not is_in_breakable_cuda_graph()
++            and not torch.cuda.is_current_stream_capturing()
++        ):
++            file_layers = [
++                (i, self.layers[i].engram)
++                for i in range(self.start_layer, self.end_layer)
++                if self.layers[i].engram is not None
++                and self.layers[i].engram.embed.file_store is not None
++            ]
++            if file_layers:
++                if not hasattr(self, "_engram_prefetch_stream"):
++                    self._engram_prefetch_stream = torch.cuda.Stream(
++                        device=hash_ids.device
++                    )
++                    self._engram_prefetch_workers = concurrent.futures.ThreadPoolExecutor(
++                        max_workers=len(file_layers), thread_name_prefix="engram-prefetch"
++                    )
++                producer_done = torch.cuda.Event()
++                producer_done.record(torch.cuda.current_stream())
++                host_ids = torch.empty(
++                    hash_ids.shape, dtype=hash_ids.dtype, pin_memory=True
++                )
++                copy_done = torch.cuda.Event()
++                with torch.cuda.stream(self._engram_prefetch_stream):
++                    self._engram_prefetch_stream.wait_event(producer_done)
++                    host_ids.copy_(hash_ids, non_blocking=True)
++                    copy_done.record(self._engram_prefetch_stream)
++                for i, engram in file_layers:
++                    prefetch[i] = self._engram_prefetch_workers.submit(
++                        _read_prefetched_engram_rows,
++                        host_ids[:, engram.layer_hash_index],
++                        copy_done,
++                        self.get_engram_row_cache(
++                            engram.layer_hash_index,
++                            engram.embed.file_store,
++                            hash_ids.device,
++                        ),
++                    )
+         tail = None
+         if (
+             self.late_layer_start is not None
+@@ -4801,6 +4886,18 @@
+                     hash_ids = tail.rows(hash_ids)
+             engram = self.layers[i].engram
+             if engram is not None:
++                prefetched_rows = None
++                if i in prefetch:
++                    slots, rows_ready, fallback_rows = prefetch[i].result()
++                    if slots is not None:
++                        cache = self.get_engram_row_cache(
++                            engram.layer_hash_index,
++                            engram.embed.file_store,
++                            hash_ids.device,
++                        )
++                        prefetched_rows = cache.gather(slots, rows_ready)
++                    else:
++                        prefetched_rows = fallback_rows.to(device=hash_ids.device)
+                 precomputed_attn = None
+                 combined_attn = None
+                 normalized_attn = None
+@@ -4815,9 +4912,13 @@
+                     forward_batch,
+                     cp_all_tokens=cp_extend,
+                     prepared_packed_rows=(
+-                        None
+-                        if prepared_engram_rows is None
+-                        else prepared_engram_rows[:, engram.layer_hash_index]
++                        prefetched_rows
++                        if prefetched_rows is not None
++                        else (
++                            None
++                            if prepared_engram_rows is None
++                            else prepared_engram_rows[:, engram.layer_hash_index]
++                        )
+                     ),
+                 )
+                 if (

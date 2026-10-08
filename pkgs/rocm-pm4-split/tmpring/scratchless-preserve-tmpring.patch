@@ -1,0 +1,38 @@
+--- a/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
++++ b/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+@@ -93,10 +93,14 @@
+     SetShRegs(kComputePgmRsrc1, rsrc, 2);
+     SetShRegs(kComputePgmRsrc3, &image.compute_pgm_rsrc3, 1);
+     const uint32_t zero = 0;
+-    const size_t tmpring_words_before = words_.size();
+-    SetShRegs(kComputeTmpRingSize, &zero, 1);
+-    if (tmpring_patch_dword_ == kNoPatchDword && words_.size() != tmpring_words_before) {
+-      tmpring_patch_dword_ = words_.size() - 1;
++    // Scratchless retained dispatches must not replace queue-owned TMPRING state.
++    // A mixed list installs one validated queue binding at its first scratch use.
++    if (packet.private_segment_size != 0) {
++      const size_t tmpring_words_before = words_.size();
++      SetShRegs(kComputeTmpRingSize, &zero, 1);
++      if (tmpring_patch_dword_ == kNoPatchDword && words_.size() != tmpring_words_before) {
++        tmpring_patch_dword_ = words_.size() - 1;
++      }
+     }
+     const uint32_t workgroup[] = {packet.workgroup_size_x, packet.workgroup_size_y,
+                                   packet.workgroup_size_z};
+--- a/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
++++ b/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
+@@ -402,7 +402,13 @@
+   } else {
+     return HSA_STATUS_ERROR_INVALID_ISA;
+   }
+-  if (words.empty() || words.size() > 0x000fffff || tmpring_patch_dword >= words.size()) {
++  const bool requires_scratch = private_wave32 != 0 || private_wave64 != 0;
++  const bool scratchless_gfx11 =
++      capabilities.encoder_family == HSA_VEN_AMD_GRAPH_ENCODER_GFX11 && !requires_scratch;
++  // Only a scratchless Gfx11 list may omit this queue-binding relocation.
++  if (words.empty() || words.size() > 0x000fffff ||
++      (!scratchless_gfx11 && tmpring_patch_dword >= words.size()) ||
++      (scratchless_gfx11 && tmpring_patch_dword != static_cast<size_t>(-1))) {
+     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+   }
+ 

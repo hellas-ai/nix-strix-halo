@@ -1,0 +1,107 @@
+diff --git a/sglang/srt/managers/schedule_policy.py b/sglang/srt/managers/schedule_policy.py
+index d5f1b80..81dbe61 100644
+--- a/sglang/srt/managers/schedule_policy.py
++++ b/sglang/srt/managers/schedule_policy.py
+@@ -93,6 +93,53 @@ def _use_exact_chunk_fill() -> bool:
+     return envs.SGLANG_EXACT_CHUNK_FILL.get() and is_gfx95_supported()
+ 
+ 
++def _read_tail_merge_rows() -> int:
++    """SGLANG_PREFILL_TAIL_MERGE_ROWS: 0 (default) keeps every chunk at the chunk size."""
++    value = os.environ.get("SGLANG_PREFILL_TAIL_MERGE_ROWS", "").strip()
++    if not value:
++        return 0
++    try:
++        rows = int(value)
++    except ValueError:
++        raise ValueError(
++            f"SGLANG_PREFILL_TAIL_MERGE_ROWS must be a non-negative integer, got {value!r}"
++        ) from None
++    if rows < 0:
++        raise ValueError(f"SGLANG_PREFILL_TAIL_MERGE_ROWS must be >= 0, got {rows}")
++    return rows
++
++
++# A prompt that ends a few rows past a chunk boundary pays a whole extra forward
++# for them (weight streaming, ~5.4K launches, 80 collectives) and runs a row count
++# the tuned tiles do not cover. With this set, the rows past the last full chunk
++# ride with it when there are at most this many: one forward of up to
++# chunk + rows instead of two.
++TAIL_MERGE_ROWS = _read_tail_merge_rows()
++
++
++def tail_merge_fits(
++    rows: int,
++    limit: int,
++    merge_rows: int,
++    budget: Optional[int],
++    first_in_batch: bool,
++) -> bool:
++    """Whether the `rows - limit` rows after this chunk should join it.
++
++    `rows` is what the request still has to extend, `limit` the rows this chunk
++    could take, `budget` the batch's whole remaining chunk budget. Only the first
++    request of a batch merges, and only with an uncapped chunk, so a batch never
++    grows past chunk + merge_rows and a memory-capped chunk keeps its cap.
++    """
++    return (
++        merge_rows > 0
++        and first_in_batch
++        and budget is not None
++        and limit == budget
++        and 0 < rows - limit <= merge_rows
++    )
++
++
+ # Threshold for in-batch prefix cache.
+ # If a request has a matched prefix length (against existing cache) less than this value,
+ # the scheduler runs the in-batch prefix caching check for this request.
+@@ -847,6 +894,26 @@ class PrefillAdder:
+     def ceil_paged_tokens(self, tokens: int) -> int:
+         return -(-tokens // self.page_size) * self.page_size
+ 
++    def _merge_tail(self, req: Req, rows: int, limit: int) -> bool:
++        """Whether the rows past this chunk join it (SGLANG_PREFILL_TAIL_MERGE_ROWS)."""
++        if not tail_merge_fits(
++            rows,
++            limit,
++            TAIL_MERGE_ROWS,
++            self.rem_chunk_tokens,
++            not self.can_run_list,
++        ):
++            return False
++        # The merged forward must fit the KV budget too; otherwise chunk as usual.
++        return (
++            self.memory_budget.fit_chunk(
++                extend_input_len=rows,
++                max_new_tokens=self._swa_new_tokens(req),
++                chunk_limit=rows,
++            )
++            == rows
++        )
++
+     def budget_state(self):
+         no_token = not self.memory_budget.has_capacity()
+         # Gate new mamba slots separately: rem_total_tokens' full_evictable can't
+@@ -1154,6 +1221,8 @@ class PrefillAdder:
+         )
+         if _rem_tokens is None:
+             return req
++        if self._merge_tail(req, cand_extend_input_len, _rem_tokens):
++            _rem_tokens = cand_extend_input_len
+         truncated = cand_extend_input_len > _rem_tokens
+         new_len = min(cand_extend_input_len, _rem_tokens)
+         # The continuing chunk must fit. Keep reservation outside assert for -O.
+@@ -1508,7 +1577,11 @@ class PrefillAdder:
+             if extend_len <= 0:
+                 return AddReqResult.OTHER
+             max_new_tokens = 0
+-        elif chunk_tokens_limit is not None and chunk_fit_tokens > chunk_tokens_limit:
++        elif (
++            chunk_tokens_limit is not None
++            and chunk_fit_tokens > chunk_tokens_limit
++            and not self._merge_tail(req, extend_len, chunk_tokens_limit)
++        ):
+             if (
+                 has_chunked_req
+                 and get_schedule().schedule_policy == "shortest-prefill-first"

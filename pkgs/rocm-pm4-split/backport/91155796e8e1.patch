@@ -1,0 +1,2923 @@
+From 91155796e8e1fbcb5f1d6d694f9392c78dd035ca Mon Sep 17 00:00:00 2001
+From: Piotr Wilkin <ilintar@gmail.com>
+Date: Wed, 2 Sep 2026 22:00:39 +0200
+Subject: [PATCH] hip: add retained PM4 graph command lists
+
+Add an opaque ROCr command-list API with separate GFX11 and GFX12 encoders, queue-aware scratch binding, and reference-counted scratch leases. Integrate retained submission into HIP graph replay with fail-closed AQL fallback, lifecycle tests, architecture qualification policy, and measured correctness/performance documentation.
+---
+ .../clr/hipamd/src/hip_graph_internal.cpp     |  33 +-
+ .../clr/hipamd/src/hip_graph_internal.hpp     |   6 +
+ .../hipamd/src/hrr/playback/CMakeLists.txt    |  63 ++
+ projects/clr/rocclr/device/device.hpp         |  28 +
+ projects/clr/rocclr/device/rocm/rocrctx.cpp   |   6 +
+ projects/clr/rocclr/device/rocm/rocrctx.hpp   |  58 ++
+ .../clr/rocclr/device/rocm/rocvirtual.cpp     | 174 +++++
+ .../clr/rocclr/device/rocm/rocvirtual.hpp     |   8 +
+ projects/clr/rocclr/platform/command.hpp      |   8 +
+ projects/clr/rocclr/utils/flags.hpp           |   4 +
+ .../catch/config/configs/performance.yaml     |   5 +
+ .../graph/hipGraphCollapseCorrectness.cc      | 309 +++++++++
+ .../graph/graph_command_encoder_test.cc       | 252 +++++++
+ .../rocrtst/suites/test_common/CMakeLists.txt |  14 +
+ .../retained-pm4-command-lists.rst            | 323 +++++++++
+ projects/rocr-runtime/runtime/docs/index.rst  |   1 +
+ .../runtime/docs/sphinx/_toc.yml.in           |   1 +
+ .../runtime/hsa-runtime/CMakeLists.txt        |   1 +
+ .../hsa-runtime/core/inc/amd_aql_queue.h      |  10 +
+ .../core/inc/amd_graph_command_encoder.h      | 425 ++++++++++++
+ .../core/runtime/amd_aql_queue.cpp            |  49 +-
+ .../core/runtime/hsa_ven_amd_graph.cpp        | 629 ++++++++++++++++++
+ .../runtime/hsa-runtime/hsacore.dll.def       |   8 +-
+ .../runtime/hsa-runtime/hsacore.so.def        |   6 +
+ .../hsa-runtime/inc/hsa_ven_amd_graph.h       | 115 ++++
+ 25 files changed, 2531 insertions(+), 5 deletions(-)
+ create mode 100644 projects/clr/hipamd/src/hrr/playback/CMakeLists.txt
+ create mode 100644 projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc
+ create mode 100644 projects/rocr-runtime/runtime/docs/contribution/retained-pm4-command-lists.rst
+ create mode 100644 projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+ create mode 100644 projects/rocr-runtime/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
+ create mode 100644 projects/rocr-runtime/runtime/hsa-runtime/inc/hsa_ven_amd_graph.h
+
+diff --git a/projects/clr/hipamd/src/hip_graph_internal.cpp b/projects/clr/hipamd/src/hip_graph_internal.cpp
+index 13dbab201025..cd38ce278d28 100644
+--- a/projects/clr/hipamd/src/hip_graph_internal.cpp
++++ b/projects/clr/hipamd/src/hip_graph_internal.cpp
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "hip_graph_internal.hpp"
++#include "platform/activity.hpp"
+ 
+ #include <hsa/hsa.h>
+ 
+@@ -2529,6 +2530,11 @@ void GraphExecSegmented::EndAQLPacketUpdates() {
+ }
+ 
+ void GraphExecSegmented::RebuildAQLPacketBatch(PacketBatch& packetBatch) {
++  {
++    std::lock_guard<std::mutex> lock(packetBatch.pm4Cache->lock);
++    packetBatch.pm4Cache->batch.reset();
++    packetBatch.pm4Cache->rejected = false;
++  }
+   packetBatch.rebuildFlatBuffer();
+   packetBatch.restorePatchListPointers(sync_plan_.patch_list);
+   if (packetBatch.disabledNodeCount > 0) {
+@@ -2860,8 +2866,31 @@ hipError_t GraphExecSegmented::EnqueueSegment(const Segment& segment, hip::Strea
+     }
+ 
+     if (!flatData->empty()) {
+-      bool batchStatus = stream->vdev()->dispatchAqlPacketBatchFlat(
+-          *flatData, *flatHdrs, accumulate, attach_signal, true, false, metaData);
++      bool batchStatus = false;
++      bool usedPm4 = false;
++      if (DEBUG_HIP_GRAPH_PM4 && packetBatch.disabledNodeCount == 0 &&
++          !amd::activity_prof::IsEnabled(OP_ID_DISPATCH)) {
++        std::shared_ptr<amd::device::GraphPm4Batch> retained;
++        {
++          std::lock_guard<std::mutex> lock(packetBatch.pm4Cache->lock);
++          if (packetBatch.pm4Cache->batch == nullptr && !packetBatch.pm4Cache->rejected) {
++            packetBatch.pm4Cache->batch =
++                stream->vdev()->CreateGraphPm4Batch(*flatData, *flatHdrs);
++            packetBatch.pm4Cache->rejected = packetBatch.pm4Cache->batch == nullptr;
++          }
++          retained = packetBatch.pm4Cache->batch;
++        }
++        if (retained != nullptr) {
++          accumulate->retainGraphPm4Batch(retained);
++          batchStatus = stream->vdev()->DispatchGraphPm4Batch(
++              retained, accumulate, attach_signal, false);
++          usedPm4 = batchStatus;
++        }
++      }
++      if (!usedPm4) {
++        batchStatus = stream->vdev()->dispatchAqlPacketBatchFlat(
++            *flatData, *flatHdrs, accumulate, attach_signal, true, false, metaData);
++      }
+       if (!batchStatus) {
+         return hipErrorUnknown;
+       }
+diff --git a/projects/clr/hipamd/src/hip_graph_internal.hpp b/projects/clr/hipamd/src/hip_graph_internal.hpp
+index 08d36a6c25f6..c026ccc28825 100644
+--- a/projects/clr/hipamd/src/hip_graph_internal.hpp
++++ b/projects/clr/hipamd/src/hip_graph_internal.hpp
+@@ -1336,6 +1336,12 @@ class GraphExecSegmented : public GraphExecBase {
+     std::unordered_map<GraphNode*, size_t> nodeToRangeIndex;  // O(1) lookup
+     int disabledNodeCount = 0;  // Count of currently disabled nodes
+     bool updatePending = false;
++    struct Pm4Cache {
++      std::mutex lock;
++      std::shared_ptr<amd::device::GraphPm4Batch> batch;
++      bool rejected = false;
++    };
++    std::shared_ptr<Pm4Cache> pm4Cache = std::make_shared<Pm4Cache>();
+     // Standalone barrier reserved (at BuildSyncPlan) for the last batch of a
+     // segment whose completion signal is embedded on its last kernel packet.
+     // Only spliced into the *filtered* dispatch buffer by rebuildFilteredLists
+diff --git a/projects/clr/hipamd/src/hrr/playback/CMakeLists.txt b/projects/clr/hipamd/src/hrr/playback/CMakeLists.txt
+new file mode 100644
+index 000000000000..a78e5ae95454
+--- /dev/null
++++ b/projects/clr/hipamd/src/hrr/playback/CMakeLists.txt
+@@ -0,0 +1,63 @@
++# HRR Playback Tools
++# Built as part of the main HIP runtime CMake tree.
++# HIP headers are inherited from amdhip64 via target_link_libraries.
++
++# hrr_api_args.h and capture headers are one directory up (hipamd/src/hrr/).
++set(HRR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
++
++# C++20 on Windows (MSVC requires it for some std features), C++17 on Linux.
++if(WIN32)
++  set(HRR_CXX_STANDARD 20)
++else()
++  set(HRR_CXX_STANDARD 17)
++endif()
++
++# ---------------------------------------------------------------------------
++# hrr_reader — archive loader (STATIC)
++# ---------------------------------------------------------------------------
++add_library(hrr_reader STATIC hrr_reader.cpp)
++set_target_properties(hrr_reader PROPERTIES CXX_STANDARD ${HRR_CXX_STANDARD} CXX_STANDARD_REQUIRED ON)
++target_include_directories(hrr_reader PUBLIC
++  ${CMAKE_CURRENT_SOURCE_DIR}
++  ${HRR_DIR}
++  ${HIP_COMMON_INCLUDE_DIR}
++  ${PROJECT_BINARY_DIR}/include
++)
++target_compile_definitions(hrr_reader PRIVATE
++  HRR_API_ARGS_IMPLEMENTATION
++  $<$<BOOL:${WIN32}>:NOMINMAX WIN32_LEAN_AND_MEAN>
++)
++
++# ---------------------------------------------------------------------------
++# hrr-playback — full replay tool
++# ---------------------------------------------------------------------------
++add_executable(hrr-playback
++  hrr_playback.cpp
++  hip_playback.cpp
++  hip_playback_generated.cpp
++)
++set_target_properties(hrr-playback PROPERTIES CXX_STANDARD ${HRR_CXX_STANDARD} CXX_STANDARD_REQUIRED ON)
++target_include_directories(hrr-playback PRIVATE
++  ${CMAKE_CURRENT_SOURCE_DIR}
++  ${HRR_DIR}
++  ${HIP_COMMON_INCLUDE_DIR}
++  ${PROJECT_SOURCE_DIR}/include
++  ${PROJECT_BINARY_DIR}/include
++)
++target_compile_definitions(hrr-playback PRIVATE
++  __HIP_PLATFORM_AMD__
++  $<$<BOOL:${WIN32}>:NOMINMAX WIN32_LEAN_AND_MEAN>
++)
++find_package(Threads REQUIRED)
++find_package(hsa-runtime64 REQUIRED)
++target_link_libraries(hrr-playback PRIVATE
++  hrr_reader
++  amdhip64
++  hsa-runtime64::hsa-runtime64
++  Threads::Threads)
++
++install(TARGETS hrr-playback RUNTIME DESTINATION bin)
++
++# Crash-truncation recovery is covered by the hip-tests catch suite
++# (projects/hip-tests/catch/unit/hrr/hrr_recovery.cc, run via HrrTest "[hrr]"),
++# so it is part of CI rather than a standalone EXCLUDE_FROM_ALL target.
+diff --git a/projects/clr/rocclr/device/device.hpp b/projects/clr/rocclr/device/device.hpp
+index d57c5fff2b6d..aa8cae42e75e 100644
+--- a/projects/clr/rocclr/device/device.hpp
++++ b/projects/clr/rocclr/device/device.hpp
+@@ -40,6 +40,7 @@
+ #include <map>
+ #include <mutex>
+ #include <list>
++#include <memory>
+ #include <set>
+ #include <unordered_set>
+ #include <utility>
+@@ -1287,6 +1288,16 @@ class ThreadTrace {
+   ThreadTrace& operator=(const ThreadTrace&);
+ };
+ 
++//! Backend-owned retained command stream for a captured graph packet batch.
++//!
++//! The HIP graph owns the shared pointer. Individual launches retain another
++//! reference through their completion command, so a graph update or destroy
++//! cannot free backend command memory while the GPU is still consuming it.
++class GraphPm4Batch {
++ public:
++  virtual ~GraphPm4Batch() = default;
++};
++
+ //! A device execution environment.
+ class VirtualDevice : public amd::ReferenceCountedObject {
+  public:
+@@ -1393,6 +1404,23 @@ class VirtualDevice : public amd::ReferenceCountedObject {
+     return false;
+   }
+ 
++  //! Try to lower a fully captured graph batch into one retained backend PM4 IB.
++  //! Returning nullptr means the packet shape or device is unsupported and the
++  //! caller must retain the ordinary AQL path.
++  virtual std::shared_ptr<GraphPm4Batch> CreateGraphPm4Batch(
++      const amd::AlignedVector64<uint8_t>& flatPacketData,
++      const std::vector<uint32_t>& validFullHeaders) {
++    return nullptr;
++  }
++
++  //! Submit a retained graph PM4 IB through the stream's native queue.
++  virtual bool DispatchGraphPm4Batch(const std::shared_ptr<GraphPm4Batch>& batch,
++                                     amd::AccumulateCommand* vcmd,
++                                     bool attach_signal = false,
++                                     bool blocking = false) {
++    return false;
++  }
++
+   //! Returns the number of outstanding HSA async handlers
+   std::atomic<uint64_t>& QueuedAsyncHandlers() const { return queued_async_handlers_; }
+ 
+diff --git a/projects/clr/rocclr/device/rocm/rocrctx.cpp b/projects/clr/rocclr/device/rocm/rocrctx.cpp
+index a43a1a33b3f1..6912e8fd6e70 100644
+--- a/projects/clr/rocclr/device/rocm/rocrctx.cpp
++++ b/projects/clr/rocclr/device/rocm/rocrctx.cpp
+@@ -97,6 +97,12 @@ bool Hsa::LoadLib() {
+   GET_ROCR_SYMBOL(hsa_amd_register_system_event_handler)
+   GET_ROCR_SYMBOL(hsa_amd_queue_set_priority)
+   GET_ROCR_OPTIONAL_SYMBOL(hsa_amd_queue_create)
++  GET_ROCR_OPTIONAL_SYMBOL(hsa_ven_amd_graph_get_capabilities)
++  GET_ROCR_OPTIONAL_SYMBOL(hsa_ven_amd_graph_command_list_create)
++  GET_ROCR_OPTIONAL_SYMBOL(hsa_ven_amd_graph_command_list_destroy)
++  GET_ROCR_OPTIONAL_SYMBOL(hsa_ven_amd_graph_command_list_get_info)
++  GET_ROCR_OPTIONAL_SYMBOL(hsa_ven_amd_graph_command_list_materialize_packet)
++  GET_ROCR_OPTIONAL_SYMBOL(hsa_ven_amd_graph_command_list_materialize_packet_for_queue)
+   GET_ROCR_SYMBOL(hsa_amd_memory_async_copy_rect)
+   GET_ROCR_SYMBOL(hsa_amd_memory_lock_to_pool)
+   GET_ROCR_SYMBOL(hsa_amd_signal_value_pointer)
+diff --git a/projects/clr/rocclr/device/rocm/rocrctx.hpp b/projects/clr/rocclr/device/rocm/rocrctx.hpp
+index c7eaf7fce531..ed3a57951965 100644
+--- a/projects/clr/rocclr/device/rocm/rocrctx.hpp
++++ b/projects/clr/rocclr/device/rocm/rocrctx.hpp
+@@ -16,6 +16,7 @@
+ #include "amd_hsa_signal.h"
+ #include "hsa_ven_amd_loader.h"
+ #include "hsa_ven_amd_aqlprofile.h"
++#include "hsa_ven_amd_graph.h"
+ #else
+ #include "hsa/hsa.h"
+ #include "hsa/hsa_ext_image.h"
+@@ -23,10 +24,22 @@
+ #include "hsa/amd_hsa_signal.h"
+ #include "hsa/hsa_ven_amd_loader.h"
+ #include "hsa/hsa_ven_amd_aqlprofile.h"
++#include "hsa/hsa_ven_amd_graph.h"
+ #endif
+ 
+ typedef hsa_status_t HSA_API hsa_amd_queue_create_fn(
+     hsa_agent_t agent, hsa_amd_queue_create_desc_t* descs, uint32_t num_descs);
++typedef decltype(hsa_ven_amd_graph_get_capabilities) hsa_ven_amd_graph_get_capabilities_fn;
++typedef decltype(hsa_ven_amd_graph_command_list_create)
++    hsa_ven_amd_graph_command_list_create_fn;
++typedef decltype(hsa_ven_amd_graph_command_list_destroy)
++    hsa_ven_amd_graph_command_list_destroy_fn;
++typedef decltype(hsa_ven_amd_graph_command_list_get_info)
++    hsa_ven_amd_graph_command_list_get_info_fn;
++typedef decltype(hsa_ven_amd_graph_command_list_materialize_packet)
++    hsa_ven_amd_graph_command_list_materialize_packet_fn;
++typedef decltype(hsa_ven_amd_graph_command_list_materialize_packet_for_queue)
++    hsa_ven_amd_graph_command_list_materialize_packet_for_queue_fn;
+ 
+ namespace amd {
+ namespace roc {
+@@ -109,6 +122,14 @@ struct RocrEntryPoints {
+   decltype(hsa_amd_register_system_event_handler)* hsa_amd_register_system_event_handler_;
+   decltype(hsa_amd_queue_set_priority)* hsa_amd_queue_set_priority_;
+   hsa_amd_queue_create_fn* hsa_amd_queue_create_;
++  hsa_ven_amd_graph_get_capabilities_fn* hsa_ven_amd_graph_get_capabilities_;
++  hsa_ven_amd_graph_command_list_create_fn* hsa_ven_amd_graph_command_list_create_;
++  hsa_ven_amd_graph_command_list_destroy_fn* hsa_ven_amd_graph_command_list_destroy_;
++  hsa_ven_amd_graph_command_list_get_info_fn* hsa_ven_amd_graph_command_list_get_info_;
++  hsa_ven_amd_graph_command_list_materialize_packet_fn*
++      hsa_ven_amd_graph_command_list_materialize_packet_;
++  hsa_ven_amd_graph_command_list_materialize_packet_for_queue_fn*
++      hsa_ven_amd_graph_command_list_materialize_packet_for_queue_;
+   decltype(hsa_amd_memory_async_copy_rect)* hsa_amd_memory_async_copy_rect_;
+   decltype(hsa_amd_memory_lock_to_pool)* hsa_amd_memory_lock_to_pool_;
+   decltype(hsa_amd_signal_value_pointer)* hsa_amd_signal_value_pointer_;
+@@ -200,6 +221,43 @@ class Hsa : public amd::AllStatic {
+                                          hsa_queue_info_attribute_t attribute, void* value) {
+     return ROCR_DYN(hsa_amd_queue_get_info)(queue, attribute, value);
+   }
++  static bool amd_graph_command_list_available() {
++#ifdef ROCR_DYN_DLL
++    return cep_.hsa_ven_amd_graph_get_capabilities_ != nullptr &&
++           cep_.hsa_ven_amd_graph_command_list_create_ != nullptr &&
++           cep_.hsa_ven_amd_graph_command_list_destroy_ != nullptr &&
++           cep_.hsa_ven_amd_graph_command_list_get_info_ != nullptr &&
++           cep_.hsa_ven_amd_graph_command_list_materialize_packet_ != nullptr &&
++           cep_.hsa_ven_amd_graph_command_list_materialize_packet_for_queue_ != nullptr;
++#else
++    return true;
++#endif
++  }
++  static hsa_status_t amd_graph_get_capabilities(
++      hsa_agent_t agent, hsa_ven_amd_graph_capabilities_t* capabilities) {
++    return ROCR_DYN(hsa_ven_amd_graph_get_capabilities)(agent, capabilities);
++  }
++  static hsa_status_t amd_graph_command_list_create(
++      hsa_agent_t agent, const hsa_ven_amd_graph_command_list_desc_t* desc,
++      hsa_ven_amd_graph_command_list_t* command_list) {
++    return ROCR_DYN(hsa_ven_amd_graph_command_list_create)(agent, desc, command_list);
++  }
++  static hsa_status_t amd_graph_command_list_destroy(
++      hsa_ven_amd_graph_command_list_t command_list) {
++    return ROCR_DYN(hsa_ven_amd_graph_command_list_destroy)(command_list);
++  }
++  static hsa_status_t amd_graph_command_list_get_info(
++      hsa_ven_amd_graph_command_list_t command_list,
++      hsa_ven_amd_graph_command_list_info_t attribute, void* value) {
++    return ROCR_DYN(hsa_ven_amd_graph_command_list_get_info)(command_list, attribute, value);
++  }
++  static hsa_status_t amd_graph_command_list_materialize_packet(
++      hsa_ven_amd_graph_command_list_t command_list, hsa_queue_t* queue,
++      hsa_fence_scope_t acquire_scope, hsa_fence_scope_t release_scope, uint32_t barrier,
++      hsa_signal_t completion_signal, hsa_ven_amd_graph_materialized_packet_t* packet) {
++    return ROCR_DYN(hsa_ven_amd_graph_command_list_materialize_packet_for_queue)(
++        command_list, queue, acquire_scope, release_scope, barrier, completion_signal, packet);
++  }
+   static uint64_t queue_load_read_index_scacquire(const hsa_queue_t* queue) {
+     return ROCR_DYN(hsa_queue_load_read_index_scacquire)(queue);
+   }
+diff --git a/projects/clr/rocclr/device/rocm/rocvirtual.cpp b/projects/clr/rocclr/device/rocm/rocvirtual.cpp
+index 12e2d22bafcd..f499eeac0415 100644
+--- a/projects/clr/rocclr/device/rocm/rocvirtual.cpp
++++ b/projects/clr/rocclr/device/rocm/rocvirtual.cpp
+@@ -1703,6 +1703,180 @@ bool VirtualGPU::dispatchAqlPacket(AqlPacket* packet, uint16_t header,
+     return dispatchGenericAqlPacket(packet, header, rest, blocking, attach_signal);
+   }
+ }
++// ================================================================================================
++namespace {
++
++class RocrGraphPm4Batch final : public amd::device::GraphPm4Batch {
++ public:
++  RocrGraphPm4Batch(const Device& device, hsa_ven_amd_graph_command_list_t command_list)
++      : device_(device), command_list_(command_list) {}
++
++  ~RocrGraphPm4Batch() override {
++    if (command_list_.handle != 0) {
++      Hsa::amd_graph_command_list_destroy(command_list_);
++    }
++  }
++
++  const Device& device() const { return device_; }
++
++  bool Materialize(hsa_queue_t* queue,
++                   hsa_ven_amd_graph_materialized_packet_t* packet) const {
++    return Hsa::amd_graph_command_list_materialize_packet(
++               command_list_, queue, HSA_FENCE_SCOPE_SYSTEM, HSA_FENCE_SCOPE_SYSTEM, 1,
++               hsa_signal_t{0}, packet) == HSA_STATUS_SUCCESS;
++  }
++
++ private:
++  const Device& device_;
++  hsa_ven_amd_graph_command_list_t command_list_;
++};
++
++}  // namespace
++
++std::shared_ptr<amd::device::GraphPm4Batch> VirtualGPU::CreateGraphPm4Batch(
++    const amd::AlignedVector64<uint8_t>& flatPacketData,
++    const std::vector<uint32_t>& validFullHeaders) {
++  if (!Hsa::amd_graph_command_list_available() || validFullHeaders.size() < 2 ||
++      flatPacketData.size() != validFullHeaders.size() * sizeof(hsa_kernel_dispatch_packet_t) ||
++      amd::activity_prof::IsEnabled(OP_ID_DISPATCH)) {
++    return nullptr;
++  }
++
++  hsa_ven_amd_graph_capabilities_t capabilities{};
++  capabilities.struct_size = sizeof(capabilities);
++  const bool allow_unqualified = DEBUG_HIP_GRAPH_PM4_UNQUALIFIED;
++  if (Hsa::amd_graph_get_capabilities(gpu_device_, &capabilities) != HSA_STATUS_SUCCESS ||
++      (capabilities.flags & HSA_VEN_AMD_GRAPH_CAPABILITY_COMPILE_SUPPORTED) == 0 ||
++      ((capabilities.flags & HSA_VEN_AMD_GRAPH_CAPABILITY_RUNTIME_QUALIFIED) == 0 &&
++       !allow_unqualified) ||
++      capabilities.encoder_family == HSA_VEN_AMD_GRAPH_ENCODER_NONE) {
++    return nullptr;
++  }
++
++  std::vector<hsa_kernel_dispatch_packet_t> packets(validFullHeaders.size());
++  std::vector<uint32_t> kernel_flags(validFullHeaders.size(), 0);
++  std::vector<hsa_ven_amd_graph_dependency_t> dependencies(
++      validFullHeaders.size() - 1, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW);
++  for (size_t i = 0; i < validFullHeaders.size(); ++i) {
++    const uint16_t header = static_cast<uint16_t>(validFullHeaders[i]);
++    const uint8_t type =
++        extractAqlBits(header, HSA_PACKET_HEADER_TYPE, HSA_PACKET_HEADER_WIDTH_TYPE);
++    if (type != HSA_PACKET_TYPE_KERNEL_DISPATCH) {
++      return nullptr;
++    }
++    std::memcpy(&packets[i],
++                flatPacketData.data() + i * sizeof(hsa_kernel_dispatch_packet_t),
++                sizeof(hsa_kernel_dispatch_packet_t));
++    packets[i].header = header;
++    packets[i].setup = static_cast<uint16_t>(validFullHeaders[i] >> 16);
++    if (packets[i].completion_signal.handle != 0) {
++      return nullptr;
++    }
++    auto kernel_it = dev().KernelMap().find(packets[i].kernel_object);
++    if (kernel_it == dev().KernelMap().end()) {
++      return nullptr;
++    }
++    if (kernel_it->second.KernalHasDynamicCallStack()) {
++      kernel_flags[i] |= HSA_VEN_AMD_GRAPH_KERNEL_DYNAMIC_CALLSTACK;
++    }
++  }
++
++  hsa_ven_amd_graph_command_list_desc_t desc{};
++  desc.struct_size = sizeof(desc);
++  desc.packets = packets.data();
++  desc.packet_count = packets.size();
++  desc.dependencies = dependencies.data();
++  desc.dependency_count = dependencies.size();
++  desc.kernel_flags = kernel_flags.data();
++  desc.kernel_flag_count = kernel_flags.size();
++  if (allow_unqualified) {
++    desc.flags |= HSA_VEN_AMD_GRAPH_COMMAND_LIST_ALLOW_UNQUALIFIED;
++  }
++  hsa_ven_amd_graph_command_list_t command_list{};
++  const hsa_status_t create_status =
++      Hsa::amd_graph_command_list_create(gpu_device_, &desc, &command_list);
++  if (create_status != HSA_STATUS_SUCCESS) {
++    ClPrint(amd::LOG_INFO, amd::LOG_CODE,
++            "[hipGraph][PM4] ROCR command-list fallback for %zu packets: status=%d",
++            validFullHeaders.size(), create_status);
++    return nullptr;
++  }
++
++  uint32_t dwords = 0;
++  uint32_t dispatches = 0;
++  uint32_t max_private_segment_size = 0;
++  if (Hsa::amd_graph_command_list_get_info(
++          command_list, HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_DWORD_COUNT, &dwords) !=
++          HSA_STATUS_SUCCESS ||
++      Hsa::amd_graph_command_list_get_info(
++          command_list, HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_DISPATCH_COUNT,
++          &dispatches) != HSA_STATUS_SUCCESS ||
++      Hsa::amd_graph_command_list_get_info(
++          command_list, HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_MAX_PRIVATE_SEGMENT_SIZE,
++          &max_private_segment_size) != HSA_STATUS_SUCCESS) {
++    Hsa::amd_graph_command_list_destroy(command_list);
++    return nullptr;
++  }
++  ClPrint(amd::LOG_INFO, amd::LOG_CODE,
++          "[hipGraph][PM4] retained %zu dispatches in %zu dwords, max private %u bytes",
++          static_cast<size_t>(dispatches), static_cast<size_t>(dwords),
++          max_private_segment_size);
++  return std::make_shared<RocrGraphPm4Batch>(dev(), command_list);
++}
++
++bool VirtualGPU::DispatchGraphPm4Batch(
++    const std::shared_ptr<amd::device::GraphPm4Batch>& batch, amd::AccumulateCommand* vcmd,
++    bool attach_signal, bool blocking) {
++  auto retained = std::dynamic_pointer_cast<RocrGraphPm4Batch>(batch);
++  if (retained == nullptr || &retained->device() != &dev() || vcmd == nullptr) {
++    return false;
++  }
++
++  hsa_ven_amd_graph_materialized_packet_t materialized{};
++  if (!retained->Materialize(gpu_queue_, &materialized)) {
++    return false;
++  }
++
++  std::scoped_lock lock(execution());
++  profilingBegin(*vcmd);
++  dispatchBlockingWait(nullptr);
++  hsa_ext_amd_aql_pm4_packet_t packet{};
++  std::memcpy(&packet, materialized.packet.bytes, sizeof(packet));
++  uint16_t header = static_cast<uint16_t>(materialized.full_header);
++  const bool requested_barrier = (header & kBarrierBit) != 0;
++  AqlSlotReservation reservation = ReserveAqlSlots(1);
++  const uint64_t index = reservation.start_slot;
++  if (requested_barrier) {
++    OptimizeStreamOrderingBarrier(header, reservation);
++  }
++  RecordAqlPacketHeader(reservation, 0, header);
++  CompleteAqlSubmission(reservation);
++
++  addSystemScope_ = false;
++  fence_state_ = amd::Device::kCacheStateSystem;
++  setFenceDirty(false);
++  const bool attachSignal = timestamp_ != nullptr || attach_signal || blocking;
++  packet.completion_signal =
++      Barriers().ActiveSignal(kInitSignalValueOne, timestamp_, attachSignal);
++
++  const uint32_t queue_mask = gpu_queue_->size - 1;
++  WaitForQueueSlot(index, queue_mask);
++  TrackQueueProgress(packet, index);
++  auto* slot = &reinterpret_cast<hsa_ext_amd_aql_pm4_packet_t*>(
++      gpu_queue_->base_address)[index & queue_mask];
++  const uint16_t vendor_header = static_cast<uint16_t>(materialized.full_header >> 16);
++  writePacketToRingBuffer(slot, &packet, header, vendor_header, index);
++  ringQueueDoorbell(index);
++  hasPendingDispatch_ = true;
++
++  bool status = true;
++  if (blocking && !Barriers().WaitCurrent()) {
++    status = false;
++  }
++  profilingEnd();
++  return status;
++}
++
+ // ================================================================================================
+ // Publish one metadata-prefetch packet (256B = 4 x 64B segments) to the metadata ring at |dst|.
+ // |src| is the captured metadata packet with valid headers already baked into each segment
+diff --git a/projects/clr/rocclr/device/rocm/rocvirtual.hpp b/projects/clr/rocclr/device/rocm/rocvirtual.hpp
+index f0c2aa0da012..e8e72e79502e 100644
+--- a/projects/clr/rocclr/device/rocm/rocvirtual.hpp
++++ b/projects/clr/rocclr/device/rocm/rocvirtual.hpp
+@@ -740,6 +740,14 @@ class VirtualGPU : public device::VirtualDevice {
+                                   bool blocking = false,
+                                   const std::vector<uint8_t>* flatMetadataData = nullptr) override;
+ 
++  std::shared_ptr<amd::device::GraphPm4Batch> CreateGraphPm4Batch(
++      const amd::AlignedVector64<uint8_t>& flatPacketData,
++      const std::vector<uint32_t>& validFullHeaders) override;
++
++  bool DispatchGraphPm4Batch(const std::shared_ptr<amd::device::GraphPm4Batch>& batch,
++                             amd::AccumulateCommand* vcmd, bool attach_signal = false,
++                             bool blocking = false) override;
++
+   template <typename AqlPacket> bool dispatchGenericAqlPacket(AqlPacket* packet, uint16_t header,
+                                                               uint16_t rest, bool blocking,
+                                                               bool attach_signal = false);
+diff --git a/projects/clr/rocclr/platform/command.hpp b/projects/clr/rocclr/platform/command.hpp
+index 2b9c2a1b335c..b1731efe9ca6 100644
+--- a/projects/clr/rocclr/platform/command.hpp
++++ b/projects/clr/rocclr/platform/command.hpp
+@@ -1746,6 +1746,8 @@ class AccumulateCommand : public Command {
+   //! When false, the destructor does not destroy hw_events_ (an external owner,
+   //! e.g. the graph signal pool, reclaims them instead).
+   bool owns_hw_events_ = true;
++  //! Keep retained graph command buffers alive until this launch completes.
++  std::vector<std::shared_ptr<device::GraphPm4Batch>> graph_pm4_batches_;
+ 
+  public:
+   AccumulateCommand(HostQueue& queue, const EventWaitList& eventWaitList = nullWaitList,
+@@ -1778,6 +1780,12 @@ class AccumulateCommand : public Command {
+   //! them across launches instead.
+   void setOwnsHwEvents(bool owns) { owns_hw_events_ = owns; }
+ 
++  void retainGraphPm4Batch(const std::shared_ptr<device::GraphPm4Batch>& batch) {
++    if (batch != nullptr) {
++      graph_pm4_batches_.push_back(batch);
++    }
++  }
++
+   //! Reserve one graph kernel dispatch slot and return its index. |name| must
+   //! not be nullptr — use "<unknown>" when it cannot be resolved.
+   uint32_t addKernelDispatch(const char* name, uint32_t queue_index) {
+diff --git a/projects/clr/rocclr/utils/flags.hpp b/projects/clr/rocclr/utils/flags.hpp
+index 7fba2fc39265..65acee8b2c35 100644
+--- a/projects/clr/rocclr/utils/flags.hpp
++++ b/projects/clr/rocclr/utils/flags.hpp
+@@ -247,6 +247,10 @@ release(uint, DEBUG_HIP_GRAPH_BATCH_SIZE, 256,                                \
+         "Number of graph nodes to batch at a time")                           \
+ release(bool, DEBUG_HIP_GRAPH_MERGE_COLLAPSED, false,                         \
+         "Merge fully captured single-stream graph segments")                 \
++release(bool, DEBUG_HIP_GRAPH_PM4, false,                                    \
++        "Lower supported single-stream graph batches to retained PM4")       \
++release(bool, DEBUG_HIP_GRAPH_PM4_UNQUALIFIED, false,                        \
++        "Allow retained PM4 on compile-supported but unqualified ASICs")    \
+ release(uint, DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING, 0,                          \
+         "Segment scheduling mode (segmented path only): "                      \
+         "0=Hybrid/auto, 1=Round-robin, 2=DFS")                                \
+diff --git a/projects/hip-tests/catch/config/configs/performance.yaml b/projects/hip-tests/catch/config/configs/performance.yaml
+index 5f7db8c99041..1dea9f7e0639 100644
+--- a/projects/hip-tests/catch/config/configs/performance.yaml
++++ b/projects/hip-tests/catch/config/configs/performance.yaml
+@@ -261,5 +261,10 @@ performance:
+   Performance_Graph_CollapseCorrectness: *level_2
+   Performance_Graph_DisabledBoundarySynchronization: *level_2
+   Performance_Graph_CollapsedIndependentCompletion: *level_2
++  Performance_Graph_RmwAndAsyncDestroy: *level_2
++  Performance_Graph_RmwUpdateAndDisable: *level_2
++  Performance_Graph_Pm4ConcurrentLaunchAndTrim: *level_2
++  Performance_Graph_Pm4QueueScratch: *level_2
++  Performance_Graph_Pm4QueueScratchConcurrentLaunchAndTrim: *level_2
+   Performance_hipPerfSharedQueueAnyOrderOverlap: *level_2
+   Performance_hipPerfSharedQueueAnyOrderOverlap_EventDependency: *level_2
+diff --git a/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc b/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
+index 02254e5deb1a..b84d67960008 100644
+--- a/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
++++ b/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
+@@ -23,6 +23,7 @@
+ #include <algorithm>
+ #include <cstdint>
+ #include <cstdlib>
++#include <thread>
+ #include <vector>
+ 
+ namespace {
+@@ -60,6 +61,30 @@ __global__ void k_delay_set(int* output, int index, uint64_t count) {
+   output[index] = 1;
+ }
+ 
++__global__ void k_increment(int* value) { value[0] = value[0] + 1; }
++
++__global__ void k_add_value(int* value, int addend) { value[0] = value[0] + addend; }
++
++__global__ void k_atomic_increment(int* value) { atomicAdd(value, 1); }
++
++__global__ void k_private_increment(int* value, int selector) {
++  volatile int scratch[8];
++  const int slot = (selector + static_cast<int>(threadIdx.x)) & 7;
++  scratch[slot] = value[0] + 1;
++  if (threadIdx.x == 0) {
++    value[0] = scratch[slot];
++  }
++}
++
++__global__ void k_private_atomic_increment(int* value, int selector) {
++  volatile int scratch[8];
++  const int slot = (selector + static_cast<int>(threadIdx.x)) & 7;
++  scratch[slot] = 1;
++  if (threadIdx.x == 0) {
++    atomicAdd(value, scratch[slot]);
++  }
++}
++
+ hipGraphNode_t AddKernel(hipGraph_t graph, std::vector<hipGraphNode_t> deps,
+                          void* func, std::vector<void*> args) {
+   hipKernelNodeParams p{};
+@@ -268,3 +293,287 @@ TEST_CASE("Performance_Graph_CollapsedIndependentCompletion") {
+   HIP_CHECK(hipGraphDestroy(graph));
+   HIP_CHECK(hipFree(output));
+ }
++
++TEST_CASE("Performance_Graph_RmwAndAsyncDestroy") {
++  constexpr int kNodes = 512;
++  constexpr int kLaunches = 64;
++
++  int* device_value = nullptr;
++  HIP_CHECK(hipMalloc(&device_value, sizeof(*device_value)));
++
++  hipGraph_t graph{};
++  HIP_CHECK(hipGraphCreate(&graph, 0));
++  hipGraphNode_t dependency = nullptr;
++  void* value_arg = device_value;
++  void* kernel_args[] = {&value_arg};
++  hipKernelNodeParams params{};
++  params.func = reinterpret_cast<void*>(k_increment);
++  params.gridDim = dim3(1);
++  params.blockDim = dim3(1);
++  params.kernelParams = kernel_args;
++
++  for (int i = 0; i < kNodes; ++i) {
++    hipGraphNode_t node{};
++    HIP_CHECK(hipGraphAddKernelNode(&node, graph, dependency ? &dependency : nullptr,
++                                    dependency ? 1 : 0, &params));
++    dependency = node;
++  }
++
++  hipGraphExec_t exec{};
++  HIP_CHECK(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
++  hipStream_t stream{};
++  HIP_CHECK(hipStreamCreate(&stream));
++  HIP_CHECK(hipMemsetAsync(device_value, 0, sizeof(*device_value), stream));
++
++  for (int i = 0; i < kLaunches; ++i) {
++    HIP_CHECK(hipGraphLaunch(exec, stream));
++  }
++
++  // Queued graph work must remain valid through the following ordered copy.
++  HIP_CHECK(hipGraphExecDestroy(exec));
++  HIP_CHECK(hipGraphDestroy(graph));
++
++  int host_value = 0;
++  HIP_CHECK(
++      hipMemcpyAsync(&host_value, device_value, sizeof(host_value), hipMemcpyDeviceToHost, stream));
++  HIP_CHECK(hipStreamSynchronize(stream));
++  REQUIRE(host_value == kNodes * kLaunches);
++
++  HIP_CHECK(hipStreamDestroy(stream));
++  HIP_CHECK(hipFree(device_value));
++}
++
++TEST_CASE("Performance_Graph_RmwUpdateAndDisable") {
++  constexpr int kNodes = 128;
++  constexpr int kIterations = 32;
++  constexpr int kUpdatedNode = kNodes / 2;
++
++  int* device_value = nullptr;
++  HIP_CHECK(hipMalloc(&device_value, sizeof(*device_value)));
++
++  hipGraph_t graph{};
++  HIP_CHECK(hipGraphCreate(&graph, 0));
++  std::vector<hipGraphNode_t> nodes;
++  nodes.reserve(kNodes);
++  hipGraphNode_t dependency = nullptr;
++  void* value_arg = device_value;
++  int addend = 1;
++  void* kernel_args[] = {&value_arg, &addend};
++  hipKernelNodeParams params{};
++  params.func = reinterpret_cast<void*>(k_add_value);
++  params.gridDim = dim3(1);
++  params.blockDim = dim3(1);
++  params.kernelParams = kernel_args;
++
++  for (int i = 0; i < kNodes; ++i) {
++    hipGraphNode_t node{};
++    HIP_CHECK(hipGraphAddKernelNode(&node, graph, dependency ? &dependency : nullptr,
++                                    dependency ? 1 : 0, &params));
++    nodes.push_back(node);
++    dependency = node;
++  }
++
++  hipGraphExec_t exec{};
++  HIP_CHECK(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
++  hipStream_t stream{};
++  HIP_CHECK(hipStreamCreate(&stream));
++
++  auto run_and_check = [&](int expected) {
++    for (int iteration = 0; iteration < kIterations; ++iteration) {
++      HIP_CHECK(hipMemsetAsync(device_value, 0, sizeof(*device_value), stream));
++      HIP_CHECK(hipGraphLaunch(exec, stream));
++      int actual = 0;
++      HIP_CHECK(hipMemcpyAsync(&actual, device_value, sizeof(actual), hipMemcpyDeviceToHost,
++                               stream));
++      HIP_CHECK(hipStreamSynchronize(stream));
++      REQUIRE(actual == expected);
++    }
++  };
++
++  run_and_check(kNodes);
++
++  int updated_addend = 7;
++  void* updated_args[] = {&value_arg, &updated_addend};
++  hipKernelNodeParams updated_params = params;
++  updated_params.kernelParams = updated_args;
++  HIP_CHECK(hipGraphExecKernelNodeSetParams(exec, nodes[kUpdatedNode], &updated_params));
++  run_and_check(kNodes + updated_addend - addend);
++
++  HIP_CHECK(hipGraphNodeSetEnabled(exec, nodes[kUpdatedNode], 0));
++  run_and_check(kNodes - 1);
++  HIP_CHECK(hipGraphNodeSetEnabled(exec, nodes[kUpdatedNode], 1));
++  run_and_check(kNodes + updated_addend - addend);
++
++  HIP_CHECK(hipStreamDestroy(stream));
++  HIP_CHECK(hipGraphExecDestroy(exec));
++  HIP_CHECK(hipGraphDestroy(graph));
++  HIP_CHECK(hipFree(device_value));
++}
++
++TEST_CASE("Performance_Graph_Pm4ConcurrentLaunchAndTrim") {
++  constexpr int kNodes = 64;
++  constexpr int kLaunches = 32;
++
++  int* device_value = nullptr;
++  HIP_CHECK(hipMalloc(&device_value, sizeof(*device_value)));
++  HIP_CHECK(hipMemset(device_value, 0, sizeof(*device_value)));
++
++  hipGraph_t graph{};
++  HIP_CHECK(hipGraphCreate(&graph, 0));
++  hipGraphNode_t dependency = nullptr;
++  void* value_arg = device_value;
++  void* kernel_args[] = {&value_arg};
++  hipKernelNodeParams params{};
++  params.func = reinterpret_cast<void*>(k_atomic_increment);
++  params.gridDim = dim3(1);
++  params.blockDim = dim3(1);
++  params.kernelParams = kernel_args;
++  for (int i = 0; i < kNodes; ++i) {
++    hipGraphNode_t node{};
++    HIP_CHECK(hipGraphAddKernelNode(&node, graph, dependency ? &dependency : nullptr,
++                                    dependency ? 1 : 0, &params));
++    dependency = node;
++  }
++
++  hipGraphExec_t exec{};
++  HIP_CHECK(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
++  hipStream_t streams[2]{};
++  HIP_CHECK(hipStreamCreate(&streams[0]));
++  HIP_CHECK(hipStreamCreate(&streams[1]));
++
++  for (int i = 0; i < kLaunches; ++i) {
++    HIP_CHECK(hipGraphLaunch(exec, streams[i & 1]));
++  }
++  hipError_t trim_status = hipSuccess;
++  std::thread trimmer([&] {
++    for (int i = 0; i < 16; ++i) {
++      const hipError_t status = hipDeviceGraphMemTrim(0);
++      if (status != hipSuccess) {
++        trim_status = status;
++        return;
++      }
++    }
++  });
++
++  HIP_CHECK(hipGraphExecDestroy(exec));
++  HIP_CHECK(hipGraphDestroy(graph));
++  trimmer.join();
++  HIP_CHECK(trim_status);
++  HIP_CHECK(hipStreamSynchronize(streams[0]));
++  HIP_CHECK(hipStreamSynchronize(streams[1]));
++
++  int actual = 0;
++  HIP_CHECK(hipMemcpy(&actual, device_value, sizeof(actual), hipMemcpyDeviceToHost));
++  REQUIRE(actual == kNodes * kLaunches);
++
++  HIP_CHECK(hipStreamDestroy(streams[0]));
++  HIP_CHECK(hipStreamDestroy(streams[1]));
++  HIP_CHECK(hipFree(device_value));
++}
++
++TEST_CASE("Performance_Graph_Pm4QueueScratch") {
++  constexpr int kNodes = 8;
++
++  hipFuncAttributes attributes{};
++  HIP_CHECK(hipFuncGetAttributes(&attributes,
++                                 reinterpret_cast<const void*>(k_private_increment)));
++  INFO("private bytes=" << attributes.localSizeBytes);
++  REQUIRE(attributes.localSizeBytes > 0);
++
++  int* device_value = nullptr;
++  HIP_CHECK(hipMalloc(&device_value, sizeof(*device_value)));
++  HIP_CHECK(hipMemset(device_value, 0, sizeof(*device_value)));
++
++  hipGraph_t graph{};
++  HIP_CHECK(hipGraphCreate(&graph, 0));
++  hipGraphNode_t dependency = nullptr;
++  void* value_arg = device_value;
++  int selector = 3;
++  void* kernel_args[] = {&value_arg, &selector};
++  hipKernelNodeParams params{};
++  params.func = reinterpret_cast<void*>(k_private_increment);
++  params.gridDim = dim3(1);
++  params.blockDim = dim3(32);
++  params.kernelParams = kernel_args;
++  for (int i = 0; i < kNodes; ++i) {
++    hipGraphNode_t node{};
++    HIP_CHECK(hipGraphAddKernelNode(&node, graph, dependency ? &dependency : nullptr,
++                                    dependency ? 1 : 0, &params));
++    dependency = node;
++  }
++
++  hipGraphExec_t exec{};
++  HIP_CHECK(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
++  hipStream_t stream{};
++  HIP_CHECK(hipStreamCreate(&stream));
++  HIP_CHECK(hipGraphLaunch(exec, stream));
++
++  int actual = 0;
++  HIP_CHECK(hipMemcpyAsync(&actual, device_value, sizeof(actual), hipMemcpyDeviceToHost,
++                           stream));
++  HIP_CHECK(hipStreamSynchronize(stream));
++  REQUIRE(actual == kNodes);
++
++  HIP_CHECK(hipStreamDestroy(stream));
++  HIP_CHECK(hipGraphExecDestroy(exec));
++  HIP_CHECK(hipGraphDestroy(graph));
++  HIP_CHECK(hipFree(device_value));
++}
++
++TEST_CASE("Performance_Graph_Pm4QueueScratchConcurrentLaunchAndTrim") {
++  constexpr int kNodes = 32;
++  constexpr int kLaunches = 16;
++
++  hipFuncAttributes attributes{};
++  HIP_CHECK(hipFuncGetAttributes(
++      &attributes, reinterpret_cast<const void*>(k_private_atomic_increment)));
++  REQUIRE(attributes.localSizeBytes > 0);
++
++  int* device_value = nullptr;
++  HIP_CHECK(hipMalloc(&device_value, sizeof(*device_value)));
++  HIP_CHECK(hipMemset(device_value, 0, sizeof(*device_value)));
++
++  hipGraph_t graph{};
++  HIP_CHECK(hipGraphCreate(&graph, 0));
++  hipGraphNode_t dependency = nullptr;
++  void* value_arg = device_value;
++  int selector = 5;
++  void* kernel_args[] = {&value_arg, &selector};
++  hipKernelNodeParams params{};
++  params.func = reinterpret_cast<void*>(k_private_atomic_increment);
++  params.gridDim = dim3(1);
++  params.blockDim = dim3(32);
++  params.kernelParams = kernel_args;
++  for (int i = 0; i < kNodes; ++i) {
++    hipGraphNode_t node{};
++    HIP_CHECK(hipGraphAddKernelNode(&node, graph, dependency ? &dependency : nullptr,
++                                    dependency ? 1 : 0, &params));
++    dependency = node;
++  }
++
++  hipGraphExec_t exec{};
++  HIP_CHECK(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
++  hipStream_t streams[2]{};
++  HIP_CHECK(hipStreamCreate(&streams[0]));
++  HIP_CHECK(hipStreamCreate(&streams[1]));
++  for (int i = 0; i < kLaunches; ++i) {
++    HIP_CHECK(hipGraphLaunch(exec, streams[i & 1]));
++  }
++
++  hipError_t trim_status = hipSuccess;
++  std::thread trimmer([&] { trim_status = hipDeviceGraphMemTrim(0); });
++  HIP_CHECK(hipGraphExecDestroy(exec));
++  HIP_CHECK(hipGraphDestroy(graph));
++  trimmer.join();
++  HIP_CHECK(trim_status);
++  HIP_CHECK(hipStreamSynchronize(streams[0]));
++  HIP_CHECK(hipStreamSynchronize(streams[1]));
++
++  int actual = 0;
++  HIP_CHECK(hipMemcpy(&actual, device_value, sizeof(actual), hipMemcpyDeviceToHost));
++  REQUIRE(actual == kNodes * kLaunches);
++
++  HIP_CHECK(hipStreamDestroy(streams[0]));
++  HIP_CHECK(hipStreamDestroy(streams[1]));
++  HIP_CHECK(hipFree(device_value));
++}
+diff --git a/projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc b/projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc
+new file mode 100644
+index 000000000000..3bbf1b7fef89
+--- /dev/null
++++ b/projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc
+@@ -0,0 +1,252 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ * SPDX-FileCopyrightText: 2026 Kaden Schutt <kaden@hipfire.dev>
++ * SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
++ */
++
++#include <gtest/gtest.h>
++
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <utility>
++
++#include "core/inc/amd_graph_command_encoder.h"
++
++namespace {
++
++rocr::graph::Gfx11KernelImage Image(uint16_t properties = 0x409) {
++  return {
++      0x1'0000,
++      0x11,
++      0x22,
++      0x33,
++      properties,
++      0,
++  };
++}
++
++rocr::graph::Gfx12KernelImage Image12(uint16_t properties = 0x408) {
++  return {
++      0x1'0000,
++      0x11,
++      0x22,
++      0x33,
++      properties,
++      0,
++  };
++}
++
++hsa_kernel_dispatch_packet_t Packet() {
++  hsa_kernel_dispatch_packet_t packet{};
++  packet.workgroup_size_x = 256;
++  packet.workgroup_size_y = 1;
++  packet.workgroup_size_z = 1;
++  packet.grid_size_x = 256;
++  packet.grid_size_y = 1;
++  packet.grid_size_z = 1;
++  packet.kernarg_address = reinterpret_cast<void*>(0x1234'5678'9abc'def0ULL);
++  return packet;
++}
++
++TEST(GraphCommandEncoder, Gfx11WordsMatchRedline20474) {
++  constexpr std::array<uint32_t, 60> expected = {
++      0xc0065800, 0x00000000, 0xffffffff, 0x000000ff, 0x00000000, 0x00000000,
++      0x00000004, 0x0001c3f1, 0xc0027602, 0x0000020c, 0x00000100, 0x00000000,
++      0xc0027602, 0x00000212, 0x00000011, 0x00000022, 0xc0017602, 0x00000228,
++      0x00000033, 0xc0017602, 0x00000218, 0x00000000, 0xc0037602, 0x00000207,
++      0x00000100, 0x00000001, 0x00000001, 0xc0017602, 0x00000215, 0x00000000,
++      0xc0067602, 0x00000240, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++      0x9abcdef0, 0x12345678, 0xc0031502, 0x00000001, 0x00000001, 0x00000001,
++      0x0000800d, 0xc0004600, 0x00000407, 0xc0065800, 0x00000000, 0xffffffff,
++      0x00ffffff, 0x00000000, 0x00000000, 0x0000000a, 0x00000380, 0xc0031502,
++      0x00000001, 0x00000001, 0x00000001, 0x0000800d, 0xc0004600, 0x00000407,
++  };
++
++  rocr::graph::Gfx11CommandEncoder encoder;
++  const auto packet = Packet();
++  const auto image = Image();
++  ASSERT_TRUE(encoder.Append(packet, image, 0,
++                             HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  ASSERT_TRUE(encoder.Append(packet, image, 0,
++                             HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  encoder.Finish();
++  ASSERT_EQ(encoder.dispatch_count(), 2u);
++  ASSERT_EQ(encoder.words().size(), expected.size());
++  EXPECT_TRUE(std::equal(encoder.words().begin(), encoder.words().end(), expected.begin()));
++}
++
++TEST(GraphCommandEncoder, Gfx11VmemBoundaryRequiresVerifiedMetadata) {
++  auto packet = Packet();
++  const auto image = Image();
++  rocr::graph::Gfx11CommandEncoder rejected;
++  ASSERT_TRUE(rejected.Append(packet, image, 0,
++                              HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  EXPECT_FALSE(rejected.Append(packet, image, 0,
++                               HSA_VEN_AMD_GRAPH_DEPENDENCY_VMEM_ONLY));
++
++  rocr::graph::Gfx11CommandEncoder accepted;
++  ASSERT_TRUE(accepted.Append(packet, image, HSA_VEN_AMD_GRAPH_KERNEL_VERIFIED_VMEM_ONLY,
++                              HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  ASSERT_TRUE(accepted.Append(packet, image, HSA_VEN_AMD_GRAPH_KERNEL_VERIFIED_VMEM_ONLY,
++                              HSA_VEN_AMD_GRAPH_DEPENDENCY_VMEM_ONLY));
++  accepted.Finish();
++  EXPECT_NE(std::find(accepted.words().begin(), accepted.words().end(), 0x00000300),
++            accepted.words().end());
++}
++
++TEST(GraphCommandEncoder, Gfx11RejectsUnsupportedAbiShapes) {
++  auto packet = Packet();
++  auto image = Image();
++
++  packet.private_segment_size = 4;
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  packet.private_segment_size = 0;
++
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, image, HSA_VEN_AMD_GRAPH_KERNEL_DYNAMIC_CALLSTACK,
++      HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++
++  image.kernel_code_properties |= 1u << 2;
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  image = Image();
++
++  packet.grid_size_x = 255;
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  packet = Packet();
++
++  packet.kernarg_address = nullptr;
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++
++  packet = Packet();
++  image.code_entry += 4;
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++
++  packet = Packet();
++  image = Image();
++  image.kernarg_preload_length = 1;
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++}
++
++TEST(GraphCommandEncoder, QueueScratchUsesPatchableTmpRingState) {
++  auto packet = Packet();
++  packet.private_segment_size = 32;
++
++  rocr::graph::Gfx11CommandEncoder gfx11;
++  ASSERT_TRUE(gfx11.Append(packet, Image(0x408), 0,
++                           HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  ASSERT_LT(gfx11.tmpring_patch_dword(), gfx11.words().size());
++  EXPECT_EQ(gfx11.words()[gfx11.tmpring_patch_dword()], 0u);
++
++  rocr::graph::Gfx12CommandEncoder gfx12;
++  ASSERT_TRUE(gfx12.Append(packet, Image12(), 0,
++                           HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  ASSERT_LT(gfx12.tmpring_patch_dword(), gfx12.words().size());
++  EXPECT_EQ(gfx12.words()[gfx12.tmpring_patch_dword()], 0u);
++}
++
++TEST(GraphCommandEncoder, Gfx12WordsMatchRedline20474) {
++  constexpr std::array<uint32_t, 62> expected = {
++      0xc0065800, 0x00000000, 0xffffffff, 0x000000ff, 0x00000000, 0x00000000,
++      0x00000004, 0x00010180, 0xc0027602, 0x0000020c, 0x00000100, 0x00000000,
++      0xc0027602, 0x00000212, 0x00000011, 0x00000022, 0xc0017602, 0x00000223,
++      0x00000033, 0xc0017602, 0x00000216, 0x00000000, 0xc0037602, 0x00000207,
++      0x00000100, 0x00000001, 0x00000001, 0xc0017602, 0x00000215, 0x000003ff,
++      0xc0047602, 0x00000230, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
++      0xc0027602, 0x00000240, 0x9abcdef0, 0x12345678, 0xc0031502, 0x00000100,
++      0x00000001, 0x00000001, 0x00008025, 0xc0004600, 0x00000407, 0xc0065800,
++      0x00000000, 0xffffffff, 0x00ffffff, 0x00000000, 0x00000000, 0x0000000a,
++      0x00000380, 0xc0031502, 0x00000100, 0x00000001, 0x00000001, 0x00008025,
++      0xc0004600, 0x00000407,
++  };
++
++  rocr::graph::Gfx12CommandEncoder encoder;
++  const auto packet = Packet();
++  const auto image = Image12();
++  ASSERT_TRUE(encoder.Append(packet, image, 0,
++                             HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  ASSERT_TRUE(encoder.Append(packet, image, 0,
++                             HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  encoder.Finish();
++  ASSERT_EQ(encoder.dispatch_count(), 2u);
++  ASSERT_EQ(encoder.words().size(), expected.size());
++  EXPECT_TRUE(std::equal(encoder.words().begin(), encoder.words().end(), expected.begin()));
++}
++
++TEST(GraphCommandEncoder, Gfx12UsesSeparateAbiAndVmemBoundary) {
++  const auto packet = Packet();
++  auto image = Image12();
++  rocr::graph::Gfx12CommandEncoder encoder;
++  ASSERT_TRUE(encoder.Append(packet, image, HSA_VEN_AMD_GRAPH_KERNEL_VERIFIED_VMEM_ONLY,
++                             HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  ASSERT_TRUE(encoder.Append(packet, image, HSA_VEN_AMD_GRAPH_KERNEL_VERIFIED_VMEM_ONLY,
++                             HSA_VEN_AMD_GRAPH_DEPENDENCY_VMEM_ONLY));
++  encoder.Finish();
++  EXPECT_NE(std::find(encoder.words().begin(), encoder.words().end(), 0x00000300),
++            encoder.words().end());
++
++  image.kernel_code_properties |= 1u << 0;
++  EXPECT_FALSE(rocr::graph::Gfx12CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++
++  image = Image12();
++  image.kernarg_preload_length = 1;
++  EXPECT_FALSE(rocr::graph::Gfx12CommandEncoder().Append(
++      packet, image, 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++}
++
++TEST(GraphCommandEncoder, CapabilityTableCoversDeclaredGfx11AndGfx12Families) {
++  for (const auto [minor, stepping] :
++       {std::pair{0u, 0u}, std::pair{0u, 1u}, std::pair{0u, 2u}, std::pair{0u, 3u},
++        std::pair{5u, 0u}, std::pair{5u, 1u}, std::pair{5u, 2u}, std::pair{5u, 3u}}) {
++    const auto capability = rocr::graph::GetGraphCommandCapability(11, minor, stepping);
++    EXPECT_EQ(capability.family, HSA_VEN_AMD_GRAPH_ENCODER_GFX11);
++    EXPECT_TRUE(capability.compile_supported);
++    EXPECT_EQ(capability.runtime_qualified, minor == 5 && stepping == 1);
++  }
++  for (const auto [minor, stepping] :
++       {std::pair{0u, 0u}, std::pair{0u, 1u}, std::pair{5u, 0u}}) {
++    const auto capability = rocr::graph::GetGraphCommandCapability(12, minor, stepping);
++    EXPECT_EQ(capability.family, HSA_VEN_AMD_GRAPH_ENCODER_GFX12);
++    EXPECT_TRUE(capability.compile_supported);
++    EXPECT_FALSE(capability.runtime_qualified);
++  }
++  const auto unsupported = rocr::graph::GetGraphCommandCapability(10, 3, 0);
++  EXPECT_EQ(unsupported.family, HSA_VEN_AMD_GRAPH_ENCODER_NONE);
++  EXPECT_FALSE(unsupported.compile_supported);
++  EXPECT_FALSE(unsupported.runtime_qualified);
++}
++
++TEST(GraphCommandEncoder, DynamicLdsIsEncodedAndOverflowRejected) {
++  auto packet = Packet();
++  packet.group_segment_size = 1536;
++  constexpr std::array<uint32_t, 2> expected_rsrc = {0x00000011, 0x00018022};
++
++  rocr::graph::Gfx11CommandEncoder gfx11;
++  ASSERT_TRUE(gfx11.Append(packet, Image(), 0,
++                           HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  const auto gfx11_rsrc = std::search(gfx11.words().begin(), gfx11.words().end(),
++                                      expected_rsrc.begin(), expected_rsrc.end());
++  EXPECT_NE(gfx11_rsrc, gfx11.words().end());
++
++  rocr::graph::Gfx12CommandEncoder gfx12;
++  ASSERT_TRUE(gfx12.Append(packet, Image12(), 0,
++                           HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  const auto gfx12_rsrc = std::search(gfx12.words().begin(), gfx12.words().end(),
++                                      expected_rsrc.begin(), expected_rsrc.end());
++  EXPECT_NE(gfx12_rsrc, gfx12.words().end());
++
++  packet.group_segment_size = UINT32_MAX;
++  EXPECT_FALSE(rocr::graph::Gfx11CommandEncoder().Append(
++      packet, Image(), 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  EXPECT_FALSE(rocr::graph::Gfx12CommandEncoder().Append(
++      packet, Image12(), 0, HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++}
++
++}  // namespace
+diff --git a/projects/rocr-runtime/rocrtst/suites/test_common/CMakeLists.txt b/projects/rocr-runtime/rocrtst/suites/test_common/CMakeLists.txt
+index 30ecf6ca1361..f10e43cc472c 100644
+--- a/projects/rocr-runtime/rocrtst/suites/test_common/CMakeLists.txt
++++ b/projects/rocr-runtime/rocrtst/suites/test_common/CMakeLists.txt
+@@ -811,6 +811,18 @@ set_tests_properties(intercept_queue_logic_test PROPERTIES
+   LABELS "quick;standard;pr;pre-commit"
+   TIMEOUT 60)
+ 
++set(GRAPH_COMMAND_ENCODER_TEST_ROOT "${ROCRTST_ROOT}/suites/functional/graph")
++add_executable(graph_command_encoder_test
++  ${GRAPH_COMMAND_ENCODER_TEST_ROOT}/graph_command_encoder_test.cc)
++target_include_directories(graph_command_encoder_test PRIVATE
++  ${HSA_RUNTIME_ROOT}
++  ${ROCRTST_ROOT}/gtest/include)
++target_link_libraries(graph_command_encoder_test ${GOOGLE_TEST_FRWK_NAME} pthread)
++add_test(NAME graph_command_encoder_test COMMAND graph_command_encoder_test)
++set_tests_properties(graph_command_encoder_test PROPERTIES
++  LABELS "quick;standard;pr;pre-commit"
++  TIMEOUT 60)
++
+ #Build kernels
+ add_custom_target(rocrtst_kernels ALL DEPENDS ${HSACO_TARG_LIST})
+ 
+@@ -832,6 +844,8 @@ install(TARGETS ${ROCRTST}
+ 
+ install(TARGETS intercept_queue_logic_test
+         RUNTIME DESTINATION bin)
++install(TARGETS graph_command_encoder_test
++        RUNTIME DESTINATION bin)
+ 
+ # Install platform configuration file
+ install(FILES ${ROCRTST_ROOT}/config/platform_config.yaml
+diff --git a/projects/rocr-runtime/runtime/docs/contribution/retained-pm4-command-lists.rst b/projects/rocr-runtime/runtime/docs/contribution/retained-pm4-command-lists.rst
+new file mode 100644
+index 000000000000..04e1a57115ed
+--- /dev/null
++++ b/projects/rocr-runtime/runtime/docs/contribution/retained-pm4-command-lists.rst
+@@ -0,0 +1,323 @@
++.. meta::
++   :description: Design and qualification plan for retained PM4 graph command lists
++   :keywords: ROCR, HIP graphs, PM4, AQL, GFX11, GFX12
++
++.. _retained-pm4-command-lists:
++
++Retained PM4 graph command lists
++================================
++
++Status
++------
++
++This is an experimental, opt-in design. It is not a general replacement for
++ordinary AQL dispatch. Runtime enablement is limited to ASICs that have passed
++the qualification gates in this document; an encoder compiling for an ISA does
++not qualify that ISA for runtime use.
++
++The initial prototype is implemented at the HIP/ROCclr boundary and is enabled
++with ``DEBUG_HIP_GRAPH_PM4=1``. The shippable design moves PM4 encoding,
++validation, executable allocation, and vendor-packet materialization behind an
++opaque ROCR prepared-command-list object. HIP retains ownership of graph
++lifetime and submits the resulting vendor packet through its existing stream
++queue so queue tracking, stream ordering, profiling, and completion remain
++consistent with ordinary graph replay.
++
++All declared GFX11 and GFX12 targets have compile-time encoders. Hardware that
++has not completed qualification additionally requires
++``DEBUG_HIP_GRAPH_PM4_UNQUALIFIED=1``. This second gate is for bring-up only and
++does not add the ASIC to the default qualification allowlist.
++
++Reference snapshot
++------------------
++
++The reference implementation and measurements are frozen at:
++
++* ROCm branch ``pwilkin/ilintar-experiments``, base commit
++  ``2f725f1807a17efd772156649829052012a949f7``.
++* Redline branch ``pwilkin/hipgraph-exec-update``, commit
++  ``20474b8c1a5bf31189e5a94b34a8e9689c028e54``. The GFX11 and GFX12 register
++  maps and dependency boundaries are semantically matched against Redline's
++  Apache-2.0 encoders; this provenance must be preserved.
++* Hardware ``gfx1151`` (Radeon 8060S / Strix Halo).
++* Workload Ornith 1.5 35B-A3B IQ4_XS, token generation with
++  ``llama-bench -p 0 -n 128 -r 4 -o json``.
++
++The locked, counterbalanced AQL/PM4/Vulkan bracket used two four-sample arms
++per backend:
++
++.. list-table:: Reference token-generation result
++   :header-rows: 1
++
++   * - Backend
++     - Mean tokens/s
++     - Median tokens/s
++     - Range
++   * - Ordinary HIP AQL graph
++     - 67.2651
++     - 67.1490
++     - 66.6806--67.9936
++   * - Vulkan/RADV
++     - 71.3325
++     - 71.3075
++     - 70.8369--71.7543
++   * - Retained PM4 through HIP's AQL queue
++     - 78.7651
++     - 78.7161
++     - 78.2785--79.3113
++
++Retained PM4 improved the matched AQL mean by 17.10% and the Vulkan mean by
++10.42%. A final safety-gated run logged a 1,585-dispatch warm graph encoded in
++46,716 dwords and a 1,525-dispatch decode graph encoded in 45,036 dwords.
++
++Numerical reference
++-------------------
++
++The correctness oracle hashes every float in the 248,320-entry vocabulary for
++16 autoregressive steps. Ordinary AQL and retained PM4 produced identical
++top-token IDs, hexadecimal top logits, and the following full-logit hashes:
++
++.. code-block:: text
++
++   2e85ee028c4b3384 e85fbbeb4e77d279 abe6e73da1f64637 2809f3726cd528b3
++   51e99dfd0caa62e5 1c2170cf944acbfa 63f05a3fe10b995a a5969729823db0d9
++   6feb2bbf426a3b09 fc1692d086963485 21a7d969401b0e29 dd14dff8f8882e83
++   6774f63ab90f96d0 9a69083ce4c68d61 c00d35ac8a8fd936 03b4d4f9e3bb1c52
++
++Nanbeige queue-scratch qualification
++------------------------------------
++
++Nanbeige4.1 3B BF16 contains a wave32 flash-attention tile with a 32-byte
++fixed private segment. Its gfx1151 code-object metadata, runtime kernel-object
++offset, and entry offset identify the specialization as
++``flash_attn_tile<128, 128, 2, 1, false>``. The command list retains 422
++dispatches in 12,050 dwords and reports a maximum private segment of 32 bytes.
++
++Sixteen autoregressive steps over the full 166,144-entry vocabulary matched
++ordinary AQL exactly. Each step matched the raw-float hash, top-token ID, and
++hexadecimal top logit. The hashes were:
++
++.. code-block:: text
++
++   96c565bf1f5b741a dbbd5bf1bce27f29 47db84f3e1b81e3e a03042a9a4eb0c82
++   2ad0ef2c3f984466 56a7902498272377 0c872fc0d886bfb1 80ee8a0b94015405
++   c7d620757f865e59 9deb3dbaa1331a20 7f8a8a4c5360e879 a2d7607ef8ab45dc
++   b902fd8b72be78cf 4b985fdc09b4352e 45620b3d9b4d6412 6b8256e1219f19df
++
++The locked throughput bracket used
++``llama-bench -dev ROCm0 -p 0 -n 128 -r 3 -o json`` in the counterbalanced
++order vanilla, custom AQL, custom PM4, custom PM4, custom AQL, vanilla. Each
++row contains six samples:
++
++.. list-table:: Nanbeige4.1 3B BF16 token-generation result
++   :header-rows: 1
++
++   * - Backend
++     - Mean tokens/s
++     - Median tokens/s
++     - Range
++   * - Vanilla ROCm
++     - 30.0275
++     - 30.0385
++     - 29.9521--30.1212
++   * - Custom ordinary AQL
++     - 30.0889
++     - 30.0910
++     - 30.0621--30.1087
++   * - Custom retained PM4
++     - 30.6051
++     - 30.6221
++     - 30.4681--30.6786
++
++Retained PM4 improved the mean by 1.92% over vanilla ROCm and 1.72% over the
++matched custom AQL runtime. A separate lifecycle gate launched one 32-dispatch,
++48-byte-private graph sixteen times across two streams, destroyed the graph and
++executable before stream synchronization, and ran graph-memory trim
++concurrently. Its final atomic count was exactly 512 of 512.
++
++The synthetic floor uses a non-atomic dependent ``value = value + 1`` chain.
++Atomic increments and no-op kernels are not acceptable visibility gates.
++
++Non-negotiable ownership invariants
++-----------------------------------
++
++1. A prepared command list is owned by one instantiated graph packet batch;
++   there is no process-global pointer-keyed cache.
++2. A graph packet rebuild or graph-exec parameter update invalidates that
++   batch's prepared list.
++3. Every in-flight launch retains its prepared-list handle until the launch's
++   completion command is destroyed. Updating or destroying the graph cannot
++   free an IB still visible to the GPU.
++4. Kernarg pointers, code objects, and pointees embedded in the IB remain live
++   for the same interval as the launch. Existing graph update locking must
++   prevent in-place kernarg reuse while an earlier launch is active.
++5. HIP submits one ROCR-materialized vendor AQL packet through its existing
++   stream queue. A prepared list must not create an untracked application KFD
++   queue.
++6. Unsupported packet types, ABI properties, dependency shapes, profiler
++   states, or architectures fall back to ordinary AQL before any PM4 work is
++   submitted.
++7. Failure after publication is a launch failure, never an AQL fallback; a
++   fallback after partial submission could execute a graph twice.
++
++Dependency contract
++-------------------
++
++The conservative serial policy places a correctness boundary before every
++dispatch after the first. For GFX11, the accepted boundary is:
++
++1. ``CS_PARTIAL_FLUSH`` / compute-idle;
++2. ``ACQUIRE_MEM`` with same-agent scalar/vector read-cache invalidation
++   (GCR ``0x00380``);
++3. the consumer dispatch.
++
++The command list begins with a system acquire so host-side kernarg updates are
++visible on every replay and ends with compute-idle before the outer vendor
++packet can publish completion.
++
++GFX12 uses its separate register map and GCR encoding. GFX11 PM4 words must
++never be selected by a GFX12 prefix check, or vice versa. A later
++resource-aware policy may use a narrower VMEM-only boundary only when verified
++kernel metadata proves the consumer's cache class. Unknown metadata always
++uses the fail-closed scalar/vector boundary.
++
++Target ROCR abstraction
++-----------------------
++
++The first shippable interface should remain experimental/private while its ABI
++is being exercised. The intended operations are:
++
++``query_capability``
++  Return the encoder family, supported ABI features, and runtime enablement
++  state for an agent. Compile support and hardware-qualified enablement are
++  reported separately.
++
++``prepare``
++  Validate a stable array of captured kernel-dispatch packets plus explicit
++  dependency classes, lower it with the agent's encoder, allocate executable
++  storage, and return an opaque handle. No raw PM4 address is returned.
++
++``materialize_packet``
++  Fill a 64-byte vendor AQL packet for a prepared handle using caller-supplied
++  fence scopes and completion signal. HIP publishes this packet through its
++  normal queue path.
++
++``materialize_packet_for_queue``
++  Bind a prepared handle to the destination AQL queue before filling the vendor
++  packet. Command lists that contain private-segment dispatches require this
++  operation so ROCR can validate and retain the queue's scratch allocation.
++
++``destroy``
++  Release the executable allocation after the caller has proved that every
++  launch retaining the handle completed.
++
++Re-preparing on graph update is the initial correctness-first behavior. An
++in-place patch API may be added only after packet offsets, concurrent launches,
++and kernarg lifetime have permanent tests.
++
++Queue scratch contract
++----------------------
++
++Private segments are queue state, not agent or graph state. A retained list
++records the largest wave32 and wave64 private-segment requirements separately.
++At queue materialization ROCR:
++
++1. unwraps tool intercept layers and verifies that the destination is an AQL
++   queue owned by the same GPU agent;
++2. verifies that the queue has a stable main-scratch allocation whose bytes per
++   wave cover every retained dispatch;
++3. acquires a shared lease that prevents asynchronous main-scratch reclaim
++   while the queue-specific command-list binding exists; and
++4. clones the immutable command-list template once per queue ID and patches the
++   clone with that queue's ``COMPUTE_TMPRING_SIZE`` value.
++
++The graph-level template is never patched in place, so simultaneous launches
++on queues with different scratch configurations cannot race. Queue IDs are
++unique for their lifetime and each queue-specific executable clone remains
++owned by the prepared list until its final in-flight launch completes.
++The binding releases its scratch lease when the prepared list is destroyed;
++the lease state is reference counted independently of the queue object, so a
++queue may be destroyed before a graph that was previously materialized on it.
++
++ROCR does not allocate a second graph-private scratch pool. HIP compute queues
++normally start with reusable main scratch, and the retained path reuses that
++same allocation. A queue with no main scratch, an insufficient bytes-per-wave
++allocation, or single-use large scratch fails materialization before the
++vendor packet is published; HIP may then submit the original AQL batch. The
++legacy queue-less materialization entry point remains valid only for lists that
++do not require scratch.
++
++Dynamic call stacks remain unsupported. Kernels that require the legacy
++private-segment-buffer user-SGPR descriptor also remain fail-closed; GFX11/12
++architected-flat-scratch kernels that describe private storage only through the
++AQL packet are supported. Per-ASIC qualification must include private-memory
++correctness, two-queue concurrent launch, graph destruction, and graph-memory
++trim before scratch is considered enabled by default on that ASIC.
++
++Architecture matrix
++-------------------
++
++The source tree currently declares these concrete targets:
++
++.. list-table:: Planned encoder and enablement coverage
++   :header-rows: 1
++
++   * - Family
++     - Targets
++     - Encoder
++     - Initial runtime state
++   * - GFX11 RDNA3
++     - ``gfx1100``, ``gfx1101``, ``gfx1102``, ``gfx1103``
++     - Legacy GFX10/GFX11 register map
++     - Disabled until per-ASIC qualification
++   * - GFX11 RDNA3.5
++     - ``gfx1150``, ``gfx1151``, ``gfx1152``, ``gfx1153``
++     - Legacy GFX10/GFX11 register map
++     - ``gfx1151`` qualified; others disabled
++   * - GFX12 RDNA4
++     - ``gfx1200``, ``gfx1201``
++     - Separate GFX12 register map, implemented
++     - Disabled until per-ASIC qualification
++   * - GFX12.5
++     - ``gfx1250``
++     - GFX12-family encoder implemented; explicit 12.5 review still required
++     - Disabled until hardware qualification
++
++Generic targets are compile targets, not runtime qualification identities.
++Unknown steppings remain disabled even if their major version is 11 or 12.
++Unqualified concrete targets can be exercised only through the second debug
++gate described above.
++
++Qualification gates
++-------------------
++
++Every concrete ASIC requires all of the following before runtime enablement:
++
++1. CPU golden tests for emitted PM4 words, compared with the matching Redline
++   family encoder and reviewed against AMD packet/register definitions.
++2. Exact 512-dispatch non-atomic RMW on ordinary AQL and retained PM4.
++3. Diamond, fan-out/fan-in, disabled-node, and cross-stream fallback tests.
++4. Graph-exec parameter update, packet-count change, graph-memory trim, and
++   immediate asynchronous graph destroy.
++5. Concurrent launches of one graph exec on multiple streams with independent
++   storage, followed by update and destroy stress.
++6. Scratch, dynamic LDS, implicit SGPR, kernarg preload, cooperative dispatch,
++   and partial-workgroup cases either pass dedicated tests or explicitly fall
++   back.
++7. Profiler start/stop and activity tracing prove ordinary-AQL fallback without
++   losing per-kernel records.
++8. Full-model logits or intermediate tensors match the ordinary-AQL reference.
++9. Locked, counterbalanced AQL/PM4/Vulkan performance reproduces a useful win.
++10. Repeated create/launch/update/destroy soak and injected failure tests
++    complete without VM faults, queue-removal failures, GPU resets, or leaked
++    executable allocations.
++
++Rollout policy
++--------------
++
++The feature remains opt-in while any target is in qualification. Runtime logs
++must distinguish: selected, compile-supported but unqualified, unsupported
++packet shape, unsupported kernel ABI, profiler fallback, and submission
++failure. A future beta policy may enable only an explicit allowlist of
++qualified ASIC and firmware combinations. Making retained PM4 the default is a
++separate decision after multi-device soak testing and fault-recovery review.
+diff --git a/projects/rocr-runtime/runtime/docs/index.rst b/projects/rocr-runtime/runtime/docs/index.rst
+index a3dcb68009ca..278ddd395d1b 100644
+--- a/projects/rocr-runtime/runtime/docs/index.rst
++++ b/projects/rocr-runtime/runtime/docs/index.rst
+@@ -30,6 +30,7 @@ The documentation is structured as follows:
+   .. grid-item-card:: Contribution
+ 
+     * :ref:`contributing-to-rocr`
++    * :ref:`retained-pm4-command-lists`
+ 
+ To contribute to the documentation, refer to
+ `Contributing to ROCm  <https://rocm.docs.amd.com/en/latest/contribute/contributing.html>`_.
+diff --git a/projects/rocr-runtime/runtime/docs/sphinx/_toc.yml.in b/projects/rocr-runtime/runtime/docs/sphinx/_toc.yml.in
+index ac2249c2e18a..d24c0dff2694 100644
+--- a/projects/rocr-runtime/runtime/docs/sphinx/_toc.yml.in
++++ b/projects/rocr-runtime/runtime/docs/sphinx/_toc.yml.in
+@@ -15,6 +15,7 @@ subtrees:
+   - caption: Contribution
+     entries:
+     - file: contribution/contributing-to-rocr
++    - file: contribution/retained-pm4-command-lists
+ 
+   - caption: About
+     entries:
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/CMakeLists.txt b/projects/rocr-runtime/runtime/hsa-runtime/CMakeLists.txt
+index b89cc46b00e8..60aa347f7406 100644
+--- a/projects/rocr-runtime/runtime/hsa-runtime/CMakeLists.txt
++++ b/projects/rocr-runtime/runtime/hsa-runtime/CMakeLists.txt
+@@ -233,6 +233,7 @@ set ( SRCS core/driver/driver.cpp
+            core/runtime/amd_sdma_queue.cpp
+            core/runtime/amd_loader_context.cpp
+            core/runtime/hsa_ven_amd_loader.cpp
++           core/runtime/hsa_ven_amd_graph.cpp
+            core/runtime/amd_memory_region.cpp
+            core/runtime/amd_filter_device.cpp
+            core/runtime/amd_topology.cpp
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_aql_queue.h b/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_aql_queue.h
+index dee070bbe3d7..9c21150980e8 100644
+--- a/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_aql_queue.h
++++ b/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_aql_queue.h
+@@ -43,6 +43,8 @@
+ #ifndef HSA_RUNTIME_CORE_INC_AMD_HW_AQL_COMMAND_PROCESSOR_H_
+ #define HSA_RUNTIME_CORE_INC_AMD_HW_AQL_COMMAND_PROCESSOR_H_
+ 
++#include <memory>
++
+ #include "core/inc/runtime.h"
+ #include "core/inc/signal.h"
+ #include "core/inc/queue.h"
+@@ -247,6 +249,11 @@ class AqlQueue : public core::Queue, private core::LocalSignal, public core::Doo
+   /// larger than new limits, perform async-reclaim.
+   void CheckScratchLimits();
+ 
++  hsa_status_t GetGraphScratchState(
++      uint32_t private_wave32, uint32_t private_wave64,
++      uint32_t* compute_tmpring_size,
++      std::shared_ptr<std::atomic<uint32_t>>* scratch_users);
++
+   /// @brief Async reclaim main scratch memory
+   void AsyncReclaimMainScratch();
+ 
+@@ -375,6 +382,9 @@ class AqlQueue : public core::Queue, private core::LocalSignal, public core::Doo
+   // happening at the same time.
+   std::mutex scratch_lock_;
+ 
++  std::shared_ptr<std::atomic<uint32_t>> retained_graph_scratch_ =
++      std::make_shared<std::atomic<uint32_t>>(0);
++
+   // Current CU mask
+   std::vector<uint32_t> cu_mask_;
+ 
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h b/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+new file mode 100644
+index 000000000000..dcadead2ec36
+--- /dev/null
++++ b/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+@@ -0,0 +1,425 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ * SPDX-FileCopyrightText: 2026 Kaden Schutt <kaden@hipfire.dev>
++ * SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
++ */
++
++#ifndef HSA_RUNTIME_CORE_INC_AMD_GRAPH_COMMAND_ENCODER_H_
++#define HSA_RUNTIME_CORE_INC_AMD_GRAPH_COMMAND_ENCODER_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <map>
++#include <vector>
++
++#include "inc/hsa.h"
++#include "inc/hsa_ven_amd_graph.h"
++
++namespace rocr::graph {
++
++struct GraphCommandCapability {
++  hsa_ven_amd_graph_encoder_family_t family;
++  bool compile_supported;
++  bool runtime_qualified;
++};
++
++inline GraphCommandCapability GetGraphCommandCapability(uint32_t major, uint32_t minor,
++                                                        uint32_t stepping) {
++  if (major == 11) {
++    return {HSA_VEN_AMD_GRAPH_ENCODER_GFX11, true, minor == 5 && stepping == 1};
++  }
++  if (major == 12) {
++    return {HSA_VEN_AMD_GRAPH_ENCODER_GFX12, true, false};
++  }
++  return {HSA_VEN_AMD_GRAPH_ENCODER_NONE, false, false};
++}
++
++struct Gfx11KernelImage {
++  uint64_t code_entry;
++  uint32_t compute_pgm_rsrc1;
++  uint32_t compute_pgm_rsrc2;
++  uint32_t compute_pgm_rsrc3;
++  uint16_t kernel_code_properties;
++  uint16_t kernarg_preload_length;
++};
++
++class Gfx11CommandEncoder {
++ public:
++  Gfx11CommandEncoder() { AcquireSystem(); }
++
++  bool Append(const hsa_kernel_dispatch_packet_t& packet, const Gfx11KernelImage& image,
++              uint32_t kernel_flags, hsa_ven_amd_graph_dependency_t dependency) {
++    if ((kernel_flags & HSA_VEN_AMD_GRAPH_KERNEL_DYNAMIC_CALLSTACK) != 0 ||
++        (image.kernel_code_properties & ~kSupportedKernelProperties) != 0 ||
++        (packet.private_segment_size != 0 &&
++         (image.kernel_code_properties & kEnableSgprPrivateSegmentBuffer) != 0) ||
++        image.kernarg_preload_length != 0 || image.code_entry == 0 ||
++        (image.code_entry & 0xff) != 0) {
++      return false;
++    }
++    if (packet.workgroup_size_x == 0 || packet.workgroup_size_y == 0 ||
++        packet.workgroup_size_z == 0 ||
++        packet.grid_size_x % packet.workgroup_size_x != 0 ||
++        packet.grid_size_y % packet.workgroup_size_y != 0 ||
++        packet.grid_size_z % packet.workgroup_size_z != 0) {
++      return false;
++    }
++
++    const uint32_t lds_blocks = packet.group_segment_size / kLdsGranule +
++                                (packet.group_segment_size % kLdsGranule != 0);
++    if (lds_blocks > (kLdsSizeMask >> kLdsSizeShift)) {
++      return false;
++    }
++    const uint32_t rsrc2 =
++        (image.compute_pgm_rsrc2 & ~kLdsSizeMask) | (lds_blocks << kLdsSizeShift);
++
++    if (dispatch_count_ != 0) {
++      if (dependency == HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW) {
++        DependencyRmwSameAgent();
++      } else if (dependency == HSA_VEN_AMD_GRAPH_DEPENDENCY_VMEM_ONLY &&
++                 (kernel_flags & HSA_VEN_AMD_GRAPH_KERNEL_VERIFIED_VMEM_ONLY) != 0) {
++        DependencyRmwVmem();
++      } else {
++        return false;
++      }
++    }
++
++    const uint32_t pgm[] = {
++        static_cast<uint32_t>(image.code_entry >> 8),
++        static_cast<uint32_t>(image.code_entry >> 40),
++    };
++    SetShRegs(kComputePgmLo, pgm, 2);
++    const uint32_t rsrc[] = {image.compute_pgm_rsrc1, rsrc2};
++    SetShRegs(kComputePgmRsrc1, rsrc, 2);
++    SetShRegs(kComputePgmRsrc3, &image.compute_pgm_rsrc3, 1);
++    const uint32_t zero = 0;
++    const size_t tmpring_words_before = words_.size();
++    SetShRegs(kComputeTmpRingSize, &zero, 1);
++    if (tmpring_patch_dword_ == kNoPatchDword && words_.size() != tmpring_words_before) {
++      tmpring_patch_dword_ = words_.size() - 1;
++    }
++    const uint32_t workgroup[] = {packet.workgroup_size_x, packet.workgroup_size_y,
++                                  packet.workgroup_size_z};
++    SetShRegs(kComputeNumThreadX, workgroup, 3);
++    SetShRegs(kComputeResourceLimits, &zero, 1);
++
++    uint32_t user_sgprs[6] = {};
++    size_t user_sgpr_count = 0;
++    if ((image.kernel_code_properties & kEnableSgprPrivateSegmentBuffer) != 0) {
++      user_sgpr_count += 4;
++    }
++    if ((image.kernel_code_properties & kEnableSgprKernargSegmentPtr) != 0) {
++      if (packet.kernarg_address == nullptr) {
++        return false;
++      }
++      const uint64_t kernarg = reinterpret_cast<uint64_t>(packet.kernarg_address);
++      user_sgprs[user_sgpr_count++] = static_cast<uint32_t>(kernarg);
++      user_sgprs[user_sgpr_count++] = static_cast<uint32_t>(kernarg >> 32);
++    }
++    if (user_sgpr_count != 0) {
++      SetShRegs(kComputeUserData0, user_sgprs, user_sgpr_count);
++    }
++
++    const uint32_t workgroups[] = {
++        packet.grid_size_x / packet.workgroup_size_x,
++        packet.grid_size_y / packet.workgroup_size_y,
++        packet.grid_size_z / packet.workgroup_size_z,
++    };
++    const uint32_t wave_mode =
++        (image.kernel_code_properties & kEnableWavefrontSize32) != 0 ? 1u << 15 : 0;
++    const uint32_t initiator = (1u << 0) | (1u << 2) | (1u << 3) | wave_mode;
++    words_.push_back(Packet3(kPacket3DispatchDirect, 4, true));
++    words_.insert(words_.end(), workgroups, workgroups + 3);
++    words_.push_back(initiator);
++    ++dispatch_count_;
++    return true;
++  }
++
++  void Finish() { WaitComputeIdle(); }
++  const std::vector<uint32_t>& words() const { return words_; }
++  size_t dispatch_count() const { return dispatch_count_; }
++  size_t tmpring_patch_dword() const { return tmpring_patch_dword_; }
++
++ private:
++  static constexpr uint32_t kPacket3SetShReg = 0x76;
++  static constexpr uint32_t kPacket3DispatchDirect = 0x15;
++  static constexpr uint32_t kPacket3EventWrite = 0x46;
++  static constexpr uint32_t kPacket3AcquireMem = 0x58;
++  static constexpr uint32_t kComputeNumThreadX = 0x207;
++  static constexpr uint32_t kComputePgmLo = 0x20c;
++  static constexpr uint32_t kComputePgmRsrc1 = 0x212;
++  static constexpr uint32_t kComputeResourceLimits = 0x215;
++  static constexpr uint32_t kComputeTmpRingSize = 0x218;
++  static constexpr uint32_t kComputePgmRsrc3 = 0x228;
++  static constexpr uint32_t kComputeUserData0 = 0x240;
++  static constexpr uint32_t kLdsSizeMask = 0x00ff8000;
++  static constexpr uint32_t kLdsSizeShift = 15;
++  static constexpr uint32_t kLdsGranule = 512;
++  static constexpr uint16_t kEnableSgprPrivateSegmentBuffer = 1 << 0;
++  static constexpr uint16_t kEnableSgprKernargSegmentPtr = 1 << 3;
++  static constexpr uint16_t kEnableWavefrontSize32 = 1 << 10;
++  static constexpr uint16_t kSupportedKernelProperties =
++      kEnableSgprPrivateSegmentBuffer | kEnableSgprKernargSegmentPtr |
++      kEnableWavefrontSize32;
++
++  static uint32_t Packet3(uint32_t opcode, uint32_t body_dwords, bool compute) {
++    return (3u << 30) | ((body_dwords - 1) << 16) | (opcode << 8) |
++           (compute ? 1u << 1 : 0);
++  }
++
++  void AcquireSystem() {
++    words_.insert(words_.end(), {
++        Packet3(kPacket3AcquireMem, 7, false), 0, UINT32_MAX, 0xff, 0, 0, 4,
++        (1u << 16) | (1u << 15) | (1u << 14) | (1u << 9) | (1u << 8) |
++            (1u << 7) | (1u << 6) | (1u << 5) | (1u << 4) | 1u,
++    });
++  }
++
++  void WaitComputeIdle() {
++    words_.push_back(Packet3(kPacket3EventWrite, 1, false));
++    words_.push_back(0x407);
++  }
++
++  void DependencyRmwSameAgent() {
++    WaitComputeIdle();
++    EmitAcquire(0x00380);
++  }
++
++  void DependencyRmwVmem() {
++    WaitComputeIdle();
++    EmitAcquire(0x00300);
++  }
++
++  void EmitAcquire(uint32_t gcr_cntl) {
++    words_.insert(words_.end(), {
++        Packet3(kPacket3AcquireMem, 7, false), 0, UINT32_MAX, 0x00ffffff, 0, 0, 10,
++        gcr_cntl,
++    });
++  }
++
++  void SetShRegs(uint32_t first, const uint32_t* values, size_t count) {
++    size_t i = 0;
++    while (i < count) {
++      while (i < count) {
++        const uint32_t reg = first + static_cast<uint32_t>(i);
++        const auto it = register_state_.find(reg);
++        if (it == register_state_.end() || it->second != values[i]) {
++          break;
++        }
++        ++i;
++      }
++      if (i == count) {
++        break;
++      }
++      const size_t run_start = i;
++      while (i < count) {
++        const uint32_t reg = first + static_cast<uint32_t>(i);
++        const auto it = register_state_.find(reg);
++        if (it != register_state_.end() && it->second == values[i]) {
++          break;
++        }
++        register_state_[reg] = values[i];
++        ++i;
++      }
++      const size_t run_count = i - run_start;
++      words_.push_back(Packet3(kPacket3SetShReg,
++                               1 + static_cast<uint32_t>(run_count), true));
++      words_.push_back(first + static_cast<uint32_t>(run_start));
++      words_.insert(words_.end(), values + run_start, values + run_start + run_count);
++    }
++  }
++
++  std::vector<uint32_t> words_;
++  std::map<uint32_t, uint32_t> register_state_;
++  size_t dispatch_count_ = 0;
++  static constexpr size_t kNoPatchDword = static_cast<size_t>(-1);
++  size_t tmpring_patch_dword_ = kNoPatchDword;
++};
++
++struct Gfx12KernelImage {
++  uint64_t code_entry;
++  uint32_t compute_pgm_rsrc1;
++  uint32_t compute_pgm_rsrc2;
++  uint32_t compute_pgm_rsrc3;
++  uint16_t kernel_code_properties;
++  uint16_t kernarg_preload_length;
++};
++
++class Gfx12CommandEncoder {
++ public:
++  Gfx12CommandEncoder() { AcquireInterNode(); }
++
++  bool Append(const hsa_kernel_dispatch_packet_t& packet, const Gfx12KernelImage& image,
++              uint32_t kernel_flags, hsa_ven_amd_graph_dependency_t dependency) {
++    if ((kernel_flags & HSA_VEN_AMD_GRAPH_KERNEL_DYNAMIC_CALLSTACK) != 0 ||
++        (image.kernel_code_properties & ~kSupportedKernelProperties) != 0 ||
++        image.kernarg_preload_length != 0 || image.code_entry == 0 ||
++        (image.code_entry & 0xff) != 0) {
++      return false;
++    }
++    if (packet.workgroup_size_x == 0 || packet.workgroup_size_y == 0 ||
++        packet.workgroup_size_z == 0) {
++      return false;
++    }
++
++    const uint32_t lds_blocks = packet.group_segment_size / kLdsGranule +
++                                (packet.group_segment_size % kLdsGranule != 0);
++    if (lds_blocks > (kLdsSizeMask >> kLdsSizeShift)) {
++      return false;
++    }
++    const uint32_t rsrc2 =
++        (image.compute_pgm_rsrc2 & ~kLdsSizeMask) | (lds_blocks << kLdsSizeShift);
++
++    if (dispatch_count_ != 0) {
++      if (dependency == HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW) {
++        DependencyRmwSameAgent();
++      } else if (dependency == HSA_VEN_AMD_GRAPH_DEPENDENCY_VMEM_ONLY &&
++                 (kernel_flags & HSA_VEN_AMD_GRAPH_KERNEL_VERIFIED_VMEM_ONLY) != 0) {
++        DependencyRmwVmem();
++      } else {
++        return false;
++      }
++    }
++
++    const uint32_t pgm[] = {
++        static_cast<uint32_t>(image.code_entry >> 8),
++        static_cast<uint32_t>(image.code_entry >> 40),
++    };
++    SetShRegs(kComputePgmLo, pgm, 2);
++    const uint32_t rsrc[] = {image.compute_pgm_rsrc1, rsrc2};
++    SetShRegs(kComputePgmRsrc1, rsrc, 2);
++    SetShRegs(kComputePgmRsrc3, &image.compute_pgm_rsrc3, 1);
++    const uint32_t zero = 0;
++    const size_t tmpring_words_before = words_.size();
++    SetShRegs(kComputeTmpRingSize, &zero, 1);
++    if (tmpring_patch_dword_ == kNoPatchDword && words_.size() != tmpring_words_before) {
++      tmpring_patch_dword_ = words_.size() - 1;
++    }
++    const uint32_t workgroup[] = {packet.workgroup_size_x, packet.workgroup_size_y,
++                                  packet.workgroup_size_z};
++    SetShRegs(kComputeNumThreadX, workgroup, 3);
++    const uint32_t resource_limits = 0x3ff;
++    SetShRegs(kComputeResourceLimits, &resource_limits, 1);
++    const uint32_t static_thread_management[] = {UINT32_MAX, UINT32_MAX, UINT32_MAX,
++                                                 UINT32_MAX};
++    SetShRegs(kComputeStaticThreadMgmtSe0, static_thread_management, 4);
++
++    if ((image.kernel_code_properties & kEnableSgprKernargSegmentPtr) != 0) {
++      if (packet.kernarg_address == nullptr) {
++        return false;
++      }
++      const uint64_t kernarg = reinterpret_cast<uint64_t>(packet.kernarg_address);
++      const uint32_t user_sgprs[] = {static_cast<uint32_t>(kernarg),
++                                     static_cast<uint32_t>(kernarg >> 32)};
++      SetShRegs(kComputeUserData0, user_sgprs, 2);
++    }
++
++    const uint32_t dimensions[] = {packet.grid_size_x, packet.grid_size_y,
++                                   packet.grid_size_z};
++    const uint32_t wave_mode =
++        (image.kernel_code_properties & kEnableWavefrontSize32) != 0 ? 1u << 15 : 0;
++    const uint32_t initiator = (1u << 0) | (1u << 2) | (1u << 5) | wave_mode;
++    words_.push_back(Packet3(kPacket3DispatchDirect, 4, true));
++    words_.insert(words_.end(), dimensions, dimensions + 3);
++    words_.push_back(initiator);
++    ++dispatch_count_;
++    return true;
++  }
++
++  void Finish() { WaitComputeIdle(); }
++  const std::vector<uint32_t>& words() const { return words_; }
++  size_t dispatch_count() const { return dispatch_count_; }
++  size_t tmpring_patch_dword() const { return tmpring_patch_dword_; }
++
++ private:
++  static constexpr uint32_t kPacket3SetShReg = 0x76;
++  static constexpr uint32_t kPacket3DispatchDirect = 0x15;
++  static constexpr uint32_t kPacket3EventWrite = 0x46;
++  static constexpr uint32_t kPacket3AcquireMem = 0x58;
++  static constexpr uint32_t kComputeNumThreadX = 0x207;
++  static constexpr uint32_t kComputePgmLo = 0x20c;
++  static constexpr uint32_t kComputePgmRsrc1 = 0x212;
++  static constexpr uint32_t kComputeResourceLimits = 0x215;
++  static constexpr uint32_t kComputeTmpRingSize = 0x216;
++  static constexpr uint32_t kComputePgmRsrc3 = 0x223;
++  static constexpr uint32_t kComputeStaticThreadMgmtSe0 = 0x230;
++  static constexpr uint32_t kComputeUserData0 = 0x240;
++  static constexpr uint32_t kLdsSizeMask = 0x00ff8000;
++  static constexpr uint32_t kLdsSizeShift = 15;
++  static constexpr uint32_t kLdsGranule = 512;
++  static constexpr uint16_t kEnableSgprKernargSegmentPtr = 1 << 3;
++  static constexpr uint16_t kEnableWavefrontSize32 = 1 << 10;
++  static constexpr uint16_t kSupportedKernelProperties =
++      kEnableSgprKernargSegmentPtr | kEnableWavefrontSize32;
++
++  static uint32_t Packet3(uint32_t opcode, uint32_t body_dwords, bool compute) {
++    return (3u << 30) | ((body_dwords - 1) << 16) | (opcode << 8) |
++           (compute ? 1u << 1 : 0);
++  }
++
++  void AcquireInterNode() { EmitAcquire(0xff, 4, 0x10180); }
++
++  void WaitComputeIdle() {
++    words_.push_back(Packet3(kPacket3EventWrite, 1, false));
++    words_.push_back(0x407);
++  }
++
++  void DependencyRmwSameAgent() {
++    WaitComputeIdle();
++    EmitAcquire(0x00ffffff, 10, 0x00380);
++  }
++
++  void DependencyRmwVmem() {
++    WaitComputeIdle();
++    EmitAcquire(0x00ffffff, 10, 0x00300);
++  }
++
++  void EmitAcquire(uint32_t size_hi, uint32_t poll_interval, uint32_t gcr_cntl) {
++    words_.insert(words_.end(), {
++        Packet3(kPacket3AcquireMem, 7, false), 0, UINT32_MAX, size_hi, 0, 0,
++        poll_interval, gcr_cntl,
++    });
++  }
++
++  void SetShRegs(uint32_t first, const uint32_t* values, size_t count) {
++    size_t i = 0;
++    while (i < count) {
++      while (i < count) {
++        const uint32_t reg = first + static_cast<uint32_t>(i);
++        const auto it = register_state_.find(reg);
++        if (it == register_state_.end() || it->second != values[i]) {
++          break;
++        }
++        ++i;
++      }
++      if (i == count) {
++        break;
++      }
++      const size_t run_start = i;
++      while (i < count) {
++        const uint32_t reg = first + static_cast<uint32_t>(i);
++        const auto it = register_state_.find(reg);
++        if (it != register_state_.end() && it->second == values[i]) {
++          break;
++        }
++        register_state_[reg] = values[i];
++        ++i;
++      }
++      const size_t run_count = i - run_start;
++      words_.push_back(Packet3(kPacket3SetShReg,
++                               1 + static_cast<uint32_t>(run_count), true));
++      words_.push_back(first + static_cast<uint32_t>(run_start));
++      words_.insert(words_.end(), values + run_start, values + run_start + run_count);
++    }
++  }
++
++  std::vector<uint32_t> words_;
++  std::map<uint32_t, uint32_t> register_state_;
++  size_t dispatch_count_ = 0;
++  static constexpr size_t kNoPatchDword = static_cast<size_t>(-1);
++  size_t tmpring_patch_dword_ = kNoPatchDword;
++};
++
++}  // namespace rocr::graph
++
++#endif  // HSA_RUNTIME_CORE_INC_AMD_GRAPH_COMMAND_ENCODER_H_
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/amd_aql_queue.cpp b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/amd_aql_queue.cpp
+index 220aef73709c..2c41c7770ccd 100644
+--- a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/amd_aql_queue.cpp
++++ b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/amd_aql_queue.cpp
+@@ -774,6 +774,48 @@ void AqlQueue::CheckScratchLimits() {
+   return;
+ }
+ 
++hsa_status_t AqlQueue::GetGraphScratchState(
++    uint32_t private_wave32, uint32_t private_wave64,
++    uint32_t* compute_tmpring_size,
++    std::shared_ptr<std::atomic<uint32_t>>* scratch_users) {
++  if (compute_tmpring_size == nullptr || scratch_users == nullptr) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++  *compute_tmpring_size = 0;
++  scratch_users->reset();
++  if (private_wave32 == 0 && private_wave64 == 0) {
++    return HSA_STATUS_SUCCESS;
++  }
++
++  std::lock_guard<std::mutex> lock(scratch_lock_);
++  const auto& scratch = queue_scratch_;
++  if (!active_.load(std::memory_order_acquire) || scratch.main_queue_base == nullptr ||
++      scratch.main_size == 0 || scratch.main_size_per_thread == 0 ||
++      scratch.main_lanes_per_wave == 0 || scratch.large ||
++      amd_queue_.compute_tmpring_size == 0) {
++    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
++  }
++
++  const uint64_t available_per_wave =
++      AlignUp(static_cast<uint64_t>(scratch.main_size_per_thread) *
++                  scratch.main_lanes_per_wave,
++              static_cast<uint64_t>(scratch.mem_alignment_size));
++  const uint64_t required_wave32 =
++      AlignUp(static_cast<uint64_t>(private_wave32) * 32,
++              static_cast<uint64_t>(scratch.mem_alignment_size));
++  const uint64_t required_wave64 =
++      AlignUp(static_cast<uint64_t>(private_wave64) * 64,
++              static_cast<uint64_t>(scratch.mem_alignment_size));
++  if (required_wave32 > available_per_wave || required_wave64 > available_per_wave) {
++    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
++  }
++
++  *compute_tmpring_size = amd_queue_.compute_tmpring_size;
++  *scratch_users = retained_graph_scratch_;
++  retained_graph_scratch_->fetch_add(1, std::memory_order_acq_rel);
++  return HSA_STATUS_SUCCESS;
++}
++
+ void AqlQueue::FreeMainScratchSpace() {
+   auto& scratch = queue_scratch_;
+   if (queue_scratch_.main_queue_base) {
+@@ -885,14 +927,17 @@ void AqlQueue::AsyncReclaimMainScratch() {
+     return;
+   }
+ 
++  std::lock_guard<std::mutex> lock(scratch_lock_);
++  if (retained_graph_scratch_->load(std::memory_order_acquire) != 0) {
++    return;
++  }
++
+   assert((amd_queue_.caps & AMD_QUEUE_CAPS_CP_ASYNC_RECLAIM) &&
+           "This version of CP FW should support async scratch, but flag is not set");
+ 
+   tool::notify_event_scratch_async_reclaim_start(public_handle(),
+                                                  HSA_AMD_EVENT_SCRATCH_ALLOC_FLAG_NONE);
+ 
+-  std::lock_guard<std::mutex> lock(scratch_lock_);
+-
+   // Unmap the queue. CP will check amd_queue_ fields on re-map
+   Suspend();
+ 
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
+new file mode 100644
+index 000000000000..19fb06ef9b15
+--- /dev/null
++++ b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
+@@ -0,0 +1,629 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ * SPDX-FileCopyrightText: 2026 Kaden Schutt <kaden@hipfire.dev>
++ * SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
++ *
++ * The GFX11 register map and dependency sequence are adapted from
++ * redline-rocr at pwilkin/redline 20474b8c1a5b.
++ */
++
++#include "inc/hsa_ven_amd_graph.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <new>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++#include "core/inc/agent.h"
++#include "core/inc/amd_aql_queue.h"
++#include "core/inc/amd_graph_command_encoder.h"
++#include "core/inc/amd_gpu_agent.h"
++#include "core/inc/hsa_ven_amd_loader_impl.h"
++#include "core/inc/intercept_queue.h"
++#include "core/inc/memory_region.h"
++#include "core/inc/runtime.h"
++#include "inc/hsa_ext_amd.h"
++
++namespace rocr {
++namespace AMD {
++hsa_status_t handleException();
++}
++
++namespace graph {
++namespace {
++
++constexpr uint16_t kPm4IndirectBufferFormat = 1;
++constexpr uint32_t kPacket3IndirectBuffer = 0x3f;
++constexpr uint32_t kIbValid = 1u << 23;
++constexpr uint32_t kIbTemporalLu = 3u << 28;
++
++class CommandList {
++ public:
++  struct QueueBinding {
++    void* ib;
++    std::shared_ptr<std::atomic<uint32_t>> scratch_users;
++  };
++
++  CommandList(AMD::GpuAgent* agent, void* ib, uint32_t dwords, uint32_t dispatches,
++              hsa_ven_amd_graph_encoder_family_t family, size_t tmpring_patch_dword,
++              uint32_t private_wave32, uint32_t private_wave64)
++      : agent_(agent),
++        ib_(ib),
++        dwords_(dwords),
++        dispatches_(dispatches),
++        family_(family),
++        tmpring_patch_dword_(tmpring_patch_dword),
++        private_wave32_(private_wave32),
++        private_wave64_(private_wave64) {}
++
++  ~CommandList() {
++    for (const auto& [queue_id, binding] : queue_ibs_) {
++      static_cast<void>(queue_id);
++      agent_->system_deallocator()(binding.ib);
++      binding.scratch_users->fetch_sub(1, std::memory_order_release);
++    }
++    agent_->system_deallocator()(ib_);
++  }
++
++  AMD::GpuAgent* agent() const { return agent_; }
++  void* ib() const { return ib_; }
++  uint32_t dwords() const { return dwords_; }
++  uint32_t dispatches() const { return dispatches_; }
++  hsa_ven_amd_graph_encoder_family_t family() const { return family_; }
++  uint32_t max_private_segment_size() const {
++    return std::max(private_wave32_, private_wave64_);
++  }
++  uint32_t private_wave32() const { return private_wave32_; }
++  uint32_t private_wave64() const { return private_wave64_; }
++  bool requires_scratch() const { return private_wave32_ != 0 || private_wave64_ != 0; }
++
++  void* QueueIb(uint64_t queue_id, uint32_t compute_tmpring_size,
++                const std::shared_ptr<std::atomic<uint32_t>>& scratch_users) {
++    if (!requires_scratch()) {
++      return ib_;
++    }
++    if (scratch_users == nullptr) {
++      return nullptr;
++    }
++    const auto existing = queue_ibs_.find(queue_id);
++    if (existing != queue_ibs_.end()) {
++      scratch_users->fetch_sub(1, std::memory_order_release);
++      return existing->second.ib;
++    }
++    if (compute_tmpring_size == 0 || tmpring_patch_dword_ >= dwords_) {
++      scratch_users->fetch_sub(1, std::memory_order_release);
++      return nullptr;
++    }
++
++    const size_t bytes = static_cast<size_t>(dwords_) * sizeof(uint32_t);
++    void* binding =
++        agent_->system_allocator()(bytes, 4096, core::MemoryRegion::AllocateExecutable);
++    if (binding == nullptr) {
++      scratch_users->fetch_sub(1, std::memory_order_release);
++      return nullptr;
++    }
++    std::memcpy(binding, ib_, bytes);
++    static_cast<uint32_t*>(binding)[tmpring_patch_dword_] = compute_tmpring_size;
++    std::atomic_thread_fence(std::memory_order_release);
++    try {
++      queue_ibs_.emplace(queue_id, QueueBinding{binding, scratch_users});
++    } catch (...) {
++      agent_->system_deallocator()(binding);
++      scratch_users->fetch_sub(1, std::memory_order_release);
++      throw;
++    }
++    return binding;
++  }
++
++ private:
++  AMD::GpuAgent* agent_;
++  void* ib_;
++  uint32_t dwords_;
++  uint32_t dispatches_;
++  hsa_ven_amd_graph_encoder_family_t family_;
++  size_t tmpring_patch_dword_;
++  uint32_t private_wave32_;
++  uint32_t private_wave64_;
++  std::unordered_map<uint64_t, QueueBinding> queue_ibs_;
++};
++
++std::mutex command_lists_mutex;
++std::unordered_set<CommandList*> command_lists;
++
++bool DiagnosticsEnabled() {
++  const char* value = std::getenv("HSA_GRAPH_COMMAND_LIST_DIAGNOSTICS");
++  return value != nullptr && value[0] != '\0' && value[0] != '0';
++}
++
++template <typename Image>
++void PrintEncoderRejection(size_t index, hsa_ven_amd_graph_encoder_family_t family,
++                           const hsa_kernel_dispatch_packet_t& packet,
++                           const Image& image, uint32_t kernel_flags,
++                           hsa_ven_amd_graph_dependency_t dependency) {
++  if (!DiagnosticsEnabled()) {
++    return;
++  }
++  std::fprintf(
++      stderr,
++      "[ROCR graph PM4] reject packet=%zu family=%u kernel=0x%016llx entry=0x%016llx "
++      "private=%u dynamic=%u properties=0x%04x preload=%u grid=%ux%ux%u "
++      "workgroup=%ux%ux%u group=%u kernarg=%p dependency=%u flags=0x%x\n",
++      index, static_cast<unsigned>(family),
++      static_cast<unsigned long long>(packet.kernel_object),
++      static_cast<unsigned long long>(image.code_entry), packet.private_segment_size,
++      (kernel_flags & HSA_VEN_AMD_GRAPH_KERNEL_DYNAMIC_CALLSTACK) != 0,
++      image.kernel_code_properties, image.kernarg_preload_length, packet.grid_size_x,
++      packet.grid_size_y, packet.grid_size_z, packet.workgroup_size_x,
++      packet.workgroup_size_y, packet.workgroup_size_z, packet.group_segment_size,
++      packet.kernarg_address, static_cast<unsigned>(dependency), kernel_flags);
++}
++
++bool GetCapability(AMD::GpuAgent* agent, hsa_ven_amd_graph_capabilities_t* capabilities) {
++  if (agent->supported_isas().empty()) {
++    return false;
++  }
++  const auto* isa = agent->supported_isas()[0];
++  const auto capability = GetGraphCommandCapability(
++      isa->GetMajorVersion(), isa->GetMinorVersion(), isa->GetStepping());
++  capabilities->encoder_family = capability.family;
++  capabilities->flags = 0;
++  if (capability.compile_supported) {
++    capabilities->flags |= HSA_VEN_AMD_GRAPH_CAPABILITY_COMPILE_SUPPORTED;
++  }
++  if (capability.runtime_qualified) {
++    capabilities->flags |= HSA_VEN_AMD_GRAPH_CAPABILITY_RUNTIME_QUALIFIED;
++  }
++  return true;
++}
++
++CommandList* FindCommandList(hsa_ven_amd_graph_command_list_t handle) {
++  auto* command_list = reinterpret_cast<CommandList*>(handle.handle);
++  return command_lists.count(command_list) != 0 ? command_list : nullptr;
++}
++
++AMD::AqlQueue* UnwrapAqlQueue(hsa_queue_t* queue) {
++  core::Queue* core_queue = core::Queue::Convert(queue);
++  if (core_queue == nullptr || !core_queue->IsValid()) {
++    return nullptr;
++  }
++  while (core::InterceptQueue::IsType(core_queue)) {
++    core_queue = static_cast<core::InterceptQueue*>(core_queue)->wrapped.get();
++    if (core_queue == nullptr || !core_queue->IsValid()) {
++      return nullptr;
++    }
++  }
++  return AMD::AqlQueue::IsType(core_queue) ? static_cast<AMD::AqlQueue*>(core_queue)
++                                           : nullptr;
++}
++
++bool LoadGfx11KernelImage(const hsa_kernel_dispatch_packet_t& packet,
++                          Gfx11KernelImage* image) {
++  const void* host_address = nullptr;
++  if (image == nullptr ||
++      rocr::hsa_ven_amd_loader_query_host_address(
++          reinterpret_cast<const void*>(packet.kernel_object), &host_address) !=
++          HSA_STATUS_SUCCESS ||
++      host_address == nullptr) {
++    return false;
++  }
++  constexpr size_t kDescriptorOffset = 16;
++  const auto* descriptor = reinterpret_cast<const hsa_amd_metadata_kernel_descriptor_t*>(
++      static_cast<const uint8_t*>(host_address) + kDescriptorOffset);
++  const int64_t entry_offset = descriptor->kernel_code_entry_byte_offset;
++  uint64_t code_entry = packet.kernel_object;
++  if (entry_offset >= 0) {
++    if (code_entry > UINT64_MAX - static_cast<uint64_t>(entry_offset)) {
++      return false;
++    }
++    code_entry += static_cast<uint64_t>(entry_offset);
++  } else {
++    const uint64_t magnitude = static_cast<uint64_t>(-(entry_offset + 1)) + 1;
++    if (code_entry < magnitude) {
++      return false;
++    }
++    code_entry -= magnitude;
++  }
++  *image = {
++      code_entry,
++      descriptor->compute_pgm_rsrc1,
++      descriptor->compute_pgm_rsrc2,
++      descriptor->compute_pgm_rsrc3,
++      descriptor->kernel_code_properties,
++      descriptor->kernarg_preload.length,
++  };
++  return true;
++}
++
++bool LoadGfx12KernelImage(const hsa_kernel_dispatch_packet_t& packet,
++                          Gfx12KernelImage* image) {
++  Gfx11KernelImage legacy{};
++  if (image == nullptr || !LoadGfx11KernelImage(packet, &legacy)) {
++    return false;
++  }
++  *image = {
++      legacy.code_entry,
++      legacy.compute_pgm_rsrc1,
++      legacy.compute_pgm_rsrc2,
++      legacy.compute_pgm_rsrc3,
++      legacy.kernel_code_properties,
++      legacy.kernarg_preload_length,
++  };
++  return true;
++}
++
++}  // namespace
++
++hsa_status_t GetCapabilities(hsa_agent_t hsa_agent,
++                             hsa_ven_amd_graph_capabilities_t* capabilities) {
++  if (capabilities == nullptr ||
++      capabilities->struct_size < sizeof(hsa_ven_amd_graph_capabilities_t)) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++  core::Agent* agent = core::Agent::Convert(hsa_agent);
++  if (agent == nullptr || !agent->IsValid() ||
++      agent->device_type() != core::Agent::kAmdGpuDevice) {
++    return HSA_STATUS_ERROR_INVALID_AGENT;
++  }
++  auto* gpu_agent = static_cast<AMD::GpuAgent*>(agent);
++  std::memset(reinterpret_cast<uint8_t*>(capabilities) + offsetof(
++                  hsa_ven_amd_graph_capabilities_t, version_major),
++              0, sizeof(*capabilities) -
++                     offsetof(hsa_ven_amd_graph_capabilities_t, version_major));
++  capabilities->struct_size = sizeof(*capabilities);
++  capabilities->version_major = HSA_VEN_AMD_GRAPH_VERSION_MAJOR;
++  capabilities->version_minor = HSA_VEN_AMD_GRAPH_VERSION_MINOR;
++  return GetCapability(gpu_agent, capabilities) ? HSA_STATUS_SUCCESS
++                                                 : HSA_STATUS_ERROR_INVALID_ISA;
++}
++
++hsa_status_t Create(hsa_agent_t hsa_agent,
++                    const hsa_ven_amd_graph_command_list_desc_t* desc,
++                    hsa_ven_amd_graph_command_list_t* handle) {
++  if (desc == nullptr || handle == nullptr ||
++      desc->struct_size < sizeof(hsa_ven_amd_graph_command_list_desc_t) ||
++      desc->packets == nullptr || desc->packet_count < 2 ||
++      (desc->flags & ~HSA_VEN_AMD_GRAPH_COMMAND_LIST_ALLOW_UNQUALIFIED) != 0 ||
++      desc->kernel_flags == nullptr || desc->kernel_flag_count != desc->packet_count ||
++      desc->dependency_count != desc->packet_count - 1 ||
++      (desc->dependency_count != 0 && desc->dependencies == nullptr)) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++  handle->handle = 0;
++
++  core::Agent* agent = core::Agent::Convert(hsa_agent);
++  if (agent == nullptr || !agent->IsValid() ||
++      agent->device_type() != core::Agent::kAmdGpuDevice) {
++    return HSA_STATUS_ERROR_INVALID_AGENT;
++  }
++  auto* gpu_agent = static_cast<AMD::GpuAgent*>(agent);
++  hsa_ven_amd_graph_capabilities_t capabilities{};
++  capabilities.struct_size = sizeof(capabilities);
++  const bool allow_unqualified =
++      (desc->flags & HSA_VEN_AMD_GRAPH_COMMAND_LIST_ALLOW_UNQUALIFIED) != 0;
++  if (!GetCapability(gpu_agent, &capabilities) ||
++      (capabilities.flags & HSA_VEN_AMD_GRAPH_CAPABILITY_COMPILE_SUPPORTED) == 0 ||
++      ((capabilities.flags & HSA_VEN_AMD_GRAPH_CAPABILITY_RUNTIME_QUALIFIED) == 0 &&
++       !allow_unqualified) ||
++      capabilities.encoder_family == HSA_VEN_AMD_GRAPH_ENCODER_NONE) {
++    return HSA_STATUS_ERROR_INVALID_ISA;
++  }
++
++  auto validate_packet = [](const hsa_kernel_dispatch_packet_t& packet) {
++    const uint8_t type =
++        (packet.header >> HSA_PACKET_HEADER_TYPE) &
++        ((1 << HSA_PACKET_HEADER_WIDTH_TYPE) - 1);
++    return type == HSA_PACKET_TYPE_KERNEL_DISPATCH && packet.completion_signal.handle == 0;
++  };
++  std::vector<uint32_t> words;
++  uint32_t dispatch_count = 0;
++  size_t tmpring_patch_dword = static_cast<size_t>(-1);
++  uint32_t private_wave32 = 0;
++  uint32_t private_wave64 = 0;
++  constexpr uint16_t kEnableWavefrontSize32 = 1u << 10;
++  if (capabilities.encoder_family == HSA_VEN_AMD_GRAPH_ENCODER_GFX11) {
++    Gfx11CommandEncoder builder;
++    for (size_t i = 0; i < desc->packet_count; ++i) {
++      const auto& packet = desc->packets[i];
++      if (!validate_packet(packet)) {
++        return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++      }
++      const auto dependency = i == 0 ? HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW
++                                     : desc->dependencies[i - 1];
++      Gfx11KernelImage image{};
++      if (!LoadGfx11KernelImage(packet, &image)) {
++        if (DiagnosticsEnabled()) {
++          std::fprintf(stderr,
++                       "[ROCR graph PM4] reject packet=%zu family=%u kernel=0x%016llx "
++                       "reason=loader-descriptor\n",
++                       i, static_cast<unsigned>(capabilities.encoder_family),
++                       static_cast<unsigned long long>(packet.kernel_object));
++        }
++        return HSA_STATUS_ERROR_INVALID_CODE_OBJECT;
++      }
++      if (!builder.Append(packet, image, desc->kernel_flags[i], dependency)) {
++        PrintEncoderRejection(i, capabilities.encoder_family, packet, image,
++                              desc->kernel_flags[i], dependency);
++        return HSA_STATUS_ERROR_INVALID_CODE_OBJECT;
++      }
++      if ((image.kernel_code_properties & kEnableWavefrontSize32) != 0) {
++        private_wave32 = std::max(private_wave32, packet.private_segment_size);
++      } else {
++        private_wave64 = std::max(private_wave64, packet.private_segment_size);
++      }
++    }
++    builder.Finish();
++    words = builder.words();
++    dispatch_count = static_cast<uint32_t>(builder.dispatch_count());
++    tmpring_patch_dword = builder.tmpring_patch_dword();
++  } else if (capabilities.encoder_family == HSA_VEN_AMD_GRAPH_ENCODER_GFX12) {
++    Gfx12CommandEncoder builder;
++    for (size_t i = 0; i < desc->packet_count; ++i) {
++      const auto& packet = desc->packets[i];
++      if (!validate_packet(packet)) {
++        return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++      }
++      const auto dependency = i == 0 ? HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW
++                                     : desc->dependencies[i - 1];
++      Gfx12KernelImage image{};
++      if (!LoadGfx12KernelImage(packet, &image)) {
++        if (DiagnosticsEnabled()) {
++          std::fprintf(stderr,
++                       "[ROCR graph PM4] reject packet=%zu family=%u kernel=0x%016llx "
++                       "reason=loader-descriptor\n",
++                       i, static_cast<unsigned>(capabilities.encoder_family),
++                       static_cast<unsigned long long>(packet.kernel_object));
++        }
++        return HSA_STATUS_ERROR_INVALID_CODE_OBJECT;
++      }
++      if (!builder.Append(packet, image, desc->kernel_flags[i], dependency)) {
++        PrintEncoderRejection(i, capabilities.encoder_family, packet, image,
++                              desc->kernel_flags[i], dependency);
++        return HSA_STATUS_ERROR_INVALID_CODE_OBJECT;
++      }
++      if ((image.kernel_code_properties & kEnableWavefrontSize32) != 0) {
++        private_wave32 = std::max(private_wave32, packet.private_segment_size);
++      } else {
++        private_wave64 = std::max(private_wave64, packet.private_segment_size);
++      }
++    }
++    builder.Finish();
++    words = builder.words();
++    dispatch_count = static_cast<uint32_t>(builder.dispatch_count());
++    tmpring_patch_dword = builder.tmpring_patch_dword();
++  } else {
++    return HSA_STATUS_ERROR_INVALID_ISA;
++  }
++  if (words.empty() || words.size() > 0x000fffff || tmpring_patch_dword >= words.size()) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++
++  const size_t bytes = words.size() * sizeof(uint32_t);
++  void* ib = gpu_agent->system_allocator()(bytes, 4096, core::MemoryRegion::AllocateExecutable);
++  if (ib == nullptr) {
++    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
++  }
++  std::memcpy(ib, words.data(), bytes);
++  std::atomic_thread_fence(std::memory_order_release);
++
++  auto* command_list = new (std::nothrow)
++      CommandList(gpu_agent, ib, static_cast<uint32_t>(words.size()),
++                  dispatch_count, capabilities.encoder_family, tmpring_patch_dword,
++                  private_wave32, private_wave64);
++  if (command_list == nullptr) {
++    gpu_agent->system_deallocator()(ib);
++    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
++  }
++  {
++    std::lock_guard<std::mutex> lock(command_lists_mutex);
++    command_lists.insert(command_list);
++  }
++  handle->handle = reinterpret_cast<uint64_t>(command_list);
++  return HSA_STATUS_SUCCESS;
++}
++
++hsa_status_t Destroy(hsa_ven_amd_graph_command_list_t handle) {
++  CommandList* command_list = nullptr;
++  {
++    std::lock_guard<std::mutex> lock(command_lists_mutex);
++    command_list = FindCommandList(handle);
++    if (command_list == nullptr) {
++      return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++    }
++    command_lists.erase(command_list);
++  }
++  delete command_list;
++  return HSA_STATUS_SUCCESS;
++}
++
++hsa_status_t GetInfo(hsa_ven_amd_graph_command_list_t handle,
++                     hsa_ven_amd_graph_command_list_info_t attribute, void* value) {
++  if (value == nullptr) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++  std::lock_guard<std::mutex> lock(command_lists_mutex);
++  CommandList* command_list = FindCommandList(handle);
++  if (command_list == nullptr) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++  switch (attribute) {
++    case HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_DISPATCH_COUNT:
++      *static_cast<uint32_t*>(value) = command_list->dispatches();
++      return HSA_STATUS_SUCCESS;
++    case HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_DWORD_COUNT:
++      *static_cast<uint32_t*>(value) = command_list->dwords();
++      return HSA_STATUS_SUCCESS;
++    case HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_ENCODER_FAMILY:
++      *static_cast<hsa_ven_amd_graph_encoder_family_t*>(value) =
++          command_list->family();
++      return HSA_STATUS_SUCCESS;
++    case HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_MAX_PRIVATE_SEGMENT_SIZE:
++      *static_cast<uint32_t*>(value) = command_list->max_private_segment_size();
++      return HSA_STATUS_SUCCESS;
++    default:
++      return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++}
++
++hsa_status_t Materialize(hsa_ven_amd_graph_command_list_t handle, hsa_queue_t* queue,
++                         hsa_fence_scope_t acquire_scope,
++                         hsa_fence_scope_t release_scope, uint32_t barrier,
++                         hsa_signal_t completion_signal,
++                         hsa_ven_amd_graph_materialized_packet_t* output) {
++  if (output == nullptr || acquire_scope > HSA_FENCE_SCOPE_SYSTEM ||
++      release_scope > HSA_FENCE_SCOPE_SYSTEM || barrier > 1) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++  std::lock_guard<std::mutex> lock(command_lists_mutex);
++  CommandList* command_list = FindCommandList(handle);
++  if (command_list == nullptr) {
++    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
++  }
++
++  void* ib = command_list->ib();
++  if (command_list->requires_scratch()) {
++    AMD::AqlQueue* aql_queue = UnwrapAqlQueue(queue);
++    if (aql_queue == nullptr || aql_queue->GetAgent() != command_list->agent()) {
++      return HSA_STATUS_ERROR_INVALID_QUEUE;
++    }
++    uint32_t compute_tmpring_size = 0;
++    std::shared_ptr<std::atomic<uint32_t>> scratch_users;
++    const hsa_status_t scratch_status = aql_queue->GetGraphScratchState(
++        command_list->private_wave32(), command_list->private_wave64(),
++        &compute_tmpring_size, &scratch_users);
++    if (scratch_status != HSA_STATUS_SUCCESS) {
++      return scratch_status;
++    }
++    ib = command_list->QueueIb(aql_queue->public_handle()->id, compute_tmpring_size,
++                               scratch_users);
++    if (ib == nullptr) {
++      return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
++    }
++  }
++
++  struct AqlPm4Ib {
++    uint16_t header;
++    uint16_t vendor_header;
++    uint32_t indirect_buffer[4];
++    uint32_t dword_count_remaining;
++    uint32_t reserved[8];
++    hsa_signal_t completion_signal;
++  } packet{};
++  static_assert(sizeof(packet) == 64, "vendor PM4 packet must be one AQL slot");
++
++  packet.header =
++      (HSA_PACKET_TYPE_VENDOR_SPECIFIC << HSA_PACKET_HEADER_TYPE) |
++      (barrier << HSA_PACKET_HEADER_BARRIER) |
++      (acquire_scope << HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE) |
++      (release_scope << HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE);
++  packet.vendor_header = kPm4IndirectBufferFormat;
++  const uint64_t address = reinterpret_cast<uint64_t>(ib);
++  packet.indirect_buffer[0] =
++      (3u << 30) | (2u << 16) | (kPacket3IndirectBuffer << 8);
++  packet.indirect_buffer[1] = static_cast<uint32_t>(address) & 0xfffffffc;
++  packet.indirect_buffer[2] = static_cast<uint32_t>(address >> 32);
++  packet.indirect_buffer[3] = command_list->dwords() | kIbValid | kIbTemporalLu;
++  packet.dword_count_remaining = 10;
++  packet.completion_signal = completion_signal;
++
++  std::memset(output, 0, sizeof(*output));
++  std::memcpy(output->packet.bytes, &packet, sizeof(packet));
++  output->full_header =
++      static_cast<uint32_t>(packet.header) |
++      (static_cast<uint32_t>(packet.vendor_header) << 16);
++  return HSA_STATUS_SUCCESS;
++}
++
++}  // namespace graph
++}  // namespace rocr
++
++hsa_status_t HSA_API hsa_ven_amd_graph_get_capabilities(
++    hsa_agent_t agent, hsa_ven_amd_graph_capabilities_t* capabilities) {
++  try {
++    if (!rocr::core::Runtime::runtime_singleton_->IsOpen()) {
++      return HSA_STATUS_ERROR_NOT_INITIALIZED;
++    }
++    return rocr::graph::GetCapabilities(agent, capabilities);
++  } catch (...) {
++    return rocr::AMD::handleException();
++  }
++}
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_create(
++    hsa_agent_t agent, const hsa_ven_amd_graph_command_list_desc_t* desc,
++    hsa_ven_amd_graph_command_list_t* command_list) {
++  try {
++    if (!rocr::core::Runtime::runtime_singleton_->IsOpen()) {
++      return HSA_STATUS_ERROR_NOT_INITIALIZED;
++    }
++    return rocr::graph::Create(agent, desc, command_list);
++  } catch (...) {
++    return rocr::AMD::handleException();
++  }
++}
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_destroy(
++    hsa_ven_amd_graph_command_list_t command_list) {
++  try {
++    if (!rocr::core::Runtime::runtime_singleton_->IsOpen()) {
++      return HSA_STATUS_ERROR_NOT_INITIALIZED;
++    }
++    return rocr::graph::Destroy(command_list);
++  } catch (...) {
++    return rocr::AMD::handleException();
++  }
++}
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_get_info(
++    hsa_ven_amd_graph_command_list_t command_list,
++    hsa_ven_amd_graph_command_list_info_t attribute, void* value) {
++  try {
++    if (!rocr::core::Runtime::runtime_singleton_->IsOpen()) {
++      return HSA_STATUS_ERROR_NOT_INITIALIZED;
++    }
++    return rocr::graph::GetInfo(command_list, attribute, value);
++  } catch (...) {
++    return rocr::AMD::handleException();
++  }
++}
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_materialize_packet(
++    hsa_ven_amd_graph_command_list_t command_list, hsa_fence_scope_t acquire_scope,
++    hsa_fence_scope_t release_scope, uint32_t barrier, hsa_signal_t completion_signal,
++    hsa_ven_amd_graph_materialized_packet_t* packet) {
++  try {
++    if (!rocr::core::Runtime::runtime_singleton_->IsOpen()) {
++      return HSA_STATUS_ERROR_NOT_INITIALIZED;
++    }
++    return rocr::graph::Materialize(command_list, nullptr, acquire_scope, release_scope,
++                                    barrier, completion_signal, packet);
++  } catch (...) {
++    return rocr::AMD::handleException();
++  }
++}
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_materialize_packet_for_queue(
++    hsa_ven_amd_graph_command_list_t command_list, hsa_queue_t* queue,
++    hsa_fence_scope_t acquire_scope, hsa_fence_scope_t release_scope, uint32_t barrier,
++    hsa_signal_t completion_signal, hsa_ven_amd_graph_materialized_packet_t* packet) {
++  try {
++    if (!rocr::core::Runtime::runtime_singleton_->IsOpen()) {
++      return HSA_STATUS_ERROR_NOT_INITIALIZED;
++    }
++    if (queue == nullptr) {
++      return HSA_STATUS_ERROR_INVALID_QUEUE;
++    }
++    return rocr::graph::Materialize(command_list, queue, acquire_scope, release_scope,
++                                    barrier, completion_signal, packet);
++  } catch (...) {
++    return rocr::AMD::handleException();
++  }
++}
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/hsacore.dll.def b/projects/rocr-runtime/runtime/hsa-runtime/hsacore.dll.def
+index 28a0488bde04..78d2049f42b4 100644
+--- a/projects/rocr-runtime/runtime/hsa-runtime/hsacore.dll.def
++++ b/projects/rocr-runtime/runtime/hsa-runtime/hsacore.dll.def
+@@ -242,4 +242,10 @@ EXPORTS
+   hsa_amd_vmem_export_fabric_handle
+   hsa_amd_vmem_import_fabric_handle
+   hsa_amd_agent_preload
+-  hsa_amd_svm_discard_and_prefetch_batch_async
+\ No newline at end of file
++  hsa_amd_svm_discard_and_prefetch_batch_async
++  hsa_ven_amd_graph_get_capabilities
++  hsa_ven_amd_graph_command_list_create
++  hsa_ven_amd_graph_command_list_destroy
++  hsa_ven_amd_graph_command_list_get_info
++  hsa_ven_amd_graph_command_list_materialize_packet
++  hsa_ven_amd_graph_command_list_materialize_packet_for_queue
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/hsacore.so.def b/projects/rocr-runtime/runtime/hsa-runtime/hsacore.so.def
+index 46f6c8c2e3aa..3bdab3c3b2dd 100644
+--- a/projects/rocr-runtime/runtime/hsa-runtime/hsacore.so.def
++++ b/projects/rocr-runtime/runtime/hsa-runtime/hsacore.so.def
+@@ -282,6 +282,12 @@ global:
+ 	hsa_amd_vmem_export_fabric_handle;
+ 	hsa_amd_vmem_import_fabric_handle;
+ 	hsa_amd_svm_discard_and_prefetch_batch_async;
++	hsa_ven_amd_graph_get_capabilities;
++	hsa_ven_amd_graph_command_list_create;
++	hsa_ven_amd_graph_command_list_destroy;
++	hsa_ven_amd_graph_command_list_get_info;
++	hsa_ven_amd_graph_command_list_materialize_packet;
++	hsa_ven_amd_graph_command_list_materialize_packet_for_queue;
+ local:
+     *;
+ };
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/inc/hsa_ven_amd_graph.h b/projects/rocr-runtime/runtime/hsa-runtime/inc/hsa_ven_amd_graph.h
+new file mode 100644
+index 000000000000..aface5b6f381
+--- /dev/null
++++ b/projects/rocr-runtime/runtime/hsa-runtime/inc/hsa_ven_amd_graph.h
+@@ -0,0 +1,115 @@
++/*
++ * Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef HSA_RUNTIME_INC_HSA_VEN_AMD_GRAPH_H_
++#define HSA_RUNTIME_INC_HSA_VEN_AMD_GRAPH_H_
++
++#include "hsa.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define HSA_VEN_AMD_GRAPH_VERSION_MAJOR 0
++#define HSA_VEN_AMD_GRAPH_VERSION_MINOR 3
++
++typedef struct hsa_ven_amd_graph_command_list_s {
++  uint64_t handle;
++} hsa_ven_amd_graph_command_list_t;
++
++typedef enum hsa_ven_amd_graph_encoder_family_s {
++  HSA_VEN_AMD_GRAPH_ENCODER_NONE = 0,
++  HSA_VEN_AMD_GRAPH_ENCODER_GFX11 = 1,
++  HSA_VEN_AMD_GRAPH_ENCODER_GFX12 = 2,
++} hsa_ven_amd_graph_encoder_family_t;
++
++typedef enum hsa_ven_amd_graph_capability_flag_s {
++  HSA_VEN_AMD_GRAPH_CAPABILITY_COMPILE_SUPPORTED = 1u << 0,
++  HSA_VEN_AMD_GRAPH_CAPABILITY_RUNTIME_QUALIFIED = 1u << 1,
++} hsa_ven_amd_graph_capability_flag_t;
++
++typedef struct hsa_ven_amd_graph_capabilities_s {
++  uint32_t struct_size;
++  uint32_t version_major;
++  uint32_t version_minor;
++  hsa_ven_amd_graph_encoder_family_t encoder_family;
++  uint32_t flags;
++  uint32_t reserved[3];
++} hsa_ven_amd_graph_capabilities_t;
++
++typedef enum hsa_ven_amd_graph_dependency_s {
++  HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW = 0,
++  HSA_VEN_AMD_GRAPH_DEPENDENCY_VMEM_ONLY = 1,
++} hsa_ven_amd_graph_dependency_t;
++
++typedef enum hsa_ven_amd_graph_kernel_flag_s {
++  HSA_VEN_AMD_GRAPH_KERNEL_DYNAMIC_CALLSTACK = 1u << 0,
++  HSA_VEN_AMD_GRAPH_KERNEL_VERIFIED_VMEM_ONLY = 1u << 1,
++} hsa_ven_amd_graph_kernel_flag_t;
++
++typedef enum hsa_ven_amd_graph_command_list_flag_s {
++  HSA_VEN_AMD_GRAPH_COMMAND_LIST_ALLOW_UNQUALIFIED = 1u << 0,
++} hsa_ven_amd_graph_command_list_flag_t;
++
++typedef struct hsa_ven_amd_graph_command_list_desc_s {
++  uint32_t struct_size;
++  uint32_t reserved0;
++  const hsa_kernel_dispatch_packet_t* packets;
++  size_t packet_count;
++  const hsa_ven_amd_graph_dependency_t* dependencies;
++  size_t dependency_count;
++  const uint32_t* kernel_flags;
++  size_t kernel_flag_count;
++  uint64_t flags;
++} hsa_ven_amd_graph_command_list_desc_t;
++
++typedef union hsa_ven_amd_graph_packet_bytes_u {
++  uint8_t bytes[64];
++  uint64_t qwords[8];
++} hsa_ven_amd_graph_packet_bytes_t;
++
++typedef struct hsa_ven_amd_graph_materialized_packet_s {
++  hsa_ven_amd_graph_packet_bytes_t packet;
++  uint32_t full_header;
++  uint32_t reserved;
++} hsa_ven_amd_graph_materialized_packet_t;
++
++typedef enum hsa_ven_amd_graph_command_list_info_s {
++  HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_DISPATCH_COUNT = 0,
++  HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_DWORD_COUNT = 1,
++  HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_ENCODER_FAMILY = 2,
++  HSA_VEN_AMD_GRAPH_COMMAND_LIST_INFO_MAX_PRIVATE_SEGMENT_SIZE = 3,
++} hsa_ven_amd_graph_command_list_info_t;
++
++hsa_status_t HSA_API hsa_ven_amd_graph_get_capabilities(
++    hsa_agent_t agent, hsa_ven_amd_graph_capabilities_t* capabilities);
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_create(
++    hsa_agent_t agent, const hsa_ven_amd_graph_command_list_desc_t* desc,
++    hsa_ven_amd_graph_command_list_t* command_list);
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_destroy(
++    hsa_ven_amd_graph_command_list_t command_list);
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_get_info(
++    hsa_ven_amd_graph_command_list_t command_list,
++    hsa_ven_amd_graph_command_list_info_t attribute, void* value);
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_materialize_packet(
++    hsa_ven_amd_graph_command_list_t command_list, hsa_fence_scope_t acquire_scope,
++    hsa_fence_scope_t release_scope, uint32_t barrier, hsa_signal_t completion_signal,
++    hsa_ven_amd_graph_materialized_packet_t* packet);
++
++hsa_status_t HSA_API hsa_ven_amd_graph_command_list_materialize_packet_for_queue(
++    hsa_ven_amd_graph_command_list_t command_list, hsa_queue_t* queue,
++    hsa_fence_scope_t acquire_scope, hsa_fence_scope_t release_scope, uint32_t barrier,
++    hsa_signal_t completion_signal, hsa_ven_amd_graph_materialized_packet_t* packet);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // HSA_RUNTIME_INC_HSA_VEN_AMD_GRAPH_H_

@@ -1,0 +1,98 @@
+--- a/sglang/kernels/ops/attention/dsv4/attn_glue_hip.py
++++ b/sglang/kernels/ops/attention/dsv4/attn_glue_hip.py
+@@ -345,7 +345,7 @@
+     return out
+ 
+ 
+-@triton.jit
++@triton.jit(do_not_specialize=["num_cols"])
+ def _page_table_from_req_to_token_kernel(
+     r2t_ptr,
+     req_ptr,
+@@ -386,7 +386,10 @@
+     out = torch.empty((n, num_cols), dtype=torch.int32, device=req_to_token.device)
+     if n == 0 or num_cols == 0:
+         return out
+-    block = min(1024, triton.next_power_of_2(num_cols))
++    # A power-of-two tile per width compiled one variant per size (1..1024, plus a
++    # divisibility split). The kernel is integer-only and its result does not depend
++    # on the tile, so use one tile for every width.
++    block = 1024
+     _page_table_from_req_to_token_kernel[(n, triton.cdiv(num_cols, block))](
+         req_to_token,
+         req_rows,
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
+@@ -13,6 +13,24 @@
+ import triton.language as tl
+ 
+ 
++# Length- and pool-dependent arguments. WIDTH, PAGE_COLS and PAGES used to be
++# `tl.constexpr`, so Triton JIT-compiled a new variant (about 1.4 s on a 2.5 GHz
++# Strix host, on every rank in lockstep) each time the guarded page table grew
++# by 4096 positions: 36 variants in one qualification campaign, ~39 s inside a
++# single cold 61K prefill, and up to ~256 at a 1M-token context window. As
++# runtime integers they only bound loops and masks, so the arithmetic is the
++# same. `do_not_specialize` also keeps Triton from splitting the cache on
++# divisibility by 16 or equality with 1 of these values (pt_stride equals
++# PAGE_COLS for the guarded table), so one variant serves every length.
++_LENGTH_ARGS = ["pt_stride", "WIDTH", "PAGE_COLS", "PAGES"]
++# Long prefills score the logits block in row chunks and pass `lengths[rows]` (and
++# the other per-row inputs) sliced at arbitrary row offsets, so a pointer is
++# 16-byte aligned for some chunks and not others: a second variant per width.
++# These are only read through scalar/gather loads, so alignment is no benefit
++# (the amdgcn instruction mix is identical with and without the assumption).
++_ROW_POINTER_ARGS = ["Q", "QS", "W", "PT", "LENS"]
++
++
+ def use_gfx1151_indexer(device: torch.device) -> bool:
+     return bool(torch.version.hip) and (
+         torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] == "gfx1151"
+@@ -34,7 +52,9 @@
+     return tl.where((code & 8) != 0, -value, value)
+ 
+ 
+-@triton.jit
++@triton.jit(
++    do_not_specialize=_LENGTH_ARGS, do_not_specialize_on_alignment=_ROW_POINTER_ARGS
++)
+ def _paged_logits(
+     Q,
+     QS,
+@@ -48,9 +68,9 @@
+     qs_stride,
+     w_stride,
+     pt_stride,
+-    WIDTH: tl.constexpr,
+-    PAGE_COLS: tl.constexpr,
+-    PAGES: tl.constexpr,
++    WIDTH,
++    PAGE_COLS,
++    PAGES,
+     HEADS: tl.constexpr,
+     WEIGHT_SCALE: tl.constexpr,
+     BLOCK: tl.constexpr,
+@@ -199,7 +219,9 @@
+     return dot * (qscale[:, None] * kscale[None, :])
+ 
+ 
+-@triton.jit
++@triton.jit(
++    do_not_specialize=_LENGTH_ARGS, do_not_specialize_on_alignment=_ROW_POINTER_ARGS
++)
+ def _paged_logits_wmma(
+     Q,
+     QS,
+@@ -213,9 +235,9 @@
+     qs_stride,
+     w_stride,
+     pt_stride,
+-    WIDTH: tl.constexpr,
+-    PAGE_COLS: tl.constexpr,
+-    PAGES: tl.constexpr,
++    WIDTH,
++    PAGE_COLS,
++    PAGES,
+     HEADS: tl.constexpr,
+     WEIGHT_SCALE: tl.constexpr,
+     BLOCK: tl.constexpr,

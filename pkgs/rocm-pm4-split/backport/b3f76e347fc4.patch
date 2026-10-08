@@ -1,0 +1,220 @@
+From b3f76e347fc4970ffe3a260403e0f1fcb063b72b Mon Sep 17 00:00:00 2001
+From: Piotr Wilkin <piotr.wilkin@syndatis.com>
+Date: Thu, 3 Sep 2026 00:08:29 +0200
+Subject: [PATCH] ROCr: fix gfx1201 retained PM4 register programming
+
+Use the GC 12.0 compute register map, batch shader register writes with SET_SH_REG_PAIRS, and fall back for unsupported GFX12 minor versions. Extend encoder and high-scratch graph coverage for the failure mode.
+
+Assisted-by: Codex
+---
+ .../graph/hipGraphCollapseCorrectness.cc      |  6 +-
+ .../graph/graph_command_encoder_test.cc       | 29 ++++----
+ .../core/inc/amd_graph_command_encoder.h      | 66 +++++++++----------
+ 3 files changed, 48 insertions(+), 53 deletions(-)
+
+diff --git a/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc b/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
+index b84d67960008..20a9ab28f93e 100644
+--- a/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
++++ b/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
+@@ -68,8 +68,8 @@ __global__ void k_add_value(int* value, int addend) { value[0] = value[0] + adde
+ __global__ void k_atomic_increment(int* value) { atomicAdd(value, 1); }
+ 
+ __global__ void k_private_increment(int* value, int selector) {
+-  volatile int scratch[8];
+-  const int slot = (selector + static_cast<int>(threadIdx.x)) & 7;
++  volatile int scratch[528];
++  const int slot = (selector + static_cast<int>(threadIdx.x)) % 528;
+   scratch[slot] = value[0] + 1;
+   if (threadIdx.x == 0) {
+     value[0] = scratch[slot];
+@@ -478,7 +478,7 @@ TEST_CASE("Performance_Graph_Pm4QueueScratch") {
+   HIP_CHECK(hipFuncGetAttributes(&attributes,
+                                  reinterpret_cast<const void*>(k_private_increment)));
+   INFO("private bytes=" << attributes.localSizeBytes);
+-  REQUIRE(attributes.localSizeBytes > 0);
++  REQUIRE(attributes.localSizeBytes >= 528 * sizeof(int));
+ 
+   int* device_value = nullptr;
+   HIP_CHECK(hipMalloc(&device_value, sizeof(*device_value)));
+diff --git a/projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc b/projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc
+index 3bbf1b7fef89..e061b3575b26 100644
+--- a/projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc
++++ b/projects/rocr-runtime/rocrtst/suites/functional/graph/graph_command_encoder_test.cc
+@@ -151,19 +151,18 @@ TEST(GraphCommandEncoder, QueueScratchUsesPatchableTmpRingState) {
+   EXPECT_EQ(gfx12.words()[gfx12.tmpring_patch_dword()], 0u);
+ }
+ 
+-TEST(GraphCommandEncoder, Gfx12WordsMatchRedline20474) {
+-  constexpr std::array<uint32_t, 62> expected = {
++TEST(GraphCommandEncoder, Gfx12WordsUseGc120RegistersAndPairs) {
++  constexpr std::array<uint32_t, 55> expected = {
+       0xc0065800, 0x00000000, 0xffffffff, 0x000000ff, 0x00000000, 0x00000000,
+-      0x00000004, 0x00010180, 0xc0027602, 0x0000020c, 0x00000100, 0x00000000,
+-      0xc0027602, 0x00000212, 0x00000011, 0x00000022, 0xc0017602, 0x00000223,
+-      0x00000033, 0xc0017602, 0x00000216, 0x00000000, 0xc0037602, 0x00000207,
+-      0x00000100, 0x00000001, 0x00000001, 0xc0017602, 0x00000215, 0x000003ff,
+-      0xc0047602, 0x00000230, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+-      0xc0027602, 0x00000240, 0x9abcdef0, 0x12345678, 0xc0031502, 0x00000100,
+-      0x00000001, 0x00000001, 0x00008025, 0xc0004600, 0x00000407, 0xc0065800,
+-      0x00000000, 0xffffffff, 0x00ffffff, 0x00000000, 0x00000000, 0x0000000a,
+-      0x00000380, 0xc0031502, 0x00000100, 0x00000001, 0x00000001, 0x00008025,
+-      0xc0004600, 0x00000407,
++      0x00000004, 0x00010180, 0xc017ba02, 0x0000020c, 0x00000100, 0x0000020d,
++      0x00000000, 0x00000212, 0x00000011, 0x00000213, 0x00000022, 0x00000228,
++      0x00000033, 0x00000218, 0x00000000, 0x00000207, 0x00000100, 0x00000208,
++      0x00000001, 0x00000209, 0x00000001, 0x00000215, 0x000003ff, 0x00000240,
++      0x9abcdef0, 0x00000241, 0x12345678, 0xc0031502, 0x00000100, 0x00000001,
++      0x00000001, 0x00008025, 0xc0004600, 0x00000407, 0xc0065800, 0x00000000,
++      0xffffffff, 0x00ffffff, 0x00000000, 0x00000000, 0x0000000a, 0x00000380,
++      0xc0031502, 0x00000100, 0x00000001, 0x00000001, 0x00008025, 0xc0004600,
++      0x00000407,
+   };
+ 
+   rocr::graph::Gfx12CommandEncoder encoder;
+@@ -214,7 +213,7 @@ TEST(GraphCommandEncoder, CapabilityTableCoversDeclaredGfx11AndGfx12Families) {
+        {std::pair{0u, 0u}, std::pair{0u, 1u}, std::pair{5u, 0u}}) {
+     const auto capability = rocr::graph::GetGraphCommandCapability(12, minor, stepping);
+     EXPECT_EQ(capability.family, HSA_VEN_AMD_GRAPH_ENCODER_GFX12);
+-    EXPECT_TRUE(capability.compile_supported);
++    EXPECT_EQ(capability.compile_supported, minor == 0);
+     EXPECT_FALSE(capability.runtime_qualified);
+   }
+   const auto unsupported = rocr::graph::GetGraphCommandCapability(10, 3, 0);
+@@ -238,8 +237,10 @@ TEST(GraphCommandEncoder, DynamicLdsIsEncodedAndOverflowRejected) {
+   rocr::graph::Gfx12CommandEncoder gfx12;
+   ASSERT_TRUE(gfx12.Append(packet, Image12(), 0,
+                            HSA_VEN_AMD_GRAPH_DEPENDENCY_SAME_AGENT_RMW));
++  constexpr std::array<uint32_t, 4> expected_gfx12_rsrc = {
++      0x00000212, 0x00000011, 0x00000213, 0x00018022};
+   const auto gfx12_rsrc = std::search(gfx12.words().begin(), gfx12.words().end(),
+-                                      expected_rsrc.begin(), expected_rsrc.end());
++                                      expected_gfx12_rsrc.begin(), expected_gfx12_rsrc.end());
+   EXPECT_NE(gfx12_rsrc, gfx12.words().end());
+ 
+   packet.group_segment_size = UINT32_MAX;
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h b/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+index dcadead2ec36..4eebac86aff7 100644
+--- a/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
++++ b/projects/rocr-runtime/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+@@ -29,7 +29,7 @@ inline GraphCommandCapability GetGraphCommandCapability(uint32_t major, uint32_t
+     return {HSA_VEN_AMD_GRAPH_ENCODER_GFX11, true, minor == 5 && stepping == 1};
+   }
+   if (major == 12) {
+-    return {HSA_VEN_AMD_GRAPH_ENCODER_GFX12, true, false};
++    return {HSA_VEN_AMD_GRAPH_ENCODER_GFX12, minor == 0, false};
+   }
+   return {HSA_VEN_AMD_GRAPH_ENCODER_NONE, false, false};
+ }
+@@ -290,19 +290,12 @@ class Gfx12CommandEncoder {
+     SetShRegs(kComputePgmRsrc1, rsrc, 2);
+     SetShRegs(kComputePgmRsrc3, &image.compute_pgm_rsrc3, 1);
+     const uint32_t zero = 0;
+-    const size_t tmpring_words_before = words_.size();
+     SetShRegs(kComputeTmpRingSize, &zero, 1);
+-    if (tmpring_patch_dword_ == kNoPatchDword && words_.size() != tmpring_words_before) {
+-      tmpring_patch_dword_ = words_.size() - 1;
+-    }
+     const uint32_t workgroup[] = {packet.workgroup_size_x, packet.workgroup_size_y,
+                                   packet.workgroup_size_z};
+     SetShRegs(kComputeNumThreadX, workgroup, 3);
+     const uint32_t resource_limits = 0x3ff;
+     SetShRegs(kComputeResourceLimits, &resource_limits, 1);
+-    const uint32_t static_thread_management[] = {UINT32_MAX, UINT32_MAX, UINT32_MAX,
+-                                                 UINT32_MAX};
+-    SetShRegs(kComputeStaticThreadMgmtSe0, static_thread_management, 4);
+ 
+     if ((image.kernel_code_properties & kEnableSgprKernargSegmentPtr) != 0) {
+       if (packet.kernarg_address == nullptr) {
+@@ -314,6 +307,8 @@ class Gfx12CommandEncoder {
+       SetShRegs(kComputeUserData0, user_sgprs, 2);
+     }
+ 
++    FlushShRegs();
++
+     const uint32_t dimensions[] = {packet.grid_size_x, packet.grid_size_y,
+                                    packet.grid_size_z};
+     const uint32_t wave_mode =
+@@ -332,7 +327,7 @@ class Gfx12CommandEncoder {
+   size_t tmpring_patch_dword() const { return tmpring_patch_dword_; }
+ 
+  private:
+-  static constexpr uint32_t kPacket3SetShReg = 0x76;
++  static constexpr uint32_t kPacket3SetShRegPairs = 0xba;
+   static constexpr uint32_t kPacket3DispatchDirect = 0x15;
+   static constexpr uint32_t kPacket3EventWrite = 0x46;
+   static constexpr uint32_t kPacket3AcquireMem = 0x58;
+@@ -340,9 +335,8 @@ class Gfx12CommandEncoder {
+   static constexpr uint32_t kComputePgmLo = 0x20c;
+   static constexpr uint32_t kComputePgmRsrc1 = 0x212;
+   static constexpr uint32_t kComputeResourceLimits = 0x215;
+-  static constexpr uint32_t kComputeTmpRingSize = 0x216;
+-  static constexpr uint32_t kComputePgmRsrc3 = 0x223;
+-  static constexpr uint32_t kComputeStaticThreadMgmtSe0 = 0x230;
++  static constexpr uint32_t kComputeTmpRingSize = 0x218;
++  static constexpr uint32_t kComputePgmRsrc3 = 0x228;
+   static constexpr uint32_t kComputeUserData0 = 0x240;
+   static constexpr uint32_t kLdsSizeMask = 0x00ff8000;
+   static constexpr uint32_t kLdsSizeShift = 15;
+@@ -382,38 +376,38 @@ class Gfx12CommandEncoder {
+   }
+ 
+   void SetShRegs(uint32_t first, const uint32_t* values, size_t count) {
+-    size_t i = 0;
+-    while (i < count) {
+-      while (i < count) {
+-        const uint32_t reg = first + static_cast<uint32_t>(i);
+-        const auto it = register_state_.find(reg);
+-        if (it == register_state_.end() || it->second != values[i]) {
+-          break;
+-        }
+-        ++i;
+-      }
+-      if (i == count) {
+-        break;
++    for (size_t i = 0; i < count; ++i) {
++      const uint32_t reg = first + static_cast<uint32_t>(i);
++      const auto it = register_state_.find(reg);
++      if (it == register_state_.end() || it->second != values[i]) {
++        register_state_[reg] = values[i];
++        pending_registers_.push_back(reg);
++        pending_registers_.push_back(values[i]);
+       }
+-      const size_t run_start = i;
+-      while (i < count) {
+-        const uint32_t reg = first + static_cast<uint32_t>(i);
+-        const auto it = register_state_.find(reg);
+-        if (it != register_state_.end() && it->second == values[i]) {
++    }
++  }
++
++  void FlushShRegs() {
++    if (pending_registers_.empty()) {
++      return;
++    }
++    const size_t header = words_.size();
++    words_.push_back(Packet3(kPacket3SetShRegPairs,
++                             static_cast<uint32_t>(pending_registers_.size()), true));
++    words_.insert(words_.end(), pending_registers_.begin(), pending_registers_.end());
++    if (tmpring_patch_dword_ == kNoPatchDword) {
++      for (size_t i = 0; i < pending_registers_.size(); i += 2) {
++        if (pending_registers_[i] == kComputeTmpRingSize) {
++          tmpring_patch_dword_ = header + i + 2;
+           break;
+         }
+-        register_state_[reg] = values[i];
+-        ++i;
+       }
+-      const size_t run_count = i - run_start;
+-      words_.push_back(Packet3(kPacket3SetShReg,
+-                               1 + static_cast<uint32_t>(run_count), true));
+-      words_.push_back(first + static_cast<uint32_t>(run_start));
+-      words_.insert(words_.end(), values + run_start, values + run_start + run_count);
+     }
++    pending_registers_.clear();
+   }
+ 
+   std::vector<uint32_t> words_;
++  std::vector<uint32_t> pending_registers_;
+   std::map<uint32_t, uint32_t> register_state_;
+   size_t dispatch_count_ = 0;
+   static constexpr size_t kNoPatchDword = static_cast<size_t>(-1);

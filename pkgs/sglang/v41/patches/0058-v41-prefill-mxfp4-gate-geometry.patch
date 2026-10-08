@@ -1,0 +1,38 @@
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+@@ -7,6 +7,7 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ from typing import Optional
+ 
+ import torch
+@@ -132,7 +133,26 @@
+     hidden_size: int,
+     intermediate_size: int,
+ ) -> dict:
+-    """Avoid the wrapped half N tile in native TP4 C2 gate/up only."""
++    """Select opt-in TP4 prefill geometry or the native C2 gate/up tile."""
++    # The 1536-row official prefill routes ~24 assignments/expert. The
++    # existing BM32 grouped WMMA tile then traverses K=5120 in eighty BK64
++    # iterations and its fifth BN256 tile is half empty (N=1152). Keep the
++    # baseline by default; opt-in variants let the bounded prefill benchmark
++    # test a shorter K loop and full N tiles without touching decode or down.
++    if (
++        arch == "gfx1151"
++        and (num_tokens, top_k, num_experts, hidden_size, intermediate_size)
++        == (1536, 6, 384, 5120, 576)
++        and (config.get("BLOCK_SIZE_M"), config.get("BLOCK_SIZE_N"),
++             config.get("BLOCK_SIZE_K")) == (32, 256, 64)
++    ):
++        prefill_tile = os.environ.get("SGLANG_DSV41_MXFP4_PREFILL_GATE_TILE", "")
++        if prefill_tile == "n128k128":
++            return {**config, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128}
++        if prefill_tile == "n128k64":
++            return {**config, "BLOCK_SIZE_N": 128}
++        if prefill_tile == "n256k128":
++            return {**config, "BLOCK_SIZE_K": 128}
+     expected = {
+         "BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64,
+         "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 2,

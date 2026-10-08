@@ -1,0 +1,328 @@
+--- a/sglang/kernels/ops/embeddings/engram_hash.py
++++ b/sglang/kernels/ops/embeddings/engram_hash.py
+@@ -77,6 +77,95 @@
+         HISTORY_WIDTH=width,
+         TOKEN_STRIDE=verify_ids.stride(0),
+         BLOCK=triton.next_power_of_2(width),
++        num_warps=4,
++    )
++
++
++@triton.jit
++def _engram_commit_deferred_kernel(
++    history_ptr,
++    tokens_ptr,
++    slots_ptr,
++    out_loc_ptr,
++    status_ptr,
++    history_stride: tl.constexpr,
++    token_stride: tl.constexpr,
++    history_width: tl.constexpr,
++    pad_row: tl.constexpr,
++    has_out_loc: tl.constexpr,
++    has_status: tl.constexpr,
++    status_count: tl.constexpr,
++    status_block: tl.constexpr,
++    block: tl.constexpr,
++):
++    """Commit one distinct live request row only when the TP generation passed."""
++    row = tl.program_id(0)
++    slot = tl.load(slots_ptr + row).to(tl.int64)
++    live = slot != pad_row
++    if has_out_loc:
++        live = live & (tl.load(out_loc_ptr + row) != 0)
++    if has_status:
++        s = tl.arange(0, status_block)
++        status = tl.load(status_ptr + s, mask=s < status_count, other=0)
++        live = live & (tl.sum(status, 0) == 0)
++    col = tl.arange(0, block)
++    # tokens[row] is [current, prev1, ...]; history is oldest first.
++    value = tl.load(
++        tokens_ptr + row * token_stride + (history_width - 1 - col),
++        mask=col < history_width,
++        other=0,
++    )
++    tl.store(
++        history_ptr + slot * history_stride + col,
++        value,
++        mask=(col < history_width) & live,
++    )
++
++
++def engram_commit_deferred_history(
++    history: torch.Tensor,
++    tokens: torch.Tensor,
++    req_slots: torch.Tensor,
++    *,
++    pad_row: int,
++    out_cache_loc: Optional[torch.Tensor] = None,
++    status: Optional[torch.Tensor] = None,
++) -> None:
++    """GPU-only deferred commit; padded/failing generations write no history.
++
++    ``status`` is the fixed, already TP-reduced generation word. The caller
++    must retain it until this launch completes and must not reuse it early.
++    ``req_slots`` must name distinct live requests, as in the canonical hasher.
++    """
++    bs = req_slots.numel()
++    width = history.shape[1]
++    if bs == 0 or width == 0:
++        return
++    assert history.is_cuda and tokens.is_cuda and req_slots.is_cuda
++    assert history.stride(1) == tokens.stride(1) == req_slots.stride(0) == 1
++    assert tokens.shape == (bs, width + 1)
++    if out_cache_loc is not None:
++        assert out_cache_loc.is_cuda and out_cache_loc.shape == (bs,)
++        assert out_cache_loc.stride(0) == 1
++    if status is not None:
++        assert status.is_cuda and status.dtype == torch.int32 and status.is_contiguous()
++    status_count = 0 if status is None else status.numel()
++    assert status_count <= 8
++    _engram_commit_deferred_kernel[(bs,)](
++        history,
++        tokens,
++        req_slots,
++        out_cache_loc if out_cache_loc is not None else history,
++        status if status is not None else history,
++        history_stride=history.stride(0),
++        token_stride=tokens.stride(0),
++        history_width=width,
++        pad_row=pad_row,
++        has_out_loc=out_cache_loc is not None,
++        has_status=status is not None,
++        status_count=status_count,
++        status_block=triton.next_power_of_2(max(1, status_count)),
++        block=triton.next_power_of_2(width),
+         num_warps=4,
+     )
+ 
+--- a/sglang/srt/layers/engram.py
++++ b/sglang/srt/layers/engram.py
+@@ -14,6 +14,7 @@
+ import os
+ import re
+ import time
++from dataclasses import dataclass
+ from functools import partial
+ from typing import Optional
+ 
+@@ -30,6 +31,7 @@
+     MODE_EXTEND,
+     MODE_VERIFY,
+     engram_commit_history,
++    engram_commit_deferred_history,
+     engram_hash_ids,
+     engram_hash_ids_and_commit,
+ )
+@@ -218,6 +220,18 @@
+     return torch.cat(hashes, dim=-1) + offsets
+ 
+ 
++@dataclass
++class EngramPendingHistoryCommit:
++    """Hash-only forward's one-shot history update, retained until preflight passes."""
++
++    owner: "EngramHasher"
++    tokens: torch.Tensor
++    rows: Optional[torch.Tensor]
++    last: Optional[torch.Tensor]
++    out_cache_loc: Optional[torch.Tensor]
++    consumed: bool = False
++
++
+ class EngramHasher(nn.Module):
+     """Hash ids for every token of a forward batch, [T, n_engram_layers, n_hash_cols]."""
+ 
+@@ -284,17 +298,22 @@
+         return result
+ 
+     def forward(
+-        self, input_ids: torch.Tensor, forward_batch: ForwardBatch
+-    ) -> torch.Tensor:
++        self,
++        input_ids: torch.Tensor,
++        forward_batch: ForwardBatch,
++        *,
++        defer_commit: bool = False,
++    ) -> torch.Tensor | tuple[torch.Tensor, Optional[EngramPendingHistoryCommit]]:
+         assert self.history is not None, "EngramHasher.init_history was not called"
+         n = self.max_ngram_size
+         num_tokens = input_ids.shape[0]
+         if num_tokens == 0:
+-            return torch.empty(
++            empty = torch.empty(
+                 (0, self.primes.shape[0], self.offsets.shape[1]),
+                 dtype=torch.int64,
+                 device=input_ids.device,
+             )
++            return (empty, None) if defer_commit else empty
+         mode = forward_batch.forward_mode
+         req_slots = forward_batch.req_pool_indices
+         bs = req_slots.shape[0]
+@@ -329,7 +348,7 @@
+             commit_last = (starts + lens - 1).clamp(0, num_tokens - 1)
+ 
+         if _cuda_kernels(input_ids):
+-            if kmode == MODE_DECODE:
++            if kmode == MODE_DECODE and not defer_commit:
+                 # out_cache_loc 0 marks the CUDA-graph padded rows that must not commit.
+                 assert forward_batch.out_cache_loc is not None
+                 return engram_hash_ids_and_commit(
+@@ -375,6 +394,15 @@
+                 row,
+                 starts,
+             )
++        if defer_commit:
++            pending = EngramPendingHistoryCommit(
++                owner=self,
++                tokens=tokens,
++                rows=commit_rows,
++                last=commit_last,
++                out_cache_loc=forward_batch.out_cache_loc,
++            )
++            return hash_ids, pending
+         if commit_rows is not None:
+             # Padded rows must not overwrite a live request's history.
+             last_tokens = tokens if commit_last is None else tokens[commit_last]
+@@ -387,6 +415,54 @@
+                 last_tokens[:, : n - 1].flip(-1).to(self.history.dtype)
+             )
+         return hash_ids
++
++    def commit_preflight(
++        self,
++        pending: Optional[EngramPendingHistoryCommit],
++        *,
++        status_device: Optional[torch.Tensor] = None,
++    ) -> None:
++        """Publish only live rows after the caller's all-rank preflight.
++
++        An optional TP-reduced device status gates writes without a host read.
++        Its storage must remain live until this kernel has completed.
++        """
++        if pending is None:
++            return
++        if pending.owner is not self or pending.consumed:
++            raise RuntimeError("stale or already committed Engram preflight")
++        pending.consumed = True
++        if pending.rows is None:
++            return  # target verify commits only after acceptance
++        tokens = pending.tokens
++        last_tokens = tokens if pending.last is None else tokens[pending.last]
++        rows = pending.rows
++        out_loc = pending.out_cache_loc
++        if out_loc is not None:
++            if pending.last is not None:
++                out_loc = out_loc[pending.last]
++        # The hash kernel itself is restricted on gfx1151, but this simple
++        # masked commit kernel works on every supported HIP/CUDA device.
++        if tokens.is_cuda:
++            engram_commit_deferred_history(
++                self.history,
++                last_tokens,
++                rows,
++                pad_row=self.pad_row,
++                out_cache_loc=out_loc,
++                status=status_device,
++            )
++            return
++        if status_device is not None:
++            raise ValueError("device-gated history commit requires the GPU kernel")
++        live = rows != self.pad_row
++        if out_loc is not None:
++            live = live & (out_loc != 0)
++        self.history[rows[live]] = (
++            last_tokens[live, : self.max_ngram_size - 1]
++            .flip(-1)
++            .to(self.history.dtype)
++        )
+ 
+     def _torch_hash_ids(
+         self,
+--- /dev/null
++++ b/sglang/srt/layers/engram_preflight_status.py
+@@ -0,0 +1,84 @@
++"""Per-generation, TP-wide Engram failure status for opt-in preflight.
++
++The first serving arm checks this status on the host *before* model execution.
++That check is intentionally a correctness scaffold, not the zero-host hot path.
++Future device-gated graphs may read ``device_status`` only until ``retire``.
++"""
++
++from __future__ import annotations
++
++import torch
++
++from sglang.srt.distributed.parallel_state import inplace_all_reduce
++
++
++class EngramPreflightError(RuntimeError):
++    def __init__(self, generation: int, status: tuple[tuple[int, int], ...]):
++        self.generation = generation
++        self.status = status
++        super().__init__(f"Engram preflight generation {generation} failed: {status}")
++
++
++class EngramPreflightStatus:
++    """Stable [TP rank, layer] int32 buffer; one outstanding forward per rank.
++
++    Each rank writes only its own two cells. Integer TP sum therefore retains
++    the exact rank/layer/code, including simultaneous failures. The caller must
++    wait for all local gather writers before ``finish`` and must call it on every
++    rank in the same TP order, even after a local file error. No retry follows a
++    failed generation: the service stops as one TP group.
++    """
++
++    def __init__(self, *, device, tp_rank: int, tp_size: int, group_name: str):
++        if not (1 <= tp_size <= 4 and 0 <= tp_rank < tp_size):
++            raise ValueError("Engram preflight supports TP1-4 and a valid local rank")
++        self.tp_rank = tp_rank
++        self.tp_size = tp_size
++        self.group_name = group_name
++        self.device_status = torch.zeros((tp_size, 2), dtype=torch.int32, device=device)
++        self.generation = 0
++        self.active_generation: int | None = None
++        self.finished = False
++
++    def begin(self) -> int:
++        if self.active_generation is not None:
++            raise RuntimeError("previous Engram preflight generation was not retired")
++        self.generation += 1
++        self.active_generation = self.generation
++        self.finished = False
++        self.device_status.zero_()
++        return self.generation
++
++    def local_layer_word(self, layer: int) -> torch.Tensor:
++        if self.active_generation is None or self.finished or layer not in (0, 1):
++            raise RuntimeError("Engram layer status requested outside live preflight")
++        return self.device_status[self.tp_rank, layer : layer + 1]
++
++    def set_local_failure(self, layer: int, code: int) -> None:
++        """CPU-known local failure; native GPU gather writes the same cell."""
++        if not 1 <= code <= 127:
++            raise ValueError("Engram status code must fit the bounded ABI")
++        self.local_layer_word(layer).fill_(code)
++
++    def finish(self, generation: int) -> torch.Tensor:
++        if self.active_generation != generation or self.finished:
++            raise RuntimeError("stale or duplicate Engram status collective")
++        # Local gather completion is the caller's stream/event dependency.
++        if self.tp_size > 1:
++            inplace_all_reduce(self.device_status, group_name=self.group_name)
++        self.finished = True
++        return self.device_status
++
++    def check_before_model(self, generation: int) -> None:
++        """Safe, deliberately synchronizing scaffold; no model write preceded it."""
++        if self.active_generation != generation or not self.finished:
++            raise RuntimeError("Engram preflight status was not reduced")
++        snapshot = self.device_status.to(device="cpu").tolist()
++        result = tuple((int(row[0]), int(row[1])) for row in snapshot)
++        if any(code for row in result for code in row):
++            raise EngramPreflightError(generation, result)
++
++    def retire(self, generation: int) -> None:
++        if self.active_generation != generation or not self.finished:
++            raise RuntimeError("stale or unfinished Engram status retirement")
++        self.active_generation = None

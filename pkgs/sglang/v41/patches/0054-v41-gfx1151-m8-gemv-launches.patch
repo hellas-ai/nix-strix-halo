@@ -1,0 +1,60 @@
+diff --git a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+index 1688cf2..16bb3a6 100644
+--- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -344,10 +344,10 @@ def native_c4_c8_gemv(q, qs, w, ws):
+         torch.cuda.get_device_properties(q.device).gcnArchName.split(":")[0] != "gfx1151"):
+         raise ValueError("C4/C8 native GEMV is gfx1151-only")
+     output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
+-    rows = _multirow_output_tile(n, k, m)
++    rows, block_k, num_warps, num_stages = _multirow_launch(n, k, m, shapes[(n, k)])
+     _native_c4_c8_gemv[(n // rows,)](
+-        q, qs, w, ws, output, n, k, m, rows, shapes[(n, k)],
+-        num_warps=4, num_stages=1, enable_fp_fusion=False)
++        q, qs, w, ws, output, n, k, m, rows, block_k,
++        num_warps=num_warps, num_stages=num_stages, enable_fp_fusion=False)
+     return output
+ 
+ 
+@@ -394,6 +394,27 @@ def _multirow_output_tile(n, k, m):
+     return 4 if m == 8 and (n, k) == (25600, 6144) else 8
+ 
+ 
++def _multirow_launch(n, k, m, block_k):
++    """Qualified eight-row launch geometry; every other shape/row keeps its launch."""
++    if m == 8:
++        # (output tile, BLOCK_K, warps, stages).  Q1 checked these exact
++        # configurations against the installed FP8 output bits.  No indexer
++        # or draft-row padding change is part of this policy.
++        winners = {
++            (1792, 5120): (16, 512, 8, 2),  # wqkv_a
++            (8192, 1280): (16, 256, 4, 1),  # wq_b
++            (5120, 2048): (8, 512, 8, 2),  # wo_b
++            (1152, 5120): (16, 512, 8, 3),  # shared gate/up
++            (5120, 576): (4, 64, 2, 1),  # shared down
++        }
++        if (n, k) in winners:
++            selected = winners[(n, k)]
++            if selected[1] != block_k:
++                raise ValueError("qualified GEMV BLOCK_K differs from projection policy")
++            return selected
++    return _multirow_output_tile(n, k, m), block_k, 4, 1
++
++
+ def _launch_rows(q, qs, w, ws, output, n, k, m, block_k):
+     """One launch for ``m`` in 1..8 token rows (unchecked; the callers validate operands)."""
+     if m == 1:
+@@ -404,9 +425,10 @@ def _launch_rows(q, qs, w, ws, output, n, k, m, block_k):
+         _native_c2_gemv[(n // 8,)](q, qs, w, ws, output, n, k, 8, block_k,
+                                    num_warps=4, num_stages=1, enable_fp_fusion=False)
+     else:
+-        rows = _multirow_output_tile(n, k, m)
+-        _native_c4_c8_gemv[(n // rows,)](q, qs, w, ws, output, n, k, m, rows, block_k,
+-                                      num_warps=4, num_stages=1, enable_fp_fusion=False)
++        rows, selected_block_k, num_warps, num_stages = _multirow_launch(n, k, m, block_k)
++        _native_c4_c8_gemv[(n // rows,)](
++            q, qs, w, ws, output, n, k, m, rows, selected_block_k,
++            num_warps=num_warps, num_stages=num_stages, enable_fp_fusion=False)
+ 
+ 
+ def native_gemv_rows(q, qs, w, ws):

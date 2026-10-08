@@ -1,0 +1,23 @@
+From 7dda3ac6cfe6bbe0b7f08c23a67cfa118d8641a1 Mon Sep 17 00:00:00 2001
+From: Piotr Wilkin <ilintar@gmail.com>
+Date: Sun, 6 Sep 2026 01:37:55 +0200
+Subject: [PATCH] fix: prefer selected ROCr headers in HIP build
+
+---
+ projects/clr/rocclr/cmake/ROCclrHSA.cmake | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/projects/clr/rocclr/cmake/ROCclrHSA.cmake b/projects/clr/rocclr/cmake/ROCclrHSA.cmake
+index 1014070b4595..50597ed37145 100644
+--- a/projects/clr/rocclr/cmake/ROCclrHSA.cmake
++++ b/projects/clr/rocclr/cmake/ROCclrHSA.cmake
+@@ -49,6 +49,9 @@ else()
+         cmake/hsa-runtime64
+         lib/cmake/hsa-runtime64
+         lib64/cmake/hsa-runtime64)
++    get_target_property(HSA_RUNTIME_INCLUDE_DIRS hsa-runtime64::hsa-runtime64
++                        INTERFACE_INCLUDE_DIRECTORIES)
++    target_include_directories(rocclr BEFORE PUBLIC ${HSA_RUNTIME_INCLUDE_DIRS})
+   else()
+     find_package(hsa-runtime64 1.11 REQUIRED CONFIG
+       PATHS
