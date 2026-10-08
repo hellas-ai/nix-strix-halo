@@ -1,0 +1,417 @@
+--- a/sglang/kernels/ops/gemm/dsv41_native_rows.py
++++ b/sglang/kernels/ops/gemm/dsv41_native_rows.py
+@@ -33,6 +33,7 @@ PROJECTION_BLOCK_K = {
+     (25600, 6144): 512, (5120, 2048): 512, (1792, 5120): 512, (8192, 1280): 256,
+     (1152, 5120): 512, (5120, 576): 64, (4096, 1280): 256,
+     (1280, 5120): 512, (512, 5120): 512, (5120, 15360): 512,
++    (1536, 5120): 512,   # the three draft stages' wkv stacked into one weight by CommitKvProj (run on the commit rows of every step)
+ }
+ HC_POST_PREFILL_ROWS = (512, 1306, 1536)   # the prefill row counts of the legacy (patch 0036) whitelist
+ _ALL = frozenset(range(1, MAX_ROWS + 1))
+--- /dev/null
++++ b/sglang/kernels/ops/moe/dsv41_mxfp4_draft.py
+@@ -0,0 +1,242 @@
++"""Owner-routed decode path for the DSpark draft stages' MXFP4 routed experts (128 experts, top-3) on gfx1151.
++
++The draft stages run `fused_experts_mxfp4` WITHOUT the official routed-operand policy (that policy is armed only for the
++384-expert/top-6 target layers): bf16 activations feed the gate/up GEMM unquantised, SwiGLU runs in bf16, the down GEMM
++multiplies the routing weight in its epilogue, the top-k routes are summed in bf16 and scaled by `routed_scaling_factor`.
++At the draft's 3 rows (batch 1) and 6 rows (batch 2) that sequence takes AITER's `_fused_moe_kernel_mxfp4` (BM16 tiles, one
++program per sorted expert block, 47 GB/s at 3 rows per K2's measurement) behind ~45 glue launches.
++
++This module computes the same sequence with four launches, on K2's owner-routed WMMA gate/up and down kernels (the AITER
++`dot_scaled` arithmetic, parameterised by TOPK; the expert count enters only through the weight pointers):
++
++  G  `dsv41_mxfp4_decode._gate_up_wmma`  owner-routed gate/up on the bf16 hidden states            -> bf16 [M, 3, 1152]
++  S  `_swiglu_bf16`                      clamp, silu (bf16 result), * up (bf16 result)             -> bf16 [M*3, 576]
++  D  `_down_wmma_weighted`               owner-routed down, routing weight multiplied in fp32 before the bf16 store
++                                         (AITER's MUL_ROUTED_WEIGHT epilogue)                      -> bf16 [M, 3, 5120]
++  C  `_combine_bf16`                     fp32 sum of the routes in slot order, bf16 result, * routed_scaling_factor in bf16
++
++The expression of every step follows the torch ops of the installed fallback sequence.  Whether the result is bitwise the
++installed sequence on the GPU is what `tests/draft-moe-gpu.py` measures (stage by stage); the draft only proposes tokens, so
++any difference changes acceptance, never the output.
++
++Rows >= `live_rows` (a padded draft graph replay, see `sglang.srt.layers.live_rows`) are routed to expert -1 first.
++
++Switch: SGLANG_DSV41_DRAFT_MOE=0 restores the installed sequence.
++"""
++import os
++
++import torch
++import triton
++import triton.language as tl
++from triton.language.extra.hip import libdevice
++
++from sglang.kernels.ops.moe import dsv41_mxfp4_decode as k2
++from sglang.kernels.ops.moe.dsv41_mxfp4_decode import _gemm_core, _owner_of
++
++NUM_EXPERTS, HIDDEN, INTER, TOPK = 128, 5120, 576, 3
++N_GATE_UP, N_DOWN = 2 * INTER, HIDDEN
++MAX_M = 16
++LIMIT = 10.0
++
++_OFF = ("0", "false", "off", "no")
++
++
++def enabled() -> bool:
++    return os.environ.get("SGLANG_DSV41_DRAFT_MOE", "1").strip().lower() not in _OFF
++
++
++# ----------------------------------------------------------------------------------------------
++# ids mask for padded draft graph replays (only launched while a graph is captured)
++# ----------------------------------------------------------------------------------------------
++@triton.jit(do_not_specialize=["n_ids"])
++def _mask_ids(IDS, IDS_OUT, LIVE, n_ids, TOPK: tl.constexpr, IDP: tl.constexpr):
++    i = tl.arange(0, IDP)
++    m = i < n_ids
++    ids = tl.load(IDS + i, mask=m, other=-1)
++    tl.store(IDS_OUT + i, tl.where(i // TOPK < tl.load(LIVE), ids, -1), mask=m)
++
++
++# ----------------------------------------------------------------------------------------------
++# S: bf16 SwiGLU, torch expression order
++#    gate.clamp(max=L); up.clamp(min=-L, max=L); activated = F.silu(gate) * up      (all bf16 tensors)
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _swiglu_bf16(GU, Y, H: tl.constexpr, LIMIT: tl.constexpr, BLOCK: tl.constexpr):
++    r = tl.program_id(0).to(tl.int64)
++    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    m = cols < H
++    row = GU + r * (2 * H)
++    gate = tl.load(row + cols, mask=m, other=0).to(tl.float32)
++    up = tl.load(row + H + cols, mask=m, other=0).to(tl.float32)
++    # clamp keeps NaN (comparisons with NaN are false) like torch.clamp
++    gate = tl.where(gate > LIMIT, LIMIT, gate)
++    up = tl.where(up > LIMIT, LIMIT, tl.where(up < -LIMIT, -LIMIT, up))
++    silu = (gate / (1.0 + libdevice.exp(-gate))).to(tl.bfloat16)      # F.silu on a bf16 tensor: fp32 math, bf16 result
++    tl.store(Y + r * H + cols, (silu.to(tl.float32) * up).to(tl.bfloat16), mask=m)
++
++
++# ----------------------------------------------------------------------------------------------
++# D: owner-routed down with the routing weight multiplied before the bf16 store
++# ----------------------------------------------------------------------------------------------
++@triton.jit(do_not_specialize=["M"])
++def _down_wmma_weighted(
++    A, W, S, IDS, TW, Y, M,
++    K: tl.constexpr, N: tl.constexpr, TOPK: tl.constexpr,
++    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, RP: tl.constexpr,
++):
++    """`k2._down_wmma` with AITER's MUL_ROUTED_WEIGHT epilogue: acc * topk_weights[route] in fp32, then bf16."""
++    nt = tl.program_id(0)
++    r = tl.program_id(1)
++    e, is_owner, all_ids, routes = _owner_of(IDS, r, M * TOPK, RP)
++    if is_owner:
++        rows = tl.arange(0, 16)
++        offs_n = nt * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
++        match = (routes < M * TOPK) & (all_ids == e)
++        rank = tl.cumsum(match.to(tl.int32), 0) - 1
++        n_match = tl.sum(match.to(tl.int32))
++        for p in range(0, (n_match + 15) // 16):
++            sel = match[None, :] & (rank[None, :] == (p * 16 + rows)[:, None])
++            route_row = tl.sum(tl.where(sel, routes[None, :], 0), axis=1)
++            live = tl.sum(sel.to(tl.int32), axis=1) > 0
++            if e >= 0:
++                e64 = e.to(tl.int64)
++                acc = _gemm_core(A, route_row * K, live[:, None], W + e64 * (N * (K // 2)), S + e64 * (N * (K // 32)),
++                                 offs_n, K, BLOCK_N, BLOCK_K)
++                weight = tl.load(TW + route_row, mask=live, other=0.0)
++                acc = acc * weight[:, None]
++            else:
++                acc = tl.zeros((16, BLOCK_N), dtype=tl.float32)
++            tl.store(Y + route_row[:, None] * N + offs_n[None, :], acc.to(tl.bfloat16), mask=live[:, None])
++
++
++# ----------------------------------------------------------------------------------------------
++# C: routed_output.sum(dim=1) (bf16, fp32 accumulation in slot order) then .mul_(routed_scaling_factor) in bf16
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _combine_bf16(RO, OUT, factor, N: tl.constexpr, TOPK: tl.constexpr, BLOCK: tl.constexpr, HAS_SCALE: tl.constexpr):
++    t = tl.program_id(0).to(tl.int64)
++    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    cmask = cols < N
++    acc = tl.zeros((BLOCK,), dtype=tl.float32)
++    for k in tl.static_range(TOPK):
++        acc = acc + tl.load(RO + (t * TOPK + k) * N + cols, mask=cmask, other=0.0).to(tl.float32)
++    out = acc.to(tl.bfloat16)
++    if HAS_SCALE:
++        out = (out.to(tl.float32) * factor).to(tl.bfloat16)
++    tl.store(OUT + t * N + cols, out, mask=cmask)
++
++
++# ----------------------------------------------------------------------------------------------
++# host side
++# ----------------------------------------------------------------------------------------------
++GATE_UP_CFG = k2.GATE_UP_CFG
++DOWN_CFG = k2.DOWN_CFG
++
++
++def _route_pad(m: int) -> int:
++    return max(32, triton.next_power_of_2(m * TOPK))
++
++
++def decode_supported(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                     routed_scaling_factor, swiglu_limit) -> bool:
++    """True only for the draft stage geometry and operand dtypes: 128 experts, top-3, 1..16 rows, gfx1151."""
++    if not enabled():
++        return False
++    x = hidden_states
++    if x.ndim != 2 or not 1 <= x.shape[0] <= MAX_M or x.shape[1] != HIDDEN or x.dtype != torch.bfloat16:
++        return False
++    m = x.shape[0]
++    if x.device.type != "cuda" or not k2._is_gfx1151(x.device.index if x.device.index is not None else torch.cuda.current_device()):
++        return False
++    if swiglu_limit != 10 or (routed_scaling_factor is not None and not isinstance(routed_scaling_factor, (int, float))):
++        return False
++    shapes = (
++        (x, (m, HIDDEN), (torch.bfloat16,)),
++        (w13, (NUM_EXPERTS, N_GATE_UP, HIDDEN // 2), (torch.int8, torch.uint8)),
++        (w2, (NUM_EXPERTS, N_DOWN, INTER // 2), (torch.int8, torch.uint8)),
++        (s13, (NUM_EXPERTS, N_GATE_UP, HIDDEN // 32), (torch.uint8, torch.float8_e8m0fnu)),
++        (s2, (NUM_EXPERTS, N_DOWN, INTER // 32), (torch.uint8, torch.float8_e8m0fnu)),
++        (topk_weights, (m, TOPK), (torch.float32,)),
++        (topk_ids, (m, TOPK), (torch.int32,)),
++    )
++    for tensor, shape, dtypes in shapes:
++        if tuple(tensor.shape) != shape or tensor.dtype not in dtypes or not tensor.is_contiguous():
++            return False
++        if tensor.device != x.device:
++            return False
++    return True
++
++
++def launch_mask_ids(topk_ids, ids_out, live_rows):
++    n_ids = topk_ids.numel()
++    assert live_rows.dtype == torch.int32 and live_rows.numel() == 1 and live_rows.device == topk_ids.device
++    assert topk_ids.is_contiguous() and ids_out.shape == topk_ids.shape and ids_out.dtype == torch.int32
++    _mask_ids[(1,)](topk_ids, ids_out, live_rows, n_ids, TOPK, triton.next_power_of_2(max(n_ids, 2)),
++                    num_warps=1, num_stages=1)
++
++
++def launch_gate_up(x, w13, s13, topk_ids, gu):
++    m = x.shape[0]
++    g = k2._cfg(GATE_UP_CFG, m, N_GATE_UP, HIDDEN, "GATE_UP")
++    k2._gate_up_wmma[(N_GATE_UP // g["BLOCK_N"], m * TOPK)](
++        x, w13.view(torch.uint8), s13.view(torch.uint8), topk_ids, gu, m,
++        K=HIDDEN, N=N_GATE_UP, TOPK=TOPK, BLOCK_N=g["BLOCK_N"], BLOCK_K=g["BLOCK_K"], RP=_route_pad(m),
++        num_warps=g["num_warps"], num_stages=g["num_stages"], matrix_instr_nonkdim=16, kpack=1)
++
++
++def launch_swiglu(gu, act):
++    _swiglu_bf16[(gu.shape[0] * TOPK, triton.cdiv(INTER, 512))](gu, act, INTER, LIMIT, 512,
++                                                                 num_warps=4, num_stages=1, enable_fp_fusion=False)
++
++
++def launch_down(act, w2, s2, topk_ids, topk_weights, ro):
++    m = topk_ids.shape[0]
++    d = k2._cfg(DOWN_CFG, m, N_DOWN, INTER, "DOWN")
++    _down_wmma_weighted[(N_DOWN // d["BLOCK_N"], m * TOPK)](
++        act, w2.view(torch.uint8), s2.view(torch.uint8), topk_ids, topk_weights, ro, m,
++        K=INTER, N=N_DOWN, TOPK=TOPK, BLOCK_N=d["BLOCK_N"], BLOCK_K=d["BLOCK_K"], RP=_route_pad(m),
++        num_warps=d["num_warps"], num_stages=d["num_stages"], matrix_instr_nonkdim=16, kpack=1)
++
++
++def launch_combine(ro, out, factor):
++    _combine_bf16[(ro.shape[0], triton.cdiv(N_DOWN, 512))](
++        ro, out, 1.0 if factor is None else float(factor), N_DOWN, TOPK, 512, factor is not None,
++        num_warps=2, num_stages=1, enable_fp_fusion=False)
++
++
++def decode_draft_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids, routed_scaling_factor,
++                         out=None, live_rows=None, stages: bool = False):
++    """Four-launch routed-expert chain of a draft stage; returns the bf16 [M, 5120] routed sum (written into `out` if given)."""
++    x = hidden_states
++    m = x.shape[0]
++    dev = x.device
++    if live_rows is not None:
++        masked = torch.empty_like(topk_ids)
++        launch_mask_ids(topk_ids, masked, live_rows)
++        topk_ids = masked
++    gu = torch.empty((m, TOPK, N_GATE_UP), dtype=torch.bfloat16, device=dev)
++    launch_gate_up(x, w13, s13, topk_ids, gu)
++    act = torch.empty((m * TOPK, INTER), dtype=torch.bfloat16, device=dev)
++    launch_swiglu(gu, act)
++    ro = torch.empty((m, TOPK, N_DOWN), dtype=torch.bfloat16, device=dev)
++    launch_down(act, w2, s2, topk_ids, topk_weights, ro)
++    result = torch.empty((m, N_DOWN), dtype=torch.bfloat16, device=dev) if out is None else out
++    launch_combine(ro, result, routed_scaling_factor)
++    if stages:
++        return gu, act, ro, result
++    return result
++
++
++def try_draft_routed(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                     routed_scaling_factor, swiglu_limit, inplace: bool):
++    """The routed-expert output of a draft stage, or None outside the qualified envelope (the caller then runs the installed sequence).
++
++    `inplace` mirrors the installed tail: the combined result overwrites `hidden_states`, which is returned."""
++    if not decode_supported(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                            routed_scaling_factor, swiglu_limit):
++        return None
++    from sglang.srt.layers import live_rows
++
++    # `hidden_states` is consumed by the gate/up kernel before the combine kernel writes it, in stream order.
++    return decode_draft_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids, routed_scaling_factor,
++                                out=hidden_states if inplace else None, live_rows=live_rows.active())
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+@@ -233,6 +233,18 @@ def fused_experts_mxfp4(
+         if routed is not None:
+             return routed
+ 
++    if not official_routed_policy and not no_combine and not apply_router_weight_on_input:
++        # DSpark draft stages (128 experts, top-3, 1..16 rows): four owner-routed launches instead of ~50, same
++        # sequence as below.  SGLANG_DSV41_DRAFT_MOE=0 restores it.
++        from sglang.kernels.ops.moe.dsv41_mxfp4_draft import try_draft_routed
++
++        routed = try_draft_routed(
++            hidden_states, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale,
++            topk_weights, topk_ids, routed_scaling_factor, swiglu_limit, inplace,
++        )
++        if routed is not None:
++            return routed
++
+     num_tokens = hidden_states.shape[0]
+     top_k = topk_ids.shape[1]
+     num_experts = w13_weight.shape[0]
+--- a/sglang/srt/models/deepseek_v4_dspark.py
++++ b/sglang/srt/models/deepseek_v4_dspark.py
+@@ -1,7 +1,9 @@
+ from __future__ import annotations
+ 
+ import copy
++import functools
+ import logging
++import os
+ from typing import Iterable, List, Optional, Tuple
+ 
+ import msgspec
+@@ -78,6 +80,16 @@ _CONFIDENCE = Invariant(
+ )
+ _is_npu = is_npu()
+ 
++_NATIVE_DRAFT_OFF = ("0", "false", "off", "no")
++
++
++def _native_draft_projections_enabled() -> bool:
++    """SGLANG_DSV41_NATIVE_DRAFT_PROJECTIONS=0 keeps every draft projection on the generic block-FP8 matmul."""
++    return (
++        os.environ.get("SGLANG_DSV41_NATIVE_DRAFT_PROJECTIONS", "1").strip().lower()
++        not in _NATIVE_DRAFT_OFF
++    )
++
+ 
+ def apply_rotary_emb(
+     x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False
+@@ -660,6 +672,111 @@ class DSparkV4Stage(DeepseekV4DecoderLayer):
+                     self.hc_head_scale,
+                 ) = make_hc_head_params(config.hc_mult, config.hidden_size)
+ 
++        if _native_draft_projections_enabled():
++            self._enable_native_projections(config, quant_config)
++
++    def _enable_native_projections(
++        self, config: DeepSeekV4Config, quant_config: Optional[QuantizationConfig]
++    ) -> None:
++        """gfx1151 V4.1 TP4: mark the stage's block-FP8 projections that no flag covers yet.
++
++        The target model marks its own projections (fused wqkv_a, wq_b, wo_b, the shared expert) for the native GEMVs.
++        A draft stage keeps wq_a and wkv separate, its shared expert is built with is_nextn, and stage 0 owns main_proj,
++        so none of those three ever reached a native kernel: every draft row count took the generic 64-row-tile matmul.
++        Only the quantised linear method's block-linear callable gets a keyword (same guards as the target's flags);
++        quantizers, activations, outputs and the TP reduction stay owned by the original modules."""
++        from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
++        from sglang.srt.layers.quantization.fp8_utils import (
++            triton_w8a8_block_fp8_linear,
++        )
++        from sglang.srt.utils import is_hip
++
++        if not (
++            is_hip()
++            and getattr(config, "model_type", None) == "deepseek_v41"
++            and isinstance(quant_config, Fp8Config)
++            and quant_config.is_checkpoint_fp8_serialized
++            and quant_config.activation_scheme == "dynamic"
++            and quant_config.weight_block_size == [32, 32]
++            and quant_config.scale_fmt == "ue8m0"
++            and get_parallel().tp_size == get_parallel().attn_tp_size == 4
++            and config.hidden_size == 5120
++        ):
++            return
++
++        def block_linear_of(linear):
++            method = getattr(linear, "quant_method", None)
++            block_linear = getattr(method, "w8a8_block_fp8_linear", None)
++            if (
++                isinstance(method, Fp8LinearMethod)
++                and not method.use_mxfp8
++                and not method.block_fp8_as_mxfp8
++                and getattr(linear, "bias", None) is None
++                and isinstance(block_linear, functools.partial)
++                and block_linear.func is triton_w8a8_block_fp8_linear
++                and block_linear.keywords == {"act_scale_ue8m0": True}
++            ):
++                return method, block_linear
++            return None
++
++        def mark(linear, in_size, out_size, **flag):
++            if (
++                isinstance(linear, ReplicatedLinear)
++                and linear.input_size == in_size
++                and linear.output_size == out_size
++                and (found := block_linear_of(linear)) is not None
++            ):
++                method, block_linear = found
++                method.w8a8_block_fp8_linear = functools.partial(block_linear, **flag)
++
++        attn = self.self_attn
++        mark(getattr(attn, "wq_a", None), 5120, config.q_lora_rank, native_gemv_rows=True)
++        mark(getattr(attn, "wkv", None), 5120, config.head_dim, native_gemv_rows=True)
++        if self.stage_id == 0:
++            mark(
++                getattr(self, "main_proj", None),
++                5120 * 3,
++                5120,
++                native_gemv_rows=True,
++            )
++
++        moe = self.mlp
++        shared = getattr(moe, "shared_experts", None)
++        if (
++            shared is not None
++            and moe.tp_size == 4
++            and moe.moe_ep_size == 1
++            and not moe._shared_expert_tp1
++            and config.moe_intermediate_size == 2304
++            and config.n_shared_experts == 1
++            and getattr(config, "swiglu_limit", None) == 10.0
++        ):
++            from sglang.srt.layers.linear import (
++                MergedColumnParallelLinear,
++                RowParallelLinear,
++            )
++
++            gate, down = shared.gate_up_proj, shared.down_proj
++            if (
++                isinstance(gate, MergedColumnParallelLinear)
++                and isinstance(down, RowParallelLinear)
++                and gate.tp_size == down.tp_size == 4
++                and gate.input_size == 5120
++                and gate.output_sizes == [2304, 2304]
++                and gate.output_size_per_partition == 1152
++                and gate.bias is None
++                and down.input_size == 2304
++                and down.input_size_per_partition == 576
++                and down.output_size == 5120
++                and down.bias is None
++            ):
++                for linear, kind in ((gate, "gate_up"), (down, "down")):
++                    if (found := block_linear_of(linear)) is not None:
++                        method, block_linear = found
++                        method.w8a8_block_fp8_linear = functools.partial(
++                            block_linear, native_v41_shared=kind
++                        )
++
+     def _build_self_attn(
+         self,
+         *,

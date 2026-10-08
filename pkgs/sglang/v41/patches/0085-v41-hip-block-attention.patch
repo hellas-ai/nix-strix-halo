@@ -1,0 +1,487 @@
+diff --git a/sglang/kernels/ops/attention/nsa_triton_decode/__init__.py b/sglang/kernels/ops/attention/nsa_triton_decode/__init__.py
+index f3e8bfc..679eb8d 100644
+--- a/sglang/kernels/ops/attention/nsa_triton_decode/__init__.py
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/__init__.py
+@@ -72,6 +72,17 @@ def triton_fp8_attention_fwd(
+         ``[batch, seq_len, num_heads, head_dim_v]`` and *lse* has shape
+         ``[batch, seq_len, num_heads]``.
+     """
++    from sglang.kernels.ops.attention.nsa_triton_decode import dsv41_hip_attention
++
++    if dsv41_hip_attention.enabled() and dsv41_hip_attention.supported(
++        q, k_cache, indices, topk_length, extra_k_cache, extra_indices_in_kvcache,
++        extra_topk_length, attn_sink, q.shape[1],
++    ):
++        return dsv41_hip_attention.attention(
++            q, k_cache, indices, topk_length, extra_k_cache, extra_indices_in_kvcache,
++            extra_topk_length, attn_sink, softmax_scale,
++        )
++
+     kv_scope = _KVScopeAdapter(k_cache, indices, topk_length)
+ 
+     extra_kv_scope = None
+diff --git a/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_attn_block.hip.cpp b/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_attn_block.hip.cpp
+new file mode 100644
+index 0000000..7f884c9
+--- /dev/null
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_attn_block.hip.cpp
+@@ -0,0 +1,313 @@
++// DSv4.1 sparse attention on gfx1151, one query per workgroup, WMMA bf16.
++//   16 heads (MQA, one shared K=V latent of 512 dims), main scope (SWA window) + extra scope (selected compressed keys), keys gathered straight
++//   from the paged fp8 cache (E4M3 data + E8M0 group scales) and dequantised exactly to bf16 in registers.
++// Workgroup = 4 waves; wave w owns output dims [128w, 128w+128).
++//   S^T[key][head] = K[key][dims] . Q[head][dims]^T  (A = K rows, B = Q fragments held in registers; per-wave partial over its 128 dims)
++//   partial S is summed across the four waves through LDS (one barrier per 16-key tile), softmax runs per lane (lane = head),
++//   O^T[dim][head] += V^T[dim][key] . P^T[key][head]  (A = the K tile transposed through LDS: lane j reads 8 dims of every key and
++//   permutes them into 8 fragments; B = P exchanged between the two half-waves).
++// The key loads of tile k+1 and the key indices of tile k+2 are issued before tile k is computed.
++// splits > 1 (decode and verify rows, where one workgroup per query leaves most of the GPU idle) divides the tile sequence of each query over
++// `splits` workgroups that write unnormalised partials; attn_combine_kernel merges them with the sink.
++#include <hip/hip_runtime.h>
++#include <stdint.h>
++
++typedef __bf16 bf16x16 __attribute__((ext_vector_type(16)));
++typedef float f32x8 __attribute__((ext_vector_type(8)));
++typedef float f32x4 __attribute__((ext_vector_type(4)));
++typedef unsigned int u32x4 __attribute__((ext_vector_type(4)));
++typedef unsigned int u32x8 __attribute__((ext_vector_type(8)));
++
++#define DIM 512
++#define KP 136  // LDS pitch of the per-wave K tile (128 dims + 8 pad), bf16 elements
++
++__device__ __forceinline__ bf16x16 as_bf16x16(u32x4 lo, u32x4 hi) {
++  u32x8 v = __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7);
++  return __builtin_bit_cast(bf16x16, v);
++}
++__device__ __forceinline__ unsigned swap_half_u(unsigned x) {  // value of the same lane index in the other half-wave
++  return __builtin_amdgcn_permlanex16(0, x, 0x76543210u, 0xFEDCBA98u, false, false);
++}
++__device__ __forceinline__ float swap_half(float x) {
++  return __builtin_bit_cast(float, swap_half_u(__builtin_bit_cast(unsigned, x)));
++}
++__device__ __forceinline__ unsigned pack_bf16(float lo, float hi) {  // round-to-nearest-even, lo in the low half
++  unsigned a = __builtin_bit_cast(unsigned, lo), b = __builtin_bit_cast(unsigned, hi);
++  a = (a + 0x7FFFu + ((a >> 16) & 1u)) >> 16;
++  b = (b + 0x7FFFu + ((b >> 16) & 1u)) & 0xFFFF0000u;
++  return a | b;
++}
++
++struct Smem {
++  alignas(16) uint16_t ktile[4][16][KP];
++  alignas(16) float sbuf[2][4][2][32][4];
++};
++
++struct Scope {
++  const void* kv;      // fp8 paged cache base: [page][page*512 data bytes | page*16 e8m0 scale bytes] (V4.1 layout, 528 bytes per slot)
++  const int* idx;
++  const int* len;
++  long sidx;
++  int topk;
++  long page_stride;    // bytes per page
++  int page;            // slots per page (power of two)
++  int pshift;
++};
++
++// fp8 e4m3fn byte -> float, before the group scale: bits = (mag << 20 | sign << 31), times 2^120 (fixes the exponent bias, and normalises subnormals)
++__device__ __forceinline__ float fp8_to_f32_raw(unsigned b) {
++  return __builtin_bit_cast(float, ((b & 0x7Fu) << 20) | ((b & 0x80u) << 24));
++}
++
++__global__ void __launch_bounds__(128, 2)
++attn_block_kernel(const __bf16* __restrict__ q, long sq_t, long sq_h, Scope sc_m, Scope sc_e,
++                  const float* __restrict__ sink, __bf16* __restrict__ out, long so_t, long so_h, float* __restrict__ lse, long slse_t,
++                  float sm_scale, int splits, float* __restrict__ part_o, float* __restrict__ part_m, float* __restrict__ part_l) {
++  __shared__ Smem sm;
++  const int t = blockIdx.x;
++  const int w = threadIdx.x >> 5;
++  const int lane = threadIdx.x & 31;
++  const int h = lane >> 4;       // half-wave
++  const int col = lane & 15;     // head (S^T / P^T / O^T), key slot (K fragments), dim row (V^T fragments)
++  const float L2E = 1.4426950408889634f;
++  const float NEG_INF = __builtin_bit_cast(float, 0xFF800000u);
++
++  bf16x16 qf[8];
++  {
++    const u32x4* qp = (const u32x4*)(q + (long)t * sq_t + (long)col * sq_h + 128 * w);
++#pragma unroll
++    for (int c = 0; c < 8; ++c) qf[c] = as_bf16x16(qp[2 * c], qp[2 * c + 1]);
++  }
++
++  f32x8 acc[8];
++#pragma unroll
++  for (int e = 0; e < 8; ++e) acc[e] = (f32x8){0, 0, 0, 0, 0, 0, 0, 0};
++  float m_run = NEG_INF, l_run = 0.f;
++  const int len_m = sc_m.kv ? min(sc_m.len ? sc_m.len[t] : sc_m.topk, sc_m.topk) : 0;
++  const int len_e = sc_e.kv ? min(sc_e.len ? sc_e.len[t] : sc_e.topk, sc_e.topk) : 0;
++  const int nm = (len_m + 15) >> 4, ntot = nm + ((len_e + 15) >> 4);
++  const int per = (ntot + splits - 1) / splits;
++  const int tk0 = blockIdx.y * per, tk1 = min(ntot, tk0 + per);
++
++  // index of key slot `col` of tile k (-1 when invalid), and the loads of its fp8 row slice
++  auto tile_id = [&](int k) -> int {
++    const bool ex = k >= nm;
++    const int pos = ((ex ? k - nm : k) << 4) + col;
++    const int* ip = (ex ? sc_e.idx : sc_m.idx) + (long)t * (ex ? sc_e.sidx : sc_m.sidx);
++    return (k < tk1 && pos < (ex ? len_e : len_m)) ? ip[pos] : -1;
++  };
++  auto tile_load = [&](int k, int id, u32x4* raw, unsigned& sc4) {
++    const bool ex = k >= nm;
++    const uint8_t* kvb = (const uint8_t*)(ex ? sc_e.kv : sc_m.kv);
++    const long pstride = ex ? sc_e.page_stride : sc_m.page_stride;
++    const int page = ex ? sc_e.page : sc_m.page, pshift = ex ? sc_e.pshift : sc_m.pshift;
++    const int idc = id > 0 ? id : 0;
++    const int pg = idc >> pshift, slot = idc & (page - 1);
++    const uint8_t* pbase = kvb + (long)pg * pstride;
++    const u32x4* dp = (const u32x4*)(pbase + (long)slot * 512 + 128 * w + 64 * h);
++    sc4 = *(const unsigned*)(pbase + (long)page * 512 + (long)slot * 16 + 4 * w);
++#pragma unroll
++    for (int i = 0; i < 4; ++i) raw[i] = dp[i];
++  };
++
++  int id_cur = -1, id_n1 = -1;
++  u32x4 raw_cur[4], raw_n[4];
++  unsigned sc_cur = 0, sc_n = 0;
++  if (tk0 < tk1) {
++    id_cur = tile_id(tk0);
++    tile_load(tk0, id_cur, raw_cur, sc_cur);
++    id_n1 = tile_id(tk0 + 1);
++  }
++  for (int k = tk0; k < tk1; ++k) {
++    {
++      const int buf = (k - tk0) & 1;
++      if (k + 1 < tk1) tile_load(k + 1, id_n1, raw_n, sc_n);
++      const int id_n2 = tile_id(k + 2);
++      const unsigned mask = (unsigned)__ballot(id_cur >= 0) & 0xFFFFu;
++      f32x8 s0 = {0, 0, 0, 0, 0, 0, 0, 0}, s1 = {0, 0, 0, 0, 0, 0, 0, 0};
++      {
++        // lane (col, h) dequantises dims 64h .. 64h+63 of this wave's slice for key col
++#pragma unroll
++        for (int g = 0; g < 2; ++g) {
++          const unsigned code = (sc_cur >> (8 * (2 * h + g))) & 0xFFu;
++          const float scl = __builtin_bit_cast(float, code << 23) * 1.329227995784916e+36f;   // 2^(code-127) * 2^120
++#pragma unroll
++          for (int i = 2 * g; i < 2 * g + 2; ++i) {
++            unsigned o[8];
++#pragma unroll
++            for (int j = 0; j < 4; ++j) {
++              const unsigned d = raw_cur[i][j];
++              float f0 = fp8_to_f32_raw(d & 0xFFu) * scl, f1 = fp8_to_f32_raw((d >> 8) & 0xFFu) * scl;
++              float f2 = fp8_to_f32_raw((d >> 16) & 0xFFu) * scl, f3 = fp8_to_f32_raw(d >> 24) * scl;
++              o[2 * j] = __builtin_amdgcn_perm(__builtin_bit_cast(unsigned, f1), __builtin_bit_cast(unsigned, f0), 0x07060302u);
++              o[2 * j + 1] = __builtin_amdgcn_perm(__builtin_bit_cast(unsigned, f3), __builtin_bit_cast(unsigned, f2), 0x07060302u);
++            }
++            // 16 dims -> 32 bytes of bf16
++            u32x4* wp = (u32x4*)&sm.ktile[w][col][64 * h + 16 * i];
++            wp[0] = (u32x4){o[0], o[1], o[2], o[3]};
++            wp[1] = (u32x4){o[4], o[5], o[6], o[7]};
++          }
++        }
++        __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
++#pragma unroll
++        for (int c = 0; c < 8; ++c) {
++          const u32x4* kp = (const u32x4*)&sm.ktile[w][col][16 * c];
++          bf16x16 a = as_bf16x16(kp[0], kp[1]);
++          if (c & 1) s1 = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, qf[c], s1);
++          else s0 = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, qf[c], s0);
++        }
++      }
++      f32x8 sp = s0 + s1;
++      // sum the four per-wave partials (same order in every wave so the four copies of the softmax state stay bit-identical)
++      *(f32x4*)&sm.sbuf[buf][w][0][lane][0] = (f32x4){sp[0], sp[1], sp[2], sp[3]};
++      *(f32x4*)&sm.sbuf[buf][w][1][lane][0] = (f32x4){sp[4], sp[5], sp[6], sp[7]};
++      __syncthreads();
++      f32x8 s = {0, 0, 0, 0, 0, 0, 0, 0};
++#pragma unroll
++      for (int ww = 0; ww < 4; ++ww) {
++        f32x4 lo = *(f32x4*)&sm.sbuf[buf][ww][0][lane][0];
++        f32x4 hi = *(f32x4*)&sm.sbuf[buf][ww][1][lane][0];
++        s += (f32x8){lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]};
++      }
++      // S^T[key = 2r + h][head = col]
++      float sc[8];
++      float mt = NEG_INF;
++#pragma unroll
++      for (int r = 0; r < 8; ++r) {
++        const bool v = (mask >> (2 * r + h)) & 1u;
++        sc[r] = v ? s[r] * sm_scale : NEG_INF;
++        mt = fmaxf(mt, sc[r]);
++      }
++      mt = fmaxf(mt, swap_half(mt));
++      const float m_new = fmaxf(m_run, mt);
++      const float alpha = (m_run == NEG_INF) ? 0.f : __builtin_amdgcn_exp2f((m_run - m_new) * L2E);
++      float p[8];
++      float psum = 0.f;
++#pragma unroll
++      for (int r = 0; r < 8; ++r) {
++        p[r] = (sc[r] == NEG_INF) ? 0.f : __builtin_amdgcn_exp2f((sc[r] - m_new) * L2E);
++        psum += p[r];
++      }
++      l_run = alpha * l_run + psum;
++      m_run = m_new;
++      if (__ballot(alpha != 1.f)) {
++#pragma unroll
++        for (int e = 0; e < 8; ++e) acc[e] *= alpha;
++      }
++      // P^T as the B operand: slot k = key k. own p[r] is key 2r+h, the other half-wave holds key 2r+1-h.
++      unsigned own[4], oth[4];
++#pragma unroll
++      for (int j = 0; j < 4; ++j) {
++        own[j] = pack_bf16(p[2 * j], p[2 * j + 1]);
++        oth[j] = swap_half_u(own[j]);
++      }
++      u32x8 pb;
++#pragma unroll
++      for (int r = 0; r < 8; ++r) {
++        const unsigned a = h ? oth[r >> 1] : own[r >> 1];   // key 2r   (low half)
++        const unsigned b = h ? own[r >> 1] : oth[r >> 1];   // key 2r+1 (high half)
++        pb[r] = (r & 1) ? __builtin_amdgcn_perm(b, a, 0x07060302u) : __builtin_amdgcn_perm(b, a, 0x05040100u);
++      }
++      const bf16x16 pfrag = __builtin_bit_cast(bf16x16, pb);
++      // V^T fragments: lane col holds dims 8*col .. 8*col+7 of this wave's slice for all 16 keys
++      u32x4 wk[16];
++#pragma unroll
++      for (int k = 0; k < 16; ++k) wk[k] = *(const u32x4*)&sm.ktile[w][k][8 * col];
++#pragma unroll
++      for (int e = 0; e < 8; ++e) {
++        u32x8 vt;
++#pragma unroll
++        for (int i = 0; i < 8; ++i)
++          vt[i] = (e & 1) ? __builtin_amdgcn_perm(wk[2 * i + 1][e >> 1], wk[2 * i][e >> 1], 0x07060302u)
++                          : __builtin_amdgcn_perm(wk[2 * i + 1][e >> 1], wk[2 * i][e >> 1], 0x05040100u);
++        acc[e] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(__builtin_bit_cast(bf16x16, vt), pfrag, acc[e]);
++      }
++      id_cur = id_n1; id_n1 = id_n2; sc_cur = sc_n;
++#pragma unroll
++      for (int i = 0; i < 4; ++i) raw_cur[i] = raw_n[i];
++    }
++  }
++
++  if (splits > 1) {
++    // unnormalised partial of this workgroup: acc[e][r] = O[head = col][dim = 128 w + 8 (2r + h) + e]
++    const float l_part = l_run + swap_half(l_run);
++    float* po = part_o + (((long)t * splits + blockIdx.y) * 16 + col) * DIM + 128 * w;
++#pragma unroll
++    for (int r = 0; r < 8; ++r) {
++      f32x4 lo = {acc[0][r], acc[1][r], acc[2][r], acc[3][r]}, hi = {acc[4][r], acc[5][r], acc[6][r], acc[7][r]};
++      *(f32x4*)(po + 16 * r + 8 * h) = lo;
++      *(f32x4*)(po + 16 * r + 8 * h + 4) = hi;
++    }
++    if (w == 0 && h == 0) {
++      part_m[((long)t * splits + blockIdx.y) * 16 + col] = m_run;
++      part_l[((long)t * splits + blockIdx.y) * 16 + col] = l_part;
++    }
++    return;
++  }
++
++  // epilogue: acc[e][r] = O[head = col][dim = 128 w + 8 (2r + h) + e]
++  const float l_tot = l_run + swap_half(l_run);
++  const bool lonely = l_tot == 0.f;
++  const float sk = sink ? sink[col] : NEG_INF;
++  float den = l_tot + (lonely ? 0.f : __builtin_amdgcn_exp2f((sk - m_run) * L2E));
++  den = den == 0.f ? 1.f : den;
++  const float scale = lonely ? 0.f : 1.f / den;
++  __bf16* op = out + (long)t * so_t + (long)col * so_h + 128 * w;
++#pragma unroll
++  for (int r = 0; r < 8; ++r) {
++    u32x4 o;
++#pragma unroll
++    for (int j = 0; j < 4; ++j) o[j] = pack_bf16(acc[2 * j][r] * scale, acc[2 * j + 1][r] * scale);
++    *(u32x4*)(op + 16 * r + 8 * h) = o;
++  }
++  if (w == 0 && h == 0) lse[(long)t * slse_t + col] = lonely ? __builtin_bit_cast(float, 0x7F800000u) : m_run + logf(l_tot);
++}
++
++// grid (T, 16 heads), block 128: thread j merges dims 4j..4j+3 over the splits
++__global__ void __launch_bounds__(128)
++attn_combine_kernel(const float* __restrict__ part_o, const float* __restrict__ part_m, const float* __restrict__ part_l, const float* __restrict__ sink,
++                    __bf16* __restrict__ out, long so_t, long so_h, float* __restrict__ lse, long slse_t, int splits) {
++  const int t = blockIdx.x, head = blockIdx.y, j = threadIdx.x;
++  const float L2E = 1.4426950408889634f;
++  const float NEG_INF = __builtin_bit_cast(float, 0xFF800000u);
++  float M = NEG_INF;
++  for (int s = 0; s < splits; ++s) M = fmaxf(M, part_m[((long)t * splits + s) * 16 + head]);
++  float L = 0.f;
++  f32x4 acc = {0, 0, 0, 0};
++  for (int s = 0; s < splits; ++s) {
++    const long base = ((long)t * splits + s) * 16 + head;
++    const float ms = part_m[base], ls = part_l[base];
++    const float wgt = (ms == NEG_INF) ? 0.f : __builtin_amdgcn_exp2f((ms - M) * L2E);
++    L += wgt * ls;
++    if (wgt != 0.f) acc += wgt * *(const f32x4*)(part_o + base * DIM + 4 * j);
++  }
++  const bool lonely = L == 0.f;
++  const float sk = sink ? sink[head] : NEG_INF;
++  float den = L + (lonely ? 0.f : __builtin_amdgcn_exp2f((sk - M) * L2E));
++  den = den == 0.f ? 1.f : den;
++  const float scale = lonely ? 0.f : 1.f / den;
++  uint2 o = {pack_bf16(acc[0] * scale, acc[1] * scale), pack_bf16(acc[2] * scale, acc[3] * scale)};
++  *(uint2*)(out + (long)t * so_t + (long)head * so_h + 4 * j) = o;
++  if (j == 0) lse[(long)t * slse_t + head] = lonely ? __builtin_bit_cast(float, 0x7F800000u) : M + logf(L);
++}
++
++// Returns 0 on success, a HIP error code otherwise. All pointers are device pointers; strides are in elements of the respective tensor.
++// splits > 1 needs part_o [T][splits][16][512] fp32 and part_m / part_l [T][splits][16] fp32 scratch.
++extern "C" int dsv41_attn_block(const void* q, long sq_t, long sq_h,
++                                const void* kv_m, const int* idx_m, const int* len_m, long sidx_m, int topk_m, long page_stride_m, int page_m,
++                                const void* kv_e, const int* idx_e, const int* len_e, long sidx_e, int topk_e, long page_stride_e, int page_e,
++                                const float* sink, void* out, long so_t, long so_h, float* lse, long slse_t, float sm_scale, int T,
++                                int splits, float* part_o, float* part_m, float* part_l, void* stream) {
++  if (T <= 0) return 0;
++  if ((page_m & (page_m - 1)) || (kv_e && (page_e & (page_e - 1)))) return (int)hipErrorInvalidValue;
++  if (splits < 1) splits = 1;
++  if (splits > 1 && !(part_o && part_m && part_l)) return (int)hipErrorInvalidValue;
++  Scope a = {kv_m, idx_m, len_m, sidx_m, topk_m, page_stride_m, page_m, page_m ? __builtin_ctz(page_m) : 0};
++  Scope b = {kv_e, idx_e, len_e, sidx_e, topk_e, page_stride_e, page_e, page_e ? __builtin_ctz(page_e) : 0};
++  hipLaunchKernelGGL(attn_block_kernel, dim3(T, splits), dim3(128), 0, (hipStream_t)stream, (const __bf16*)q, sq_t, sq_h, a, b, sink, (__bf16*)out, so_t, so_h,
++                     lse, slse_t, sm_scale, splits, part_o, part_m, part_l);
++  if (splits > 1)
++    hipLaunchKernelGGL(attn_combine_kernel, dim3(T, 16), dim3(128), 0, (hipStream_t)stream, part_o, part_m, part_l, sink, (__bf16*)out, so_t, so_h, lse, slse_t,
++                       splits);
++  return (int)hipGetLastError();
++}
+diff --git a/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_hip_attention.py b/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_hip_attention.py
+new file mode 100644
+index 0000000..68e8fc8
+--- /dev/null
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_hip_attention.py
+@@ -0,0 +1,140 @@
++"""Hand-written WMMA sparse attention for the V4.1 prefill (gfx1151, 16 heads per rank, head_dim 512).
++
++One workgroup per query row. The kernel gathers the selected keys straight from the paged fp8 KV cache (main scope, extra scope),
++dequantises them to bf16 exactly (fp8 * 2^k is exact in bf16), and runs QK^T, the online softmax (with the attention sink) and PV on
++the matrix cores. The installed Triton kernel does the same work one query at a time with eight [16, 64] fp32 accumulators and spills
++heavily; this kernel keeps the 16x512 accumulator across the four waves of the workgroup (128 output dims each).
++
++Default off: SGLANG_DSV41_HIP_ATTENTION=1 enables it for calls with at least SGLANG_DSV41_HIP_ATTENTION_MIN_ROWS rows (default 17, so the
++decode and DSpark verify shapes keep the installed split-K kernels). SGLANG_DSV41_HIP_ATTENTION_DECODE=1 additionally routes 1..16 rows, where
++one workgroup per query would leave the GPU idle: the key tiles of each query are divided over 8 (<= 8 rows), 4 (<= 16) or 2 (<= 32) workgroups
++and merged by a second small kernel (33-52 us per call against 145-230 us for the installed split-K path).
++Anything the kernel does not cover (other head counts, page sizes, dtypes, non-gfx1151) falls back to the installed path.
++
++Results are not bit-identical to the Triton kernel (different fp32 summation order inside the matrix-core accumulators); they agree to
++bf16 rounding (see tests/hip-block-attention-gpu.py).
++"""
++from __future__ import annotations
++
++import ctypes
++import logging
++import os
++from functools import lru_cache
++from pathlib import Path
++from typing import Optional, Tuple
++
++import torch
++
++_ENABLED = os.environ.get("SGLANG_DSV41_HIP_ATTENTION") == "1"
++_DECODE = os.environ.get("SGLANG_DSV41_HIP_ATTENTION_DECODE") == "1"
++_MIN_ROWS = int(os.environ.get("SGLANG_DSV41_HIP_ATTENTION_MIN_ROWS", "17"))
++_lib = None
++_seen = set()
++
++
++def enabled() -> bool:
++    return _ENABLED or _DECODE
++
++
++@lru_cache(maxsize=None)
++def _is_gfx1151(device: torch.device) -> bool:
++    return (
++        device.type == "cuda"
++        and bool(torch.version.hip)
++        and torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] == "gfx1151"
++    )
++
++
++def _load():
++    global _lib
++    if _lib is None:
++        path = os.environ.get("SGLANG_DSV41_HIP_ATTENTION_SO") or str(Path(__file__).with_name("libdsv41_attn_block.so"))
++        lib = ctypes.CDLL(path)
++        lib.dsv41_attn_block.restype = ctypes.c_int
++        _lib = lib
++    return _lib
++
++
++def _paged_fp8(cache: torch.Tensor) -> bool:
++    page = cache.shape[1] if cache.ndim == 4 else 0
++    return (
++        cache.ndim == 4 and cache.shape[2] == 1 and cache.shape[3] == 528 and cache.element_size() == 1
++        and cache.stride(3) == 1 and cache.stride(1) == 528 and cache.stride(0) >= page * 528
++        and page > 0 and (page & (page - 1)) == 0
++    )
++
++
++def supported(q, k_cache, indices, topk_length, extra_k_cache, extra_indices, extra_topk_length, attn_sink, s_q) -> bool:
++    rows = q.shape[0] * q.shape[1] if q.ndim == 4 else 0
++    if rows <= 0 or not ((rows <= 16 and _DECODE) or (rows > 16 and _ENABLED and rows >= _MIN_ROWS)):
++        return False
++    if not (q.ndim == 4 and s_q == 1 and q.shape[1] == 1 and q.shape[2:] == (16, 512) and q.dtype == torch.bfloat16 and q.stride(3) == 1):
++        return False
++    if not _paged_fp8(k_cache) or indices.dtype != torch.int32 or indices.shape[0] != rows:
++        return False
++    if (extra_k_cache is None) != (extra_indices is None):
++        return False
++    if extra_k_cache is not None and (not _paged_fp8(extra_k_cache) or extra_indices.dtype != torch.int32 or extra_indices.shape[0] != rows):
++        return False
++    if attn_sink is not None and (attn_sink.dtype != torch.float32 or attn_sink.numel() != 16 or not attn_sink.is_contiguous()):
++        return False
++    for ln in (topk_length, extra_topk_length):
++        if ln is not None and (ln.dtype != torch.int32 or ln.numel() != rows):
++            return False
++    return _is_gfx1151(q.device)
++
++
++def _ptr(x: Optional[torch.Tensor]):
++    return ctypes.c_void_p(x.data_ptr() if x is not None else 0)
++
++
++def attention(
++    q: torch.Tensor,
++    k_cache: torch.Tensor,
++    indices: torch.Tensor,
++    topk_length: Optional[torch.Tensor],
++    extra_k_cache: Optional[torch.Tensor],
++    extra_indices: Optional[torch.Tensor],
++    extra_topk_length: Optional[torch.Tensor],
++    attn_sink: Optional[torch.Tensor],
++    sm_scale: float,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """q [T,1,16,512] bf16; returns (out [T,1,16,512] bf16, lse [T,1,16] fp32), same conventions as triton_fp8_attention_fwd."""
++    rows = q.shape[0]
++    q3 = q.reshape(rows, 16, 512)
++    out = torch.empty(rows, 16, 512, dtype=torch.bfloat16, device=q.device)
++    lse = torch.empty(rows, 16, dtype=torch.float32, device=q.device)
++    splits = 8 if rows <= 8 else 4 if rows <= 16 else 2 if rows <= 32 else 1
++    key = (rows if rows <= 16 else 17, splits, extra_k_cache is not None, attn_sink is not None)
++    if key not in _seen:
++        _seen.add(key)
++        logging.getLogger(__name__).info(
++            "DSV41 HIP attention active: rows=%s splits=%s extra=%s sink=%s", rows, splits, key[2], key[3]
++        )
++    if splits > 1:
++        part_o = torch.empty(rows, splits, 16, 512, dtype=torch.float32, device=q.device)
++        part_m = torch.empty(rows, splits, 16, dtype=torch.float32, device=q.device)
++        part_l = torch.empty(rows, splits, 16, dtype=torch.float32, device=q.device)
++    else:
++        part_o = part_m = part_l = None
++    scopes = []
++    for cache, idx, ln in ((k_cache, indices, topk_length), (extra_k_cache, extra_indices, extra_topk_length)):
++        if cache is None:
++            scopes.append((None, None, None, 0, 0, 0, 0))
++            continue
++        idx2 = idx.reshape(rows, -1).contiguous()
++        ln1 = ln.reshape(-1).contiguous() if ln is not None else None
++        scopes.append((cache, idx2, ln1, idx2.stride(0), idx2.shape[1], cache.stride(0), cache.shape[1]))
++    args = []
++    for cache, idx2, ln1, sidx, topk, pstride, page in scopes:
++        args += [_ptr(cache), _ptr(idx2), _ptr(ln1), ctypes.c_long(sidx), ctypes.c_int(topk), ctypes.c_long(pstride), ctypes.c_int(page)]
++    rc = _load().dsv41_attn_block(
++        _ptr(q3), ctypes.c_long(q3.stride(0)), ctypes.c_long(q3.stride(1)), *args,
++        _ptr(attn_sink), _ptr(out), ctypes.c_long(out.stride(0)), ctypes.c_long(out.stride(1)),
++        _ptr(lse), ctypes.c_long(lse.stride(0)), ctypes.c_float(sm_scale), ctypes.c_int(rows),
++        ctypes.c_int(splits), _ptr(part_o), _ptr(part_m), _ptr(part_l),
++        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
++    )
++    if rc != 0:
++        raise RuntimeError(f"dsv41_attn_block launch failed: hip error {rc}")
++    return out.view(rows, 1, 16, 512), lse.view(rows, 1, 16)

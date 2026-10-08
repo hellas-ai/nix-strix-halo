@@ -1,0 +1,202 @@
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -93,6 +93,11 @@
+ 
+ 
+ class MooncakeDirectLinker(UnifiedCacheLinker):
++    # A layer failure during forward can strand peers in GPU collectives and
++    # leave a published tree node partly initialized. Restore whole objects into
++    # private allocations first; the wrapper publishes only after a rank vote.
++    restores_before_publish = True
++
+     def __init__(
+         self,
+         server_args,
+@@ -256,6 +261,53 @@
+         if rid in self.pending_loads:
+             raise RuntimeError(f"Mooncake load for rid={rid} is already queued.")
+         self.pending_loads[rid] = expanded
++        return True
++
++    def restore(self, rid: str, transfers: list[PoolTransfer]) -> bool:
++        # Order previous allocation/initialization work before external DMA.
++        # A device synchronization failure is not a recoverable cache miss.
++        device_module.current_stream().synchronize()
++        try:
++            expanded = self.pool_group.resolve_transfers(transfers)
++            if not expanded:
++                return False
++            for transfer in expanded:
++                pool = self.pools[transfer.name]
++                keys, _ = self.storage._get_hybrid_page_component_keys(
++                    list(transfer.keys), transfer
++                )
++                keys = self.storage._tag_keys(keys)
++                pointers, sizes = pool.get_page_buffer_meta(transfer.host_indices)
++                if len(pointers) != len(keys):
++                    pointers, sizes = self.storage._pack_multi_buffer_meta(
++                        keys, pointers, sizes
++                    )
++                expected = [
++                    sum(size) if isinstance(size, (list, tuple)) else size
++                    for size in sizes
++                ]
++                # The synchronous full-object API supports MEMORY and disk
++                # replicas, and waits for all submitted transfers before return.
++                # Require exact byte counts: a nonnegative short read is not a
++                # valid restore, even if the backend reports it as a success.
++                result = self.storage._get_batch_zero_copy_impl(keys, pointers, sizes)
++                if (
++                    result is None
++                    or isinstance(result, int)
++                    or list(result) != expected
++                ):
++                    raise RuntimeError(
++                        f"Mooncake restore failed for pool={transfer.name}: "
++                        f"transferred={result}, expected={expected}"
++                    )
++        except Exception:
++            logger.warning(
++                "Mooncake restore failed before publication for rid=%s",
++                rid,
++                exc_info=True,
++            )
++            return False
++        self.stats["load"] += 1
+         return True
+ 
+     def cancel_queued_load(self, rid: str) -> bool:
+--- a/sglang/srt/mem_cache/unified_cache/unified_cache_linker.py
++++ b/sglang/srt/mem_cache/unified_cache/unified_cache_linker.py
+@@ -19,6 +19,7 @@
+ 
+ from __future__ import annotations
+ 
++import logging
+ from abc import ABC, abstractmethod
+ from collections.abc import Sequence
+ from typing import TYPE_CHECKING, NamedTuple
+@@ -57,11 +58,24 @@
+     }
+ )
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ class UnifiedCacheLinker(ABC):
+     """External KV store reached directly from the device pools."""
+ 
+     layer_done_counter: object
++    restores_before_publish = False
++
++    def restore(self, rid: str, transfers: list[PoolTransfer]) -> bool:
++        """Restore into unpublished slots and quiesce all writes before returning.
++
++        Backends opting into restores_before_publish return False on a storage
++        miss/error. Neither success nor failure may leave DMA using these slots.
++        The wrapper agrees the outcome across ranks before publishing or freeing
++        them. No request state or radix-tree state has been changed at this point.
++        """
++        raise NotImplementedError
+ 
+     @abstractmethod
+     def lookup(self, rid: str, transfers: list[PoolTransfer]) -> list[int]:
+@@ -172,6 +186,7 @@
+         )
+         # rid -> what match found, consumed by the next init_load_back.
+         self.hit_markers: dict[str, ExternalCacheHitMarker] = {}
++        self.failed_loads: set[str] = set()
+         # Loads in flight, each pinning its inserted endpoint until DMA completes.
+         self.pending_loads: dict[str, tuple[NodeId, DecLockRefParams]] = {}
+         # Offloads in flight, each holding a lock on its node until it lands.
+@@ -190,6 +205,8 @@
+     # ---- match: probe the remote store and report host_hit_length ----
+ 
+     def match(self, key: RadixKey, req: Req, result: MatchResult) -> MatchResult:
++        if req.rid in self.failed_loads:
++            return result
+         cache = self.cache
+         key, _ = key.maybe_to_bigram_view(cache.tree_core.is_eagle)
+         page = cache.page_size
+@@ -305,14 +322,38 @@
+                 LinkerTransferPhase.LOAD, None, tail_hashes
+             )
+             if transfer is None:
+-                self._update_load(
+-                    ExternalLinkerLoadPhase.ABORT,
+-                    req,
+-                    component_transfers,
+-                    prefix_len,
++                break
++            component_transfers.append((component, transfer))
++
++        allocated = len(component_transfers) == len(self._components)
++        transactional = self.cache_linker.restores_before_publish
++        if transactional:
++            allocated = self._all_ranks_ready(allocated)
++        restored = allocated
++        if allocated and transactional:
++            restored = self._all_ranks_ready(
++                self.cache_linker.restore(
++                    req.rid, [transfer for _, transfer in component_transfers]
+                 )
+-                return empty_indices, req.last_node
+-            component_transfers.append((component, transfer))
++            )
++        if not restored:
++            # PREPARE has not run: no full-to-SWA mapping, request boundary or
++            # tree entry points to these allocations yet. Every rank has also
++            # finished its I/O before the vote, so freeing them cannot race DMA.
++            self._update_load(
++                ExternalLinkerLoadPhase.ABORT, req, component_transfers, prefix_len
++            )
++            if transactional:
++                self.failed_loads.add(req.rid)
++                req.host_hit_length = 0
++                req.swa_host_hit_length = 0
++                req.mamba_host_hit_length = 0
++                logger.warning(
++                    "External cache restore failed for rid=%s; recomputing from "
++                    "the resident prefix on every cache rank",
++                    req.rid,
++                )
++            return empty_indices, req.last_node
+ 
+         full_transfer = component_transfers[0][1]
+         assert full_transfer.name == PoolName.KV
+@@ -386,12 +427,18 @@
+             canonical_full=canonical_tail,
+         )
+ 
+-        self._queue_load(req.rid, insert_result.last_device_node, load_transfers)
++        if not transactional:
++            self._queue_load(req.rid, insert_result.last_device_node, load_transfers)
+ 
+         cache.tree_core.mark_external_cache_stored_path(
+             insert_result.last_device_node, req.last_node
+         )
+         return canonical_tail, insert_result.last_device_node
++
++    def _all_ranks_ready(self, ready: bool) -> bool:
++        state = torch.tensor([int(ready)], dtype=torch.int)
++        self.cache._all_reduce_attn_groups(state, torch.distributed.ReduceOp.MIN)
++        return bool(state.item())
+ 
+     def _queue_load(
+         self, rid: str, node_id: NodeId, transfers: list[PoolTransfer]
+@@ -580,6 +627,7 @@
+     def reset(self) -> None:
+         self.cache_linker.reset()
+         self.hit_markers.clear()
++        self.failed_loads.clear()
+         self._release_pending_locks()
+ 
+     def _release_pending_locks(self) -> None:
+@@ -595,6 +643,7 @@
+ 
+     def release_request(self, rid: str) -> None:
+         self.hit_markers.pop(rid, None)
++        self.failed_loads.discard(rid)
+         # TODO: Roll back the published tree and component state atomically before
+         # canceling; otherwise the tree may retain device slots that were never loaded.
+         if self.cache_linker.cancel_queued_load(rid):

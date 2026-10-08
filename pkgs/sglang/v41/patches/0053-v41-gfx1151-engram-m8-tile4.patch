@@ -1,0 +1,40 @@
+diff --git a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+index ebf5734..1688cf2 100644
+--- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -344,8 +344,9 @@ def native_c4_c8_gemv(q, qs, w, ws):
+         torch.cuda.get_device_properties(q.device).gcnArchName.split(":")[0] != "gfx1151"):
+         raise ValueError("C4/C8 native GEMV is gfx1151-only")
+     output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
+-    _native_c4_c8_gemv[(n // 8,)](
+-        q, qs, w, ws, output, n, k, m, 8, shapes[(n, k)],
++    rows = _multirow_output_tile(n, k, m)
++    _native_c4_c8_gemv[(n // rows,)](
++        q, qs, w, ws, output, n, k, m, rows, shapes[(n, k)],
+         num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
+ 
+@@ -386,6 +387,13 @@ def native_idx_wqb_gemv(q, qs, w, ws):
+     return output[:rows]
+ 
+ 
++def _multirow_output_tile(n, k, m):
++    # Engram's eight-token, eight-output tile consumes 170 VGPR/thread on
++    # gfx1151 and runs at half the speed of the four-output tile.  The latter
++    # keeps BLOCK_K and each token's reduction order unchanged.
++    return 4 if m == 8 and (n, k) == (25600, 6144) else 8
++
++
+ def _launch_rows(q, qs, w, ws, output, n, k, m, block_k):
+     """One launch for ``m`` in 1..8 token rows (unchecked; the callers validate operands)."""
+     if m == 1:
+@@ -396,7 +404,8 @@ def _launch_rows(q, qs, w, ws, output, n, k, m, block_k):
+         _native_c2_gemv[(n // 8,)](q, qs, w, ws, output, n, k, 8, block_k,
+                                    num_warps=4, num_stages=1, enable_fp_fusion=False)
+     else:
+-        _native_c4_c8_gemv[(n // 8,)](q, qs, w, ws, output, n, k, m, 8, block_k,
++        rows = _multirow_output_tile(n, k, m)
++        _native_c4_c8_gemv[(n // rows,)](q, qs, w, ws, output, n, k, m, rows, block_k,
+                                       num_warps=4, num_stages=1, enable_fp_fusion=False)
+ 
+ 

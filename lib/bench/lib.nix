@@ -244,6 +244,12 @@ rec {
       normalizedCommand = map stringify command;
       normalizedPackages = normalizePackages { inherit package packages; };
       normalizedRequirements = mergeRequirements [ requirements ];
+      needsHardwareLease =
+        pkgs.stdenv.hostPlatform.isLinux
+        && lib.any (feature: lib.elem feature normalizedRequirements.systemFeatures) [
+          "gfx1151"
+          "xdna2"
+        ];
       normalizedMetadata = benchmarkMetadata {
         inherit
           name
@@ -297,6 +303,17 @@ rec {
         }
 
         ${envExports normalizedEnv}
+        ${lib.optionalString needsHardwareLease ''
+          # The runner bind-mounts the serving/component lock's host inode.
+          # Opening read-only also makes a missing mount fail closed.
+          exec 9</run/benchmark-gpu.lock
+          echo "Waiting for the shared hardware lease (at most 600 seconds)" >&2
+          ${pkgs.util-linux}/bin/flock --exclusive --timeout 600 --conflict-exit-code 75 9 || {
+            status=$?
+            echo "Could not acquire the shared hardware lease (status $status)" >&2
+            exit "$status"
+          }
+        ''}
         set +e
         ${commandLine} > "$out/stdout.txt" 2> "$out/stderr.txt"
         status=$?

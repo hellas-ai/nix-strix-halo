@@ -1,0 +1,127 @@
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -3640,7 +3640,30 @@
+             rsqrt = torch.rsqrt(
+                 x_flat.square().mean(-1, keepdim=True) + self.rms_norm_eps
+             )
+-            mixes = (F.linear(x_flat, hc_fn) * rsqrt).unsqueeze(1)
++            # Native V4.1 C1/C2 gfx1151 projection; RMS, scaling and the
++            # downstream hc_split_sinkhorn remain on their original paths.
++            if (
++                getattr(self.config, "model_type", None) == "deepseek_v41"
++                and self.hc_mult == 4 and self.hidden_size == 5120
++                and x_flat.shape in ((1, 20480), (2, 20480)) and hc_fn.shape == (24, 20480)
++                and x_flat.is_contiguous() and hc_fn.is_contiguous()
++                and x_flat.dtype == torch.float32 and hc_fn.dtype == torch.float32
++                and x_flat.is_cuda and hc_fn.is_cuda and x_flat.device == hc_fn.device
++                and torch.version.hip
++                and torch.cuda.get_device_properties(x_flat.device).gcnArchName.split(":")[0]
++                == "gfx1151"
++            ):
++                if x_flat.shape[0] == 1:
++                    from sglang.kernels.ops.layernorm.native_hc_projection import native_hc_projection
++
++                    projected = native_hc_projection(x_flat, hc_fn)
++                else:
++                    from sglang.kernels.ops.layernorm.native_hc_projection import native_hc_projection_c2
++
++                    projected = native_hc_projection_c2(x_flat, hc_fn)
++            else:
++                projected = F.linear(x_flat, hc_fn)
++            mixes = (projected * rsqrt).unsqueeze(1)
+         pre, post, comb = _get_mhc_ops().hc_split_sinkhorn(
+             mixes,
+             hc_scale,
+--- /dev/null
++++ b/sglang/kernels/ops/layernorm/native_hc_projection.py
+@@ -0,0 +1,90 @@
++"""Native V4.1 gfx1151 C1/C2 FP32 mHC projections; no quantization."""
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _hc_partial(X, W, P, K: tl.constexpr, BLOCK: tl.constexpr, PARTS: tl.constexpr):
++    row = tl.program_id(0)
++    part = tl.program_id(1)
++    cols = tl.arange(0, BLOCK)
++    acc = tl.full((BLOCK,), 0, tl.float32)
++    for block in range(0, K // (PARTS * BLOCK)):
++        offset = part * (K // PARTS) + block * BLOCK + cols
++        x = tl.load(X + offset)
++        w = tl.load(W + row * K + offset)
++        acc = acc + x * w
++    tl.store(P + row * PARTS + part, tl.sum(acc, 0))
++
++
++@triton.jit
++def _hc_finish(P, Y, PARTS: tl.constexpr):
++    row = tl.program_id(0)
++    parts = tl.arange(0, PARTS)
++    values = tl.load(P + row * PARTS + parts)
++    tl.store(Y + row, tl.sum(values, 0))
++
++
++def native_hc_projection(x: torch.Tensor, fn: torch.Tensor) -> torch.Tensor:
++    """Exact source shape `[1,20480] @ [24,20480]^T`, FP32 throughout."""
++    if (x.shape != (1, 20480) or fn.shape != (24, 20480)
++        or x.dtype != torch.float32 or fn.dtype != torch.float32
++        or not x.is_contiguous() or not fn.is_contiguous()
++        or x.device != fn.device or x.device.type != 'cuda'
++        or not torch.version.hip
++        or torch.cuda.get_device_properties(x.device).gcnArchName.split(':')[0] != 'gfx1151'):
++        raise ValueError('native HC projection requires exact gfx1151 C1 FP32 operands')
++    partial = torch.empty((24, 4), dtype=torch.float32, device=x.device)
++    output = torch.empty((1, 24), dtype=torch.float32, device=x.device)
++    _hc_partial[(24, 4)](x, fn, partial, 20480, 512, 4,
++                         num_warps=4, num_stages=1, enable_fp_fusion=False)
++    _hc_finish[(24,)](partial, output, 4,
++                      num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
++
++
++@triton.jit
++def _hc_partial_c2(X, W, P, K: tl.constexpr, BLOCK: tl.constexpr, PARTS: tl.constexpr):
++    row = tl.program_id(0)
++    part = tl.program_id(1)
++    cols = tl.arange(0, BLOCK)
++    acc0 = tl.full((BLOCK,), 0, tl.float32)
++    acc1 = tl.full((BLOCK,), 0, tl.float32)
++    for block in range(0, K // (PARTS * BLOCK)):
++        offset = part * (K // PARTS) + block * BLOCK + cols
++        w = tl.load(W + row * K + offset)
++        x0 = tl.load(X + offset)
++        x1 = tl.load(X + K + offset)
++        acc0 = acc0 + x0 * w
++        acc1 = acc1 + x1 * w
++    tl.store(P + row * (2 * PARTS) + part, tl.sum(acc0, 0))
++    tl.store(P + row * (2 * PARTS) + PARTS + part, tl.sum(acc1, 0))
++
++
++@triton.jit
++def _hc_finish_c2(P, Y, PARTS: tl.constexpr):
++    row = tl.program_id(0)
++    parts = tl.arange(0, PARTS)
++    values0 = tl.load(P + row * (2 * PARTS) + parts)
++    values1 = tl.load(P + row * (2 * PARTS) + PARTS + parts)
++    tl.store(Y + row, tl.sum(values0, 0))
++    tl.store(Y + 24 + row, tl.sum(values1, 0))
++
++
++def native_hc_projection_c2(x: torch.Tensor, fn: torch.Tensor) -> torch.Tensor:
++    """Exact gfx1151 `[2,20480] @ [24,20480]^T`, independent FP32 rows."""
++    if (x.shape != (2, 20480) or fn.shape != (24, 20480)
++        or x.dtype != torch.float32 or fn.dtype != torch.float32
++        or not x.is_contiguous() or not fn.is_contiguous()
++        or x.device != fn.device or x.device.type != 'cuda'
++        or not torch.version.hip
++        or torch.cuda.get_device_properties(x.device).gcnArchName.split(':')[0] != 'gfx1151'):
++        raise ValueError('native HC C2 projection requires exact gfx1151 FP32 operands')
++    partial = torch.empty((24, 2, 4), dtype=torch.float32, device=x.device)
++    output = torch.empty((2, 24), dtype=torch.float32, device=x.device)
++    _hc_partial_c2[(24, 4)](x, fn, partial, 20480, 512, 4,
++                            num_warps=4, num_stages=1, enable_fp_fusion=False)
++    _hc_finish_c2[(24,)](partial, output, 4,
++                         num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output

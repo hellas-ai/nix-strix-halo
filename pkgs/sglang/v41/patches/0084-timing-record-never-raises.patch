@@ -1,0 +1,80 @@
+diff --git a/sglang/srt/managers/scheduler_components/timing_record.py b/sglang/srt/managers/scheduler_components/timing_record.py
+index 5b01ab2..b7c0674 100644
+--- a/sglang/srt/managers/scheduler_components/timing_record.py
++++ b/sglang/srt/managers/scheduler_components/timing_record.py
+@@ -22,6 +22,7 @@ Design constraints (Z-prefill/C-engram/SCHEDULING-TIME-SPLIT.md):
+ 
+ from __future__ import annotations
+ 
++import functools
+ import json
+ import logging
+ import os
+@@ -41,6 +42,27 @@ _MAX_TRACKED_REQUESTS = 4096
+ _Snapshot = Tuple[float, int, float, float, float]
+ 
+ 
++def _never_raises(method):
++    """The record is observational: a bug in it must not stop the scheduler.
++
++    The first exception is logged with its traceback and switches the recorder
++    off; later hook calls return immediately.
++    """
++
++    @functools.wraps(method)
++    def guarded(self, *args, **kwargs):
++        if self.failed:
++            return None
++        try:
++            return method(self, *args, **kwargs)
++        except Exception:
++            self.failed = True
++            logger.exception("scheduler timing record disabled after an error")
++            return None
++
++    return guarded
++
++
+ def _t(value: Optional[float]) -> Optional[float]:
+     return None if not value else round(value, 6)
+ 
+@@ -61,6 +83,7 @@ class SchedulingTimingRecorder:
+         # batch.launch_ts is a time.monotonic() reading; express it in `clock`.
+         self._mono_offset = monotonic() - clock()
+         self.seq = 0
++        self.failed = False
+         self.prev_end: Optional[float] = None
+         # _should_defer_prefill() accounting. `waiting` means the call happened
+         # while a request sat in the waiting queue or a chunked request had
+@@ -140,6 +163,7 @@ class SchedulingTimingRecorder:
+             self.plan_wall_s,
+         )
+ 
++    @_never_raises
+     def on_enqueue(self, req: Any) -> None:
+         """A request entered the waiting queue (retractions re-enter)."""
+         rid = req.rid
+@@ -147,6 +171,7 @@ class SchedulingTimingRecorder:
+             self._ref.pop(next(iter(self._ref)))
+         self._ref[rid] = ("queue", 0, self._snapshot(self.clock()))
+ 
++    @_never_raises
+     def on_defer(self, deferred: bool, work_waiting: bool) -> None:
+         self.defer_calls += 1
+         if deferred:
+@@ -154,6 +179,7 @@ class SchedulingTimingRecorder:
+             if work_waiting:
+                 self.defer_waiting_passes += 1
+ 
++    @_never_raises
+     def on_plan(self, batch: Any, t0: float, t1: float) -> None:
+         """get_new_batch_prefill() ran while work waited."""
+         self.plan_calls += 1
+@@ -164,6 +190,7 @@ class SchedulingTimingRecorder:
+         # Counters as of the moment the batch exists, for per-request deltas.
+         batch.sched_timing_plan = (t0, t1, self._snapshot(t1))
+ 
++    @_never_raises
+     def on_result(
+         self,
+         batch: Any,

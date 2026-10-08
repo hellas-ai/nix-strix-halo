@@ -1,0 +1,13 @@
+diff --git a/sglang/srt/entrypoints/engine.py b/sglang/srt/entrypoints/engine.py
+--- a/sglang/srt/entrypoints/engine.py
++++ b/sglang/srt/entrypoints/engine.py
+@@ -134,2 +134,3 @@
+     is_cuda,
++    is_hip,
+     is_mnnvl_fabric_device,
+@@ -1815,2 +1816,5 @@
+             os.environ["NCCL_GRAPH_MIXING_SUPPORT"] = "0"
++        elif is_hip() and not cfg.enable_symm_mem:
++            # RCCL defaults to mode 0; direct PyNCCL graph capture mixes with eager work.
++            os.environ.setdefault("NCCL_GRAPH_MIXING_SUPPORT", "1")
+     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"

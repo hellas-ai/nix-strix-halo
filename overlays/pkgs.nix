@@ -353,6 +353,19 @@ let
       };
       vllm-rocm = final."vllm-rocm-therock-${suffix}";
     }
+    // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython && suffix == "gfx1151") {
+      sglang-v41-rocm = prev.callPackage ../pkgs/sglang/v41 {
+        pythonPackages = final.${therockPythonConfig.packagesAttr};
+        rocmSdk = final."therock-rocm-${suffix}";
+        inherit (final) sglang-rocm mscclpp-rocm;
+      };
+      ds41-node = prev.callPackage ../pkgs/ds41-node {
+        inherit (final) sglang-v41-rocm;
+      };
+      mscclpp-rocm = prev.callPackage ../pkgs/mscclpp {
+        rocmSdk = final."therock-rocm-${suffix}";
+      };
+    }
   );
 in
 commonPackages // darwinPackages // linuxPackages
