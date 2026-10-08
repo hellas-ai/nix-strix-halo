@@ -1,7 +1,7 @@
 # Retained-PM4 graph replay for the TheRock 10 SDK: HIP runtime (CLR) and HSA runtime (ROCR).
 #
 # EXPERIMENTAL. Nothing in the serving closure references this package; it only builds when asked
-# for (`nix build .#rocm-pm4-clr .#rocm-pm4-rocr-tmpring`) and is loaded into a worker through
+# for (`nix build .#rocm-pm4-clr-split .#rocm-pm4-rocr-split`) and is loaded into a worker through
 # the sitecustomize in ./bootstrap (DS41_PM4_CLR / DS41_PM4_ROCR / DS41_PM4_SITE).
 #
 # Layers, in build order:
@@ -14,6 +14,16 @@
 #   rocrTmpring   rocr + ./tmpring/scratchless-preserve-tmpring.patch (scratchless retained dispatches
 #                 must not replace queue-owned TMPRING state) and a CPU compile test of the patched
 #                 encoder. Reproduces Codex's rocr-sdk10-pm4-scratchless-tmpring-diagnostic-hypothesis-1.
+#   rocrSplit     rocrTmpring + ./patches/rocr-pm4-dispatch-ptr.patch.
+#   clrSplit      clr + ./patches/clr-pm4-graph-split.patch.
+#
+# Why the last two exist: with the first four layers the DS4 decode graph (two streams deep, about
+# 3,275 packets per step) retained only 8.1% of its packets. Multi-packet batches start with a
+# cross-stream barrier-AND, which fails CreateGraphPm4Batch's "every packet is a kernel dispatch"
+# gate, and torch kernels request the dispatch pointer (kernel_code_properties 0x040a), which the
+# gfx11 encoder rejected. clrSplit/rocrSplit fix those two gates and log every remaining rejection
+# as "[hipGraph][PM4-WHY]". With both, 98.3% of packets are retained and logprobs are bit-identical.
+# The end-to-end timing A/B is pending; no speedup is claimed.
 #
 # Equivalence with Codex's derivations (clr-sdk10-pm4-7.15.26333-pm4-7dda3ac-kpack, out 9g40fnkc;
 # rocr-sdk10-pm4-scratchless-tmpring-diagnostic-hypothesis-1, out k69q8hw3): the prepared source is
@@ -263,6 +273,22 @@ let
     '';
   });
 
+  rocrSplit = rocrTmpring.overrideAttrs (old: {
+    pname = "rocr-sdk10-pm4-scratchless-tmpring-dispatchptr";
+    patches = old.patches ++ [ ./patches/rocr-pm4-dispatch-ptr.patch ];
+    postInstall = old.postInstall + ''
+      cp ${./patches/rocr-pm4-dispatch-ptr.patch} $out/share/pm4-provenance/
+    '';
+  });
+
+  clrSplit = clr.overrideAttrs (old: {
+    pname = "clr-sdk10-pm4-split";
+    patches = (old.patches or [ ]) ++ [ ./patches/clr-pm4-graph-split.patch ];
+    postInstall = old.postInstall + ''
+      cp ${./patches/clr-pm4-graph-split.patch} $out/share/pm4-provenance/
+    '';
+  });
+
   # sitecustomize that preloads the PM4 HSA and HIP runtimes into rocm_sdk before torch imports.
   # Put $out on PYTHONPATH and set DS41_PM4_CLR, DS41_PM4_ROCR and DS41_PM4_SITE (see the file).
   bootstrap = runCommand "pm4-bootstrap" { } ''
@@ -276,6 +302,8 @@ in
     rocr
     clr
     rocrTmpring
+    rocrSplit
+    clrSplit
     bootstrap
     ;
 }

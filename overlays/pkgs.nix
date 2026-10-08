@@ -383,8 +383,10 @@ let
       {
         rocm-pm4-bootstrap = rocmPm4.bootstrap;
         rocm-pm4-clr = rocmPm4.clr;
+        rocm-pm4-clr-split = rocmPm4.clrSplit;
         rocm-pm4-prepared-source = rocmPm4.prepared;
         rocm-pm4-rocr = rocmPm4.rocr;
+        rocm-pm4-rocr-split = rocmPm4.rocrSplit;
         rocm-pm4-rocr-tmpring = rocmPm4.rocrTmpring;
       }
     )
