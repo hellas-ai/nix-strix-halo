@@ -15,6 +15,8 @@
 #              SGLANG_DSV41_MSAR=1, see sglang/srt/distributed/device_communicators/dsv41_msar.py)
 #   0006       opt-in single-launch Triton (add+)RMSNorm for ROCm without vLLM/AITER (SGLANG_ROCM_TRITON_RMSNORM=1),
 #              replacing ~11 torch kernels per norm
+#   0007       opt-in fused linear-attention projections under the FP8 checkpoint (SGLANG_GLM53_FUSED_QKVBFG=1): its
+#              modules_to_not_convert lists the fused module names, so q/k/v/beta/f_a/g_a run as one BF16 GEMM
 let
   basePatches =
     let
@@ -31,6 +33,7 @@ let
       ./patches/0003-glm53-fp8-moe-gemv.patch
       ./patches/0005-glm53-mscclpp-allreduce.patch
       ./patches/0006-rocm-triton-rmsnorm.patch
+      ./patches/0007-glm53-fused-qkvbfg-under-fp8.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
