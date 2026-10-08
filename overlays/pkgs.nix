@@ -366,6 +366,28 @@ let
         rocmSdk = final."therock-rocm-${suffix}";
       };
     }
+    // lib.optionalAttrs (supportsTherockRocm && suffix == "gfx1151") (
+      let
+        # Experimental retained-PM4 HIP/HSA runtimes (see pkgs/rocm-pm4-split). Nothing deployed
+        # references them; they only build when asked for by name.
+        therockSourceTree = import ../pkgs/therock/sources/source-tree.nix { inherit inputs; };
+        rocmSystems =
+          lib.findFirst (m: m.path == "rocm-systems")
+            (throw "rocm-pm4-split: no rocm-systems entry in pkgs/therock/sources/source-tree.nix")
+            therockSourceTree.${suffix}.submodules;
+        rocmPm4 = prev.callPackage ../pkgs/rocm-pm4-split {
+          rocmSdk = final."therock-rocm-${suffix}";
+          baseSource = rocmSystems.source;
+        };
+      in
+      {
+        rocm-pm4-bootstrap = rocmPm4.bootstrap;
+        rocm-pm4-clr = rocmPm4.clr;
+        rocm-pm4-prepared-source = rocmPm4.prepared;
+        rocm-pm4-rocr = rocmPm4.rocr;
+        rocm-pm4-rocr-tmpring = rocmPm4.rocrTmpring;
+      }
+    )
   );
 in
 commonPackages // darwinPackages // linuxPackages
