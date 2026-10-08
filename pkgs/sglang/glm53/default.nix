@@ -10,7 +10,7 @@
 
 # GLM-5.3-Flash campaign runtime: sglang-rocm (same SGLang source and kernels) with extra runtime patches.
 #   0001-0003  Codex's FP8 decode/prefill experiments: contiguous batch-one dense GEMV, prefill tiles, TP4 expert GEMV
-#   0004       expert guard/grid for batches 1-4 (vendored, not applied yet)
+#   0004       expert GEMV guard/grid for batches 1-4 (needed once decode runs more than one request)
 #   0005       opt-in MSCCL++ small-message all-reduce (the DS4 v41 0090 patch rebased onto this SGLang;
 #              SGLANG_DSV41_MSAR=1, see sglang/srt/distributed/device_communicators/dsv41_msar.py)
 #   0006       opt-in single-launch Triton (add+)RMSNorm for ROCm without vLLM/AITER (SGLANG_ROCM_TRITON_RMSNORM=1),
@@ -31,6 +31,7 @@ let
       ./patches/0001-glm53-fp8-contiguous-decode.patch
       ./patches/0002-glm53-fp8-prefill-config.patch
       ./patches/0003-glm53-fp8-moe-gemv.patch
+      ./patches/0004-glm53-fp8-moe-batch4.patch
       ./patches/0005-glm53-mscclpp-allreduce.patch
       ./patches/0006-rocm-triton-rmsnorm.patch
       ./patches/0007-glm53-fused-qkvbfg-under-fp8.patch
