@@ -9,7 +9,8 @@ import torch
 
 runtime = Path(sys.argv[1]).resolve()
 source = runtime / "lib/python3.13/site-packages/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py"
-assert not Path("/dev/kfd").exists() and not Path("/dev/dri").exists()
+# GPU-capable builders expose /dev/kfd in the sandbox; the caller hides the GPU with HIP_VISIBLE_DEVICES="".
+assert not Path("/dev/kfd").exists() or not torch.cuda.is_available()
 assert not torch.cuda.is_initialized()
 # The module's existing FP8-platform constant queries device properties on HIP.
 # Substitute that driver boundary; load the complete actual installed module.
