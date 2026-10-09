@@ -29,6 +29,8 @@
 #   0013       DSA kpool target_verify on HIP (it uses the same Triton kpool helpers as decode): MTP/NEXTN verify
 #   0014       opt-in FP32 router logits from a BF16 weight copy with a one-pass Triton GEMV (SGLANG_GLM53_ROUTER_GEMV=1):
 #              ~27 us instead of ~60 us per MoE layer through hipBLASLt
+#   0015       opt-in BF16 shadow for the dense block-FP8 projections in prefill (SGLANG_GLM53_BF16_SHADOW_MIN_M=rows):
+#              a dequantised BF16 copy (~1.4 GB per rank) through hipBLASLt for chunks of at least that many rows
 let
   basePatches =
     let
@@ -54,6 +56,7 @@ let
       ./patches/0012-glm53-moe-gemv-max-rows.patch
       ./patches/0013-glm53-dsa-kpool-verify-hip.patch
       ./patches/0014-glm53-router-gemv.patch
+      ./patches/0015-glm53-bf16-shadow-prefill.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
