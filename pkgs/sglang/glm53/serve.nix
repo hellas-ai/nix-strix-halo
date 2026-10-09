@@ -13,9 +13,10 @@
 
 # One GLM-5.3-Flash TP4 rank with the configuration qualified on 2026-10-09 (campaign arms o-small5/o-pm45/o-pm46):
 # all GLM opt-ins on (Triton RMSNorm, fused linear-attention projections, MSCCL++ small all-reduce, WMMA FP8 GEMV for
-# 2-8 rows, expert GEMV to 16 rows, sync-free KDA extend), CUDA graphs with retained-PM4 replay, 128K context with the
-# radix cache, one running request. 21.3 tok/s decode at 12 and 14.5K tokens of context (57% of the 37.4 tok/s
-# weight-read floor). The GLM_* knobs of lib/bench/glm53-node.sh still override; GLM_PM4=0 disables PM4.
+# 2-8 rows, expert GEMV to 16 rows, sync-free KDA extend, router GEMV), CUDA graphs with retained-PM4 replay, 128K
+# context with the radix cache, one running request. 22.5 tok/s decode at 12 and 14.5K tokens of context (60% of the
+# 37.4 tok/s weight-read floor). Teacher-forced logprobs stay within the shift of a prefill-chunk change. The GLM_*
+# knobs of lib/bench/glm53-node.sh still override; GLM_PM4=0 disables PM4.
 #
 #   glm53-serve RANK [extra SGLang arguments]
 let
@@ -47,6 +48,7 @@ writeShellApplication {
     export SGLANG_GLM53_WMMA_GEMV=''${SGLANG_GLM53_WMMA_GEMV:-1}
     export SGLANG_GLM53_MOE_GEMV_MAX_ROWS=''${SGLANG_GLM53_MOE_GEMV_MAX_ROWS:-16}
     export SGLANG_GLM53_KDA_NOSYNC=''${SGLANG_GLM53_KDA_NOSYNC:-1}
+    export SGLANG_GLM53_ROUTER_GEMV=''${SGLANG_GLM53_ROUTER_GEMV:-1}
     if [[ ''${GLM_PM4:-1} == 1 ]]; then
       # Retained-PM4 graph replay (pkgs/rocm-pm4-split): the bootstrap sitecustomize loads these runtimes first.
       export PYTHONPATH=${rocm-pm4-bootstrap}''${PYTHONPATH:+:$PYTHONPATH}
