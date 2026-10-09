@@ -1,0 +1,12 @@
+--- a/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
++++ b/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
+@@ -1293,7 +1293,8 @@
+         enable_dual_stream: bool,
+         return_indices: bool = True,
+     ) -> Optional[torch.Tensor]:
+-        assert is_cuda(), "DSA kpool target_verify is CUDA-only"
++        # GLM-5.3 campaign (0013): the verify path uses the same Triton kpool helpers as decode, which run on HIP.
++        assert is_cuda() or is_hip(), "DSA kpool target_verify needs CUDA or HIP"
+         plan = metadata.attn_metadata.kpool_write_plan
+         assert plan is not None, "DSA kpool target_verify requires kpool_write_plan"
+         num_draft_tokens = plan.num_draft_tokens

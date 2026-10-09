@@ -26,6 +26,7 @@
 #              kernel with GLM's 128x128 block scales; for MTP verify and small prefills
 #   0012       SGLANG_GLM53_MOE_GEMV_MAX_ROWS (default 4): rows served by the TP4 FP8 expert GEMV (0003/0004) before
 #              the generic fused_moe kernel (~0.9 s for a 12-token step)
+#   0013       DSA kpool target_verify on HIP (it uses the same Triton kpool helpers as decode): MTP/NEXTN verify
 let
   basePatches =
     let
@@ -49,6 +50,7 @@ let
       ./patches/0010-glm53-kda-extend-no-sync.patch
       ./patches/0011-glm53-wmma-fp8-gemv-rows.patch
       ./patches/0012-glm53-moe-gemv-max-rows.patch
+      ./patches/0013-glm53-dsa-kpool-verify-hip.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
