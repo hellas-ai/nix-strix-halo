@@ -20,6 +20,8 @@
 #   0008       opt-in lossy int8 TP4 ring all-reduce for prefill-sized messages (SGLANG_GLM53_COMPRESSED_RING=1), the
 #              DS4 v41 fused compressed ring generalised to any hidden size, hooked into GroupCoordinator.all_reduce
 #   0009       opt-in GC controls inside scheduler processes: SGLANG_GLM53_GC_THRESHOLD, SGLANG_GLM53_GC_LOG_SECS
+#   0010       opt-in: linear-attention extend takes its token count from the CPU (SGLANG_GLM53_KDA_NOSYNC=1|check),
+#              removing a device-to-host sync per layer from every eager prefill
 let
   basePatches =
     let
@@ -40,6 +42,7 @@ let
       ./patches/0007-glm53-fused-qkvbfg-under-fp8.patch
       ./patches/0008-glm53-compressed-ring-prefill.patch
       ./patches/0009-glm53-scheduler-gc-controls.patch
+      ./patches/0010-glm53-kda-extend-no-sync.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
