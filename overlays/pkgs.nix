@@ -395,6 +395,13 @@ let
         rocm-pm4-rocr = rocmPm4.rocr;
         rocm-pm4-rocr-split = rocmPm4.rocrSplit;
         rocm-pm4-rocr-tmpring = rocmPm4.rocrTmpring;
+        # GLM-5.3-Flash rank launcher with the qualified campaign configuration, PM4 replay included.
+        glm53-serve = prev.callPackage ../pkgs/sglang/glm53/serve.nix {
+          inherit (final) sglang-glm53-rocm therock-python-wheels;
+          rocm-pm4-clr-split = rocmPm4.clrSplit;
+          rocm-pm4-rocr-split = rocmPm4.rocrSplit;
+          rocm-pm4-bootstrap = rocmPm4.bootstrap;
+        };
       }
     )
   );

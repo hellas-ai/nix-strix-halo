@@ -687,6 +687,7 @@
             "llama-cpp-master-vulkan"
             "llama-cpp-rocm"
             "llama-cpp-vulkan"
+            "glm53-serve"
             "llvm-aie"
             "mlir-aie"
             "mlir-aie-env"
