@@ -1,0 +1,55 @@
+--- a/sglang/kernels/ops/quantization/fp8_kernel.py
++++ b/sglang/kernels/ops/quantization/fp8_kernel.py
+@@ -206,6 +206,29 @@
+     tl.store(y_s_ptr, y_s)
+ 
+ 
++@triton.jit
++def _per_token_group_quant_8bit_ue8m0_rowmajor(
++    x_ptr,
++    q_ptr,
++    s_ptr,
++    group_size: tl.constexpr,
++    eps: tl.constexpr,
++    fp8_min: tl.constexpr,
++    fp8_max: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    # Portable ROCm fallback for V4.1's FP32-stored E8M0 activation scales.
++    # Each program owns one contiguous 32-value activation group and one scale.
++    group = tl.program_id(0)
++    cols = tl.arange(0, BLOCK)
++    x = tl.load(x_ptr + group * group_size + cols, mask=cols < group_size, other=0).to(tl.float32)
++    amax = tl.maximum(tl.max(tl.abs(x), 0), eps)
++    scale = tl.exp2(tl.ceil(tl.log2(amax / fp8_max)))
++    q = tl.clamp(x / scale, fp8_min, fp8_max).to(q_ptr.dtype.element_ty)
++    tl.store(q_ptr + group * group_size + cols, q, mask=cols < group_size)
++    tl.store(s_ptr + group, scale)
++
++
+ def _per_token_group_quant_8bit_raw(
+     x: torch.Tensor,
+     group_size: int,
+@@ -510,6 +533,22 @@
+     checks. Whole-row (per-token) quantization is a different op:
+     ``sglang_per_token_quant_fp8``.
+     """
++    if (_is_hip and scale_ue8m0 and x_q.dtype == fp8_dtype
++            and x_s.dtype == torch.float32 and not fuse_silu_and_mul and masked_m is None):
++        assert group_size in (16, 32, 64, 128, 256)
++        assert x.ndim >= 2 and x.shape[-1] % group_size == 0
++        assert x_q.shape == x.shape and x_q.dtype == fp8_dtype
++        assert x_s.shape == x.shape[:-1] + (x.shape[-1] // group_size,)
++        assert x.is_contiguous() and x_q.is_contiguous() and x_s.is_contiguous()
++        groups = x.numel() // group_size
++        if groups == 0:
++            return
++        _per_token_group_quant_8bit_ue8m0_rowmajor[(groups,)](
++            x, x_q, x_s, group_size, eps, fp8_min, fp8_max,
++            BLOCK=triton.next_power_of_2(group_size),
++        )
++        return
++
+     if scale_ue8m0 and x_s.dtype == torch.float32 and not _is_musa:
+         from sglang.kernels.ops.quantization.per_token_group_quant_8bit_v2 import (
+             per_token_group_quant_8bit_v2,

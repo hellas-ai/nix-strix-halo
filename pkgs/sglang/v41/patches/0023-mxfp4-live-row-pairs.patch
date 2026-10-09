@@ -1,0 +1,77 @@
+--- a/sglang/kernels/ops/gemm/dsv41_mxfp4_gate_up.py
++++ b/sglang/kernels/ops/gemm/dsv41_mxfp4_gate_up.py
+@@ -1,4 +1,4 @@
+-"""Native C2 routed gate/up for the exact gfx1151 DeepSeek V4.1 TP4 geometry."""
++"""Native paired routed gate/up for the exact gfx1151 DeepSeek V4.1 TP4 geometry."""
+
+ import torch
+ import triton
+@@ -71,20 +71,33 @@
+                  mask=(matching & (routes // 6 != token))[:, None])
+
+
++@triton.jit
++def _gate_up_live_row_pairs(A, W, S, IDS, Y, ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
++    # Each adjacent token pair retains the qualified C2 ownership and arithmetic.
++    pair = tl.program_id(2)
++    _gate_up_live_rows(
++        A + pair * (2 * 5120), W, S, IDS + pair * 12,
++        Y + pair * (12 * 1152), ROWS, BLOCK_K,
++    )
++
++
+ def try_gate_up_live_rows(a, weight, output, scales, ids, config, top_k, mul_routed_weight):
+-    """Return False for every geometry outside the already-qualified N128 guard."""
++    """Keep C2 unchanged; pair only the exact C4/C8 native fallback geometry."""
++    if a.ndim != 2 or a.shape[0] not in (2, 4, 8):
++        return False
++    tokens = a.shape[0]
+     expected_config = {
+-        "BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,
++        "BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128 if tokens == 2 else 256, "BLOCK_SIZE_K": 64,
+         "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 2,
+         "waves_per_eu": 0, "matrix_instr_nonkdim": 16, "kpack": 1,
+     }
+     if top_k != 6 or mul_routed_weight or any(config.get(k) != v for k, v in expected_config.items()):
+         return False
+-    expected = ((a, (2, 5120), (torch.bfloat16,)),
++    expected = ((a, (tokens, 5120), (torch.bfloat16,)),
+                 (weight, (384, 1152, 2560), (torch.int8, torch.uint8)),
+                 (scales, (384, 1152, 160), (torch.uint8, torch.float8_e8m0fnu)),
+-                (ids, (2, 6), (torch.int32,)),
+-                (output, (2, 6, 1152), (torch.bfloat16,)))
++                (ids, (tokens, 6), (torch.int32,)),
++                (output, (tokens, 6, 1152), (torch.bfloat16,)))
+     for tensor, shape, dtypes in expected:
+         if tensor.shape != shape or tensor.dtype not in dtypes or not tensor.is_contiguous():
+             return False
+@@ -92,8 +105,14 @@
+             return False
+     if not torch.version.hip or torch.cuda.get_device_properties(a.device).gcnArchName.split(":")[0] != "gfx1151":
+         return False
+-    _gate_up_live_rows[(1152 // 8, 12)](
+-        a, weight.view(torch.uint8), scales.view(torch.uint8), ids, output,
+-        ROWS=8, BLOCK_K=512, num_warps=4, num_stages=1, enable_fp_fusion=False,
+-    )
++    if tokens == 2:
++        _gate_up_live_rows[(1152 // 8, 12)](
++            a, weight.view(torch.uint8), scales.view(torch.uint8), ids, output,
++            ROWS=8, BLOCK_K=512, num_warps=4, num_stages=1, enable_fp_fusion=False,
++        )
++    else:
++        _gate_up_live_row_pairs[(1152 // 8, 12, tokens // 2)](
++            a, weight.view(torch.uint8), scales.view(torch.uint8), ids, output,
++            ROWS=8, BLOCK_K=512, num_warps=4, num_stages=1, enable_fp_fusion=False,
++        )
+     return True
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+@@ -29,7 +29,7 @@
+     top_k: int,
+     mul_routed_weight: bool,
+ ) -> None:
+-    if a.shape == (2, 5120) and top_k == 6 and not mul_routed_weight:
++    if a.shape in ((2, 5120), (4, 5120), (8, 5120)) and top_k == 6 and not mul_routed_weight:
+         from sglang.kernels.ops.gemm.dsv41_mxfp4_gate_up import try_gate_up_live_rows
+
+         if try_gate_up_live_rows(
