@@ -31,8 +31,6 @@
 #              ~27 us instead of ~60 us per MoE layer through hipBLASLt
 #   0015       opt-in BF16 shadow for the dense block-FP8 projections in prefill (SGLANG_GLM53_BF16_SHADOW_MIN_M=rows):
 #              a dequantised BF16 copy (~1.4 GB per rank) through hipBLASLt for chunks of at least that many rows
-#   0016       prefill MoE down-projection tiles for 1,024-token chunks (BLOCK_M/N 32/32, GROUP_SIZE_M 8, 2 warps):
-#              12.0 -> 10.4 ms per layer (lib/bench/glm53-prefill-moe-tune.py)
 let
   basePatches =
     let
@@ -59,7 +57,6 @@ let
       ./patches/0013-glm53-dsa-kpool-verify-hip.patch
       ./patches/0014-glm53-router-gemv.patch
       ./patches/0015-glm53-bf16-shadow-prefill.patch
-      ./patches/0016-glm53-moe-down-tiles-m1024.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
