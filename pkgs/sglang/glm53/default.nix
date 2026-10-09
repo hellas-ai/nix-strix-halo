@@ -27,6 +27,8 @@
 #   0012       SGLANG_GLM53_MOE_GEMV_MAX_ROWS (default 4): rows served by the TP4 FP8 expert GEMV (0003/0004) before
 #              the generic fused_moe kernel (~0.9 s for a 12-token step)
 #   0013       DSA kpool target_verify on HIP (it uses the same Triton kpool helpers as decode): MTP/NEXTN verify
+#   0014       opt-in FP32 router logits from a BF16 weight copy with a one-pass Triton GEMV (SGLANG_GLM53_ROUTER_GEMV=1):
+#              ~27 us instead of ~60 us per MoE layer through hipBLASLt
 let
   basePatches =
     let
@@ -51,6 +53,7 @@ let
       ./patches/0011-glm53-wmma-fp8-gemv-rows.patch
       ./patches/0012-glm53-moe-gemv-max-rows.patch
       ./patches/0013-glm53-dsa-kpool-verify-hip.patch
+      ./patches/0014-glm53-router-gemv.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
