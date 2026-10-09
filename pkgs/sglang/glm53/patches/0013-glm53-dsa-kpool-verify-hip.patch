@@ -1,0 +1,34 @@
+--- a/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
++++ b/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
+@@ -1293,7 +1293,8 @@
+         enable_dual_stream: bool,
+         return_indices: bool = True,
+     ) -> Optional[torch.Tensor]:
+-        assert is_cuda(), "DSA kpool target_verify is CUDA-only"
++        # GLM-5.3 campaign (0013): the verify path uses the same Triton kpool helpers as decode, which run on HIP.
++        assert is_cuda() or is_hip(), "DSA kpool target_verify needs CUDA or HIP"
+         plan = metadata.attn_metadata.kpool_write_plan
+         assert plan is not None, "DSA kpool target_verify requires kpool_write_plan"
+         num_draft_tokens = plan.num_draft_tokens
+--- a/sglang/srt/layers/attention/dsa/kpool_plan.py
++++ b/sglang/srt/layers/attention/dsa/kpool_plan.py
+@@ -17,7 +17,7 @@
+ from sglang.srt.layers.attention.dsa.utils import dsa_use_prefill_cp
+ from sglang.srt.model_executor.forward_context import get_req_to_token_pool
+ from sglang.srt.runtime_context import get_parallel
+-from sglang.srt.utils import is_cuda
++from sglang.srt.utils import is_cuda, is_hip
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.layers.attention.dsa.dsa_topk_backend import TopkTransformMethod
+@@ -732,7 +732,9 @@
+     slots_per_page: int,
+     effective_n_per_batch: Optional[torch.Tensor] = None,
+ ) -> None:
+-    if not _is_kpool_layout_enabled(pool_size, real_page_size) or not is_cuda():
++    # GLM-5.3 campaign (0013): fill the plan on HIP too. Opening target_verify without it runs verify on an
++    # all-zero plan (upstream sgl-project/sglang#39778: GSM8K 2% and 1.33 of 6 drafts accepted until both gates open).
++    if not _is_kpool_layout_enabled(pool_size, real_page_size) or not (is_cuda() or is_hip()):
+         return
+     is_verify = forward_mode.is_target_verify()
+     is_decode = forward_mode.is_decode_or_idle()

@@ -354,6 +354,13 @@ let
       vllm-rocm = final."vllm-rocm-therock-${suffix}";
     }
     // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython && suffix == "gfx1151") {
+      # GLM-5.3-Flash campaign runtime (pkgs/sglang/glm53): sglang-rocm plus GLM FP8 decode/prefill patches and the
+      # opt-in MSCCL++ small-message all-reduce. Same SGLang source and kernels as sglang-rocm.
+      sglang-glm53-rocm = prev.callPackage ../pkgs/sglang/glm53 {
+        pythonPackages = final.${therockPythonConfig.packagesAttr};
+        rocmSdk = final."therock-rocm-${suffix}";
+        inherit (final) sglang-rocm mscclpp-rocm;
+      };
       sglang-v41-rocm = prev.callPackage ../pkgs/sglang/v41 {
         pythonPackages = final.${therockPythonConfig.packagesAttr};
         rocmSdk = final."therock-rocm-${suffix}";
@@ -388,6 +395,13 @@ let
         rocm-pm4-rocr = rocmPm4.rocr;
         rocm-pm4-rocr-split = rocmPm4.rocrSplit;
         rocm-pm4-rocr-tmpring = rocmPm4.rocrTmpring;
+        # GLM-5.3-Flash rank launcher with the qualified campaign configuration, PM4 replay included.
+        glm53-serve = prev.callPackage ../pkgs/sglang/glm53/serve.nix {
+          inherit (final) sglang-glm53-rocm therock-python-wheels;
+          rocm-pm4-clr-split = rocmPm4.clrSplit;
+          rocm-pm4-rocr-split = rocmPm4.rocrSplit;
+          rocm-pm4-bootstrap = rocmPm4.bootstrap;
+        };
       }
     )
   );

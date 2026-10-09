@@ -1,0 +1,111 @@
+--- /dev/null
++++ b/sglang/kernels/ops/layernorm/rocm_rmsnorm.py
+@@ -0,0 +1,71 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Single-launch RMSNorm and fused add+RMSNorm Triton kernels for ROCm without vLLM/AITER.
++
++Without vLLM's custom ops and with SGLANG_USE_AITER=0, ``RMSNorm.forward_hip`` falls back to ``forward_native``:
++about eleven kernels per norm with a residual (casts to fp32, add, cast back, pow, mean, eps add, rsqrt and two
++multiplies). These kernels do the same fp32 math in one pass per row, in the same order as ``forward_native``:
++s = x (+ residual), residual_out = s cast back, rstd = rsqrt(mean(s * s) + eps), out = ((s * rstd) * weight) cast to
++the output dtype. The row reduction order differs from torch's, so results can differ in the last bits.
++Opt-in: SGLANG_ROCM_TRITON_RMSNORM=1.
++"""
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _rmsnorm_kernel(
++    x_ptr,
++    w_ptr,
++    out_ptr,
++    res_ptr,
++    res_out_ptr,
++    n_cols,
++    stride_x,
++    stride_r,
++    eps,
++    HAS_RESIDUAL: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++):
++    row = tl.program_id(0)
++    cols = tl.arange(0, BLOCK_N)
++    mask = cols < n_cols
++    s = tl.load(x_ptr + row * stride_x + cols, mask=mask, other=0.0).to(tl.float32)
++    if HAS_RESIDUAL:
++        r = tl.load(res_ptr + row * stride_r + cols, mask=mask, other=0.0).to(tl.float32)
++        s = s + r
++        tl.store(res_out_ptr + row * n_cols + cols, s.to(res_out_ptr.dtype.element_ty), mask=mask)
++    var = tl.sum(s * s, axis=0) / n_cols
++    rstd = tl.math.rsqrt(var + eps)
++    w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
++    out = (s * rstd) * w
++    tl.store(out_ptr + row * n_cols + cols, out.to(out_ptr.dtype.element_ty), mask=mask)
++
++
++def _num_warps(block_n: int) -> int:
++    if block_n >= 4096:
++        return 16
++    if block_n >= 1024:
++        return 8
++    return 4
++
++
++def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float, out_dtype: torch.dtype,
++            residual: torch.Tensor = None):
++    """RMSNorm over the last dim; with ``residual``, returns (normed, x + residual), both in ``out_dtype``
++    (forward_native casts the pre-norm sum to the original dtype too)."""
++    n = x.shape[-1]
++    x2 = x.reshape(-1, n)
++    m = x2.shape[0]
++    out = torch.empty((m, n), dtype=out_dtype, device=x.device)
++    block_n = triton.next_power_of_2(n)
++    if residual is None:
++        _rmsnorm_kernel[(m,)](x2, weight, out, x2, x2, n, x2.stride(0), 0, eps,
++                              HAS_RESIDUAL=False, BLOCK_N=block_n, num_warps=_num_warps(block_n))
++        return out.reshape(x.shape)
++    r2 = residual.reshape(-1, n)
++    res_out = torch.empty((m, n), dtype=out_dtype, device=x.device)
++    _rmsnorm_kernel[(m,)](x2, weight, out, r2, res_out, n, x2.stride(0), r2.stride(0), eps,
++                          HAS_RESIDUAL=True, BLOCK_N=block_n, num_warps=_num_warps(block_n))
++    return out.reshape(x.shape), res_out.reshape(x.shape)
+--- a/sglang/srt/layers/layernorm.py
++++ b/sglang/srt/layers/layernorm.py
+@@ -52,6 +52,8 @@
+ _is_musa = is_musa()
+ _is_npu = is_npu()
+ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
++# Opt-in single-launch Triton RMSNorm for ROCm when neither vLLM nor AITER provides one (see rocm_rmsnorm.py).
++_use_rocm_triton_rmsnorm = get_bool_env_var("SGLANG_ROCM_TRITON_RMSNORM") and _is_hip
+ _is_cpu_amx_available = cpu_has_amx_support()
+ _is_cpu = is_cpu()
+ _is_xpu = is_xpu()
+@@ -735,6 +737,25 @@
+     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+         # Fallback to native implementation if vllm is not available
+         if not _has_vllm_rms_norm:
++            if (
++                _use_rocm_triton_rmsnorm
++                and post_residual_addition is None
++                and not self.cast_x_before_out_mul
++                and not self.fp32_residual
++                and self.variance_size_override is None
++                and x.numel() > 0
++                and x.shape[-1] == self.hidden_size
++                and not is_batch_invariant_mode_enabled()
++            ):
++                from sglang.kernels.ops.layernorm.rocm_rmsnorm import rmsnorm as _rocm_rmsnorm
++
++                return _rocm_rmsnorm(
++                    x.contiguous(),
++                    self.weight.data,
++                    self.variance_epsilon,
++                    self.override_orig_dtype or x.dtype,
++                    None if residual is None else residual.contiguous(),
++                )
+             return self.forward_native(x, residual, post_residual_addition)
+ 
+         if is_batch_invariant_mode_enabled():
