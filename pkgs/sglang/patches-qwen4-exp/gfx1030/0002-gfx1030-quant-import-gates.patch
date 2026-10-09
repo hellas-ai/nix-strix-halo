@@ -1,0 +1,105 @@
+The generic quantization registry imports MXFP4 and Quark implementations even
+when the checkpoint uses compressed-tensors W4A16.  Both modules probe AITER
+at import time on HIP, while AITER deliberately has no gfx1030 target.  This
+made even `sglang serve --help` JIT an unsupported module and abort.
+
+Do not import the AITER MXFP4 shuffle helpers unless AITER was explicitly
+enabled, and omit the two AITER-backed Quark methods from the gfx10 registry.
+This does not claim MXFP4 support on V620: upstream already registers native
+MXFP4 only on CPU, CUDA, or gfx95.
+
+The separate diffusion registry is imported while rendering the generic
+`sglang serve --help` page.  Gate its AITER import on gfx95 as well, so merely
+asking for help cannot JIT an unsupported gfx1030 module.
+
+--- a/sglang/srt/layers/quantization/mxfp4.py
++++ b/sglang/srt/layers/quantization/mxfp4.py
+@@ -154,7 +154,7 @@
+ _is_shuffle_moe_mxfp4 = is_gfx95_supported()
+ _is_cpu_amx_available = cpu_has_amx_support()
+
+-if _is_hip:
++if _use_aiter:
+     # import aiter
+     try:
+         from aiter.ops.shuffle import (
+--- a/sglang/srt/layers/quantization/__init__.py
++++ b/sglang/srt/layers/quantization/__init__.py
+@@ -5,6 +5,7 @@
+
+ import builtins
+ import inspect
++import os
+ from typing import TYPE_CHECKING, Dict, Optional, Type
+
+ import torch
+@@ -48,8 +49,6 @@
+ from sglang.srt.layers.quantization.npu_mxfp4_w4a4 import Mxfp4W4A4Config
+ from sglang.srt.layers.quantization.nvfp4_online import NvFp4OnlineConfig
+ from sglang.srt.layers.quantization.petit import PetitNvFp4Config
+-from sglang.srt.layers.quantization.quark.quark import QuarkConfig
+-from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
+ from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
+ from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
+ from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
+@@ -59,12 +58,23 @@
+     is_cpu,
+     is_cuda,
+     is_gfx95_supported,
++    is_hip,
+     is_mps,
+     is_npu,
+ )
+
+ _is_gfx95_supported = is_gfx95_supported()
+
++# AITER has no gfx10 implementation.  The Quark modules import AITER at module
++# scope even when the selected checkpoint uses a different quantizer.
++_rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH") or os.environ.get(
++    "GPU_ARCHS", ""
++)
++_quark_available = not (is_hip() and _rocm_arch.startswith("gfx10"))
++if _quark_available:
++    from sglang.srt.layers.quantization.quark.quark import QuarkConfig
++    from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
++
+ if TYPE_CHECKING:
+     from sglang.srt.layers.moe.topk import TopKOutput
+
+@@ -90,16 +100,22 @@
+     "compressed-tensors": CompressedTensorsConfig,
+     "w4afp8": W4AFp8Config,
+     "petit_nvfp4": PetitNvFp4Config,
+-    "quark": QuarkConfig,
+-    "quark_mxfp4": QuarkConfig,
+     "auto-round": AutoRoundConfig,
+     "auto-round-int8": W8A8Int8Config,
+     "modelslim": ModelSlimConfig,
+-    "quark_int4fp8_moe": QuarkInt4Fp8Config,
+     "humming": HummingConfig,
+     "mxfp_w4a8": Mxfp4W4A8Config,
+ }
+
++if _quark_available:
++    BASE_QUANTIZATION_METHODS.update(
++        {
++            "quark": QuarkConfig,
++            "quark_mxfp4": QuarkConfig,
++            "quark_int4fp8_moe": QuarkInt4Fp8Config,
++        }
++    )
++
+
+ if is_cpu() or is_cuda() or _is_gfx95_supported:
+     BASE_QUANTIZATION_METHODS.update(
+--- a/sglang/multimodal_gen/runtime/layers/quantization/mxfp4.py
++++ b/sglang/multimodal_gen/runtime/layers/quantization/mxfp4.py
+@@ -15,7 +15,7 @@
+ logger = logging.getLogger(__name__)
+ _is_hip = is_hip()
+
+-if _is_hip:
++if _is_hip and is_gfx95_supported():
+     try:
+         import aiter
+         from aiter.ops.gemm_op_a4w4 import gemm_a4w4
