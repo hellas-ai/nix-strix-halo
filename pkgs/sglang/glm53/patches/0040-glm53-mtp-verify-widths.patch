@@ -1,0 +1,160 @@
+--- a/sglang/srt/arg_groups/speculative_hook.py
++++ b/sglang/srt/arg_groups/speculative_hook.py
+@@ -170,6 +170,7 @@
+             f"speculative_algorithm == EAGLE, got {cfg.speculative_algorithm}."
+         )
+ 
++    _maybe_enable_glm53_verify_widths(server_args)
+     if cfg.speculative_adaptive:
+         _maybe_disable_adaptive(server_args)
+         if cfg.speculative_adaptive:
+@@ -1085,6 +1086,68 @@
+         )
+ 
+ 
++def _maybe_enable_glm53_verify_widths(server_args: ServerArgs) -> None:
++    """GLM-5.3 campaign (0040): SGLANG_GLM53_MTP_VERIFY_WIDTHS turns on the adaptive
++    runtime-state machinery with one fixed verify width per batch size (see
++    adaptive_spec_params.glm53_mtp_verify_widths). The widest entry sizes every
++    pool and the scheduler's KV reservation, so it must be the startup state."""
++    from sglang.srt.speculative.adaptive_spec_params import (
++        GLM53_MTP_VERIFY_WIDTHS_ENV,
++        glm53_mtp_verify_widths,
++    )
++
++    widths = glm53_mtp_verify_widths()
++    cfg = resolving_view(server_args)
++    if widths is None or cfg.speculative_algorithm is None:
++        return
++    if cfg.speculative_algorithm != "EAGLE":
++        logger.warning(
++            "%s applies to NEXTN/EAGLE only; ignored for speculative_algorithm=%s",
++            GLM53_MTP_VERIFY_WIDTHS_ENV,
++            cfg.speculative_algorithm,
++        )
++        return
++    if cfg.speculative_adaptive_config is not None:
++        raise ValueError(
++            f"{GLM53_MTP_VERIFY_WIDTHS_ENV} and --speculative-adaptive-config are "
++            "mutually exclusive"
++        )
++    max_steps = max(widths) - 1
++    if cfg.speculative_num_steps is None:
++        declare_resolution(
++            server_args,
++            "_maybe_enable_glm53_verify_widths",
++            speculative_num_steps=max_steps,
++        )
++    elif cfg.speculative_num_steps != max_steps:
++        raise ValueError(
++            f"{GLM53_MTP_VERIFY_WIDTHS_ENV}={widths}: the widest verify ({max(widths)}) "
++            f"must equal --speculative-num-steps + 1 "
++            f"({cfg.speculative_num_steps} + 1): it sizes the pools and KV reservation"
++        )
++    if (
++        cfg.speculative_num_draft_tokens is not None
++        and cfg.speculative_num_draft_tokens != max_steps + 1
++    ):
++        raise ValueError(
++            f"{GLM53_MTP_VERIFY_WIDTHS_ENV}={widths} needs "
++            f"--speculative-num-draft-tokens {max_steps + 1} (got "
++            f"{cfg.speculative_num_draft_tokens})"
++        )
++    if cfg.speculative_eagle_topk not in (None, 1):
++        raise ValueError(f"{GLM53_MTP_VERIFY_WIDTHS_ENV} requires --speculative-eagle-topk 1")
++    declare_resolution(
++        server_args,
++        "_maybe_enable_glm53_verify_widths",
++        speculative_adaptive=True,
++    )
++    logger.info(
++        "GLM-5.3 MTP verify width per running-request count %s (steps %s)",
++        widths,
++        [width - 1 for width in widths],
++    )
++
++
+ def _maybe_disable_adaptive(server_args: ServerArgs) -> None:
+     from sglang.srt.speculative.adaptive_spec_params import (
+         adaptive_unsupported_reason,
+--- a/sglang/srt/layers/attention/dsa/kpool_plan.py
++++ b/sglang/srt/layers/attention/dsa/kpool_plan.py
+@@ -800,7 +800,9 @@
+ 
+     pool = getattr(forward_batch, "token_to_kv_pool", None)
+     if (is_verify or is_v2) and pool is not None:
+-        assert pool.tail_extra_slots == num_draft_tokens, (
++        # GLM-5.3 campaign (0040): the request tail is a ring of index_kpool + tail_extra_slots positions sized for
++        # the widest verify; a narrower per-batch-size verify (SGLANG_GLM53_MTP_VERIFY_WIDTHS) writes a prefix of it.
++        assert pool.tail_extra_slots >= num_draft_tokens, (
+             f"tail_extra_slots mismatch: pool={pool.tail_extra_slots}, "
+             f"forward={num_draft_tokens}"
+         )
+--- a/sglang/srt/speculative/adaptive_spec_params.py
++++ b/sglang/srt/speculative/adaptive_spec_params.py
+@@ -9,6 +9,7 @@
+ import json
+ import logging
+ import math
++import os
+ from functools import cached_property
+ from typing import TYPE_CHECKING
+ 
+@@ -51,6 +52,48 @@
+ }
+ 
+ 
++GLM53_MTP_VERIFY_WIDTHS_ENV = "SGLANG_GLM53_MTP_VERIFY_WIDTHS"
++
++
++def glm53_mtp_verify_widths() -> list[int] | None:
++    """GLM-5.3 campaign (0040): fixed verify width per running-request count.
++
++    ``SGLANG_GLM53_MTP_VERIFY_WIDTHS="4,4,2,2"`` verifies 4 tokens per request
++    (3 chained MTP drafts) while one or two requests decode, 2 tokens (1 draft)
++    at three or four; batch sizes past the list reuse its last entry. Width 1
++    verifies only the bonus token (no drafting; draft-extend keeps the MTP KV
++    warm). Each width is a static adaptive-spec slot (steps = width - 1, one
++    candidate per slot, so the EMA never moves it); unset keeps the stock path.
++    """
++    raw = os.environ.get(GLM53_MTP_VERIFY_WIDTHS_ENV, "").strip()
++    if not raw:
++        return None
++    try:
++        widths = [int(part) for part in raw.split(",") if part.strip()]
++    except ValueError as e:
++        raise ValueError(
++            f"{GLM53_MTP_VERIFY_WIDTHS_ENV}={raw!r}: expected comma-separated "
++            "positive integers, one verify width per batch size 1, 2, ..."
++        ) from e
++    if not widths or any(width < 1 for width in widths):
++        raise ValueError(
++            f"{GLM53_MTP_VERIFY_WIDTHS_ENV}={raw!r}: widths must be >= 1"
++        )
++    return widths
++
++
++def _glm53_static_width_config(widths: list[int]) -> dict[str, dict]:
++    return {
++        str(batch_size): {
++            "candidate_steps": [width - 1],
++            "up_hysteresis": 0.0,
++            "down_hysteresis": 0.0,
++            "ceiling_coeff": 0,
++        }
++        for batch_size, width in enumerate(widths, start=1)
++    }
++
++
+ def adaptive_unsupported_reason(server_args: ServerArgs) -> str | None:
+     """Return why adaptive spec cannot run under the given server args, or None if supported."""
+ 
+@@ -99,6 +142,8 @@
+     if cfg_path is not None:
+         with open(cfg_path) as f:
+             cfg = json.load(f)
++    elif (widths := glm53_mtp_verify_widths()) is not None:
++        cfg = _glm53_static_width_config(widths)
+     else:
+         cfg = DEFAULT_ADAPTIVE_CONFIG
+ 

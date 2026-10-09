@@ -31,6 +31,9 @@
 #              ~27 us instead of ~60 us per MoE layer through hipBLASLt
 #   0015       opt-in BF16 shadow for the dense block-FP8 projections in prefill (SGLANG_GLM53_BF16_SHADOW_MIN_M=rows):
 #              a dequantised BF16 copy (~1.4 GB per rank) through hipBLASLt for chunks of at least that many rows
+#   0040       opt-in MTP verify width per running-request count for NEXTN/EAGLE (SGLANG_GLM53_MTP_VERIFY_WIDTHS="4,4,2,2"):
+#              one static adaptive-spec runtime state per width (steps = width - 1, own draft/verify graphs), KV
+#              reservation and pools at the widest; the DSA k-pool tail accepts a narrower verify
 let
   basePatches =
     let
@@ -57,6 +60,7 @@ let
       ./patches/0013-glm53-dsa-kpool-verify-hip.patch
       ./patches/0014-glm53-router-gemv.patch
       ./patches/0015-glm53-bf16-shadow-prefill.patch
+      ./patches/0040-glm53-mtp-verify-widths.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
