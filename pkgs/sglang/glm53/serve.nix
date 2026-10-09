@@ -14,7 +14,7 @@
 # One GLM-5.3-Flash TP4 rank with the configuration qualified on 2026-10-09: every GLM opt-in on (Triton RMSNorm, fused
 # linear-attention projections, MSCCL++ small all-reduce, WMMA FP8 GEMV for 2-8 rows, expert GEMV to 16 rows, sync-free
 # KDA extend, router GEMV, BF16 dense projections in prefill), CUDA graphs with retained-PM4 replay, 128K context with
-# the radix cache, one running request. 22.5 tok/s decode at 12 and 14.5K tokens of context (60% of the 37.4 tok/s
+# the radix cache, up to four running requests. 22.5 tok/s decode at 12 and 14.5K tokens of context (60% of the 37.4 tok/s
 # weight-read floor); a cold 14.5K-token prefill in ~44 s. Teacher-forced logprobs move no more than a server restart
 # does, and natural-text NLL matches the stock runtime. The GLM_* knobs of lib/bench/glm53-node.sh still override;
 # GLM_PM4=0 disables PM4.
@@ -41,6 +41,8 @@ writeShellApplication {
     export GLM_CONTEXT_LENGTH=''${GLM_CONTEXT_LENGTH:-131072}
     export GLM_MAX_TOTAL_TOKENS=''${GLM_MAX_TOTAL_TOKENS:-131072}
     export GLM_RADIX_CACHE=''${GLM_RADIX_CACHE:-1}
+    # Up to four requests decode together (graphs for batches 1-4); a lone request still replays the batch-1 graph.
+    export GLM_MAX_REQUESTS=''${GLM_MAX_REQUESTS:-4}
     export GLM_CUDA_GRAPH=''${GLM_CUDA_GRAPH:-1}
     export SGLANG_ROCM_TRITON_RMSNORM=''${SGLANG_ROCM_TRITON_RMSNORM:-1}
     export SGLANG_GLM53_FUSED_QKVBFG=''${SGLANG_GLM53_FUSED_QKVBFG:-1}
@@ -61,7 +63,7 @@ writeShellApplication {
       export DEBUG_HIP_GRAPH_PM4=1 DEBUG_HIP_GRAPH_PM4_UNQUALIFIED=0 DEBUG_HIP_GRAPH_PM4_SPLIT=1
     fi
     exec bash ${../../../lib/bench/glm53-node.sh} "$rank" \
-      --max-mamba-cache-size 128 --cuda-graph-max-bs-decode 1 "$@"
+      --max-mamba-cache-size 128 --cuda-graph-max-bs-decode 4 "$@"
   '';
   meta.description = "GLM-5.3-Flash TP4 rank on Strix Halo with the qualified campaign configuration";
 }
