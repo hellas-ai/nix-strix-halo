@@ -37,11 +37,11 @@
     "ds4": {
       "flake": false,
       "locked": {
-        "lastModified": 1789867284,
-        "narHash": "sha256-Bo/td1HwVjw6bwz3BDwTP+ZSudkVFCo2aIVK4axvmXg=",
+        "lastModified": 1791202661,
+        "narHash": "sha256-Bwur2RQjUxAsBqymO6fhTzX6ALR17sEs79frLMvgfLc=",
         "owner": "antirez",
         "repo": "ds4",
-        "rev": "0aaea5a238fb41a35106a551e73c8409dfb751ac",
+        "rev": "f0962e375731c02c4cd6ad1d35f15b2dc5fa9d23",
         "type": "github"
       },
       "original": {
