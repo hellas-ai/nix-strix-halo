@@ -24,6 +24,8 @@
 #              removing a device-to-host sync per layer from every eager prefill
 #   0011       opt-in WMMA block-FP8 GEMV for 2..8 rows on the GLM dense shapes (SGLANG_GLM53_WMMA_GEMV=1), the DS4 v41
 #              kernel with GLM's 128x128 block scales; for MTP verify and small prefills
+#   0012       SGLANG_GLM53_MOE_GEMV_MAX_ROWS (default 4): rows served by the TP4 FP8 expert GEMV (0003/0004) before
+#              the generic fused_moe kernel (~0.9 s for a 12-token step)
 let
   basePatches =
     let
@@ -46,6 +48,7 @@ let
       ./patches/0009-glm53-scheduler-gc-controls.patch
       ./patches/0010-glm53-kda-extend-no-sync.patch
       ./patches/0011-glm53-wmma-fp8-gemv-rows.patch
+      ./patches/0012-glm53-moe-gemv-max-rows.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
