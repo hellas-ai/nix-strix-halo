@@ -22,6 +22,8 @@
 #   0009       opt-in GC controls inside scheduler processes: SGLANG_GLM53_GC_THRESHOLD, SGLANG_GLM53_GC_LOG_SECS
 #   0010       opt-in: linear-attention extend takes its token count from the CPU (SGLANG_GLM53_KDA_NOSYNC=1|check),
 #              removing a device-to-host sync per layer from every eager prefill
+#   0011       opt-in WMMA block-FP8 GEMV for 2..8 rows on the GLM dense shapes (SGLANG_GLM53_WMMA_GEMV=1), the DS4 v41
+#              kernel with GLM's 128x128 block scales; for MTP verify and small prefills
 let
   basePatches =
     let
@@ -43,6 +45,7 @@ let
       ./patches/0008-glm53-compressed-ring-prefill.patch
       ./patches/0009-glm53-scheduler-gc-controls.patch
       ./patches/0010-glm53-kda-extend-no-sync.patch
+      ./patches/0011-glm53-wmma-fp8-gemv-rows.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
