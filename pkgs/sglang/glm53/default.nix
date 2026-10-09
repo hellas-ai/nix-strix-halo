@@ -34,6 +34,10 @@
 #   0040       opt-in MTP verify width per running-request count for NEXTN/EAGLE (SGLANG_GLM53_MTP_VERIFY_WIDTHS="4,4,2,2"):
 #              one static adaptive-spec runtime state per width (steps = width - 1, own draft/verify graphs), KV
 #              reservation and pools at the widest; the DSA k-pool tail accepts a narrower verify
+#   0041       speculative verify on HIP samples instead of silently going greedy (SGLANG_GLM53_HIP_SPEC_SAMPLING=0
+#              restores stock): lossless chain speculative sampling for topk-1 NEXTN/EAGLE, point-mass argmax drafts
+#              by default or drafts sampled from the MTP distribution with --speculative-use-rejection-sampling
+#              (greedy requests keep argmax drafts)
 let
   basePatches =
     let
@@ -61,6 +65,7 @@ let
       ./patches/0014-glm53-router-gemv.patch
       ./patches/0015-glm53-bf16-shadow-prefill.patch
       ./patches/0040-glm53-mtp-verify-widths.patch
+      ./patches/0041-glm53-hip-spec-sampling.patch
     ];
   };
   sitePackages = pythonPackages.python.sitePackages;
