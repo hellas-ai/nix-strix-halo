@@ -30,10 +30,10 @@
           "kind": "wheel"
         },
         "torch": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/torch/torch-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-KMux3aEAkDEnoCt8yjl0KXK1fDg/eeYLEDYXotC3oGQ=",
-          "filename": "torch-2.13.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "2.13.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/torch/torch-2.14.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-y9DiDeQMF5HD0Q2ihGsjkkrZo3axIhXF1BYI8QqkWQA=",
+          "filename": "torch-2.14.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "2.14.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -41,10 +41,10 @@
           "kind": "wheel"
         },
         "torchvision": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/torchvision/torchvision-0.28.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-LKz0Zy0CXBwkhxy0973UDMDtBzywRYuJ1mXkfCzCUb4=",
-          "filename": "torchvision-0.28.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "0.28.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/torchvision/torchvision-0.29.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-q862gaiqW0VWjokWEOxNLZ6y/RSPKfvE5M645UoRmqI=",
+          "filename": "torchvision-0.29.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "0.29.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -52,10 +52,10 @@
           "kind": "wheel"
         },
         "torchaudio": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/torchaudio/torchaudio-2.11.0.2%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-e1qYgxSGE4WCtnEn5Q7LIVdqy/nYXTQyBYR8lm0eo6s=",
-          "filename": "torchaudio-2.11.0.2+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "2.11.0.2+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/torchaudio/torchaudio-2.11.0.3%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-eaHL14C3QWNTWmLLc7EdlpA+uqqTORw0LPVExVccV6Q=",
+          "filename": "torchaudio-2.11.0.3+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "2.11.0.3+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -63,10 +63,10 @@
           "kind": "wheel"
         },
         "triton": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/triton/triton-3.8.0%2Bgit4cff872c.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-h09BBGxQ+EOSyEgfB0ovls/B3ESpsF4WIkbLf5F15Yg=",
-          "filename": "triton-3.8.0+git4cff872c.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "3.8.0+git4cff872c.rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/triton/triton-3.8.0%2Bgit669b31ac.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-bO4KOaq5nQULpaxvGQAOyMm1y8vtguG9OJy2U9T/PWY=",
+          "filename": "triton-3.8.0+git669b31ac.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "3.8.0+git669b31ac.rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -107,10 +107,10 @@
           "kind": "wheel"
         },
         "amd-torch-device-gfx1151": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx1151/amd_torch_device_gfx1151-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-M9+2mx1tiRJ67EFtKJGyBe0x1/+woQaqRaVNp6/QwB0=",
-          "filename": "amd_torch_device_gfx1151-2.13.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "2.13.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx1151/amd_torch_device_gfx1151-2.14.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-IamnLbP+ourNB6rwj5Je2jesypeYD/Kb31lUWV+QJQk=",
+          "filename": "amd_torch_device_gfx1151-2.14.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "2.14.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -118,10 +118,10 @@
           "kind": "wheel"
         },
         "amd-torchvision-device-gfx1151": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torchvision-device-gfx1151/amd_torchvision_device_gfx1151-0.28.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-hHc4+7hdt+PNbnEVZaMUvRRecbsV87knEAS5gh0Y8jQ=",
-          "filename": "amd_torchvision_device_gfx1151-0.28.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "0.28.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torchvision-device-gfx1151/amd_torchvision_device_gfx1151-0.29.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-urfrM8oTuUIQExC9b3yXW1QQD/PVsin9Such6AIPYwU=",
+          "filename": "amd_torchvision_device_gfx1151-0.29.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "0.29.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -140,10 +140,10 @@
           "kind": "wheel"
         },
         "amd-torch-device-gfx115x": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx115x/amd_torch_device_gfx115x-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-RLJ9udVA5YnysXp4yiJ6gy9wyV/39HaSdQf72pK1JOU=",
-          "filename": "amd_torch_device_gfx115x-2.13.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "2.13.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx115x/amd_torch_device_gfx115x-2.14.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-FzDCH6yV321myVrQ8qxDgAvbGir25Y35dIu6ezok4rY=",
+          "filename": "amd_torch_device_gfx115x-2.14.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "2.14.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -151,7 +151,7 @@
           "kind": "wheel"
         }
       },
-      "updated": "2026-10-06T04:35:45.244372+00:00"
+      "updated": "2026-10-16T04:30:40.788443+00:00"
     },
     "gfx1030": {
       "target": "gfx1030",
@@ -183,10 +183,10 @@
           "kind": "wheel"
         },
         "torch": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/torch/torch-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-KMux3aEAkDEnoCt8yjl0KXK1fDg/eeYLEDYXotC3oGQ=",
-          "filename": "torch-2.13.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "2.13.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/torch/torch-2.14.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-y9DiDeQMF5HD0Q2ihGsjkkrZo3axIhXF1BYI8QqkWQA=",
+          "filename": "torch-2.14.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "2.14.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -194,10 +194,10 @@
           "kind": "wheel"
         },
         "torchvision": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/torchvision/torchvision-0.28.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-LKz0Zy0CXBwkhxy0973UDMDtBzywRYuJ1mXkfCzCUb4=",
-          "filename": "torchvision-0.28.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "0.28.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/torchvision/torchvision-0.29.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-q862gaiqW0VWjokWEOxNLZ6y/RSPKfvE5M645UoRmqI=",
+          "filename": "torchvision-0.29.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "0.29.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -205,10 +205,10 @@
           "kind": "wheel"
         },
         "torchaudio": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/torchaudio/torchaudio-2.11.0.2%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-e1qYgxSGE4WCtnEn5Q7LIVdqy/nYXTQyBYR8lm0eo6s=",
-          "filename": "torchaudio-2.11.0.2+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "2.11.0.2+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/torchaudio/torchaudio-2.11.0.3%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-eaHL14C3QWNTWmLLc7EdlpA+uqqTORw0LPVExVccV6Q=",
+          "filename": "torchaudio-2.11.0.3+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "2.11.0.3+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -216,10 +216,10 @@
           "kind": "wheel"
         },
         "triton": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/triton/triton-3.8.0%2Bgit4cff872c.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-h09BBGxQ+EOSyEgfB0ovls/B3ESpsF4WIkbLf5F15Yg=",
-          "filename": "triton-3.8.0+git4cff872c.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "3.8.0+git4cff872c.rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/triton/triton-3.8.0%2Bgit669b31ac.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-bO4KOaq5nQULpaxvGQAOyMm1y8vtguG9OJy2U9T/PWY=",
+          "filename": "triton-3.8.0+git669b31ac.rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "3.8.0+git669b31ac.rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -260,10 +260,10 @@
           "kind": "wheel"
         },
         "amd-torch-device-gfx1030": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx1030/amd_torch_device_gfx1030-2.13.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-W+9rELYEK3L1lD9tvKFnRRd3+Ow9vzr0vbVsP5Fm3m4=",
-          "filename": "amd_torch_device_gfx1030-2.13.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "2.13.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx1030/amd_torch_device_gfx1030-2.14.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-6Zc6pt5KHnb+mGLNYPtLglUTP5uXU8r4tZh9db3o9u0=",
+          "filename": "amd_torch_device_gfx1030-2.14.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "2.14.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -271,10 +271,10 @@
           "kind": "wheel"
         },
         "amd-torchvision-device-gfx1030": {
-          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torchvision-device-gfx1030/amd_torchvision_device_gfx1030-0.28.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "hash": "sha256-GB1CZ3aSpofBUTqR7ho0ojGb1OyCE1M+VlXN9AldlrQ=",
-          "filename": "amd_torchvision_device_gfx1030-0.28.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
-          "packageVersion": "0.28.0+rocm10.0.0",
+          "url": "https://stable.repo.amd.com/rocm/whl-next/amd-torchvision-device-gfx1030/amd_torchvision_device_gfx1030-0.29.0%2Brocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "hash": "sha256-EEmap56yaHUtmQh8p9YgpbMBuwRKD1LBR9I+x6YxdA8=",
+          "filename": "amd_torchvision_device_gfx1030-0.29.0+rocm10.0.0-cp313-cp313-linux_x86_64.whl",
+          "packageVersion": "0.29.0+rocm10.0.0",
           "rocmVersion": "10.0.0",
           "pythonTag": "cp313",
           "abiTag": "cp313",
@@ -293,8 +293,8 @@
           "kind": "wheel"
         }
       },
-      "updated": "2026-10-06T04:34:43.359078+00:00"
+      "updated": "2026-10-16T04:29:46.951727+00:00"
     }
   },
-  "updated": "2026-10-06T04:35:45.244372+00:00"
+  "updated": "2026-10-16T04:30:40.788443+00:00"
 }
