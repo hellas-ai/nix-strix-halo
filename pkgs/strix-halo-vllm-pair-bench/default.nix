@@ -11,6 +11,7 @@
   vllmPackage,
   packageSuffix,
   vllmTransportMatrix ? ../../lib/bench/vllm-transport-matrix.sh,
+  vllmTransportMatrixPlan ? ../../lib/bench/vllm-transport-matrix.py,
   vllmStreamClient ? ../../lib/bench/vllm-stream-client.py,
 }:
 
@@ -18,8 +19,9 @@ let
   benchSrc = runCommand "strix-halo-vllm-matrix-bench-src" { } ''
     mkdir -p "$out"
     cp ${vllmTransportMatrix} "$out/vllm-transport-matrix.sh"
+    cp ${vllmTransportMatrixPlan} "$out/vllm-transport-matrix.py"
     cp ${vllmStreamClient} "$out/vllm-stream-client.py"
-    chmod +x "$out/vllm-transport-matrix.sh" "$out/vllm-stream-client.py"
+    chmod +x "$out/vllm-transport-matrix.sh" "$out/vllm-transport-matrix.py" "$out/vllm-stream-client.py"
   '';
 in
 writeShellApplication {

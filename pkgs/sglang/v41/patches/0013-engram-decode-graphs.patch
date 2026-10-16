@@ -1,0 +1,389 @@
+--- a/sglang/srt/layers/attention/graph_variants.py
++++ b/sglang/srt/layers/attention/graph_variants.py
+@@ -107,11 +107,44 @@
+         and not model_runner.is_draft_worker
+         and captured_req_width > 0
+     )
++    # The native HIP radix backend already has the four decode branches below,
++    # but gfx1151 was excluded with the gfx95-only graph gate. Keep this opt-in
++    # to the exact C1/C2 native backend and model geometry.
++    gfx1151_native_decode = False
++    if (
++        capture_forward_mode == ForwardMode.DECODE
++        and model_runner.device == "cuda"
++        and is_hip()
++        and getattr(text_config, "model_type", None) == "deepseek_v41"
++        and torch.cuda.get_device_properties(model_runner.gpu_id)
++        .gcnArchName.split(":", 1)[0]
++        == "gfx1151"
++    ):
++        from sglang.srt.layers.attention.deepseek_v4_backend_hip_radix import (
++            DeepseekV4HipRadixBackend,
++        )
++        from sglang.srt.runtime_context import get_parallel
++
++        backend = model_runner.attn_backend
++        max_requests = model_runner.server_args.max_running_requests
++        span = getattr(text_config, "candidate_topk_blocks", 0) * getattr(
++            text_config, "candidate_block_size", 0
++        )
++        gfx1151_native_decode = (
++            isinstance(backend, DeepseekV4HipRadixBackend)
++            and get_parallel().tp_size == 4
++            and tuple(backend.low_ratios) == (1, 2)
++            and backend.index_topk == getattr(text_config, "index_topk", None)
++            and backend.low_ratio_candidate_span == span
++            and backend.low_ratio_identity_skip
++            and type(max_requests) is int
++            and 1 <= max_requests <= 2
++        )
+     if not (
+         (capture_forward_mode == ForwardMode.DECODE or dspark_target_verify)
+         and model_runner.device == "cuda"
+         and (
+-            is_gfx95_supported()
++            (is_gfx95_supported() or gfx1151_native_decode)
+             if is_hip()
+             else torch.cuda.get_device_capability(model_runner.gpu_id)[0] >= 10
+         )
+--- a/sglang/srt/layers/engram.py
++++ b/sglang/srt/layers/engram.py
+@@ -44,7 +44,11 @@
+     is_dp_gatherv_active,
+ )
+ from sglang.srt.layers.linear import ReplicatedLinear
+-from sglang.srt.layers.engram_store import EngramRowStore
++from sglang.srt.layers.engram_store import (
++    ROW_BYTES,
++    EngramRowStore,
++    dequantize_packed_rows,
++)
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ from sglang.srt.managers.schedule_batch import MM_PAD_SHIFT_VALUE
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+@@ -769,11 +773,23 @@
+ 
+     def forward(
+         self,
+-        indices: torch.Tensor,
++        indices: Optional[torch.Tensor],
+         forward_batch: Optional[ForwardBatch] = None,
+         *,
+         cp_all_tokens: bool = False,
++        prepared_packed_rows: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
++        if prepared_packed_rows is not None:
++            if self.file_store is None or cp_all_tokens:
++                raise ValueError("prepared Engram rows require file-backed, non-CP lookup")
++            if prepared_packed_rows.shape[-1] != ROW_BYTES:
++                raise ValueError("prepared Engram rows have the wrong native width")
++            if indices is not None and prepared_packed_rows.shape[:-1] != indices.shape:
++                raise ValueError("prepared Engram row shape does not match hash IDs")
++            values = dequantize_packed_rows(prepared_packed_rows)
++            return self._reduce_owned_rows(values) if self.tp_size > 1 else values
++        if indices is None:
++            raise ValueError("Engram hash IDs are required without prepared rows")
+         if self._shared:
+             if indices.shape[0] == 0:
+                 return self._empty(indices)
+@@ -976,15 +992,21 @@
+     def forward(
+         self,
+         x: torch.Tensor,
+-        hash_ids: torch.Tensor,
++        hash_ids: Optional[torch.Tensor],
+         forward_batch: Optional[ForwardBatch] = None,
+         *,
+         cp_all_tokens: bool = False,
++        prepared_packed_rows: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
+         """x [T, hc_mult, dim]; hash_ids [T, n_hash_cols] for this layer."""
+         # The lookup runs first even for an idle DP-attention batch: under DP
+         # attention it is a collective every rank has to join.
+-        emb = self.embed(hash_ids, forward_batch, cp_all_tokens=cp_all_tokens)
++        emb = self.embed(
++            hash_ids,
++            forward_batch,
++            cp_all_tokens=cp_all_tokens,
++            prepared_packed_rows=prepared_packed_rows,
++        )
+         if x.shape[0] == 0:
+             # Nothing to gate, and the MXFP8 quantize behind wkv rejects an
+             # empty M.
+--- /dev/null
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -0,0 +1,102 @@
++"""Bounded decode-graph input staging for file-backed DeepSeek V4.1 Engram.
++
++The model's existing GPU hasher remains the sole owner of hash arithmetic and
++request-history commits.  This module moves its two native-row reads out of the
++captured forward.  It intentionally supports only exact C1/C2 decode buckets.
++"""
++
++import torch
++
++from sglang.srt.layers.engram_store import ROW_BYTES
++
++
++class NativeEngramGraphPrestage:
++    def __init__(self, model, max_bs: int, device):
++        if max_bs != 2 or model.engram_hasher is None:
++            raise ValueError("Engram graph prestage requires C1/C2 and a hasher")
++        layers = {}
++        for layer in model.layers:
++            engram = getattr(layer, "engram", None)
++            if engram is not None:
++                layers[engram.layer_hash_index] = engram.embed.file_store
++        if set(layers) != {0, 1} or any(store is None for store in layers.values()):
++            raise ValueError("Engram graph prestage requires two native file stores")
++        self.hasher = model.engram_hasher
++        self.stores = (layers[0], layers[1])
++        self.gpu_rows = torch.zeros((2, 2, 24, ROW_BYTES), dtype=torch.uint8, device=device)
++        # Two frames bound page-locked memory even if the next decode arrives
++        # before the previous frame's H2D copy has completed.
++        self.host_frames = [
++            torch.empty((2, 2, 24, ROW_BYTES), dtype=torch.uint8, pin_memory=True)
++            for _ in range(2)
++        ]
++        self.frame_done = [torch.cuda.Event() for _ in range(2)]
++        self.frame_inflight = [False, False]
++        self.graph_done = torch.cuda.Event()
++        self.gpu_inflight = False
++        self.active_generation = None
++        self.generation = 0
++        self.pending = None
++
++    def prepare(self, forward_batch, graph_bs: int) -> int:
++        if self.pending is not None or self.active_generation is not None:
++            raise RuntimeError("previous Engram graph generation was not retired")
++        bs = forward_batch.batch_size
++        if (
++            not forward_batch.forward_mode.is_decode()
++            or bs not in (1, 2)
++            or graph_bs != bs
++            or forward_batch.input_ids.shape != (bs,)
++            or forward_batch.positions.shape != (bs,)
++            or forward_batch.req_pool_indices.shape != (bs,)
++            or forward_batch.out_cache_loc.shape != (bs,)
++            or forward_batch.engram_packed_rows is not None
++        ):
++            raise ValueError("Engram graph prestage requires a fresh exact C1/C2 decode")
++
++        # This call also commits the canonical per-request GPU history.  Once
++        # attempted, any failure must terminate the worker rather than retry.
++        self.generation += 1
++        generation = self.generation
++        ids = self.hasher(forward_batch.input_ids, forward_batch)
++        if ids.shape != (bs, 2, 24):
++            raise RuntimeError("unexpected canonical Engram hash layout")
++        ids_cpu = ids.to(device="cpu")  # one D2H synchronization for both layers
++
++        frame_index = (generation - 1) % 2
++        if self.frame_inflight[frame_index]:
++            self.frame_done[frame_index].synchronize()  # H2D still owns this frame
++            self.frame_inflight[frame_index] = False
++        frame = self.host_frames[frame_index]
++        frame.zero_()
++        target = frame.numpy()
++        for layer_index, store in enumerate(self.stores):
++            packed = store.lookup(ids_cpu[:, layer_index].reshape(-1)).packed
++            if packed.shape != (bs * 24, ROW_BYTES):
++                raise RuntimeError("native Engram lookup returned an invalid layout")
++            target[:bs, layer_index] = packed.reshape(bs, 24, ROW_BYTES)
++        self.pending = (generation, bs, frame_index)
++        return generation
++
++    def install(self, forward_batch, generation: int) -> None:
++        if self.pending is None or self.pending[0] != generation:
++            raise RuntimeError("stale or missing Engram graph generation")
++        _, bs, frame_index = self.pending
++        if forward_batch.batch_size != bs or forward_batch.engram_packed_rows is not None:
++            raise RuntimeError("Engram graph batch changed after preparation")
++        if self.gpu_inflight:
++            torch.cuda.current_stream().wait_event(self.graph_done)
++            self.gpu_inflight = False
++        self.gpu_rows[:bs].copy_(self.host_frames[frame_index][:bs], non_blocking=True)
++        self.frame_done[frame_index].record(torch.cuda.current_stream())
++        self.frame_inflight[frame_index] = True
++        forward_batch.engram_packed_rows = self.gpu_rows[:bs]
++        self.pending = None
++        self.active_generation = generation
++
++    def retire_after_replay(self, generation: int) -> None:
++        if self.active_generation != generation:
++            raise RuntimeError("Engram graph completion has a stale generation")
++        self.graph_done.record(torch.cuda.current_stream())
++        self.gpu_inflight = True
++        self.active_generation = None
+--- a/sglang/srt/model_executor/forward_batch_info.py
++++ b/sglang/srt/model_executor/forward_batch_info.py
+@@ -737,6 +737,10 @@
+     # DeepSeek-V4.1 engram, extend only: the n - 1 tokens before each request's
+     # first extend token, oldest first, [bs, n - 1] int32 (see EngramHasher).
+     engram_history: Optional[torch.Tensor] = None
++
++    # Decode graph only: rank-owned native rows for both Engram layers, staged
++    # outside capture after the canonical GPU hasher commits request history.
++    engram_packed_rows: Optional[torch.Tensor] = None
+ 
+     # For dumper: int-hashed request / bootstrap-room IDs (derived from rids)
+     rids_int: Optional[torch.Tensor] = None
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -60,6 +60,7 @@
+     set_dp_buffer_len,
+     set_is_extend_in_batch,
+ )
++from sglang.srt.layers.engram_graph_prestage import NativeEngramGraphPrestage
+ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+ from sglang.srt.model_executor.cuda_graph_buffer_registry import (
+     CudaGraphBufferRegistry,
+@@ -330,6 +331,34 @@
+             )
+             self.compile_bs = [bs for bs in self.compile_bs if bs <= max_requests]
+         self.max_bs = max(self.capture_bs)
++        self.engram_graph_prestage = None
++        inner_model = getattr(model_runner.model, "model", None)
++        if inner_model is not None and getattr(inner_model, "engram_hasher", None):
++            file_engram = any(
++                getattr(getattr(layer, "engram", None), "embed", None) is not None
++                and getattr(layer.engram.embed, "file_store", None) is not None
++                for layer in inner_model.layers
++            )
++            if file_engram:
++                if (
++                    self.capture_forward_mode != ForwardMode.DECODE
++                    or self.captured_req_width != 1
++                    or self.capture_bs != [1, 2]
++                    or self.enable_pdmux
++                    or self.enable_two_batch_overlap
++                    or model_runner.spec_algorithm.is_speculative()
++                    or get_parallel().tp_size != 4
++                    or get_parallel().pp_size != 1
++                    or get_parallel().attn_dp_size != 1
++                    or get_parallel().attn_cp_size != 1
++                ):
++                    raise ValueError(
++                        "file-backed Engram graphs require TP4, non-speculative DP1/CP1 "
++                        "decode, exact C1/C2 buckets and one compute stream"
++                    )
++                self.engram_graph_prestage = NativeEngramGraphPrestage(
++                    inner_model, self.max_bs, self.device
++                )
+         if KTRANSFORMERS_AVAILABLE:
+             KTMoEWrapper.set_capture_batch_sizes(self.capture_bs)
+ 
+@@ -670,6 +698,11 @@
+         return max(request_counts)
+ 
+     def can_run_graph(self, forward_batch: ForwardBatch):
++        if self.engram_graph_prestage is not None and (
++            not forward_batch.forward_mode.is_decode()
++            or forward_batch.batch_size not in (1, 2)
++        ):
++            return False
+         # Disable for token embedding overrides (dynamic per-request)
+         if forward_batch.replace_embeds is not None:
+             return False
+@@ -1011,6 +1044,11 @@
+             rids_int=rids_int,
+             bootstrap_room_ids_int=bootstrap_room_ids_int,
+         )
++        if self.engram_graph_prestage is not None:
++            # Capture/warmup must never run the live hasher or perform file I/O.
++            forward_batch.engram_packed_rows = (
++                self.engram_graph_prestage.gpu_rows[:bs]
++            )
+ 
+         # Trip the coordinator so the hisparse code path is captured into the
+         # graph; backends read it from self.model_runner.hisparse_coordinator.
+@@ -1481,6 +1519,31 @@
+         forward_batch: ForwardBatch,
+         pp_proxy_tensors: Optional[PPProxyTensors] = None,
+     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
++        before = (
++            None
++            if self.engram_graph_prestage is None
++            else self.engram_graph_prestage.generation
++        )
++        try:
++            return self._execute_impl(forward_batch, pp_proxy_tensors)
++        except Exception:
++            if (
++                before is not None
++                and self.engram_graph_prestage.generation != before
++            ):
++                # The GPU hash/history transition has begun. An ordinary
++                # exception could let the scheduler retry with advanced
++                # history or peers enter a captured TP collective. Terminate
++                # this worker; the serving controller must stop the TP group.
++                logger.exception("fatal Engram graph step after history commit")
++                os._exit(70)
++            raise
++
++    def _execute_impl(
++        self,
++        forward_batch: ForwardBatch,
++        pp_proxy_tensors: Optional[PPProxyTensors] = None,
++    ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+         timer_ctx = device_timer_ctx(
+             self.model_runner.device_timer, forward_batch.forward_mode.name.lower()
+         )
+@@ -1489,6 +1552,11 @@
+         )
+         with timer_ctx, self.backend.replay_session():
+             self.load_batch(forward_batch, pp_proxy_tensors)
++            if self.engram_graph_prestage is not None:
++                generation = self.engram_graph_prestage.prepare(
++                    forward_batch, self.bs
++                )
++                self.engram_graph_prestage.install(forward_batch, generation)
+             if envs.SGLANG_LOG_DECODE_GRAPH_KEY.get():
+                 logger.info(
+                     "Decode graph replay: worker=%s key_size=%s (%s) mode=%s raw_bs=%d%s",
+@@ -1507,6 +1575,8 @@
+                 self._publish_read_done(in_graph=False)
+ 
+             output = self.backend.replay(self._replay_graph_key, forward_batch)
++            if self.engram_graph_prestage is not None:
++                self.engram_graph_prestage.retire_after_replay(generation)
+ 
+             if shared_read_ends is SharedReadEnds.IN_REPLAY:
+                 self._publish_read_done(in_graph=True)
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -4557,7 +4557,13 @@
+         cp_extend = (
+             is_cp_active(forward_batch) and forward_batch.forward_mode.is_extend()
+         )
+-        if self.engram_hasher is not None:
++        prepared_engram_rows = forward_batch.engram_packed_rows
++        if prepared_engram_rows is not None:
++            if not forward_batch.forward_mode.is_decode() or cp_extend:
++                raise ValueError("prepared Engram rows support decode without CP only")
++            if prepared_engram_rows.shape[:2] != (input_ids.shape[0], 2):
++                raise ValueError("prepared Engram rows do not match the decode batch")
++        elif self.engram_hasher is not None:
+             if cp_extend:
+                 # n-gram hashing needs each token's predecessors: hash the whole prompt
+                 total = int(forward_batch.attn_cp_metadata.total_seq_lens)
+@@ -4621,9 +4627,18 @@
+                 before_engram = hidden_states
+                 hidden_states = engram(
+                     hidden_states,
+-                    hash_ids[:, engram.layer_hash_index],
++                    (
++                        None
++                        if prepared_engram_rows is not None
++                        else hash_ids[:, engram.layer_hash_index]
++                    ),
+                     forward_batch,
+                     cp_all_tokens=cp_extend,
++                    prepared_packed_rows=(
++                        None
++                        if prepared_engram_rows is None
++                        else prepared_engram_rows[:, engram.layer_hash_index]
++                    ),
+                 )
+                 if (
+                     self.config.model_type == "deepseek_v41"
