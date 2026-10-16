@@ -1,0 +1,594 @@
+--- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -1,13 +1,20 @@
+-"""Native V4.1 FP8 GEMV for one, two, four or eight tokens on gfx1151.
++"""Native V4.1 FP8 GEMV for one to eight tokens on gfx1151.
+ 
+ The existing activation quantizer supplies E4M3FN values and decoded E8M0
+ scales. Native 32x32 weight blocks are reduced in FP32 and stored as BF16.
+ Model-specific dispatch guards select the supported projection shapes.
++
++Row generic: one token uses ``_native_fp8_gemv_c1``, two ``_native_c2_gemv`` and three to eight
++``_native_c4_c8_gemv`` (TOKENS is a constexpr, one instantiation per row count).  Every token runs the
++same per-token reduction in all three kernels, so a row's result does not depend on how many rows are
++in the call.  ``native_gemv_rows`` is the one entry point that picks the kernel from the row count.
+ """
+ import torch
+ import triton
+ import triton.language as tl
+ 
++from sglang.kernels.ops.gemm.dsv41_native_rows import PROJECTION_BLOCK_K, c1_rows, is_legacy
++
+ 
+ @triton.jit
+ def _native_fp8_gemv_c1(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
+@@ -92,7 +99,8 @@ come from the existing native loader and unchanged activation quantizer.
+     if not torch.version.hip or not torch.cuda.get_device_properties(q.device).gcnArchName.startswith('gfx1151'):
+         raise ValueError('Engram C1 GEMV is gfx1151-only')
+     output = torch.empty((1, 25600), dtype=torch.bfloat16, device=q.device)
+-    _native_fp8_gemv_c1[(25600 // 4,)](q, qs, w, ws, output, 25600, 6144, 4, 512,
++    rows = c1_rows()
++    _native_fp8_gemv_c1[(25600 // rows,)](q, qs, w, ws, output, 25600, 6144, rows, 512,
+                                   num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
+ 
+@@ -111,8 +119,9 @@ def native_wob_gemv(q, qs, w, ws):
+     if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
+         raise ValueError('wo_b C1 GEMV is gfx1151-only')
+     output = torch.empty((1, 5120), dtype=torch.bfloat16, device=q.device)
+-    _native_fp8_gemv_c1[(5120 // 4,)](q, qs, w, ws, output, 5120, 2048, 4, 512,
+-                                     num_warps=4, num_stages=1, enable_fp_fusion=False)
++    rows = c1_rows()
++    _native_fp8_gemv_c1[(5120 // rows,)](q, qs, w, ws, output, 5120, 2048, rows, 512,
++                                  num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
+ 
+ 
+@@ -130,8 +139,9 @@ def native_wqkv_a_gemv(q, qs, w, ws):
+     if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
+         raise ValueError('fused wqkv_a C1 GEMV is gfx1151-only')
+     output = torch.empty((1, 1792), dtype=torch.bfloat16, device=q.device)
+-    _native_fp8_gemv_c1[(1792 // 4,)](q, qs, w, ws, output, 1792, 5120, 4, 512,
+-                                        num_warps=4, num_stages=1, enable_fp_fusion=False)
++    rows = c1_rows()
++    _native_fp8_gemv_c1[(1792 // rows,)](q, qs, w, ws, output, 1792, 5120, rows, 512,
++                                  num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
+ 
+ 
+@@ -149,8 +159,9 @@ def native_wqb_gemv(q, qs, w, ws):
+     if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
+         raise ValueError('wq_b C1 GEMV is gfx1151-only')
+     output = torch.empty((1, 8192), dtype=torch.bfloat16, device=q.device)
+-    _native_fp8_gemv_c1[(8192 // 4,)](q, qs, w, ws, output, 8192, 1280, 4, 256,
+-                                      num_warps=4, num_stages=1, enable_fp_fusion=False)
++    rows = c1_rows()
++    _native_fp8_gemv_c1[(8192 // rows,)](q, qs, w, ws, output, 8192, 1280, rows, 256,
++                                  num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
+ 
+ 
+@@ -209,8 +220,9 @@ def native_shared_expert_gemv(q, qs, w, ws, kind: str):
+         raise ValueError("shared expert GEMV is gfx1151-only")
+     output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
+     if m == 1:
+-        _native_fp8_gemv_c1[(n // 4,)](
+-            q, qs, w, ws, output, n, k, 4, block_k,
++        rows = c1_rows()
++        _native_fp8_gemv_c1[(n // rows,)](
++            q, qs, w, ws, output, n, k, rows, block_k,
+             num_warps=4, num_stages=1, enable_fp_fusion=False)
+     else:
+         _native_c2_gemv[(n // 8,)](
+@@ -222,8 +234,12 @@ def native_shared_expert_gemv(q, qs, w, ws, kind: str):
+ @triton.jit
+ def _native_c4_c8_gemv(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
+                        TOKENS: tl.constexpr, ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
+-    # Preserve the qualified per-token reduction; reuse each weight tile for all
+-    # live tokens without a second launch or cross-token arithmetic.
++    # Row-generic multi-token kernel, TOKENS in 3..8 (constexpr; 1 and 2 tokens keep the
++    # dedicated C1/C2 kernels).  Preserve the qualified per-token reduction; reuse each weight
++    # tile for all live tokens without a second launch or cross-token arithmetic.  Every token
++    # runs the same statements with the same tile shapes, so a token's result does not depend on
++    # TOKENS (the 4- and 8-token instantiations are unchanged by the generalisation).
++    tl.static_assert(3 <= TOKENS and TOKENS <= 8)
+     first = tl.program_id(0) * ROWS
+     rows = first + tl.arange(0, ROWS)
+     cols = tl.arange(0, BLOCK_K)
+@@ -231,11 +247,15 @@ def _native_c4_c8_gemv(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
+     accumulator0 = tl.zeros((ROWS,), tl.float32)
+     accumulator1 = tl.zeros((ROWS,), tl.float32)
+     accumulator2 = tl.zeros((ROWS,), tl.float32)
+-    accumulator3 = tl.zeros((ROWS,), tl.float32)
+-    if TOKENS == 8:
++    if TOKENS > 3:
++        accumulator3 = tl.zeros((ROWS,), tl.float32)
++    if TOKENS > 4:
+         accumulator4 = tl.zeros((ROWS,), tl.float32)
++    if TOKENS > 5:
+         accumulator5 = tl.zeros((ROWS,), tl.float32)
++    if TOKENS > 6:
+         accumulator6 = tl.zeros((ROWS,), tl.float32)
++    if TOKENS > 7:
+         accumulator7 = tl.zeros((ROWS,), tl.float32)
+     for start in range(0, K, BLOCK_K):
+         w = _e4m3fn_to_fp32(tl.load(W + rows[:, None] * K + start + cols[None, :]))
+@@ -255,27 +275,31 @@ def _native_c4_c8_gemv(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
+         a_scale2 = tl.load(QS + 2 * (K // 32) + start // 32 + groups)
+         scaled2 = (dots2 * a_scale2[None, :]) * w_scale[None, :]
+         accumulator2 = accumulator2 + tl.sum(scaled2, axis=1)
+-        q3 = _e4m3fn_to_fp32(tl.load(Q + 3 * K + start + cols))
+-        dots3 = tl.sum(tl.reshape(w * q3[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
+-        a_scale3 = tl.load(QS + 3 * (K // 32) + start // 32 + groups)
+-        scaled3 = (dots3 * a_scale3[None, :]) * w_scale[None, :]
+-        accumulator3 = accumulator3 + tl.sum(scaled3, axis=1)
+-        if TOKENS == 8:
++        if TOKENS > 3:
++            q3 = _e4m3fn_to_fp32(tl.load(Q + 3 * K + start + cols))
++            dots3 = tl.sum(tl.reshape(w * q3[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++            a_scale3 = tl.load(QS + 3 * (K // 32) + start // 32 + groups)
++            scaled3 = (dots3 * a_scale3[None, :]) * w_scale[None, :]
++            accumulator3 = accumulator3 + tl.sum(scaled3, axis=1)
++        if TOKENS > 4:
+             q4 = _e4m3fn_to_fp32(tl.load(Q + 4 * K + start + cols))
+             dots4 = tl.sum(tl.reshape(w * q4[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
+             a_scale4 = tl.load(QS + 4 * (K // 32) + start // 32 + groups)
+             scaled4 = (dots4 * a_scale4[None, :]) * w_scale[None, :]
+             accumulator4 = accumulator4 + tl.sum(scaled4, axis=1)
++        if TOKENS > 5:
+             q5 = _e4m3fn_to_fp32(tl.load(Q + 5 * K + start + cols))
+             dots5 = tl.sum(tl.reshape(w * q5[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
+             a_scale5 = tl.load(QS + 5 * (K // 32) + start // 32 + groups)
+             scaled5 = (dots5 * a_scale5[None, :]) * w_scale[None, :]
+             accumulator5 = accumulator5 + tl.sum(scaled5, axis=1)
++        if TOKENS > 6:
+             q6 = _e4m3fn_to_fp32(tl.load(Q + 6 * K + start + cols))
+             dots6 = tl.sum(tl.reshape(w * q6[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
+             a_scale6 = tl.load(QS + 6 * (K // 32) + start // 32 + groups)
+             scaled6 = (dots6 * a_scale6[None, :]) * w_scale[None, :]
+             accumulator6 = accumulator6 + tl.sum(scaled6, axis=1)
++        if TOKENS > 7:
+             q7 = _e4m3fn_to_fp32(tl.load(Q + 7 * K + start + cols))
+             dots7 = tl.sum(tl.reshape(w * q7[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
+             a_scale7 = tl.load(QS + 7 * (K // 32) + start // 32 + groups)
+@@ -284,23 +308,27 @@ def _native_c4_c8_gemv(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
+     tl.store(Y + 0 * N + rows, accumulator0.to(tl.bfloat16))
+     tl.store(Y + 1 * N + rows, accumulator1.to(tl.bfloat16))
+     tl.store(Y + 2 * N + rows, accumulator2.to(tl.bfloat16))
+-    tl.store(Y + 3 * N + rows, accumulator3.to(tl.bfloat16))
+-    if TOKENS == 8:
++    if TOKENS > 3:
++        tl.store(Y + 3 * N + rows, accumulator3.to(tl.bfloat16))
++    if TOKENS > 4:
+         tl.store(Y + 4 * N + rows, accumulator4.to(tl.bfloat16))
++    if TOKENS > 5:
+         tl.store(Y + 5 * N + rows, accumulator5.to(tl.bfloat16))
++    if TOKENS > 6:
+         tl.store(Y + 6 * N + rows, accumulator6.to(tl.bfloat16))
++    if TOKENS > 7:
+         tl.store(Y + 7 * N + rows, accumulator7.to(tl.bfloat16))
+ 
+ 
+ def native_c4_c8_gemv(q, qs, w, ws):
+-    """Only the six flagged native TP4 projection shapes, exactly four/eight rows."""
++    """Only the six flagged native TP4 projection shapes, three to eight rows (historically four/eight)."""
+     shapes = {
+         (25600, 6144): 512, (5120, 2048): 512,
+         (1792, 5120): 512, (8192, 1280): 256,
+         (1152, 5120): 512, (5120, 576): 64,
+     }
+-    if w.shape not in shapes or q.ndim != 2 or q.shape[0] not in (4, 8):
+-        raise ValueError("C4/C8 native GEMV requires an exact supported projection")
++    if w.shape not in shapes or q.ndim != 2 or not 3 <= q.shape[0] <= 8:
++        raise ValueError("C3-C8 native GEMV requires an exact supported projection")
+     n, k = w.shape
+     m = q.shape[0]
+     expected = ((q, (m, k), torch.float8_e4m3fn),
+@@ -323,15 +351,16 @@ def native_c4_c8_gemv(q, qs, w, ws):
+ 
+ 
+ def native_idx_wqb_gemv(q, qs, w, ws):
+-    """Indexer ``wq_b``: native E4M3FN/E8M0 ``[m,1280] x [4096,1280]``, m in 1, 2, 3, 4, 8.
++    """Indexer ``wq_b``: native E4M3FN/E8M0 ``[m,1280] x [4096,1280]``, m in 1..8.
+ 
+     Same per-token reduction as the attention ``wq_b`` kernels (K is also 1280):
+-    a row's result does not depend on how many other rows are present. Three
+-    rows run the four-row kernel on a zero-padded copy and return the first three.
++    a row's result does not depend on how many other rows are present.  Three
++    rows used to run the four-row kernel on a zero-padded copy; they now run the
++    exact three-row instantiation (``SGLANG_DSV41_NATIVE_ROWS=legacy`` restores the padded copy).
+     """
+     n, k = 4096, 1280
+-    if q.ndim != 2 or q.shape[0] not in (1, 2, 3, 4, 8):
+-        raise ValueError("indexer wq_b GEMV requires 1, 2, 3, 4 or 8 token rows")
++    if q.ndim != 2 or not 1 <= q.shape[0] <= 8:
++        raise ValueError("indexer wq_b GEMV requires one to eight token rows")
+     m = q.shape[0]
+     expected = ((q, (m, k), torch.float8_e4m3fn),
+                 (qs, (m, k // 32), torch.float32),
+@@ -346,20 +375,57 @@ def native_idx_wqb_gemv(q, qs, w, ws):
+         torch.cuda.get_device_properties(q.device).gcnArchName.split(":")[0] != "gfx1151"):
+         raise ValueError("indexer wq_b GEMV is gfx1151-only")
+     rows = m
+-    if m == 3:
++    if m == 3 and is_legacy():
+         q4 = torch.zeros((4, k), dtype=q.dtype, device=q.device)
+         qs4 = torch.ones((4, k // 32), dtype=qs.dtype, device=q.device)
+         q4[:3] = q
+         qs4[:3] = qs
+         q, qs, m = q4, qs4, 4
+     output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
++    _launch_rows(q, qs, w, ws, output, n, k, m, 256)
++    return output[:rows]
++
++
++def _launch_rows(q, qs, w, ws, output, n, k, m, block_k):
++    """One launch for ``m`` in 1..8 token rows (unchecked; the callers validate operands)."""
+     if m == 1:
+-        _native_fp8_gemv_c1[(n // 4,)](q, qs, w, ws, output, n, k, 4, 256,
+-                                       num_warps=4, num_stages=1, enable_fp_fusion=False)
++        rows = c1_rows()
++        _native_fp8_gemv_c1[(n // rows,)](q, qs, w, ws, output, n, k, rows, block_k,
++                                          num_warps=4, num_stages=1, enable_fp_fusion=False)
+     elif m == 2:
+-        _native_c2_gemv[(n // 8,)](q, qs, w, ws, output, n, k, 8, 256,
++        _native_c2_gemv[(n // 8,)](q, qs, w, ws, output, n, k, 8, block_k,
+                                    num_warps=4, num_stages=1, enable_fp_fusion=False)
+     else:
+-        _native_c4_c8_gemv[(n // 8,)](q, qs, w, ws, output, n, k, m, 8, 256,
++        _native_c4_c8_gemv[(n // 8,)](q, qs, w, ws, output, n, k, m, 8, block_k,
+                                       num_warps=4, num_stages=1, enable_fp_fusion=False)
+-    return output[:rows]
++
++
++def native_gemv_rows(q, qs, w, ws):
++    """Row-generic native block-FP8 GEMV: ``q [m,K] E4M3FN``, ``qs [m,K/32] f32``, ``w [N,K] E4M3FN``, ``ws [N/32,K/32] f32`` -> ``[m,N]`` BF16, m in 1..8.
++
++    One entry point for every row count: 1 -> ``_native_fp8_gemv_c1``, 2 -> ``_native_c2_gemv``, 3..8 -> ``_native_c4_c8_gemv``
++    (TOKENS=m).  Only the shapes of ``PROJECTION_BLOCK_K`` (dsv41_native_rows.py) are served; for the seven target projections the
++    result of every row is bitwise the result of the per-shape C1/C2/C4/C8 entry points.  Raises ValueError for anything else.
++    """
++    if q.ndim != 2 or not 1 <= q.shape[0] <= 8 or w.ndim != 2:
++        raise ValueError("native GEMV requires one to eight token rows and a 2-D weight")
++    n, k = w.shape
++    m = q.shape[0]
++    block_k = PROJECTION_BLOCK_K.get((n, k))
++    if block_k is None:
++        raise ValueError("native GEMV requires a qualified projection shape")
++    expected = ((q, (m, k), torch.float8_e4m3fn),
++                (qs, (m, k // 32), torch.float32),
++                (w, (n, k), torch.float8_e4m3fn),
++                (ws, (n // 32, k // 32), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError("native GEMV requires exact native contiguous operands")
++        if tensor.device != q.device or tensor.device.type != "cuda":
++            raise ValueError("native GEMV requires one HIP device")
++    if (not torch.version.hip or
++        torch.cuda.get_device_properties(q.device).gcnArchName.split(":")[0] != "gfx1151"):
++        raise ValueError("native GEMV is gfx1151-only")
++    output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
++    _launch_rows(q, qs, w, ws, output, n, k, m, block_k)
++    return output
+--- /dev/null
++++ b/sglang/kernels/ops/gemm/dsv41_native_rows.py
+@@ -0,0 +1,109 @@
++"""Row-count policy of the native gfx1151 DeepSeek-V4.1 decode kernels (pure Python: no torch, no triton).
++
++The native FP8 GEMVs (``deepseek_v41_gemv``) and the mHC post-residual kernel (``native_hc_post``) are row generic: ROWS is a
++compile-time constant of 1..8 token rows and a row's result does not depend on how many rows are in the call.  Dispatch sites ask
++this module which row counts may take a native kernel, so one switch controls every site.
++
++``SGLANG_DSV41_NATIVE_ROWS``
++    unset, ``all``  every row count 1..8 (default)
++    ``legacy``, ``0``, ``off``  the dispatch of patches 0014..0041: GEMV rows 1,2,4,8 (indexer wq_b 1,2,3,4,8 with its padded 3-row
++                    path), HC post rows 1,2,4 (plus the prefill row counts 512, 1306, 1536 of patch 0036)
++    ``1,2,3-5``  exactly these rows (lists and ranges, each 1..8); every other row count takes the generic path.  The mHC post
++                    kernel is also native for every row count above 8 (prefill tails of any size), whatever the list
++
++``SGLANG_DSV41_NATIVE_C1_ROWS``
++    ``4`` (default, the qualified kernel) or ``8``: output rows per program of the one-token GEMV.  For the three projections whose
++    BLOCK_K is 256 or 64 (wq_b, indexer wq_b, shared down) the 4-row tile reduces each 32-element block with a different lane
++    layout than the 8-row tile of the 2..8-token kernels, so a token's last bf16 bit can differ between one row and two or more
++    rows.  ``8`` makes the one-token result bitwise the multi-token one (full batch invariance 1..8) at the cost of a different
++    grid; it changes the numerics of those three projections at one row, so it is opt-in.
++"""
++import functools
++import os
++
++ENV = "SGLANG_DSV41_NATIVE_ROWS"
++MAX_ROWS = 8
++
++# Block-FP8 (32x32 weight blocks, UE8M0 activation scales) projections served by the row-generic entry point
++# ``deepseek_v41_gemv.native_gemv_rows`` and by the ``native_gemv_rows=True`` opt-in of ``triton_w8a8_block_fp8_linear``:
++# (N, K) -> BLOCK_K of the qualified kernels.  The first seven are the target model's TP4 projections (Engram wkv, wo_b, wqkv_a,
++# wq_b, shared gate/up, shared down, indexer wq_b), the last three the DSpark draft stages' unflagged linears (wq_a, wkv,
++# stage-0 main_proj).  K must be a multiple of BLOCK_K.
++PROJECTION_BLOCK_K = {
++    (25600, 6144): 512, (5120, 2048): 512, (1792, 5120): 512, (8192, 1280): 256,
++    (1152, 5120): 512, (5120, 576): 64, (4096, 1280): 256,
++    (1280, 5120): 512, (512, 5120): 512, (5120, 15360): 512,
++}
++HC_POST_PREFILL_ROWS = (512, 1306, 1536)   # the prefill row counts of the legacy (patch 0036) whitelist
++_ALL = frozenset(range(1, MAX_ROWS + 1))
++_LEGACY_GEMV = frozenset((1, 2, 4, 8))
++_LEGACY_IDX = frozenset((1, 2, 3, 4, 8))
++_LEGACY_HC_POST = frozenset((1, 2, 4))
++_LEGACY_WORDS = ("legacy", "0", "off", "false", "no")
++
++
++@functools.lru_cache(maxsize=None)
++def _parse(value: str):
++    """-> (is_legacy, rows frozenset or None for the defaults)."""
++    text = value.strip().lower()
++    if text in ("", "all", "1-8", "default", "on", "true", "yes"):
++        return False, None
++    if text in _LEGACY_WORDS:
++        return True, None
++    rows = set()
++    for part in text.split(","):
++        part = part.strip()
++        if not part:
++            continue
++        low, _, high = part.partition("-")
++        low, high = int(low), int(high or low)
++        if not 1 <= low <= high <= MAX_ROWS:
++            raise ValueError(f"{ENV}: rows must lie in 1..{MAX_ROWS}, got {part!r}")
++        rows.update(range(low, high + 1))
++    if not rows:
++        raise ValueError(f"{ENV}: empty row list {value!r}")
++    return False, frozenset(rows)
++
++
++def _policy():
++    return _parse(os.environ.get(ENV, ""))
++
++
++def is_legacy() -> bool:
++    return _policy()[0]
++
++
++def gemv_rows() -> frozenset:
++    """Row counts the attention / shared-expert / Engram FP8 GEMVs may serve natively."""
++    legacy, rows = _policy()
++    return _LEGACY_GEMV if legacy else (_ALL if rows is None else rows)
++
++
++def idx_wqb_rows() -> frozenset:
++    """Row counts the indexer wq_b FP8 GEMV may serve natively."""
++    legacy, rows = _policy()
++    return _LEGACY_IDX if legacy else (_ALL if rows is None else rows)
++
++
++def hc_post_native(m: int) -> bool:
++    """Whether the native mHC post kernel serves ``m`` token rows.
++
++    Default: every ``m`` >= 1 (the kernel's grid z is the row count, no row constexpr; ``native_hc_post_c2`` chunks launches above
++    65535 rows).  ``legacy``: rows 1, 2, 4 and the prefill rows 512, 1306, 1536 only.  A row list restricts only the decode rows
++    1..8.  ``m`` < 1 never takes the native kernel."""
++    if m < 1:
++        return False
++    legacy, rows = _policy()
++    if legacy:
++        return m in _LEGACY_HC_POST or m in HC_POST_PREFILL_ROWS
++    if m > MAX_ROWS or rows is None:
++        return True
++    return m in rows
++
++
++def c1_rows() -> int:
++    """Output rows per program of the one-token GEMV (SGLANG_DSV41_NATIVE_C1_ROWS: 4 default, 8 opt-in)."""
++    value = os.environ.get("SGLANG_DSV41_NATIVE_C1_ROWS", "4").strip()
++    if value not in ("4", "8"):
++        raise ValueError(f"SGLANG_DSV41_NATIVE_C1_ROWS must be 4 or 8, got {value!r}")
++    return int(value)
+--- a/sglang/kernels/ops/layernorm/native_hc_post.py
++++ b/sglang/kernels/ops/layernorm/native_hc_post.py
+@@ -1,9 +1,14 @@
+-"""Exact-order gfx1151 C1/C2/C4 post-residual mixing for native V4.1 mHC."""
++"""Exact-order gfx1151 post-residual mixing for native V4.1 mHC, any number of token rows (decode 1..8, prefill tails of any size).
++
++The kernel is row generic (grid z = rows, no row constexpr), so a row's result does not depend on the row count; launches are
++chunked at 65535 rows (the z-grid limit, and 32-bit element offsets stay below 2**31)."""
+ 
+ import torch
+ import triton
+ import triton.language as tl
+ 
++_MAX_GRID_Z = 65535
++
+ 
+ @triton.jit
+ def _hc_post_c2(X, R, P, C, Y, H: tl.constexpr, BLOCK: tl.constexpr):
+@@ -34,7 +39,7 @@ def _hc_post_c2(X, R, P, C, Y, H: tl.constexpr, BLOCK: tl.constexpr):
+ def native_hc_post_c2(x, residual, post, comb):
+     """Preserve FP32 product/add boundaries and one final BF16 rounding."""
+     if (
+-        x.ndim != 2 or x.shape[0] not in (1, 2, 4, 512, 1306, 1536) or x.shape[1] != 5120
++        x.ndim != 2 or x.shape[0] < 1 or x.shape[1] != 5120
+         or residual.shape != (x.shape[0], 4, 5120)
+         or post.shape != (x.shape[0], 4)
+         or comb.shape != (x.shape[0], 4, 4)
+@@ -49,11 +54,21 @@ def native_hc_post_c2(x, residual, post, comb):
+         or torch.cuda.get_device_properties(x.device).gcnArchName.split(":")[0]
+         != "gfx1151"
+     ):
+-        raise ValueError("native HC post requires exact gfx1151 C1/C2/C4 operands")
++        raise ValueError("native HC post requires exact gfx1151 operands")
+     output = torch.empty_like(residual)
+-    _hc_post_c2[(20, 4, x.shape[0])](
+-        x, residual, post, comb, output, 5120, 256,
+-        num_warps=4, num_stages=1, enable_fp_fusion=False,
+-        allow_flush_denorm=False,
+-    )
++    rows = x.shape[0]
++    for start in range(0, rows, _MAX_GRID_Z):
++        stop = min(rows, start + _MAX_GRID_Z)
++        # One launch for up to 65535 rows (every decode batch and chunked-prefill size); the slices are contiguous row ranges.
++        whole = start == 0 and stop == rows
++        _hc_post_c2[(20, 4, stop - start)](
++            x if whole else x[start:stop],
++            residual if whole else residual[start:stop],
++            post if whole else post[start:stop],
++            comb if whole else comb[start:stop],
++            output if whole else output[start:stop],
++            5120, 256,
++            num_warps=4, num_stages=1, enable_fp_fusion=False,
++            allow_flush_denorm=False,
++        )
+     return output
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1451,6 +1451,19 @@ def aiter_w8a8_block_fp8_linear(
+     ).view(*output_shape)
+ 
+ 
++def _v41_native_rows():
++    """Native gfx1151 V4.1 GEMV policy: (attention/shared/Engram rows, indexer wq_b rows, {(N, K): BLOCK_K} of native_gemv_rows).
++
++    SGLANG_DSV41_NATIVE_ROWS (see dsv41_native_rows.py); default 1..8, ``legacy`` restores 1,2,4,8 / 1,2,3,4,8."""
++    from sglang.kernels.ops.gemm.dsv41_native_rows import (
++        PROJECTION_BLOCK_K,
++        gemv_rows,
++        idx_wqb_rows,
++    )
++
++    return gemv_rows(), idx_wqb_rows(), PROJECTION_BLOCK_K
++
++
+ def triton_w8a8_block_fp8_linear(
+     input: torch.Tensor,
+     weight: torch.Tensor,
+@@ -1466,7 +1479,12 @@ def triton_w8a8_block_fp8_linear(
+     native_wqb_c1: bool = False,
+     native_v41_shared: str | None = None,
+     native_idx_wqb: bool = False,
++    native_gemv_rows: bool = False,
+ ) -> torch.Tensor:
++    # Row counts with a native kernel: 1..8 (ROWS is a compile-time constant of the native GEMVs).
++    native_rows, native_idx_rows, native_table = (
++        _v41_native_rows() if _is_hip else (frozenset(), frozenset(), {})
++    )
+     if input_scale is not None:
+         # Pre-quantized input: ``input`` is already fp8 and ``input_scale`` is
+         # its per-group scale (row-major (M, cdiv(K, 128))). Produced on HIP by
+@@ -1497,6 +1515,7 @@ def triton_w8a8_block_fp8_linear(
+         and block_size == [32, 32]
+         and input.ndim == 2
+         and q_input.shape == (1, 6144)
++        and 1 in native_rows
+         and weight.shape == (25600, 6144)
+         and x_scale.shape == (1, 192)
+         and weight_scale.shape == (800, 192)
+@@ -1520,6 +1539,7 @@ def triton_w8a8_block_fp8_linear(
+         and block_size == [32, 32]
+         and input.ndim == 2
+         and q_input.shape == (1, 2048)
++        and 1 in native_rows
+         and weight.shape == (5120, 2048)
+         and x_scale.shape == (1, 64)
+         and weight_scale.shape == (160, 64)
+@@ -1543,6 +1563,7 @@ def triton_w8a8_block_fp8_linear(
+         and block_size == [32, 32]
+         and input.ndim == 2
+         and q_input.shape == (1, 5120)
++        and 1 in native_rows
+         and weight.shape == (1792, 5120)
+         and x_scale.shape == (1, 160)
+         and weight_scale.shape == (56, 160)
+@@ -1566,6 +1587,7 @@ def triton_w8a8_block_fp8_linear(
+         and block_size == [32, 32]
+         and input.ndim == 2
+         and q_input.shape == (1, 1280)
++        and 1 in native_rows
+         and weight.shape == (8192, 1280)
+         and x_scale.shape == (1, 40)
+         and weight_scale.shape == (256, 40)
+@@ -1588,6 +1610,7 @@ def triton_w8a8_block_fp8_linear(
+         and block_size == [32, 32]
+         and input.ndim == 2
+         and q_input.shape[0] == 2
++        and 2 in native_rows
+         and output_dtype == torch.bfloat16
+         and bias is None
+         and q_input.dtype == weight.dtype == torch.float8_e4m3fn
+@@ -1629,6 +1652,7 @@ def triton_w8a8_block_fp8_linear(
+         and block_size == [32, 32]
+         and input.ndim == 2
+         and q_input.shape[0] in (1, 2)
++        and q_input.shape[0] in native_rows
+         and output_dtype == torch.bfloat16
+         and bias is None
+         and q_input.dtype == weight.dtype == torch.float8_e4m3fn
+@@ -1661,7 +1685,8 @@ def triton_w8a8_block_fp8_linear(
+         and act_scale_ue8m0
+         and block_size == [32, 32]
+         and input.ndim == 2
+-        and q_input.shape[0] in (4, 8)
++        and 3 <= q_input.shape[0] <= 8
++        and q_input.shape[0] in native_rows
+         and output_dtype == torch.bfloat16
+         and bias is None
+         and q_input.dtype == weight.dtype == torch.float8_e4m3fn
+@@ -1695,7 +1720,7 @@ def triton_w8a8_block_fp8_linear(
+         and act_scale_ue8m0
+         and block_size == [32, 32]
+         and input.ndim == 2
+-        and q_input.shape[0] in (1, 2, 3, 4, 8)
++        and q_input.shape[0] in native_idx_rows
+         and q_input.shape[1] == 1280
+         and weight.shape == (4096, 1280)
+         and x_scale.shape == (q_input.shape[0], 40)
+@@ -1713,6 +1738,35 @@ def triton_w8a8_block_fp8_linear(
+         from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_idx_wqb_gemv
+ 
+         output = native_idx_wqb_gemv(q_input, x_scale, weight, weight_scale)
++    elif (
++        native_gemv_rows
++        and _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape[0] in native_rows
++        and weight.ndim == 2
++        and tuple(weight.shape) in native_table
++        and q_input.shape[1] == weight.shape[1]
++        and x_scale.shape == (q_input.shape[0], weight.shape[1] // 32)
++        and weight_scale.shape == (weight.shape[0] // 32, weight.shape[1] // 32)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    ):
++        # Generic opt-in for block-FP8 projections without a per-shape flag (DSpark draft wq_a / wkv /
++        # main_proj, ...): any shape of the explicit PROJECTION_BLOCK_K table, one to eight rows.
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import (
++            native_gemv_rows as native_gemv_rows_kernel,
++        )
++
++        output = native_gemv_rows_kernel(q_input, x_scale, weight, weight_scale)
+     else:
+         output = w8a8_block_fp8_matmul_triton(
+             q_input, weight, x_scale, weight_scale, block_size, output_dtype=output_dtype
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -3290,11 +3290,13 @@ class DeepseekV4DecoderLayer(nn.Module):
+             return mhc_post(x, residual, post, comb)
+ 
+         elif _is_hip and not _use_aiter:
++            from sglang.kernels.ops.gemm.dsv41_native_rows import hc_post_native
++
+             if (
+                 getattr(self.config, "model_type", None) == "deepseek_v41"
+                 and self.hc_pre_from_prev_sublayer
+                 and self.hc_mult == 4 and self.hidden_size == 5120
+-                and x.ndim == 2 and x.shape[0] in (1, 2, 4, 512, 1306, 1536) and x.shape[1] == 5120
++                and x.ndim == 2 and hc_post_native(x.shape[0]) and x.shape[1] == 5120
+                 and residual.shape == (x.shape[0], 4, 5120)
+                 and post.shape == (x.shape[0], 4)
+                 and comb.shape == (x.shape[0], 4, 4)

@@ -1,0 +1,170 @@
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1469,6 +1469,12 @@
+     return gemv_rows(), idx_wqb_rows(), PROJECTION_BLOCK_K
+ 
+ 
++def _dsv41_wmma_gemv_serves(shape, rows: int) -> bool:
++    """SGLANG_DSV41_WMMA_GEMV=1 and the WMMA decode GEMV covers this projection shape and row count."""
++    from sglang.kernels.ops.gemm import dsv41_wmma_gemv
++
++    return dsv41_wmma_gemv.enabled() and dsv41_wmma_gemv.serves(shape, rows)
++
+ def triton_w8a8_block_fp8_linear(
+     input: torch.Tensor,
+     weight: torch.Tensor,
+@@ -1514,6 +1520,39 @@
+             )
+ 
+     if (
++        (
++            engram_wkv_c1
++            or native_wob_c1
++            or native_wqkv_a_c1
++            or native_wqb_c1
++            or native_v41_shared is not None
++            or native_idx_wqb
++        )
++        and _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.ndim == 2
++        and weight.ndim == 2
++        and _dsv41_wmma_gemv_serves(tuple(weight.shape), q_input.shape[0])
++        and q_input.shape[1] == weight.shape[1]
++        and x_scale.shape == (q_input.shape[0], weight.shape[1] // 32)
++        and weight_scale.shape == (weight.shape[0] // 32, weight.shape[1] // 32)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    ):
++        # Flagged target projections at 2..8 rows (SGLANG_DSV41_WMMA_GEMV=1): WMMA decode GEMV, see dsv41_wmma_gemv.
++        from sglang.kernels.ops.gemm.dsv41_wmma_gemv import wmma_gemv
++
++        output = wmma_gemv(q_input, x_scale, weight, weight_scale)
++    elif (
+         engram_wkv_c1
+         and _is_hip
+         and act_scale_ue8m0
+--- /dev/null
++++ b/sglang/kernels/ops/gemm/dsv41_wmma_gemv.py
+@@ -0,0 +1,112 @@
++"""WMMA decode GEMV for the gfx1151 DeepSeek-V4.1 block-FP8 projections (2..8 token rows).
++
++    y[m, n] = sum_g qs[m, g] * ws[n // 32, g] * sum_{k in g} q[m, k] * w[n, k]   (E4M3FN q and w, 32-wide groups)
++
++The native GEMVs (``deepseek_v41_gemv``) decode E4M3 to fp32 and run the token products on the vector ALUs, so their cost
++grows with the row count: 70-115 GB/s at eight rows on the decode shapes. Here each 32-group of every row is one fp16 WMMA
++dot on a 16-row tile (rows padded with zeros), so the arithmetic is the matrix unit's and the kernel streams the weight at
++150-205 GB/s whatever the row count (2026-10-05, strix-2, X-deploy/gemv-wmma).
++
++E4M3FN -> fp16 is a branch-free bit move: the seven magnitude bits shifted left by seven are an fp16 value of exactly
++value * 2**-8 for every finite code, subnormals included (E4M3 exponent bias 7 vs fp16 bias 15); the 2**16 of the two
++operands is folded into the group scales. NaN codes (0x7f/0xff), which block-FP8 weights and the clamped activation
++quantiser never produce, are not preserved. The weight walk along K is rotated per output block, so programs do not all
++hit one DRAM channel when the row stride is a power of two (wo_b, K = 2048). Split-K partials are summed in a fixed order:
++deterministic, and every row uses the same configuration for every row count, so a row's result does not depend on how
++many rows are in the call (2..8). The summation order differs from the native kernels: not bitwise with them.
++
++``SGLANG_DSV41_WMMA_GEMV=1`` enables it for the shapes and row counts of ``POLICY``.
++"""
++import functools
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++# (N, K): (BLOCK_N, K splits, 32-groups per iteration, warps, stages, minimum rows). Measured per shape over 1, 2, 4 and 8
++# rows; the native kernel stays at one row everywhere and at up to four rows for the Engram projection, where it is faster.
++POLICY = {
++    (1792, 5120): (64, 4, 4, 4, 2, 2),   # wqkv_a
++    (8192, 1280): (64, 1, 2, 4, 2, 2),   # wq_b
++    (5120, 2048): (64, 1, 4, 4, 2, 2),   # wo_b
++    (1152, 5120): (64, 8, 4, 4, 2, 2),   # shared expert gate/up
++    (5120, 576): (64, 3, 2, 4, 2, 2),    # shared expert down
++    (4096, 1280): (64, 2, 4, 4, 2, 2),   # indexer wq_b
++    (25600, 6144): (64, 1, 4, 4, 2, 5),  # Engram wkv
++}
++MAX_ROWS = 8
++BLOCK_M = 16
++
++
++@functools.lru_cache(maxsize=None)
++def enabled() -> bool:
++    return os.environ.get("SGLANG_DSV41_WMMA_GEMV", "0") == "1"
++
++
++def serves(shape, rows: int) -> bool:
++    """Whether the WMMA GEMV takes ``rows`` token rows of the projection with weight ``shape`` (N, K)."""
++    cfg = POLICY.get(tuple(shape))
++    return cfg is not None and cfg[5] <= rows <= MAX_ROWS
++
++
++@triton.jit
++def _e4m3_to_f16_scaled(code_u8):
++    code = code_u8.to(tl.uint16)
++    bits = ((code & 0x7F) << 7) | ((code & 0x80) << 8)
++    return bits.to(tl.float16, bitcast=True)
++
++
++@triton.jit
++def _wmma_fp8_gemv_partial(Q, QS, W, WS, P, M, N: tl.constexpr, K: tl.constexpr, K_SPLIT: tl.constexpr,
++                           BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUPS: tl.constexpr):
++    pid_n = tl.program_id(0)
++    pid_k = tl.program_id(1)
++    offs_m = tl.arange(0, BLOCK_M)
++    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_k = tl.arange(0, 32)
++    m_mask = offs_m < M
++    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
++    k_begin = pid_k * K_SPLIT
++    STEP: tl.constexpr = 32 * GROUPS
++    ITERS: tl.constexpr = K_SPLIT // STEP
++    for it in range(ITERS):
++        k0 = k_begin + ((it + pid_n) % ITERS) * STEP
++        for j in tl.static_range(GROUPS):
++            kk = k0 + j * 32
++            q = tl.load(Q + offs_m[:, None] * K + kk + offs_k[None, :], mask=m_mask[:, None], other=0)
++            w = tl.load(W + offs_n[:, None] * K + kk + offs_k[None, :])
++            part = tl.dot(_e4m3_to_f16_scaled(q), tl.trans(_e4m3_to_f16_scaled(w)), out_dtype=tl.float32)
++            g = kk // 32
++            sq = tl.load(QS + offs_m * (K // 32) + g, mask=m_mask, other=0.0)
++            sw = tl.load(WS + (offs_n // 32) * (K // 32) + g)
++            acc += part * (sq[:, None] * 65536.0) * sw[None, :]
++    tl.store(P + pid_k * BLOCK_M * N + offs_m[:, None] * N + offs_n[None, :], acc)
++
++
++@triton.jit
++def _sum_partials(P, Y, M, N: tl.constexpr, SPLITS: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK: tl.constexpr):
++    pid = tl.program_id(0)
++    offs = pid * BLOCK + tl.arange(0, BLOCK)
++    live = offs < M * N
++    acc = tl.zeros((BLOCK,), tl.float32)
++    for s in tl.static_range(SPLITS):
++        acc += tl.load(P + s * BLOCK_M * N + offs, mask=live, other=0.0)
++    tl.store(Y + offs, acc.to(tl.bfloat16), mask=live)
++
++
++def wmma_gemv(q, qs, w, ws):
++    """``q [m,K] E4M3FN``, ``qs [m,K/32] f32``, ``w [N,K] E4M3FN``, ``ws [N/32,K/32] f32`` -> ``[m,N]`` BF16."""
++    m, k = q.shape
++    n = w.shape[0]
++    if not serves((n, k), m):
++        raise ValueError("WMMA GEMV does not serve this projection shape / row count")
++    block_n, splits, groups, warps, stages, _ = POLICY[(n, k)]
++    partial = torch.empty((splits, BLOCK_M, n), dtype=torch.float32, device=q.device)
++    _wmma_fp8_gemv_partial[(n // block_n, splits)](
++        q.view(torch.uint8), qs, w.view(torch.uint8), ws, partial, m, n, k, k // splits, BLOCK_M, block_n, groups,
++        num_warps=warps, num_stages=stages)
++    output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
++    block = 1024
++    _sum_partials[(triton.cdiv(m * n, block),)](partial, output, m, n, splits, BLOCK_M, block, num_warps=4)
++    return output

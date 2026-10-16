@@ -1,0 +1,171 @@
+--- a/sglang/srt/layers/attention/graph_variants.py
++++ b/sglang/srt/layers/attention/graph_variants.py
+@@ -122,6 +122,7 @@
+         from sglang.srt.layers.attention.deepseek_v4_backend_hip_radix import (
+             DeepseekV4HipRadixBackend,
+         )
++        from sglang.srt.layers.graph_bucket_policy import engram_capture_bs_allowed
+         from sglang.srt.model_executor.runner.base_cuda_graph_runner import (
+             get_batch_sizes_to_capture,
+         )
+@@ -151,7 +152,7 @@
+             and backend.low_ratio_candidate_span == span
+             and backend.low_ratio_identity_skip
+             and supported_width
+-            and capture_bs in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
++            and engram_capture_bs_allowed(capture_bs)
+             and capture_bs[-1] * captured_req_width <= 8
+         )
+     if not (
+--- a/sglang/srt/layers/engram_graph_prestage.py
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -12,18 +12,30 @@
+ 
+ 
+ class NativeEngramGraphPrestage:
+-    def __init__(self, model, max_bs: int, device, *, req_width: int = 1):
+-        if max_bs not in (1, 2, 4, 8) or model.engram_hasher is None:
+-            raise ValueError(
+-                "Engram graph prestage requires max_bs 1, 2, 4, or 8 and a hasher"
+-            )
++    def __init__(
++        self, model, max_bs: int, device, *, req_width: int = 1, capture_bs=None
++    ):
++        if capture_bs is None:
++            if max_bs not in (1, 2, 4, 8) or model.engram_hasher is None:
++                raise ValueError(
++                    "Engram graph prestage requires max_bs 1, 2, 4, or 8 and a hasher"
++                )
++            capture_bs = tuple(bs for bs in (1, 2, 4, 8) if bs <= max_bs)
++        else:
++            # The runner's own capture list: a power-of-two prefix, or an exact
++            # [1..n] ladder when SGLANG_DSV41_EXACT_GRAPH_BUCKETS=1.
++            from sglang.srt.layers.graph_bucket_policy import prestage_capture_bs
++
++            capture_bs = prestage_capture_bs(max_bs, capture_bs)
++            if model.engram_hasher is None:
++                raise ValueError("Engram graph prestage requires a hasher")
+         if req_width not in (1, 2, 4) or max_bs * req_width > 8:
+             raise ValueError(
+                 "Engram graphs require width 1/2/4 and at most 8 token rows"
+             )
+         self.req_width = req_width
+         max_rows = max_bs * req_width
+-        self.capture_bs = tuple(bs for bs in (1, 2, 4, 8) if bs <= max_bs)
++        self.capture_bs = capture_bs
+         layers = {}
+         for layer in model.layers:
+             engram = getattr(layer, "engram", None)
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -340,6 +340,9 @@
+                 for layer in inner_model.layers
+             )
+             if file_engram:
++                from sglang.srt.layers.graph_bucket_policy import (
++                    engram_capture_bs_allowed,
++                )
+                 from sglang.srt.speculative.ragged_verify import (
+                     RaggedVerifyMode,
+                     read_ragged_verify_mode,
+@@ -360,7 +363,7 @@
+                 if (
+                     not (engram_decode or engram_verify)
+                     or self.max_bs * self.captured_req_width > 8
+-                    or self.capture_bs not in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
++                    or not engram_capture_bs_allowed(self.capture_bs)
+                     or self.enable_pdmux
+                     or self.enable_two_batch_overlap
+                     or get_parallel().tp_size != 4
+@@ -370,7 +373,8 @@
+                 ):
+                     raise ValueError(
+                         "file-backed Engram graphs require TP4/PP1/DP1/CP1, one compute "
+-                        "stream, prefix [1]/[1,2]/[1,2,4]/[1,2,4,8] request buckets, "
++                        "stream, prefix [1]/[1,2]/[1,2,4]/[1,2,4,8] request buckets "
++                        "(or exact [1..n] buckets with SGLANG_DSV41_EXACT_GRAPH_BUCKETS=1), "
+                         "and at most 8 token rows: decode width 1 or static DSpark "
+                         "target verification width 2/4"
+                     )
+@@ -379,6 +383,7 @@
+                     self.max_bs,
+                     self.device,
+                     req_width=self.captured_req_width,
++                    capture_bs=tuple(self.capture_bs),
+                 )
+         if KTRANSFORMERS_AVAILABLE:
+             KTMoEWrapper.set_capture_batch_sizes(self.capture_bs)
+--- /dev/null
++++ b/sglang/srt/layers/graph_bucket_policy.py
+@@ -0,0 +1,71 @@
++"""Which decode graph bucket lists the file-backed Engram graphs accept.
++
++The qualified default is a power-of-two prefix ladder: [1], [1,2], [1,2,4] or
++[1,2,4,8].  A batch between two captured sizes then replays the next larger
++bucket and its padding rows are computed (and, before the live-row mask, routed
++to experts) like any other row.
++
++``SGLANG_DSV41_EXACT_GRAPH_BUCKETS=1`` additionally admits the exact ladders
++[1..n], 1 <= n <= 8: every raw batch size 1..n has a graph of its own size, so
++no replay ever carries padding rows.  Exact ladders are never inferred from any
++other setting; with the variable unset every function below reproduces the
++installed behaviour.  Row counts are capped by the callers (the Engram stagers
++hold at most eight token rows).
++
++Pure Python on purpose: the CPU regressions load this file by path.
++"""
++
++import os
++
++ENV_EXACT_BUCKETS = "SGLANG_DSV41_EXACT_GRAPH_BUCKETS"
++MAX_EXACT_BS = 8
++LEGACY_PREFIX_LADDERS = ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
++
++_OFF = ("", "0", "false", "off", "no")
++
++
++def exact_graph_buckets_enabled() -> bool:
++    """True when the operator explicitly asked for exact [1..n] graph buckets."""
++    return os.environ.get(ENV_EXACT_BUCKETS, "").strip().lower() not in _OFF
++
++
++def is_exact_ladder(capture_bs) -> bool:
++    """capture_bs == [1, 2, ..., n] with 1 <= n <= MAX_EXACT_BS."""
++    buckets = list(capture_bs)
++    return 1 <= len(buckets) <= MAX_EXACT_BS and buckets == list(
++        range(1, len(buckets) + 1)
++    )
++
++
++def engram_capture_bs_allowed(capture_bs) -> bool:
++    """Whether the Engram graph stagers may serve exactly this capture list."""
++    buckets = list(capture_bs)
++    if buckets in [list(ladder) for ladder in LEGACY_PREFIX_LADDERS]:
++        return True
++    return exact_graph_buckets_enabled() and is_exact_ladder(buckets)
++
++
++def prestage_capture_bs(max_bs: int, capture_bs=None) -> tuple:
++    """The prestage's bucket tuple for the runner's capture list.
++
++    ``capture_bs=None`` is the installed derivation (power-of-two prefix up to
++    ``max_bs``, which must itself be 1/2/4/8).  An explicit list must be one the
++    runner accepts and must end at ``max_bs``; a legacy ladder gives the same
++    tuple the installed derivation does.
++    """
++    if capture_bs is None:
++        if max_bs not in (1, 2, 4, 8):
++            raise ValueError("Engram graph prestage requires max_bs 1, 2, 4, or 8")
++        return tuple(bs for bs in (1, 2, 4, 8) if bs <= max_bs)
++    buckets = tuple(int(bs) for bs in capture_bs)
++    if (
++        not engram_capture_bs_allowed(buckets)
++        or buckets[-1] != max_bs
++        or not 1 <= max_bs <= MAX_EXACT_BS
++    ):
++        raise ValueError(
++            "Engram graph prestage requires a prefix [1]/[1,2]/[1,2,4]/[1,2,4,8] "
++            f"capture list (or an exact [1..n] list when {ENV_EXACT_BUCKETS}=1) "
++            "that ends at max_bs"
++        )
++    return buckets

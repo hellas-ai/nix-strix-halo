@@ -1,0 +1,475 @@
+diff --git a/sglang/kernels/ops/layernorm/native_rmsnorm_decode.py b/sglang/kernels/ops/layernorm/native_rmsnorm_decode.py
+new file mode 100644
+index 0000000..e2e10b3
+--- /dev/null
++++ b/sglang/kernels/ops/layernorm/native_rmsnorm_decode.py
+@@ -0,0 +1,304 @@
++"""Single-launch decode RMSNorm for gfx1151 that reproduces the torch chain bitwise.
++
++``RMSNorm.forward_native`` (the path the HIP build takes when vLLM is absent) runs
++
++    x.float(); x.pow(2).mean(-1); + eps; rsqrt; x * r; (. * weight); .to(bf16)
++
++as eight eager kernels.  The weight multiply mixes FP32 with a BF16 weight, so
++ATen routes it to ``vectorized_templated_elementwise_kernel``: its HIP launch
++config is 512 threads x 32 elements per block (16384 elements), so every
++decode-sized call is a single partial block that runs the naive unrolled tail
++with a dynamic-dtype ``fetch_and_cast`` load per element.  Those loads cannot be
++batched, so a 5120-wide call costs ~45 us and a 1280-wide call ~16 us.
++
++This kernel does the whole chain in one launch per call.  Every operation is the
++same IEEE FP32 operation as the torch chain, except that ``torch.rsqrt`` of a
++FP32 value is evaluated on this HIP build as ``(float)rsqrt((double)x)`` (FP64
++``v_rsq_f64`` plus the OCML refinement, checked in the shipped gfx1151 code
++object), so the kernel does the same through Triton's FP64 rsqrt rather than the
++1-ulp ``v_rsq_f32``.  The only reduction is the mean of
++squares, and its summation tree is the ATen ``reduce_kernel`` tree rebuilt
++explicitly (see ``torch_mean_block_width``), including its dependence on the
++number of rows: ATen sizes the thread block as (width, height) with
++width * height <= 512, so the per-row tree changes with the batch size.  With
++``tree="match"`` (default) each batch size reproduces what the deployed torch
++chain computes for that batch size; ``tree="invariant"`` uses the one-row tree
++for every batch size, so a row's result never depends on its batch.
++"""
++
++import functools
++import logging
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++logger = logging.getLogger(__name__)
++
++_ENV_DISABLE = "SGLANG_DSV41_NATIVE_RMSNORM"
++_ENV_TREE = "SGLANG_DSV41_NATIVE_RMSNORM_TREE"
++
++# Widths exercised by the V4.1 decode path (and checked bitwise by
++# tests/rmsnorm-decode.py).  Anything else keeps the torch chain.
++SUPPORTED_WIDTHS = (128, 512, 1280, 5120)
++MAX_ROWS = 16
++
++
++def _last_pow2(n: int) -> int:
++    return 1 << (n.bit_length() - 1)
++
++
++def torch_mean_block_width(rows: int, width: int) -> "int | None":
++    """Thread-block width ATen uses for ``mean(-1)`` of a fp32 ``[rows, width]``.
++
++    Mirrors ``setReduceConfig`` / ``ReduceConfig::set_block_dimension`` in
++    ATen/native/hip/Reduce.cuh for a contiguous fp32 input reduced over its last
++    dimension (vt0 = input_vec_size = 4, 512 max threads, wave32).  Returns
++    ``None`` when ATen would split the input across warps or blocks (a different
++    tree) -- the caller must then keep the torch chain.
++    """
++    if width < 128 or width % 4:
++        return None
++    max_threads, warp, vec = 512, 32, 4
++    dim0 = width // vec  # vectorized along the input
++    dim1 = rows
++    dim0_pow2 = _last_pow2(dim0) if dim0 < max_threads else max_threads
++    dim1_pow2 = _last_pow2(dim1) if dim1 < max_threads else max_threads
++    block_width = min(dim0_pow2, warp)
++    block_height = min(dim1_pow2, max_threads // block_width)
++    block_width = min(dim0_pow2, max_threads // block_height)
++    values_per_thread = -(-width // block_width)
++    if values_per_thread >= min(block_height * 16, 256):
++        return None  # ATen would add a block-y (or CTA) reduction stage
++    return block_width
++
++
++@triton.jit
++def _fold(v, OFFSET: tl.constexpr):
++    # v[t] + v[t + OFFSET]: ATen's shared-memory stage of block_x_reduce.
++    return tl.sum(tl.reshape(v, (2, OFFSET)), axis=0)
++
++
++@triton.jit
++def _adjacent(v, HALF: tl.constexpr):
++    # v[2i] + v[2i + 1]: one shfl_down round (offsets 1, 2, 4, ...) for lane 0.
++    return tl.sum(tl.reshape(v, (HALF, 2)), axis=1)
++
++
++@triton.jit
++def _rmsnorm_decode_kernel(
++    X,
++    W,
++    Y,
++    SR,
++    N: tl.constexpr,
++    BW: tl.constexpr,
++    ITERS: tl.constexpr,
++    TILE: tl.constexpr,
++    FACTOR: tl.constexpr,
++    EPS: tl.constexpr,
++):
++    row = tl.program_id(0)
++    lane = tl.arange(0, BW)
++    vectors: tl.constexpr = N // 4
++    a0 = tl.zeros((BW,), dtype=tl.float32)
++    a1 = tl.zeros((BW,), dtype=tl.float32)
++    a2 = tl.zeros((BW,), dtype=tl.float32)
++    a3 = tl.zeros((BW,), dtype=tl.float32)
++    # Thread t accumulates 4-element vectors t, t + BW, ... into four separate
++    # accumulators (ATen input_vectorized_thread_reduce_impl).
++    for j in tl.static_range(ITERS):
++        v = lane + j * BW
++        ok = v < vectors
++        base = X + row * SR + v * 4
++        x0 = tl.load(base, mask=ok, other=0.0).to(tl.float32)
++        x1 = tl.load(base + 1, mask=ok, other=0.0).to(tl.float32)
++        x2 = tl.load(base + 2, mask=ok, other=0.0).to(tl.float32)
++        x3 = tl.load(base + 3, mask=ok, other=0.0).to(tl.float32)
++        a0 = a0 + x0 * x0
++        a1 = a1 + x1 * x1
++        a2 = a2 + x2 * x2
++        a3 = a3 + x3 * x3
++    s = ((a0 + a1) + a2) + a3
++    if BW >= 512:
++        s = _fold(s, 256)
++    if BW >= 256:
++        s = _fold(s, 128)
++    if BW >= 128:
++        s = _fold(s, 64)
++    if BW >= 64:
++        s = _fold(s, 32)
++    if BW >= 32:
++        s = _adjacent(s, 16)
++    if BW >= 16:
++        s = _adjacent(s, 8)
++    if BW >= 8:
++        s = _adjacent(s, 4)
++    if BW >= 4:
++        s = _adjacent(s, 2)
++    if BW >= 2:
++        s = _adjacent(s, 1)
++    total = tl.sum(s, axis=0)
++    # torch.rsqrt(float) on this HIP build is (float)rsqrt((double)x): v_rsq_f64 plus the
++    # OCML refinement, not v_rsq_f32.  Triton's FP64 rsqrt expands to the same sequence.
++    inv = tl.rsqrt((total * FACTOR + EPS).to(tl.float64)).to(tl.float32)
++
++    col = tl.arange(0, TILE)
++    ok = col < N
++    x = tl.load(X + row * SR + col, mask=ok, other=0.0).to(tl.float32)
++    w = tl.load(W + col, mask=ok, other=0.0).to(tl.float32)
++    y = (x * inv) * w
++    tl.store(Y + row * N + col, y.to(tl.bfloat16), mask=ok)
++
++
++@functools.lru_cache(maxsize=None)
++def _mean_factor(width: int) -> float:
++    # ATen's MeanOps multiplies the sum by float(1) / float(width), computed in FP32.
++    one = torch.tensor(1.0, dtype=torch.float32)
++    return float(one / torch.tensor(float(width), dtype=torch.float32))
++
++
++def native_rmsnorm_enabled() -> bool:
++    return os.environ.get(_ENV_DISABLE, "1") != "0"
++
++
++def native_rmsnorm_tree() -> str:
++    tree = os.environ.get(_ENV_TREE, "match")
++    if tree not in ("match", "invariant"):
++        raise ValueError(f"{_ENV_TREE} must be 'match' or 'invariant', got {tree!r}")
++    return tree
++
++
++_GFX1151 = {}
++
++
++def _is_gfx1151(device: torch.device) -> bool:
++    key = device.index if device.index is not None else torch.cuda.current_device()
++    cached = _GFX1151.get(key)
++    if cached is None:
++        cached = bool(torch.version.hip) and (
++            torch.cuda.get_device_properties(key).gcnArchName.split(":")[0] == "gfx1151"
++        )
++        _GFX1151[key] = cached
++    return cached
++
++
++def _launch(x, weight, eps, tree, rows, width, row_stride):
++    block = torch_mean_block_width(1 if tree == "invariant" else rows, width)
++    if block is None:
++        return None
++    out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
++    _rmsnorm_decode_kernel[(rows,)](
++        x,
++        weight,
++        out,
++        row_stride,
++        width,
++        block,
++        -(-(width // 4) // block),
++        triton.next_power_of_2(width),
++        _mean_factor(width),
++        eps,
++        num_warps=4 if width <= 1280 else 8,
++        num_stages=1,
++        enable_fp_fusion=False,
++    )
++    return out
++
++
++def _torch_chain(x, weight, eps):
++    """RMSNorm.forward_native for a plain row batch (the path this kernel replaces)."""
++    y = x.to(torch.float32)
++    y = y * torch.rsqrt(y.pow(2).mean(dim=-1, keepdim=True) + eps)
++    return (y * weight).to(x.dtype)
++
++
++_CANARY = {}
++_CANARY_TRIALS = 128
++
++
++def _canary_ok(x, weight, eps, tree, rows, width) -> bool:
++    """One-time bitwise self-test of this geometry against the torch chain.
++
++    The summation tree is a model of ATen's reduce kernel for this torch/ROCm build; if a
++    runtime bump ever changes it, the first call of each (width, rows, weight dtype, tree)
++    detects the difference (a wrong tree changes the FP32 mean of 4-18% of random rows) and
++    the torch chain stays in use. Never runs under graph capture: an unverified geometry
++    keeps the torch chain until an eager call (the capture warmup) has verified it.
++    """
++    key = (x.device.index, width, rows, weight.dtype, tree)
++    ok = _CANARY.get(key)
++    if ok is None:
++        if torch.cuda.is_current_stream_capturing():
++            return False
++        try:
++            gen = torch.Generator(device=x.device)
++            gen.manual_seed(0x5EED + 977 * width + rows)
++            ok = True
++            for _ in range(_CANARY_TRIALS):
++                probe = (
++                    torch.randn(rows, width, generator=gen, device=x.device) * 3
++                ).to(torch.bfloat16)
++                got = _launch(probe, weight, eps, tree, rows, width, width)
++                if tree == "invariant":
++                    want = torch.cat(
++                        [_torch_chain(probe[r : r + 1], weight, eps) for r in range(rows)]
++                    )
++                else:
++                    want = _torch_chain(probe, weight, eps)
++                if not torch.equal(got.view(torch.int16), want.view(torch.int16)):
++                    ok = False
++                    break
++        except Exception:  # e.g. a Triton compile failure: never take the service down
++            logger.exception("native RMSNorm self-test raised; keeping the torch chain")
++            ok = False
++        _CANARY[key] = ok
++        if not ok:
++            logger.error(
++                "native RMSNorm self-test failed for width=%d rows=%d tree=%s: keeping the torch chain",
++                width, rows, tree,
++            )
++    return ok
++
++
++def native_rmsnorm_decode(
++    x: torch.Tensor, weight: torch.Tensor, eps: float, tree: "str | None" = None
++) -> "torch.Tensor | None":
++    """``(x.float() * rsqrt(mean(x.float()**2) + eps) * weight).bfloat16()``.
++
++    Returns ``None`` (caller keeps the torch chain) unless the call is a gfx1151
++    decode-sized BF16 row batch of a supported width whose torch reduction tree
++    is reproduced exactly.  ``weight`` may be BF16 or FP32.
++    """
++    if (
++        x.dtype != torch.bfloat16
++        or weight.dtype not in (torch.bfloat16, torch.float32)
++        or x.ndim < 1
++        or x.shape[-1] not in SUPPORTED_WIDTHS
++        or weight.shape != (x.shape[-1],)
++        or not x.is_cuda
++        or not weight.is_contiguous()
++        or x.device != weight.device
++        or not native_rmsnorm_enabled()
++        or not _is_gfx1151(x.device)
++    ):
++        return None
++    width = x.shape[-1]
++    rows = x.numel() // width
++    if x.is_contiguous():
++        row_stride = width
++    elif x.ndim == 2 and x.stride(1) == 1 and x.stride(0) % 8 == 0:
++        # A column slice of a fused projection output (the Q-lora slice of wqkv_a
++        # for two or more rows); torch copies it contiguous first, same values.
++        row_stride = x.stride(0)
++    else:
++        return None
++    if not 1 <= rows <= MAX_ROWS:
++        return None
++    tree = tree or native_rmsnorm_tree()
++    if torch_mean_block_width(1 if tree == "invariant" else rows, width) is None:
++        return None
++    if not _canary_ok(x, weight, eps, tree, rows, width):
++        return None
++    return _launch(x, weight, eps, tree, rows, width, row_stride)
+diff --git a/sglang/kernels/ops/layernorm/native_routed_add.py b/sglang/kernels/ops/layernorm/native_routed_add.py
+new file mode 100644
+index 0000000..6660ada
+--- /dev/null
++++ b/sglang/kernels/ops/layernorm/native_routed_add.py
+@@ -0,0 +1,74 @@
++"""In-place ``routed_fp32 += shared_bf16`` for gfx1151 decode rows.
++
++The torch form mixes FP32 and BF16 operands, so ATen launches
++``vectorized_templated_elementwise_kernel``.  Its HIP launch geometry is 512
++threads x 32 elements per block, i.e. one partial block for any decode batch,
++and the partial block loads every element through a dynamic-dtype
++``fetch_and_cast`` (about 50 us for [1, 5120]).  This kernel performs the same
++single IEEE FP32 addition ``routed + float(shared)`` per element, so the result
++is bitwise identical, and spreads it over ordinary vectorized blocks.
++"""
++
++import logging
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++logger = logging.getLogger(__name__)
++
++_ENV_DISABLE = "SGLANG_DSV41_NATIVE_ROUTED_ADD"
++MAX_ELEMENTS = 16 * 5120
++_GFX1151 = {}
++_FAILED = False
++
++
++@triton.jit
++def _add_bf16_into_fp32(Y, S, N, BLOCK: tl.constexpr):
++    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++    ok = offs < N
++    y = tl.load(Y + offs, mask=ok, other=0.0)
++    s = tl.load(S + offs, mask=ok, other=0.0).to(tl.float32)
++    tl.store(Y + offs, y + s, mask=ok)
++
++
++def _is_gfx1151(device: torch.device) -> bool:
++    key = device.index if device.index is not None else torch.cuda.current_device()
++    cached = _GFX1151.get(key)
++    if cached is None:
++        cached = bool(torch.version.hip) and (
++            torch.cuda.get_device_properties(key).gcnArchName.split(":")[0] == "gfx1151"
++        )
++        _GFX1151[key] = cached
++    return cached
++
++
++def native_routed_add_(routed: torch.Tensor, shared: torch.Tensor) -> bool:
++    """``routed += shared`` in place; False (nothing done) when not applicable."""
++    if (
++        routed.dtype != torch.float32
++        or shared.dtype != torch.bfloat16
++        or routed.shape != shared.shape
++        or not 0 < routed.numel() <= MAX_ELEMENTS
++        or not routed.is_cuda
++        or shared.device != routed.device
++        or not routed.is_contiguous()
++        or not shared.is_contiguous()
++        or os.environ.get(_ENV_DISABLE, "1") == "0"
++        or not _is_gfx1151(routed.device)
++    ):
++        return False
++    global _FAILED
++    if _FAILED:
++        return False
++    n = routed.numel()
++    try:
++        _add_bf16_into_fp32[(triton.cdiv(n, 1024),)](
++            routed, shared, n, 1024, num_warps=4, num_stages=1, enable_fp_fusion=False
++        )
++    except Exception:  # e.g. a Triton compile failure: never take the service down
++        _FAILED = True
++        logger.exception("native routed add failed; keeping the torch add")
++        return False
++    return True
+diff --git a/sglang/srt/layers/attention/dsv4/dsv41_sparse.py b/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
+index 7a32a5a..1830f08 100644
+--- a/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
++++ b/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
+@@ -64,6 +64,15 @@ class RMSNorm(nn.Module):
+             and self.weight.is_contiguous()
+         ):
+             return rmsnorm_fp32(x, self.weight, self.eps)
++        if x.is_cuda and torch.version.hip is not None:
++            # gfx1151 decode rows: bitwise the torch chain below in one launch
++            from sglang.kernels.ops.layernorm.native_rmsnorm_decode import (
++                native_rmsnorm_decode,
++            )
++
++            fused = native_rmsnorm_decode(x, self.weight, self.eps)
++            if fused is not None:
++                return fused
+         dtype = x.dtype
+         x = x.float()
+         x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)
+diff --git a/sglang/srt/layers/layernorm.py b/sglang/srt/layers/layernorm.py
+index 6a4d049..f26e203 100644
+--- a/sglang/srt/layers/layernorm.py
++++ b/sglang/srt/layers/layernorm.py
+@@ -147,6 +147,18 @@ if _is_hip:
+     except ImportError:
+         _has_rocm_triton_gemma_rms_norm = False
+ 
++
++def _native_rmsnorm_decode(x, weight, eps):
++    """gfx1151 single-launch decode RMSNorm, or None to keep the torch chain."""
++    if not _is_hip or not x.is_cuda:
++        return None
++    from sglang.kernels.ops.layernorm.native_rmsnorm_decode import (
++        native_rmsnorm_decode,
++    )
++
++    return native_rmsnorm_decode(x, weight, eps)
++
++
+ if _is_cuda:
+     # HF-semantics RMSNorm kernel (JIT-compiled).  Used when `cast_x_before_out_mul=True`
+     # (the transformers backend path) to produce outputs that are numerically identical
+@@ -750,6 +762,22 @@ class RMSNorm(BaseFusedOp):
+         post_residual_addition: Optional[torch.Tensor] = None,
+         quant_linear: Optional[nn.Module] = None,
+     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
++        # gfx1151 decode rows: one launch that is bitwise the torch chain below
++        # (the weight multiply of that chain is a single-block dynamic-cast
++        # kernel that costs 16-50 us). Returns None for every other call.
++        if (
++            residual is None
++            and post_residual_addition is None
++            and self.has_weight
++            and not self.cast_x_before_out_mul
++            and self.variance_size_override is None
++            and self.override_orig_dtype is None
++            and not is_batch_invariant_mode_enabled()
++        ):
++            fused = _native_rmsnorm_decode(x, self.weight.data, self.variance_epsilon)
++            if fused is not None:
++                return fused
++
+         # Fallback to native implementation if vllm is not available
+         if not _has_vllm_rms_norm:
+             return self.forward_native(x, residual, post_residual_addition)
+diff --git a/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py b/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py
+index 7e5f844..fc0c7d4 100644
+--- a/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py
++++ b/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py
+@@ -515,6 +515,14 @@ def maybe_fuse_routed_scale_and_shared_add(
+             return routed
+         return routed.mul_(routed_scaling_factor)
+     if shared is not None:
++        if torch.version.hip is not None and routed.is_cuda:
++            # gfx1151: same FP32 add without ATen's single-block dynamic-cast kernel
++            from sglang.kernels.ops.layernorm.native_routed_add import (
++                native_routed_add_,
++            )
++
++            if native_routed_add_(routed, shared):
++                return routed
+         routed += shared
+     return routed
+ 

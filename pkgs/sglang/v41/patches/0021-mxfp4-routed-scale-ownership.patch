@@ -1,0 +1,97 @@
+--- a/sglang/srt/layers/quantization/fp8.py
++++ b/sglang/srt/layers/quantization/fp8.py
+@@ -2895,6 +2895,15 @@
+                 2,
+             ).transpose(1, 2)
+
++    @property
++    def applies_routed_scaling_factor_on_output(self) -> bool:
++        # The portable native MXFP4 consumer returns the scaled routed sum.
++        return (
++            _is_hip
++            and self.is_fp4_expert
++            and self.runner.runner_backend.is_triton()
++        )
++
+     def apply(
+         self,
+         layer: torch.nn.Module,
+@@ -2906,7 +2915,7 @@
+         x = dispatch_output.hidden_states
+         moe_runner_config = self.moe_runner_config
+
+-        if _is_hip and self.is_fp4_expert and self.runner.runner_backend.is_triton():
++        if self.applies_routed_scaling_factor_on_output:
+             from sglang.srt.layers.moe.moe_runner.triton_utils.mxfp4_moe_amd import (
+                 fused_experts_mxfp4,
+             )
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -1068,6 +1068,11 @@
+                 return logits_and_partials
+         return self.gate(hidden_states, gemm_output_zero_allocator), None
+
++    def _experts_apply_routed_scaling_factor(self) -> bool:
++        return getattr(
++            self.experts.quant_method, "applies_routed_scaling_factor_on_output", False
++        )
++
+     def _all_reduce_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         """Post-experts all-reduce of a DeepSeek-V4 layer; the mHC post fusion state,
+         when one is active, learns whether the reduction ran here."""
+@@ -1202,7 +1207,7 @@
+             and not _is_musa
+             and not _use_aiter
+             or isinstance(self.experts.quant_method, KTEPWrapperMethod)
+-        ):
++        ) and not self._experts_apply_routed_scaling_factor():
+             final_hidden_states *= self.routed_scaling_factor
+
+         # Shared expert on alt stream, issued AFTER the main (routed) branch. See note above.
+@@ -1460,7 +1465,7 @@
+             and not _is_xpu
+             and not _use_aiter
+             or isinstance(self.experts.quant_method, KTEPWrapperMethod)
+-        ):
++        ) and not self._experts_apply_routed_scaling_factor():
+             # fused in biased_grouped_topk so we can skip here
+             final_hidden_states *= self.routed_scaling_factor
+
+@@ -1775,14 +1780,20 @@
+             x = shared_output
+             # aiter moe call will handle routed_scaling_factor in the function
+             # so add _use_aiter condition to eliminate to use self.routed_scaling_factor in add_ call
+-            if self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter:
++            if (
++                self.experts.should_fuse_routed_scaling_factor_in_topk
++                or _use_aiter
++                or self._experts_apply_routed_scaling_factor()
++            ):
+                 x.add_(final_hidden_states)
+             else:
+                 x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+             final_hidden_states = x
+         else:
+             if not (
+-                self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter
++                self.experts.should_fuse_routed_scaling_factor_in_topk
++                or _use_aiter
++                or self._experts_apply_routed_scaling_factor()
+             ):
+                 final_hidden_states *= self.routed_scaling_factor
+
+@@ -2051,12 +2062,12 @@
+
+         if (shared_output := state.pop("shared_output")) is not None:
+             x = shared_output
+-            if _use_aiter:
++            if _use_aiter or self._experts_apply_routed_scaling_factor():
+                 x.add_(final_hidden_states)
+             else:
+                 x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+             final_hidden_states = x
+-        elif _use_aiter:
++        elif _use_aiter or self._experts_apply_routed_scaling_factor():
+             # fused in aiter_biased_grouped_topk so we can skip here
+             pass
+         else:

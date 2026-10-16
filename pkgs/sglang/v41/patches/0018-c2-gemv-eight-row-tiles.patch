@@ -1,0 +1,21 @@
+--- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -162,7 +162,7 @@
+     if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
+         raise ValueError('C2 native GEMV is gfx1151-only')
+     output = torch.empty((2, n), dtype=torch.bfloat16, device=q.device)
+-    _native_c2_gemv[(n // 4,)](q, qs, w, ws, output, n, k, 4, block_k,
++    _native_c2_gemv[(n // 8,)](q, qs, w, ws, output, n, k, 8, block_k,
+                                num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
+ 
+@@ -197,7 +197,7 @@
+             q, qs, w, ws, output, n, k, 4, block_k,
+             num_warps=4, num_stages=1, enable_fp_fusion=False)
+     else:
+-        _native_c2_gemv[(n // 4,)](
+-            q, qs, w, ws, output, n, k, 4, block_k,
++        _native_c2_gemv[(n // 8,)](
++            q, qs, w, ws, output, n, k, 8, block_k,
+             num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output

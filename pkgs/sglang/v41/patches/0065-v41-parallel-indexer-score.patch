@@ -1,0 +1,55 @@
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
+@@ -7,6 +7,8 @@
+ A bounded grid scores live positions and fills the disjoint padded tail;
+ all lengths and page mappings remain device inputs during graph replay.
+ """
++
++import os
+ 
+ import torch
+ import triton
+@@ -241,6 +243,7 @@
+     HEADS: tl.constexpr,
+     WEIGHT_SCALE: tl.constexpr,
+     BLOCK: tl.constexpr,
++    PARALLEL_SCORE: tl.constexpr = False,
+ ):
+     row = tl.program_id(0)
+     length = tl.load(LENS + row)
+@@ -307,13 +310,20 @@
+                 Q, QS, K, KS, row, page, off, live, q_stride, qs_stride, 3, HEADS, BLOCK
+             )
+             dots = (d0 + d1) + (d2 + d3)
+-            score = tl.full((BLOCK,), 0, tl.float32)
+-            for head in range(HEADS):
+-                dot = tl.gather(
+-                    dots, tl.full((1, BLOCK), head, tl.int32), axis=0
+-                ).reshape((BLOCK,))
+-                weight = tl.load(W + row * w_stride + head).to(tl.float32)
+-                score += tl.maximum(dot, 0.0) * weight
++            if PARALLEL_SCORE:
++                # This changes FP32 summation order; keep it behind the model
++                # numerical gate. The unsafe-scale path below stays scalar.
++                head_ids = tl.arange(0, HEADS)
++                weight_vec = tl.load(W + row * w_stride + head_ids).to(tl.float32)
++                score = tl.sum(tl.maximum(dots, 0.0) * weight_vec[:, None], axis=0)
++            else:
++                score = tl.full((BLOCK,), 0, tl.float32)
++                for head in range(HEADS):
++                    dot = tl.gather(
++                        dots, tl.full((1, BLOCK), head, tl.int32), axis=0
++                    ).reshape((BLOCK,))
++                    weight = tl.load(W + row * w_stride + head).to(tl.float32)
++                    score += tl.maximum(dot, 0.0) * weight
+         else:
+             score = _scalar_tile(
+                 Q,
+@@ -380,5 +390,7 @@
+         BLOCK=block,
+         num_warps=4,
+         enable_fp_fusion=False,
++        **({"PARALLEL_SCORE": os.environ.get("SGLANG_DSV41_PARALLEL_INDEXER_SCORE") == "1"}
++           if heads == 32 else {}),
+     )
+     return out

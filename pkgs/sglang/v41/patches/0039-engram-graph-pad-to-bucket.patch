@@ -1,0 +1,81 @@
+--- a/sglang/srt/layers/engram_graph_prestage.py
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -2,9 +2,11 @@
+ 
+ The model's existing GPU hasher remains the sole owner of hash arithmetic and
+ request-history commits.  This module moves its two native-row reads out of the
+-captured forward.  It supports exact prefix decode buckets through C1, C2,
+-C4, or C8,
+-without row padding.
++captured forward.  It supports the prefix decode buckets C1, C2, C4 and C8.
++A batch between two captured sizes (C3 with [1,2,4]) replays the next larger
++bucket: only the live rows are hashed, committed to history and looked up; the
++padding rows of the replay hold all-zero native rows and no history, store or
++request state is touched for them.
+ """
+ 
+ import torch
+@@ -49,8 +51,10 @@
+         bs = forward_batch.batch_size
+         if (
+             not forward_batch.forward_mode.is_decode()
+-            or bs not in self.capture_bs
+-            or graph_bs != bs
++            or graph_bs not in self.capture_bs
++            or not 1 <= bs <= graph_bs
++            # Exactly the runner's rounding: the smallest captured bucket >= bs.
++            or graph_bs != min(b for b in self.capture_bs if b >= bs)
+             or forward_batch.input_ids.shape != (bs,)
+             or forward_batch.positions.shape != (bs,)
+             or forward_batch.req_pool_indices.shape != (bs,)
+@@ -58,7 +62,8 @@
+             or forward_batch.engram_packed_rows is not None
+         ):
+             raise ValueError(
+-                "Engram graph prestage requires a fresh exact configured decode bucket"
++                "Engram graph prestage requires a fresh decode batch and its "
++                "smallest captured bucket"
+             )
+ 
+         # This call also commits the canonical per-request GPU history.  Once
+@@ -82,19 +87,24 @@
+             if packed.shape != (bs * 24, ROW_BYTES):
+                 raise RuntimeError("native Engram lookup returned an invalid layout")
+             target[:bs, layer_index] = packed.reshape(bs, 24, ROW_BYTES)
+-        self.pending = (generation, bs, frame_index)
++        self.pending = (generation, bs, graph_bs, frame_index)
+         return generation
+ 
+     def install(self, forward_batch, generation: int) -> None:
+         if self.pending is None or self.pending[0] != generation:
+             raise RuntimeError("stale or missing Engram graph generation")
+-        _, bs, frame_index = self.pending
++        _, bs, graph_bs, frame_index = self.pending
+         if forward_batch.batch_size != bs or forward_batch.engram_packed_rows is not None:
+             raise RuntimeError("Engram graph batch changed after preparation")
+         if self.gpu_inflight:
+             torch.cuda.current_stream().wait_event(self.graph_done)
+             self.gpu_inflight = False
+-        self.gpu_rows[:bs].copy_(self.host_frames[frame_index][:bs], non_blocking=True)
++        # prepare() zeroed the frame before filling the live rows, so rows
++        # bs..graph_bs-1 (replay padding) are deterministic zeros, never the
++        # previous step's rows.
++        self.gpu_rows[:graph_bs].copy_(
++            self.host_frames[frame_index][:graph_bs], non_blocking=True
++        )
+         self.frame_done[frame_index].record(torch.cuda.current_stream())
+         self.frame_inflight[frame_index] = True
+         forward_batch.engram_packed_rows = self.gpu_rows[:bs]
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -702,7 +702,9 @@
+     def can_run_graph(self, forward_batch: ForwardBatch):
+         if self.engram_graph_prestage is not None and (
+             not forward_batch.forward_mode.is_decode()
+-            or forward_batch.batch_size not in self.capture_bs
++            # Between captured sizes the base runner pads to the next bucket;
++            # the prestage supplies zero rows for the padding.
++            or not 1 <= forward_batch.batch_size <= self.capture_bs[-1]
+         ):
+             return False
+         # Disable for token embedding overrides (dynamic per-request)

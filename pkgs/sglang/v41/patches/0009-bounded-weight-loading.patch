@@ -1,0 +1,85 @@
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -2,6 +2,7 @@
+ 
+ import concurrent.futures
+ import functools
++import json
+ import logging
+ import time
+ from array import array
+@@ -186,6 +187,7 @@
+     get_device,
+     get_exec,
+     get_forward,
++    get_model,
+     get_parallel,
+     get_platform,
+ )
+@@ -5616,10 +5618,20 @@
+             assert self.num_fused_shared_experts == 1
+             log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
+ 
+-        with concurrent.futures.ThreadPoolExecutor() as executor:
++        # The iterator's thread setting also governs model-side H2D copies.
++        # Bound pending copies before advancing the streaming iterator: wo_a
++        # dequantization and fused projections produce owned CPU tensors.
++        extra_config = get_model().model_loader_extra_config or {}
++        if isinstance(extra_config, str):
++            extra_config = json.loads(extra_config)
++        async_enabled = extra_config.get("enable_multithread_load", True)
++        num_threads = extra_config.get("num_threads", 8)
++        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+             futures = []
+             weight_names = []
+-            for name, loaded_weight in weights:
++            for name, loaded_weight in _bounded_weight_iterator(
++                weights, futures, max_pending=num_threads
++            ):
+                 if (
+                     self.wo_a_fp8
+                     and name.endswith(".wo_a.weight")
+@@ -5633,7 +5645,9 @@
+                         "SGLANG_OPT_FP8_WO_A_GEMM=0."
+                     )
+                 try:
+-                    use_async_loading = should_async_load(loaded_weight)
++                    use_async_loading = async_enabled and should_async_load(
++                        loaded_weight
++                    )
+ 
+                     name = self.remap_weight_name_to_dpsk_hf_format(
+                         name,
+@@ -5969,6 +5983,32 @@
+ EntryClass = [DeepseekV4ForCausalLM]
+ 
+ 
++def _bounded_weight_iterator(weights, futures, *, max_pending: int):
++    """Keep source tensors owned until their blocking copy callbacks return.
++
++    V4 submits at most one copy per yielded checkpoint tensor. Reap completed
++    copies before obtaining the next tensor, so CPU dequantization cannot run
++    arbitrarily far ahead of H2D. Worker errors propagate at the next drain;
++    the enclosing executor still joins pending copies during error unwinding.
++    """
++    if max_pending < 1:
++        raise ValueError("max_pending must be positive")
++    iterator = iter(weights)
++    while True:
++        if len(futures) >= max_pending:
++            done, pending = concurrent.futures.wait(
++                futures, return_when=concurrent.futures.FIRST_COMPLETED
++            )
++            for future in done:
++                future.result()
++            futures[:] = pending
++        try:
++            item = next(iterator)
++        except StopIteration:
++            return
++        yield item
++
++
+ def _dequant_fp8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+     from einops import rearrange
+ 

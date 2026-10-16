@@ -1,0 +1,71 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9db54d1..612c92c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -182,7 +182,7 @@ elseif(MSCCLPP_USE_CUDA)
+ 	    endif()
+     endif()
+ elseif(MSCCLPP_USE_ROCM)
+-    set(MSCCLPP_GPU_ARCHS gfx90a gfx941 gfx942)
++    set(MSCCLPP_GPU_ARCHS gfx1151)
+ endif()
+ 
+ message(STATUS "GPU architectures: ${MSCCLPP_GPU_ARCHS}")
+diff --git a/src/core/gpu_utils.cc b/src/core/gpu_utils.cc
+index 628d2dc..d1f2dc7 100644
+--- a/src/core/gpu_utils.cc
++++ b/src/core/gpu_utils.cc
+@@ -117,6 +117,16 @@ void setReadWriteMemoryAccess(void* base, size_t size) {
+   MSCCLPP_CUTHROW(cuMemSetAccess((CUdeviceptr)base, size, &accessDesc, 1));
+ }
+ 
++#if defined(MSCCLPP_USE_ROCM)
++// UMA (Strix Halo): host memory is directly accessible by the GPU and, unlike hipMalloc memory, can be registered with ibv_reg_mr.
++void* gpuCalloc(size_t bytes) {
++  AvoidCudaGraphCaptureGuard cgcGuard;
++  void* ptr;
++  MSCCLPP_CUDATHROW(hipHostMalloc(&ptr, bytes, hipHostMallocCoherent));
++  ::memset(ptr, 0, bytes);
++  return ptr;
++}
++#else
+ void* gpuCalloc(size_t bytes) {
+   AvoidCudaGraphCaptureGuard cgcGuard;
+   void* ptr;
+@@ -126,6 +136,7 @@ void* gpuCalloc(size_t bytes) {
+   MSCCLPP_CUDATHROW(cudaStreamSynchronize(stream));
+   return ptr;
+ }
++#endif
+ 
+ void* gpuCallocHost(size_t bytes, unsigned int flags) {
+   AvoidCudaGraphCaptureGuard cgcGuard;
+@@ -136,15 +147,7 @@ void* gpuCallocHost(size_t bytes, unsigned int flags) {
+ }
+ 
+ #if defined(MSCCLPP_USE_ROCM)
+-void* gpuCallocUncached(size_t bytes) {
+-  AvoidCudaGraphCaptureGuard cgcGuard;
+-  void* ptr;
+-  auto stream = gpuStreamPool()->getStream();
+-  MSCCLPP_CUDATHROW(hipExtMallocWithFlags((void**)&ptr, bytes, hipDeviceMallocUncached));
+-  MSCCLPP_CUDATHROW(cudaMemsetAsync(ptr, 0, bytes, stream));
+-  MSCCLPP_CUDATHROW(cudaStreamSynchronize(stream));
+-  return ptr;
+-}
++void* gpuCallocUncached(size_t bytes) { return gpuCalloc(bytes); }
+ #endif  // defined(MSCCLPP_USE_ROCM)
+ 
+ #if (CUDA_NVLS_API_AVAILABLE)
+@@ -233,7 +236,11 @@ void* gpuCallocPhysical(size_t bytes, size_t gran, size_t align) {
+ 
+ void gpuFree(void* ptr) {
+   AvoidCudaGraphCaptureGuard cgcGuard;
++#if defined(MSCCLPP_USE_ROCM)
++  MSCCLPP_CUDATHROW_IGNORE_TEARDOWN(hipHostFree(ptr));  // gpuCalloc hands out host memory on ROCm
++#else
+   MSCCLPP_CUDATHROW_IGNORE_TEARDOWN(cudaFree(ptr));
++#endif
+ }
+ 
+ void gpuFreeHost(void* ptr) {
