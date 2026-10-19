@@ -157,16 +157,16 @@
     "llama-cpp-spacemit": {
       "flake": false,
       "locked": {
-        "lastModified": 1791870382,
-        "narHash": "sha256-E2mFkdYO0sAN5l3dWCgfA1CcrBemo8Npe0SMEpoh5rE=",
+        "lastModified": 1792132956,
+        "narHash": "sha256-1AfctcSIiKgfRcPSuiTywnoZMrB+/6WK6TTKmPg7lMc=",
         "owner": "spacemit-com",
         "repo": "llama.cpp",
-        "rev": "51c81f90f0b7f15e13d6f10376fbc95da210104e",
+        "rev": "6df9f7504da153d49c37887f895b2aca2baf8676",
         "type": "github"
       },
       "original": {
         "owner": "spacemit-com",
-        "ref": "v0.2.2",
+        "ref": "v0.2.3",
         "repo": "llama.cpp",
         "type": "github"
       }
