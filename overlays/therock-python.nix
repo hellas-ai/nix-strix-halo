@@ -61,6 +61,16 @@ final: prev: {
           "rocm-sdk-devel" = wheels;
           "rocm-sdk-libraries-${s}" = wheels;
 
+          # Package checks must not pick up an unrelated builder GPU.  The
+          # architecture-specific hardware smokes remain separate derivations.
+          safetensors = pyprev.safetensors.overridePythonAttrs (old: {
+            preCheck = (old.preCheck or "") + ''
+              export CUDA_VISIBLE_DEVICES=-1
+              export HIP_VISIBLE_DEVICES=-1
+              export ROCR_VISIBLE_DEVICES=-1
+            '';
+          });
+
           "compressed-tensors" = pyprev."compressed-tensors".overridePythonAttrs (old: {
             doCheck = false;
             dependencies = (old.dependencies or [ ]) ++ [
