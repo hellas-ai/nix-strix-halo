@@ -1,0 +1,326 @@
+--- a/sglang/srt/layers/attention/graph_variants.py
++++ b/sglang/srt/layers/attention/graph_variants.py
+@@ -107,12 +107,11 @@
+         and not model_runner.is_draft_worker
+         and captured_req_width > 0
+     )
+-    # The native HIP radix backend already has the four decode branches below,
+-    # but gfx1151 was excluded with the gfx95-only graph gate. Keep this opt-in
+-    # to exact native capture buckets and the existing model geometry.
+-    gfx1151_native_decode = False
++    # Keep gfx1151 capture bounded to native token-row counts. DSpark verify
++    # retains per-query causal filtering; it must not use decode's identity path.
++    gfx1151_native_graph = False
+     if (
+-        capture_forward_mode == ForwardMode.DECODE
++        (capture_forward_mode == ForwardMode.DECODE or dspark_target_verify)
+         and model_runner.device == "cuda"
+         and is_hip()
+         and getattr(text_config, "model_type", None) == "deepseek_v41"
+@@ -132,24 +131,34 @@
+         span = getattr(text_config, "candidate_topk_blocks", 0) * getattr(
+             text_config, "candidate_block_size", 0
+         )
+-        gfx1151_native_decode = (
++        capture_bs = get_batch_sizes_to_capture(model_runner, captured_req_width)[0]
++        supported_width = capture_forward_mode == ForwardMode.DECODE and captured_req_width == 1
++        if dspark_target_verify:
++            from sglang.srt.speculative.ragged_verify import (
++                RaggedVerifyMode,
++                read_ragged_verify_mode,
++            )
++
++            supported_width = (
++                captured_req_width in (2, 4)
++                and read_ragged_verify_mode() is RaggedVerifyMode.STATIC
++            )
++        gfx1151_native_graph = (
+             isinstance(backend, DeepseekV4HipRadixBackend)
+             and get_parallel().tp_size == 4
+             and tuple(backend.low_ratios) == (1, 2)
+             and backend.index_topk == getattr(text_config, "index_topk", None)
+             and backend.low_ratio_candidate_span == span
+             and backend.low_ratio_identity_skip
+-            and captured_req_width == 1
+-            # Match the runner's exact qualified/proposed capture sets,
+-            # including pool/alignment filters; other sizes remain eager.
+-            and get_batch_sizes_to_capture(model_runner, captured_req_width)[0]
+-            in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
++            and supported_width
++            and capture_bs in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
++            and capture_bs[-1] * captured_req_width <= 8
+         )
+     if not (
+         (capture_forward_mode == ForwardMode.DECODE or dspark_target_verify)
+         and model_runner.device == "cuda"
+         and (
+-            (is_gfx95_supported() or gfx1151_native_decode)
++            (is_gfx95_supported() or gfx1151_native_graph)
+             if is_hip()
+             else torch.cuda.get_device_capability(model_runner.gpu_id)[0] >= 10
+         )
+--- a/sglang/srt/layers/engram_graph_prestage.py
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -1,12 +1,9 @@
+-"""Bounded decode-graph input staging for file-backed DeepSeek V4.1 Engram.
++"""Bounded graph-input staging for file-backed DeepSeek V4.1 Engram.
+ 
+-The model's existing GPU hasher remains the sole owner of hash arithmetic and
+-request-history commits.  This module moves its two native-row reads out of the
+-captured forward.  It supports the prefix decode buckets C1, C2, C4 and C8.
+-A batch between two captured sizes (C3 with [1,2,4]) replays the next larger
+-bucket: only the live rows are hashed, committed to history and looked up; the
+-padding rows of the replay hold all-zero native rows and no history, store or
+-request state is touched for them.
++The canonical hasher owns hash arithmetic and request history. Decode commits
++when hashing; fixed-width target verification only hashes, leaving commits to
++acceptance. File reads happen before graph replay, for live token rows only.
++Captured padding rows are refreshed with zeros on every replay.
+ """
+ 
+ import torch
+@@ -15,9 +12,17 @@
+ 
+ 
+ class NativeEngramGraphPrestage:
+-    def __init__(self, model, max_bs: int, device):
++    def __init__(self, model, max_bs: int, device, *, req_width: int = 1):
+         if max_bs not in (1, 2, 4, 8) or model.engram_hasher is None:
+-            raise ValueError("Engram graph prestage requires max_bs 1, 2, 4, or 8 and a hasher")
++            raise ValueError(
++                "Engram graph prestage requires max_bs 1, 2, 4, or 8 and a hasher"
++            )
++        if req_width not in (1, 2, 4) or max_bs * req_width > 8:
++            raise ValueError(
++                "Engram graphs require width 1/2/4 and at most 8 token rows"
++            )
++        self.req_width = req_width
++        max_rows = max_bs * req_width
+         self.capture_bs = tuple(bs for bs in (1, 2, 4, 8) if bs <= max_bs)
+         layers = {}
+         for layer in model.layers:
+@@ -29,12 +34,14 @@
+         self.hasher = model.engram_hasher
+         self.stores = (layers[0], layers[1])
+         self.gpu_rows = torch.zeros(
+-            (max_bs, 2, 24, ROW_BYTES), dtype=torch.uint8, device=device
++            (max_rows, 2, 24, ROW_BYTES), dtype=torch.uint8, device=device
+         )
+         # Two frames bound page-locked memory even if the next decode arrives
+         # before the previous frame's H2D copy has completed.
+         self.host_frames = [
+-            torch.empty((max_bs, 2, 24, ROW_BYTES), dtype=torch.uint8, pin_memory=True)
++            torch.empty(
++                (max_rows, 2, 24, ROW_BYTES), dtype=torch.uint8, pin_memory=True
++            )
+             for _ in range(2)
+         ]
+         self.frame_done = [torch.cuda.Event() for _ in range(2)]
+@@ -45,33 +52,52 @@
+         self.generation = 0
+         self.pending = None
+ 
++    def can_stage(self, forward_batch) -> bool:
++        """Check the raw, unpadded batch before any hash or history mutation."""
++        bs = forward_batch.batch_size
++        rows = bs * self.req_width
++        mode = forward_batch.forward_mode
++        if self.req_width == 1:
++            supported_mode = mode.is_decode()
++        else:
++            spec = forward_batch.spec_info
++            supported_mode = (
++                mode.is_target_verify()
++                and spec is not None
++                and spec.draft_token_num == self.req_width
++                and spec.num_tokens_per_req == self.req_width
++                and spec.ragged_verify_layout is None
++            )
++        return (
++            supported_mode
++            and 1 <= bs <= self.capture_bs[-1]
++            and forward_batch.input_ids.shape == (rows,)
++            and forward_batch.positions.shape == (rows,)
++            and forward_batch.req_pool_indices.shape == (bs,)
++            and forward_batch.out_cache_loc.shape == (rows,)
++            and forward_batch.engram_packed_rows is None
++        )
++
+     def prepare(self, forward_batch, graph_bs: int) -> int:
+         if self.pending is not None or self.active_generation is not None:
+             raise RuntimeError("previous Engram graph generation was not retired")
+         bs = forward_batch.batch_size
+         if (
+-            not forward_batch.forward_mode.is_decode()
++            not self.can_stage(forward_batch)
+             or graph_bs not in self.capture_bs
+-            or not 1 <= bs <= graph_bs
+-            # Exactly the runner's rounding: the smallest captured bucket >= bs.
+-            or graph_bs != min(b for b in self.capture_bs if b >= bs)
+-            or forward_batch.input_ids.shape != (bs,)
+-            or forward_batch.positions.shape != (bs,)
+-            or forward_batch.req_pool_indices.shape != (bs,)
+-            or forward_batch.out_cache_loc.shape != (bs,)
+-            or forward_batch.engram_packed_rows is not None
++            or graph_bs != next(bucket for bucket in self.capture_bs if bucket >= bs)
+         ):
+             raise ValueError(
+-                "Engram graph prestage requires a fresh decode batch and its "
+-                "smallest captured bucket"
++                "Engram graph prestage requires a fresh fixed-width batch and its next bucket"
+             )
++        rows = bs * self.req_width
+ 
+-        # This call also commits the canonical per-request GPU history.  Once
+-        # attempted, any failure must terminate the worker rather than retry.
++        # Decode hashing commits history; verify hashing does not. Fail closed
++        # after either starts, so a partial staging/replay cannot be retried.
+         self.generation += 1
+         generation = self.generation
+         ids = self.hasher(forward_batch.input_ids, forward_batch)
+-        if ids.shape != (bs, 2, 24):
++        if ids.shape != (rows, 2, 24):
+             raise RuntimeError("unexpected canonical Engram hash layout")
+         ids_cpu = ids.to(device="cpu")  # one D2H synchronization for both layers
+ 
+@@ -84,30 +110,34 @@
+         target = frame.numpy()
+         for layer_index, store in enumerate(self.stores):
+             packed = store.lookup(ids_cpu[:, layer_index].reshape(-1)).packed
+-            if packed.shape != (bs * 24, ROW_BYTES):
++            if packed.shape != (rows * 24, ROW_BYTES):
+                 raise RuntimeError("native Engram lookup returned an invalid layout")
+-            target[:bs, layer_index] = packed.reshape(bs, 24, ROW_BYTES)
+-        self.pending = (generation, bs, graph_bs, frame_index)
++            target[:rows, layer_index] = packed.reshape(rows, 24, ROW_BYTES)
++        self.pending = (generation, bs, graph_bs, frame_index, forward_batch)
+         return generation
+ 
+     def install(self, forward_batch, generation: int) -> None:
+         if self.pending is None or self.pending[0] != generation:
+             raise RuntimeError("stale or missing Engram graph generation")
+-        _, bs, graph_bs, frame_index = self.pending
+-        if forward_batch.batch_size != bs or forward_batch.engram_packed_rows is not None:
++        _, bs, graph_bs, frame_index, prepared_batch = self.pending
++        if (
++            forward_batch is not prepared_batch
++            or forward_batch.batch_size != bs
++            or not self.can_stage(forward_batch)
++        ):
+             raise RuntimeError("Engram graph batch changed after preparation")
+         if self.gpu_inflight:
+             torch.cuda.current_stream().wait_event(self.graph_done)
+             self.gpu_inflight = False
+-        # prepare() zeroed the frame before filling the live rows, so rows
+-        # bs..graph_bs-1 (replay padding) are deterministic zeros, never the
+-        # previous step's rows.
+-        self.gpu_rows[:graph_bs].copy_(
+-            self.host_frames[frame_index][:graph_bs], non_blocking=True
++        # prepare() cleared every padding token row, including all positions
++        # of padded verify requests, before filling the live token rows.
++        graph_rows = graph_bs * self.req_width
++        self.gpu_rows[:graph_rows].copy_(
++            self.host_frames[frame_index][:graph_rows], non_blocking=True
+         )
+         self.frame_done[frame_index].record(torch.cuda.current_stream())
+         self.frame_inflight[frame_index] = True
+-        forward_batch.engram_packed_rows = self.gpu_rows[:bs]
++        forward_batch.engram_packed_rows = self.gpu_rows[: bs * self.req_width]
+         self.pending = None
+         self.active_generation = generation
+ 
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -340,25 +340,45 @@
+                 for layer in inner_model.layers
+             )
+             if file_engram:
++                from sglang.srt.speculative.ragged_verify import (
++                    RaggedVerifyMode,
++                    read_ragged_verify_mode,
++                )
++
++                engram_decode = (
++                    self.capture_forward_mode == ForwardMode.DECODE
++                    and self.captured_req_width == 1
++                    and not model_runner.spec_algorithm.is_speculative()
++                )
++                engram_verify = (
++                    self.capture_forward_mode == ForwardMode.TARGET_VERIFY
++                    and model_runner.spec_algorithm.is_dspark()
++                    and not model_runner.is_draft_worker
++                    and self.captured_req_width in (2, 4)
++                    and read_ragged_verify_mode() is RaggedVerifyMode.STATIC
++                )
+                 if (
+-                    self.capture_forward_mode != ForwardMode.DECODE
+-                    or self.captured_req_width != 1
++                    not (engram_decode or engram_verify)
++                    or self.max_bs * self.captured_req_width > 8
+                     or self.capture_bs not in ([1], [1, 2], [1, 2, 4], [1, 2, 4, 8])
+                     or self.enable_pdmux
+                     or self.enable_two_batch_overlap
+-                    or model_runner.spec_algorithm.is_speculative()
+                     or get_parallel().tp_size != 4
+                     or get_parallel().pp_size != 1
+                     or get_parallel().attn_dp_size != 1
+                     or get_parallel().attn_cp_size != 1
+                 ):
+                     raise ValueError(
+-                        "file-backed Engram graphs require TP4, non-speculative DP1/CP1 "
+-                        "decode, exact prefix [1]/[1,2]/[1,2,4]/[1,2,4,8] buckets "
+-                        "and one compute stream"
++                        "file-backed Engram graphs require TP4/PP1/DP1/CP1, one compute "
++                        "stream, prefix [1]/[1,2]/[1,2,4]/[1,2,4,8] request buckets, "
++                        "and at most 8 token rows: decode width 1 or static DSpark "
++                        "target verification width 2/4"
+                     )
+                 self.engram_graph_prestage = NativeEngramGraphPrestage(
+-                    inner_model, self.max_bs, self.device
++                    inner_model,
++                    self.max_bs,
++                    self.device,
++                    req_width=self.captured_req_width,
+                 )
+         if KTRANSFORMERS_AVAILABLE:
+             KTMoEWrapper.set_capture_batch_sizes(self.capture_bs)
+@@ -701,10 +721,7 @@
+ 
+     def can_run_graph(self, forward_batch: ForwardBatch):
+         if self.engram_graph_prestage is not None and (
+-            not forward_batch.forward_mode.is_decode()
+-            # Between captured sizes the base runner pads to the next bucket;
+-            # the prestage supplies zero rows for the padding.
+-            or not 1 <= forward_batch.batch_size <= self.capture_bs[-1]
++            not self.engram_graph_prestage.can_stage(forward_batch)
+         ):
+             return False
+         # Disable for token embedding overrides (dynamic per-request)
+@@ -1051,7 +1068,7 @@
+         if self.engram_graph_prestage is not None:
+             # Capture/warmup must never run the live hasher or perform file I/O.
+             forward_batch.engram_packed_rows = (
+-                self.engram_graph_prestage.gpu_rows[:bs]
++                self.engram_graph_prestage.gpu_rows[:num_tokens]
+             )
+ 
+         # Trip the coordinator so the hisparse code path is captured into the
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -4734,10 +4734,13 @@
+         )
+         prepared_engram_rows = forward_batch.engram_packed_rows
+         if prepared_engram_rows is not None:
+-            if not forward_batch.forward_mode.is_decode() or cp_extend:
+-                raise ValueError("prepared Engram rows support decode without CP only")
++            if not (
++                forward_batch.forward_mode.is_decode()
++                or forward_batch.forward_mode.is_target_verify()
++            ) or cp_extend:
++                raise ValueError("prepared Engram rows require decode or target verify without CP")
+             if prepared_engram_rows.shape[:2] != (input_ids.shape[0], 2):
+-                raise ValueError("prepared Engram rows do not match the decode batch")
++                raise ValueError("prepared Engram rows do not match the token batch")
+         elif self.engram_hasher is not None:
+             if cp_extend:
+                 # n-gram hashing needs each token's predecessors: hash the whole prompt

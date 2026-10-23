@@ -1,0 +1,87 @@
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -2998,6 +2998,24 @@
+             )
+             return y, post.squeeze(-1), comb, norm is not None
+ 
++        if _is_hip and not _use_aiter:
++            from sglang.kernels.ops.layernorm.mhc import hc_pre
++
++            y, comb, post, norm_fused = hc_pre(
++                x.flatten(1),
++                hc_fn,
++                hc_scale,
++                hc_base,
++                self.hc_mult,
++                self.rms_norm_eps,
++                self.hc_eps,
++                self.hc_sinkhorn_iters,
++                post_mult_value=_MHC_POST_MULT_VALUE,
++                out_norm_weight=norm.weight.data if norm is not None else None,
++                out_norm_eps=norm.variance_epsilon if norm is not None else None,
++            )
++            return y, post, comb.view(-1, self.hc_mult, self.hc_mult), norm_fused
++
+         if _is_hip:
+             from aiter.ops.mhc import mhc_pre
+ 
+@@ -3140,6 +3158,11 @@
+             from sglang.kernels.ops.layernorm.mhc import mhc_post
+ 
+             return mhc_post(x, residual, post, comb)
++
++        elif _is_hip and not _use_aiter:
++            from sglang.kernels.ops.layernorm.mhc import hc_post
++
++            return hc_post(x, residual, post, comb, self.hc_mult).view_as(residual)
+ 
+         elif _is_hip:
+             from aiter.ops.mhc import mhc_post
+--- a/sglang/kernels/ops/layernorm/mhc.py
++++ b/sglang/kernels/ops/layernorm/mhc.py
+@@ -484,9 +484,9 @@
+             mixes.new_empty(b, s, hc_mult),
+             mixes.new_empty(b, s, hc_mult, hc_mult),
+         )
+-    if is_gfx1250_supported():
+-        # TileLang's CK-backed addressing doesn't compile on gfx1250; use the
+-        # Triton port. _hc_split_sinkhorn_torch is kept as a reference fallback.
++    if is_gfx1250_supported() or (_is_hip and not envs.SGLANG_USE_AITER.get()):
++        # Portable HIP mode must not enter TileLang's CK-backed path.
++        # _hc_split_sinkhorn_torch remains an independent reference fallback.
+         return _hc_split_sinkhorn_triton(
+             mixes, hc_scale, hc_base, hc_mult, sinkhorn_iters, eps
+         )
+--- a/sglang/kernels/ops/communication/all_reduce_mhc_hip.py
++++ b/sglang/kernels/ops/communication/all_reduce_mhc_hip.py
+@@ -1,14 +1,19 @@
+ """TP4 tiny-row all-reduce/post using AITER's registered peer buffers."""
+ 
++from typing import TYPE_CHECKING
++
+ import torch
+-from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce
+-from aiter.jit.core import AITER_CSRC_DIR
++
++if TYPE_CHECKING:
++    from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce
+ 
+ from sglang.kernels.jit.utils import cache_once, load_jit
+ 
+ 
+ @cache_once
+ def _all_reduce_mhc_module():
++    from aiter.jit.core import AITER_CSRC_DIR
++
+     return load_jit(
+         "all_reduce_mhc_hip",
+         cuda_files=["distributed/all_reduce_mhc_hip.cuh"],
+@@ -25,7 +30,7 @@
+     residual: torch.Tensor,
+     post: torch.Tensor,
+     comb: torch.Tensor,
+-    communicator: CustomAllreduce,
++    communicator: "CustomAllreduce",
+ ) -> torch.Tensor:
+     """TP4 all-reduce of input fused with hc_post onto residual; the kernel checks the
+     shapes (1-8 contiguous rows of DeepSeek-V4.1's hidden size)."""

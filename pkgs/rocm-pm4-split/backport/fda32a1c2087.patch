@@ -1,0 +1,235 @@
+From fda32a1c20873f8785c889ef9a4106aef89c488c Mon Sep 17 00:00:00 2001
+From: Piotr Wilkin <piotr.wilkin@syndatis.com>
+Date: Wed, 2 Sep 2026 11:17:45 +0200
+Subject: [PATCH] hip: merge collapsed graph packet batches
+
+Assisted-by: Codex
+---
+ .../clr/hipamd/src/hip_graph_internal.cpp     | 102 ++++++++++++++++++
+ projects/clr/rocclr/utils/flags.hpp           |   2 +
+ .../catch/config/configs/performance.yaml     |   1 +
+ .../graph/hipGraphCollapseCorrectness.cc      |  63 +++++++++++
+ 4 files changed, 168 insertions(+)
+
+diff --git a/projects/clr/hipamd/src/hip_graph_internal.cpp b/projects/clr/hipamd/src/hip_graph_internal.cpp
+index e258d56fb4f2..13dbab201025 100644
+--- a/projects/clr/hipamd/src/hip_graph_internal.cpp
++++ b/projects/clr/hipamd/src/hip_graph_internal.cpp
+@@ -6,6 +6,8 @@
+ 
+ #include "hip_graph_internal.hpp"
+ 
++#include <hsa/hsa.h>
++
+ #define CASE_STRING(X, C)                                                                          \
+   case X:                                                                                          \
+     case_string = #C;                                                                              \
+@@ -431,6 +433,106 @@ void GraphExecSegmented::BuildSyncPlan() {
+     collapsed_to_single_stream_ = true;
+   }
+ 
++  if (collapsed_to_single_stream_ && DEBUG_HIP_GRAPH_MERGE_COLLAPSED) {
++    std::vector<int> segment_order;
++    for (int level = 0; level <= max_dependency_level_; ++level) {
++      auto level_it = segments_per_level_.find(level);
++      if (level_it != segments_per_level_.end()) {
++        segment_order.insert(segment_order.end(), level_it->second.begin(), level_it->second.end());
++      }
++    }
++
++    bool can_merge = segment_order.size() == segments_.size();
++    for (int segment_id : segment_order) {
++      auto batch_it = segmentBatches_.find(segment_id);
++      if (segment_id < 0 || segment_id >= static_cast<int>(segments_.size()) ||
++          batch_it == segmentBatches_.end() || segments_[segment_id].child_graph_ptr != nullptr ||
++          batch_it->second.has_uncaptured_nodes || batch_it->second.packet_batches.size() != 1) {
++        can_merge = false;
++        break;
++      }
++    }
++
++    if (can_merge) {
++      Segment merged_segment;
++      merged_segment.id = 0;
++      merged_segment.dev_id = segments_.front().dev_id;
++      merged_segment.stream_id = 0;
++      merged_segment.dependency_level = 0;
++      SegmentBatch merged_segment_batch(0);
++      merged_segment_batch.packet_batches.emplace_back();
++      auto& merged_batch = merged_segment_batch.packet_batches.front();
++      bool needs_join = false;
++
++      for (size_t order_index = 0; order_index < segment_order.size(); ++order_index) {
++        const int segment_id = segment_order[order_index];
++        const auto& segment = segments_[segment_id];
++        auto& source_batch = segmentBatches_.find(segment_id)->second.packet_batches.front();
++        const size_t packet_base = merged_batch.dispatchPackets.size();
++        const size_t range_base = merged_batch.nodeRanges.size();
++
++        if (order_index != 0 && segment.segment_ids_dependencies.empty() &&
++            !source_batch.dispatchPackets.empty()) {
++          constexpr uint16_t kGraphBarrierBit = 1 << HSA_PACKET_HEADER_BARRIER;
++          uint16_t header = 0;
++          std::memcpy(&header, source_batch.dispatchPackets.front(), sizeof(header));
++          header &= ~kGraphBarrierBit;
++          std::memcpy(source_batch.dispatchPackets.front(), &header, sizeof(header));
++          needs_join = true;
++        }
++
++        merged_batch.dispatchPackets.insert(merged_batch.dispatchPackets.end(),
++                                            source_batch.dispatchPackets.begin(),
++                                            source_batch.dispatchPackets.end());
++        merged_batch.dispatchKernelNames.insert(merged_batch.dispatchKernelNames.end(),
++                                                source_batch.dispatchKernelNames.begin(),
++                                                source_batch.dispatchKernelNames.end());
++        merged_batch.dispatchMetadataPackets.insert(merged_batch.dispatchMetadataPackets.end(),
++                                                    source_batch.dispatchMetadataPackets.begin(),
++                                                    source_batch.dispatchMetadataPackets.end());
++        for (auto range : source_batch.nodeRanges) {
++          range.startIndex += packet_base;
++          merged_batch.nodeRanges.push_back(range);
++        }
++        for (const auto& [node, range_index] : source_batch.nodeToRangeIndex) {
++          merged_batch.nodeToRangeIndex[node] = range_base + range_index;
++        }
++        merged_batch.disabledNodeCount += source_batch.disabledNodeCount;
++
++        merged_segment.nodes.insert(merged_segment.nodes.end(), segment.nodes.begin(),
++                                    segment.nodes.end());
++        merged_segment_batch.node_capture_status.insert(
++            merged_segment_batch.node_capture_status.end(), segment.nodes.size(), true);
++      }
++
++      if (needs_join) {
++        uint8_t* join_barrier = device->CreateBarrierPacket();
++        sync_plan_.barrier_packets.push_back(join_barrier);
++        merged_batch.dispatchPackets.push_back(join_barrier);
++        merged_batch.dispatchKernelNames.push_back(nullptr);
++        merged_batch.dispatchMetadataPackets.push_back(nullptr);
++      }
++
++      merged_segment.first_node = merged_segment.nodes.front();
++      merged_segment.last_node = merged_segment.nodes.back();
++      segments_.clear();
++      segments_.push_back(std::move(merged_segment));
++      segmentBatches_.clear();
++      segmentBatches_.emplace(0, std::move(merged_segment_batch));
++      node_to_segment_id_.clear();
++      for (auto* node : segments_.front().nodes) {
++        node_to_segment_id_[node] = 0;
++        node->segment_id_ = 0;
++      }
++      segments_per_level_.clear();
++      segments_per_level_[0].push_back(0);
++      max_dependency_level_ = 0;
++      max_streams_ = 1;
++      sync_plan_.num_segments = 1;
++      sync_plan_.seg_to_hw_event.assign(1, -1);
++    }
++  }
++
+   // PASS 1: Assign a compact HW-event slot only to segments whose completion
+   // signal is consumed — cross-device/stream successor, or leaf when
+   // leaf-sync is required. Same-stream successors are ordered by the
+diff --git a/projects/clr/rocclr/utils/flags.hpp b/projects/clr/rocclr/utils/flags.hpp
+index 5caf9d7a1dac..7fba2fc39265 100644
+--- a/projects/clr/rocclr/utils/flags.hpp
++++ b/projects/clr/rocclr/utils/flags.hpp
+@@ -245,6 +245,8 @@ release(uint, DEBUG_HIP_FORCE_GRAPH_QUEUES, 4,                                \
+         "Forces the number of streams for the graph parallel execution")      \
+ release(uint, DEBUG_HIP_GRAPH_BATCH_SIZE, 256,                                \
+         "Number of graph nodes to batch at a time")                           \
++release(bool, DEBUG_HIP_GRAPH_MERGE_COLLAPSED, false,                         \
++        "Merge fully captured single-stream graph segments")                 \
+ release(uint, DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING, 0,                          \
+         "Segment scheduling mode (segmented path only): "                      \
+         "0=Hybrid/auto, 1=Round-robin, 2=DFS")                                \
+diff --git a/projects/hip-tests/catch/config/configs/performance.yaml b/projects/hip-tests/catch/config/configs/performance.yaml
+index 5e9608ecc28c..5f7db8c99041 100644
+--- a/projects/hip-tests/catch/config/configs/performance.yaml
++++ b/projects/hip-tests/catch/config/configs/performance.yaml
+@@ -260,5 +260,6 @@ performance:
+   Performance_hipPerfHostNumaAlloc_test_preferred_host_numa_node_on_each_GPU: *level_2
+   Performance_Graph_CollapseCorrectness: *level_2
+   Performance_Graph_DisabledBoundarySynchronization: *level_2
++  Performance_Graph_CollapsedIndependentCompletion: *level_2
+   Performance_hipPerfSharedQueueAnyOrderOverlap: *level_2
+   Performance_hipPerfSharedQueueAnyOrderOverlap_EventDependency: *level_2
+diff --git a/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc b/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
+index 776422e37008..02254e5deb1a 100644
+--- a/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
++++ b/projects/hip-tests/catch/performance/scenarios/graph/hipGraphCollapseCorrectness.cc
+@@ -47,6 +47,19 @@ __global__ void k_add(const int* x, const int* y, int* out, int n) {
+   if (i < n) out[i] = x[i] + y[i];
+ }
+ 
++__global__ void k_delay_set(int* output, int index, uint64_t count) {
++#if HT_AMD
++  const uint64_t start = wall_clock64();
++  while (wall_clock64() - start < count) {
++  }
++#else
++  const uint64_t start = clock64();
++  while (clock64() - start < count) {
++  }
++#endif
++  output[index] = 1;
++}
++
+ hipGraphNode_t AddKernel(hipGraph_t graph, std::vector<hipGraphNode_t> deps,
+                          void* func, std::vector<void*> args) {
+   hipKernelNodeParams p{};
+@@ -205,3 +218,53 @@ TEST_CASE("Performance_Graph_DisabledBoundarySynchronization") {
+   HIP_CHECK(hipFree(c));
+   HIP_CHECK(hipFree(out));
+ }
++
++TEST_CASE("Performance_Graph_CollapsedIndependentCompletion") {
++  constexpr int kNodes = 32;
++  constexpr int kIterations = 20;
++  int clock_rate = 0;
++  hipDevice_t device = 0;
++  HIP_CHECK(hipGetDevice(&device));
++#if HT_AMD
++  HIP_CHECK(hipDeviceGetAttribute(&clock_rate, hipDeviceAttributeWallClockRate, device));
++#else
++  HIP_CHECK(hipDeviceGetAttribute(&clock_rate, hipDeviceAttributeClockRate, device));
++#endif
++  const uint64_t delay = static_cast<uint64_t>(clock_rate) / 2;
++
++  int* output = nullptr;
++  HIP_CHECK(hipMalloc(&output, kNodes * sizeof(int)));
++  hipGraph_t graph{};
++  HIP_CHECK(hipGraphCreate(&graph, 0));
++  for (int i = 0; i < kNodes; ++i) {
++    uint64_t count = i + 1 == kNodes ? 0 : delay;
++    void* output_arg = output;
++    hipKernelNodeParams params{};
++    params.func = reinterpret_cast<void*>(k_delay_set);
++    params.gridDim = dim3(1);
++    params.blockDim = dim3(1);
++    void* args[] = {&output_arg, &i, &count};
++    params.kernelParams = args;
++    hipGraphNode_t node{};
++    HIP_CHECK(hipGraphAddKernelNode(&node, graph, nullptr, 0, &params));
++  }
++
++  hipGraphExec_t exec{};
++  HIP_CHECK(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
++  hipStream_t stream{};
++  HIP_CHECK(hipStreamCreate(&stream));
++  std::vector<int> host(kNodes);
++  for (int iteration = 0; iteration < kIterations; ++iteration) {
++    HIP_CHECK(hipMemsetAsync(output, 0, kNodes * sizeof(int), stream));
++    HIP_CHECK(hipGraphLaunch(exec, stream));
++    HIP_CHECK(
++        hipMemcpyAsync(host.data(), output, kNodes * sizeof(int), hipMemcpyDeviceToHost, stream));
++    HIP_CHECK(hipStreamSynchronize(stream));
++    REQUIRE(std::all_of(host.begin(), host.end(), [](int value) { return value == 1; }));
++  }
++
++  HIP_CHECK(hipStreamDestroy(stream));
++  HIP_CHECK(hipGraphExecDestroy(exec));
++  HIP_CHECK(hipGraphDestroy(graph));
++  HIP_CHECK(hipFree(output));
++}

@@ -1,0 +1,677 @@
+diff --git a/sglang/srt/models/deepseek_common/amd/deepseek_v2_hip_moe.py b/sglang/srt/models/deepseek_common/amd/deepseek_v2_hip_moe.py
+index db984f8..b93830e 100644
+--- a/sglang/srt/models/deepseek_common/amd/deepseek_v2_hip_moe.py
++++ b/sglang/srt/models/deepseek_common/amd/deepseek_v2_hip_moe.py
+@@ -36,4 +36,7 @@ def all_reduce_output(moe, hidden_states: torch.Tensor) -> torch.Tensor:
+         return hidden_states
+     if mhc is not None:
+         mhc.start_stats_before_all_reduce()
+-    return post_experts_all_reduce(hidden_states)
++    from sglang.srt.models.deepseek_common.amd.dsv41_split_overlap import split_reduce
++
++    # inside the split prefill pipeline this runs on its comm stream
++    return split_reduce(hidden_states, post_experts_all_reduce)
+diff --git a/sglang/srt/models/deepseek_common/amd/dsv41_split_overlap.py b/sglang/srt/models/deepseek_common/amd/dsv41_split_overlap.py
+new file mode 100644
+index 0000000..c4b413d
+--- /dev/null
++++ b/sglang/srt/models/deepseek_common/amd/dsv41_split_overlap.py
+@@ -0,0 +1,516 @@
++"""Two-half prefill pipeline over the early DeepSeek-V4.1 layers (opt-in, SGLANG_DSV41_PREFILL_SPLIT_OVERLAP=1).
++
++A single-request prefill chunk is split at a 128-aligned row s into halves A = [0, s) and B = [s, n). Each half runs
++the early layers (start_layer .. late_layer_start - 2, i.e. up to but not including the last KV/candidate source
++layer) with the unchanged layer code, on its own Python thread used as a coroutine: exactly one half runs at a time,
++and a half hands over to the other at each of its two TP reductions per layer (attention output, routed-expert
++output), after launching that reduction on a communication stream. So every reduction overlaps the other half's
++compute:
++
++    A attn | B attn       | A moe         | B moe         | A attn(l+1) ...
++           | SUM(A attn)  | SUM(B attn)   | SUM(A moe)    | SUM(B moe)
++
++All compute is issued, in that order, onto the caller's stream. A's attention of layer l (which writes A's rows' KV,
++SWA K/V, compressed and indexer K at the source layers) is always issued before B's attention of layer l, and A never
++reads B. Each half carries its own ForwardBatch view and attention metadata (built by the backend from that view, as
++for a chunk boundary), so the halves see what two consecutive chunks of s and n - s rows would see. Every op is
++row-local or reads the cache causally, so each row's arithmetic is the full chunk's except the reductions, which sum
++two half-size buffers instead of one (the ring reduces each element in a rank order that depends on its offset): the
++result is within the reduction's rounding, not bitwise.
++
++The last early layer and the late tail layers run unsplit on the merged rows.
++"""
++
++from __future__ import annotations
++
++import contextvars
++import copy
++import logging
++import os
++import threading
++from dataclasses import dataclass
++from typing import Callable, List, Optional
++
++import torch
++
++logger = logging.getLogger(__name__)
++
++_ENABLED = os.environ.get("SGLANG_DSV41_PREFILL_SPLIT_OVERLAP", "0") == "1"
++_MIN_ROWS = int(os.environ.get("SGLANG_DSV41_PREFILL_SPLIT_MIN_ROWS", "1024"))
++# Diagnostics: INLINE runs every reduction in place (halves still split, no overlap) to price the split itself;
++# PROFILE logs per-chunk device time of the halves' reductions (one host sync per chunk).
++_INLINE = os.environ.get("SGLANG_DSV41_PREFILL_SPLIT_INLINE", "0") == "1"
++_PROFILE = os.environ.get("SGLANG_DSV41_PREFILL_SPLIT_PROFILE", "0") == "1"
++# join (default): attention in halves, the routed experts once on the merged rows (no second weight stream), then each
++# half reduces and finishes its own rows. halves: each half runs its own experts too.
++_JOIN = os.environ.get("SGLANG_DSV41_PREFILL_SPLIT_MODE", "join") == "join"
++_COMM_PRIORITY = int(os.environ.get("SGLANG_DSV41_PREFILL_SPLIT_COMM_PRIORITY", "-1"))
++# Only full chunks whose halves land on the 768-row reduction shapes already compiled for them; merged tails stay whole.
++_ROWS = tuple(int(r) for r in os.environ.get("SGLANG_DSV41_PREFILL_SPLIT_ROWS", "1536").split(","))
++_ALIGN = 128
++_MIN_HALF = 256
++_logged = False
++_tls = threading.local()
++
++
++# ---- TP reductions: inline, or handed over to the other half ---------------------------------------------------
++
++
++def split_reduce(x: torch.Tensor, reducer: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
++    """reducer(x), unless called from a split-pipeline half: then launch it on the communication stream, let the other
++    half run until it reaches its own reduction, and return the result once this half is resumed (the compute stream
++    waits for the reduction there)."""
++    state = getattr(_tls, "state", None)
++    if state is None:
++        return reducer(x)
++    if _INLINE:
++        if _PROFILE:
++            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
++            start.record(state.main)
++            reduced = reducer(x)
++            end.record(state.main)
++            state.timings.append((start, end))
++            return reduced
++        return reducer(x)
++    ready = torch.cuda.Event(enable_timing=_PROFILE)
++    ready.record(state.main)
++    state.comm.wait_event(ready)
++    with torch.cuda.stream(state.comm):
++        reduced = reducer(x)
++    x.record_stream(state.comm)
++    reduced.record_stream(state.main)
++    done = torch.cuda.Event(enable_timing=_PROFILE)
++    done.record(state.comm)
++    if _PROFILE:
++        state.timings.append((ready, done))
++    state.coop.switch(state.h)
++    state.main.wait_event(done)
++    return reduced
++
++
++# ---- routed experts once on the merged rows ---------------------------------------------------------------------
++
++
++class _Capture:
++    __slots__ = ("partial", "reducer", "finish")
++
++    def __init__(self):
++        self.partial = None
++        self.reducer = None
++        self.finish = None
++
++
++_capture: Optional[_Capture] = None
++
++
++def moe_capture(partial: torch.Tensor, reducer, finish) -> bool:
++    """Called by the routed-expert block just before its TP reduction. Inside moe_join's merged-rows call it records
++    the unreduced output, the reduction and the post-reduction finish (applied per row range), and returns True: the
++    caller then returns the partial unchanged. Elsewhere it returns False and the caller reduces as usual."""
++    global _capture
++    if _capture is None or _capture.partial is not None:
++        return False
++    _capture.partial, _capture.reducer, _capture.finish = partial, reducer, finish
++    return True
++
++
++def moe_join_active() -> bool:
++    return _JOIN and getattr(_tls, "state", None) is not None
++
++
++@dataclass
++class _Join:
++    x: list
++    result: list
++
++
++def moe_join(x: torch.Tensor, compute) -> torch.Tensor:
++    """Routed experts for a split-pipeline half. The first half to arrive deposits its rows and hands over; the second
++    runs compute once on both halves' rows (one pass over the expert weights), launches the reduction of each half's
++    rows on the communication stream (first half first), and hands back. Each half then waits for its own rows'
++    reduction and applies the finish (shared-expert add / cast) to them, so the second half's reduction overlaps the
++    first half's next-layer attention."""
++    global _capture
++    st = _tls.state
++    h = st.h
++    join = st.join
++    join.x[h] = x
++    if join.x[1 - h] is None:
++        st.coop.switch(h)
++    else:
++        rows = (slice(0, st.split), slice(st.split, None))
++        merged = torch.cat(join.x)
++        join.x = [None, None]
++        _tls.state = None  # the merged call reduces nothing itself and must not hand over
++        _capture = _Capture()
++        try:
++            out = compute(merged, st.full_fb, st.full_ids, st.full_ids_global)
++            cap = _capture
++        finally:
++            _capture = None
++            _tls.state = st
++        if cap.partial is None:  # the block reduced in place (no deferral on this path): just hand rows back
++            join.result = [(out[r], None, r, None) for r in rows]
++        else:
++            for i, r in enumerate(rows):
++                part = cap.partial[r]
++                ready = torch.cuda.Event(enable_timing=_PROFILE)
++                ready.record(st.main)
++                st.comm.wait_event(ready)
++                _tls.state = None
++                try:
++                    with torch.cuda.stream(st.comm):
++                        reduced = cap.reducer(part)
++                finally:
++                    _tls.state = st
++                part.record_stream(st.comm)
++                reduced.record_stream(st.main)
++                done = torch.cuda.Event(enable_timing=_PROFILE)
++                done.record(st.comm)
++                if _PROFILE:
++                    st.timings.append((ready, done))
++                join.result[i] = (reduced, done, r, cap.finish)
++        st.coop.switch(h)
++    reduced, done, r, finish = join.result[h]
++    join.result[h] = None
++    if done is not None:
++        st.main.wait_event(done)
++    return finish(reduced, r) if finish is not None else reduced
++
++
++# ---- planning ---------------------------------------------------------------------------------------------------
++
++
++@dataclass
++class _Half:
++    rows: slice
++    fb: object
++    meta: object = None
++    masks: object = None
++
++
++@dataclass
++class SplitPlan:
++    split: int
++    end_layer: int
++    halves: List[_Half]
++    full_fb: object = None
++
++
++def _split_row(prefix_len: int, rows: int) -> Optional[int]:
++    """The row nearest the middle that is 128-aligned in absolute position, so neither half straddles a compressed
++    block; None when a half would be shorter than 256 rows."""
++    target = prefix_len + rows // 2
++    best = None
++    for pos in (target - target % _ALIGN, target - target % _ALIGN + _ALIGN):
++        s = pos - prefix_len
++        if _MIN_HALF <= s <= rows - _MIN_HALF and (best is None or abs(s - rows // 2) < abs(best - rows // 2)):
++            best = s
++    return best
++
++
++def plan(model, forward_batch, hidden_states, *, tail, capture_dspark, prepared_engram_rows, cp_extend) -> Optional[SplitPlan]:
++    if not _ENABLED or hidden_states is None:
++        return None
++    from sglang.srt.layers.dp_attention import get_parallel
++    from sglang.srt.layers.moe import get_moe_a2a_backend
++    from sglang.srt.model_executor.forward_batch_info import ForwardMode
++    from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context import (
++        is_in_breakable_cuda_graph,
++    )
++
++    late = getattr(model, "late_layer_start", None)
++    if late is None or tail is None:
++        return None
++    end_layer = late - 1  # the last source layer stays unsplit: the tail entry reads its full-chunk metadata
++    if end_layer - model.start_layer < 2:
++        return None
++    fb = forward_batch
++    rows = hidden_states.shape[0]
++    if (
++        fb.forward_mode != ForwardMode.EXTEND
++        or fb.batch_size != 1
++        or cp_extend
++        or prepared_engram_rows is not None
++        or rows < _MIN_ROWS
++        or (_ROWS and rows not in _ROWS)
++        or fb.extend_seq_lens_cpu is None
++        or list(fb.extend_seq_lens_cpu) != [rows]
++        or fb.extend_prefix_lens_cpu is None
++        or getattr(fb, "tbo_children", None) is not None
++        or getattr(fb, "tbo_parent_token_range", None) is not None
++        or torch.cuda.is_current_stream_capturing()
++        or is_in_breakable_cuda_graph()
++    ):
++        return None
++    par = get_parallel()
++    if not (par.tp_size == par.attn_tp_size == 4 and par.attn_dp_size == 1 and get_moe_a2a_backend().is_none()):
++        return None
++    if any(model.layers[i].hc_boundary_fused for i in range(model.start_layer, end_layer)):
++        return None  # the gfx950 fused-boundary path is not wired here
++    if capture_dspark and any(i < end_layer for i in model.dspark_layers_to_capture):
++        return None
++    prefix = int(fb.extend_prefix_lens_cpu[0])
++    s = _split_row(prefix, rows)
++    if s is None:
++        return None
++    halves = [_Half(slice(0, s), _child(fb, 0, s, prefix)), _Half(slice(s, rows), _child(fb, s, rows, prefix))]
++    return SplitPlan(split=s, end_layer=end_layer, halves=halves, full_fb=fb)
++
++
++def _child(fb, a: int, b: int, prefix: int):
++    """ForwardBatch view of extend rows [a, b) of the sole request: the same request at prefix + a, extending by b - a."""
++    child = copy.copy(fb)
++    n = b - a
++    dev = fb.seq_lens.device
++    for key in ("input_ids", "positions", "out_cache_loc"):
++        setattr(child, key, getattr(fb, key)[a:b])
++    if getattr(fb, "out_cache_loc_virtual", None) is not None:
++        child.out_cache_loc_virtual = fb.out_cache_loc_virtual[a:b]
++    seq_len = prefix + b
++    child.seq_lens = torch.tensor([seq_len], dtype=fb.seq_lens.dtype, device=dev)
++    child.seq_lens_cpu = torch.tensor([seq_len], dtype=fb.seq_lens_cpu.dtype)
++    child.seq_lens_sum = seq_len
++    child.extend_seq_lens = torch.tensor([n], dtype=fb.extend_seq_lens.dtype, device=dev)
++    child.extend_seq_lens_cpu = [n]
++    child.extend_prefix_lens = torch.tensor([prefix + a], dtype=fb.extend_prefix_lens.dtype, device=dev)
++    child.extend_prefix_lens_cpu = [prefix + a]
++    child.extend_start_loc = torch.zeros(1, dtype=fb.extend_start_loc.dtype, device=dev)
++    child.extend_num_tokens = n
++    if getattr(fb, "extend_logprob_start_lens_cpu", None) is not None:
++        child.extend_logprob_start_lens_cpu = [0]
++    if getattr(fb, "num_token_non_padded", None) is not None:
++        child.num_token_non_padded = torch.full_like(fb.num_token_non_padded, n)
++    child.global_num_token_non_padded_cpu = n
++    if getattr(fb, "mrope_positions", None) is not None:
++        child.mrope_positions = fb.mrope_positions[:, a:b]
++    return child
++
++
++# ---- attention metadata per half --------------------------------------------------------------------------------
++
++
++def _build_metadata(backend, half: _Half) -> None:
++    saved = (backend.forward_metadata, backend.candidate_masks)
++    try:
++        backend.forward_metadata = backend._build_forward_metadata(half.fb)
++        backend.init_forward_metadata_in_graph(half.fb)
++        backend._refresh_fp4_prefill_workspace(half.fb)
++        half.meta = backend.forward_metadata
++    finally:
++        backend.forward_metadata, backend.candidate_masks = saved
++
++
++def _activate(backend, meta, masks) -> None:
++    backend.forward_metadata = meta
++    backend.candidate_masks = masks
++    window = backend.token_to_kv_pool.request_window
++    if window is not None:
++        window.activate(meta.core_attn_metadata.request_window_layout)
++
++
++# ---- two halves as strictly alternating coroutines --------------------------------------------------------------
++
++
++class _Coop:
++    """Turn-taking between the two half threads: exactly one runs; switch() hands over to the other unless it has
++    finished, and activates the resumed half's attention metadata."""
++
++    def __init__(self, backend, halves):
++        self.cv = threading.Condition()
++        self.turn = 0
++        self.done = [False, False]
++        self.backend = backend
++        self.halves = halves
++
++    def _resume(self, h):
++        half = self.halves[h]
++        _activate(self.backend, half.meta, half.masks)
++
++    def wait_turn(self, h):
++        with self.cv:
++            while self.turn != h:
++                self.cv.wait()
++        self._resume(h)
++
++    def switch(self, h):
++        other = 1 - h
++        self.halves[h].masks = self.backend.candidate_masks
++        with self.cv:
++            if self.done[other]:
++                return
++            self.turn = other
++            self.cv.notify_all()
++            while self.turn != h:
++                self.cv.wait()
++        self._resume(h)
++
++    def finish(self, h):
++        self.halves[h].masks = self.backend.candidate_masks
++        with self.cv:
++            self.done[h] = True
++            self.turn = 1 - h
++            self.cv.notify_all()
++
++
++@dataclass
++class _ThreadState:
++    h: int
++    main: torch.cuda.Stream
++    comm: torch.cuda.Stream
++    coop: _Coop
++    timings: list
++    join: _Join
++    split: int
++    full_fb: object
++    full_ids: torch.Tensor
++    full_ids_global: torch.Tensor
++
++
++def _half_layers(model, plan: SplitPlan, h: int, *, positions, hidden_states, input_ids, input_ids_global, hash_ids, engram_rows):
++    """The early-layer loop of _forward_layers_hc_pre_from_prev for one half (non-fused-boundary path). At these row
++    counts no cross-layer collapsed input applies, exactly as for the full chunk, so each layer sees prev_pre only."""
++    from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
++
++    half = plan.halves[h]
++    rows = half.rows
++    fb = half.fb
++    pos, ids, ids_global = positions[rows], input_ids[rows], input_ids_global[rows]
++    hid = hidden_states[rows]
++    prev_pre = None
++    for i in range(model.start_layer, plan.end_layer):
++        layer = model.layers[i]
++        engram = layer.engram
++        if engram is not None:
++            before = hid
++            packed = engram_rows(i)
++            hid = engram(
++                hid,
++                hash_ids[rows, engram.layer_hash_index],
++                fb,
++                cp_all_tokens=False,
++                prepared_packed_rows=None if packed is None else packed[rows],
++            )
++            if model.config.model_type == "deepseek_v41" and model.config.vision_n_layers > 0:
++                hid = torch.where((ids == model.config.image_token_id)[:, None, None], before, hid)
++        with get_global_expert_distribution_recorder().with_current_layer(i):
++            hid, prev_pre = layer.forward_hc_pre_from_prev(
++                positions=pos,
++                hidden_states=hid,
++                input_ids=ids,
++                forward_batch=fb,
++                input_ids_global=ids_global,
++                prev_pre=prev_pre,
++                precomputed_attn=None,
++                next_norm=None,
++                next_input=[],
++                combined_attn=None,
++                normalized_attn=None,
++                next_combined=None,
++            )
++    return hid, prev_pre
++
++
++def run(model, plan: SplitPlan, *, positions, hidden_states, input_ids, input_ids_global, hash_ids, prefetch, capture_dspark):
++    """Run the early layers as two pipelined halves; returns the merged (hidden_states, prev_pre, None) and the layer
++    the unsplit loop continues from."""
++    global _logged
++    from sglang.srt.model_executor.forward_context import get_attn_backend
++
++    if not _logged:
++        logger.info(
++            "DSV41 split prefill pipeline active: rows=%d split=%d layers=%d..%d mode=%s",
++            hidden_states.shape[0], plan.split, model.start_layer, plan.end_layer - 1, "join" if _JOIN else "halves",
++        )
++        _logged = True
++    backend = get_attn_backend()
++    full = (backend.forward_metadata, backend.candidate_masks)
++    for half in plan.halves:
++        _build_metadata(backend, half)
++        half.masks = full[1]
++    if not hasattr(model, "_split_overlap_comm_stream"):
++        # a high-priority stream gets its own hardware queue, so the reductions run beside the compute queue without
++        # raising GPU_MAX_HW_QUEUES for every stream in the process
++        model._split_overlap_comm_stream = torch.cuda.Stream(device=hidden_states.device, priority=_COMM_PRIORITY)
++    comm = model._split_overlap_comm_stream
++    main = torch.cuda.current_stream()
++    device = hidden_states.device
++    inference = torch.is_inference_mode_enabled()
++    grad = torch.is_grad_enabled()
++
++    gathered = {}
++    gathered_lock = threading.Lock()
++
++    def engram_rows(i):
++        """Prefetched Engram rows of layer i for the whole chunk, gathered once (by the half that gets there first)."""
++        if i not in prefetch:
++            return None
++        with gathered_lock:
++            if i not in gathered:
++                engram = model.layers[i].engram
++                slots, rows_ready, fallback_rows = prefetch[i].result()
++                if slots is not None:
++                    cache = model.get_engram_row_cache(engram.layer_hash_index, engram.embed.file_store, hash_ids.device)
++                    gathered[i] = cache.gather(slots, rows_ready)
++                else:
++                    gathered[i] = fallback_rows.to(device=hash_ids.device)
++            return gathered[i]
++
++    coop = _Coop(backend, plan.halves)
++    join = _Join([None, None], [None, None])
++    timings = []
++    if _PROFILE:
++        t_start = torch.cuda.Event(enable_timing=True)
++        t_start.record(main)
++    results = [None, None]
++    errors = [None, None]
++
++    def body(h):
++        torch.cuda.set_device(device)
++        torch.cuda.set_stream(main)
++        with torch.inference_mode(inference), torch.set_grad_enabled(grad):
++            _tls.state = _ThreadState(h, main, comm, coop, timings, join, plan.split, plan.full_fb, input_ids, input_ids_global)
++            try:
++                coop.wait_turn(h)
++                results[h] = _half_layers(
++                    model,
++                    plan,
++                    h,
++                    positions=positions,
++                    hidden_states=hidden_states,
++                    input_ids=input_ids,
++                    input_ids_global=input_ids_global,
++                    hash_ids=hash_ids,
++                    engram_rows=engram_rows,
++                )
++            except BaseException as error:  # re-raised on the caller's thread
++                errors[h] = error
++            finally:
++                _tls.state = None
++                coop.finish(h)
++
++    threads = [
++        threading.Thread(target=contextvars.copy_context().run, args=(body, h), name=f"dsv41-split-{h}", daemon=True)
++        for h in (0, 1)
++    ]
++    try:
++        for t in threads:
++            t.start()
++        for t in threads:
++            t.join()
++    finally:
++        _activate(backend, full[0], full[1])
++    for error in errors:
++        if error is not None:
++            raise error
++    if _PROFILE:
++        t_end = torch.cuda.Event(enable_timing=True)
++        t_end.record(main)
++        t_end.synchronize()
++        reduce_ms = [a.elapsed_time(b) for a, b in timings]
++        logger.info(
++            "DSV41 split prefill profile: rows=%d split=%d inline=%d wall_ms=%.1f reductions=%d reduce_ms_sum=%.1f reduce_ms_max=%.2f",
++            hidden_states.shape[0], plan.split, int(_INLINE), t_start.elapsed_time(t_end), len(reduce_ms), sum(reduce_ms), max(reduce_ms) if reduce_ms else 0.0,
++        )
++    (h0, p0), (h1, p1) = results
++    return torch.cat((h0, h1)), torch.cat((p0, p1)), None, plan.end_layer
+diff --git a/sglang/srt/models/deepseek_v2.py b/sglang/srt/models/deepseek_v2.py
+index 3176eda..5080f00 100644
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -1600,27 +1600,44 @@ class DeepseekV2MoE(nn.Module):
+             )
+             self._dsv41_fused_prefill_combine_logged = True
+ 
++        # TP1 shared experts are replicated, so add them after all-reduce to
++        # avoid summing the same shared output once per TP rank.
++        replicated_shared = (
++            shared_output
++            if shared_output is not None
++            and self._shared_expert_tp1
++            and should_add_replicated_moe_output()
++            else None
++        )
++        official_routed = getattr(self.experts, "_dsv41_official_routed_policy", False)
++        if official_routed:
++            # This candidate requires the TP sum here, before the BF16 cast.
++            assert not should_skip_post_experts_all_reduce(is_tp_path=True)
++        out_dtype = hidden_states.dtype
++
++        def after_reduce(x: torch.Tensor, rows: slice = slice(None)) -> torch.Tensor:
++            if replicated_shared is not None:
++                x += replicated_shared[rows]
++            if official_routed:
++                x = x.to(out_dtype)
++            return x
++
+         if (
+             self.is_deepseek_v4
+             and self.tp_size > 1
+             and not should_skip_post_experts_all_reduce(is_tp_path=True)
+         ):
++            from sglang.srt.models.deepseek_common.amd import dsv41_split_overlap
++
++            if dsv41_split_overlap.moe_capture(
++                final_hidden_states, self._all_reduce_output, after_reduce
++            ):
++                # split prefill pipeline: each half reduces and finishes its own rows
++                return final_hidden_states
+             final_hidden_states = self._all_reduce_output(final_hidden_states)
+         else:
+             final_hidden_states = post_experts_all_reduce(final_hidden_states)
+-        # TP1 shared experts are replicated, so add them after all-reduce to
+-        # avoid summing the same shared output once per TP rank.
+-        if (
+-            shared_output is not None
+-            and self._shared_expert_tp1
+-            and should_add_replicated_moe_output()
+-        ):
+-            final_hidden_states += shared_output
+-        if getattr(self.experts, "_dsv41_official_routed_policy", False):
+-            # This candidate requires the TP sum here, before the BF16 cast.
+-            assert not should_skip_post_experts_all_reduce(is_tp_path=True)
+-            final_hidden_states = final_hidden_states.to(hidden_states.dtype)
+-        return final_hidden_states
++        return after_reduce(final_hidden_states)
+ 
+     def forward_cpu(
+         self,
+diff --git a/sglang/srt/models/deepseek_v4.py b/sglang/srt/models/deepseek_v4.py
+index 9533384..4c65495 100644
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -2755,11 +2755,19 @@ class MQALayer(MqaAttentionBase):
+         )
+         if compressed_attn:
+             if can_use_compressed_ring(o, parallel.attn_tp_group, torch.bfloat16):
+-                o = compressed_ring_all_reduce(o, parallel.attn_tp_group)
++                reduce = functools.partial(
++                    compressed_ring_all_reduce, group=parallel.attn_tp_group
++                )
+             else:
+                 # A quantization backend may change output dtype; keep the
+                 # original reduction for anything outside the BF16 envelope.
+-                o = attn_tp_all_reduce(o)
++                reduce = attn_tp_all_reduce
++            from sglang.srt.models.deepseek_common.amd.dsv41_split_overlap import (
++                split_reduce,
++            )
++
++            # inside the split prefill pipeline this runs on its comm stream
++            o = split_reduce(o, reduce)
+         if mhc is not None and mhc.overlap_only:
+             mhc.start_stats_before_all_reduce()
+             o = attn_tp_all_reduce(o)
+@@ -4232,6 +4240,16 @@ class DeepseekV4DecoderLayer(nn.Module):
+         input_ids: Optional[torch.Tensor],
+         input_ids_global: Optional[torch.Tensor],
+     ) -> torch.Tensor:
++        from sglang.srt.models.deepseek_common.amd import dsv41_split_overlap
++
++        if dsv41_split_overlap.moe_join_active():
++            # split prefill pipeline: the routed experts run once on both halves' rows
++            return dsv41_split_overlap.moe_join(
++                hidden_states,
++                lambda merged, fb, ids, ids_global: self._run_moe_ffn_dp_sync(
++                    merged, fb, input_ids=ids, input_ids_global=ids_global
++                ),
++            )
+         _use_cp = self.dsa_enable_prefill_cp and dsa_use_prefill_cp(forward_batch)
+         _use_tp_moe_gather = (
+             not _use_cp
+@@ -4991,7 +5009,35 @@ class DeepseekV4Model(nn.Module):
+         normalized_attn = None
+         # HIP: the fused boundary hands the next layer its FFN hc_post unapplied
+         pending_post = None
+-        for i in range(self.start_layer, self.end_layer):
++        first_layer = self.start_layer
++        if _is_hip:
++            from sglang.srt.models.deepseek_common.amd import dsv41_split_overlap
++
++            split = dsv41_split_overlap.plan(
++                self,
++                forward_batch,
++                hidden_states,
++                tail=tail,
++                capture_dspark=capture_dspark,
++                prepared_engram_rows=prepared_engram_rows,
++                cp_extend=cp_extend,
++            )
++            if split is not None:
++                # early layers as two pipelined halves (opt-in); merged at split.end_layer
++                hidden_states, prev_pre, pending_post, first_layer = (
++                    dsv41_split_overlap.run(
++                        self,
++                        split,
++                        positions=positions,
++                        hidden_states=hidden_states,
++                        input_ids=input_ids,
++                        input_ids_global=input_ids_global,
++                        hash_ids=hash_ids,
++                        prefetch=prefetch,
++                        capture_dspark=capture_dspark,
++                    )
++                )
++        for i in range(first_layer, self.end_layer):
+             if tail is not None and i == self.late_layer_start:
+                 combined_attn = None
+                 normalized_attn = None

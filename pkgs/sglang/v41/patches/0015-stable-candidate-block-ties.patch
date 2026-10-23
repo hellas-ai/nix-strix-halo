@@ -1,0 +1,31 @@
+--- a/sglang/kernels/ops/attention/dsv4/candidate_blocks_hip.py
++++ b/sglang/kernels/ops/attention/dsv4/candidate_blocks_hip.py
+@@ -276,7 +276,8 @@
+ ) -> CandidateBlocks:
+     """Level one over a [rows, capacity] logits rectangle, bounded by seq_lens: the topk_blocks
+     best blocks of each row, the block with its newest position always among them; as a set per
+-    row the ids equal the reference's select_candidate_blocks. Graph-safe: no host sync."""
++    row strict score winners match the reference; gfx1151 breaks equal-score ties by smaller
++    logical block ID. Graph-safe: no host sync."""
+     seq_lens = seq_lens.to(torch.int32).contiguous()
+     rows, width = logits.shape
+     device = logits.device
+@@ -303,9 +304,15 @@
+         ids = torch.empty((rows, topk_blocks), dtype=torch.int32, device=device)
+         torch.ops.sgl_kernel.fast_topk(scores, ids, block_lens, None)
+     else:
+-        picked = scores.topk(min(topk_blocks, num_blocks), dim=-1)
+-        ids = picked.indices.to(torch.int32).masked_fill(
+-            picked.values == -torch.inf, -1
++        count = min(topk_blocks, num_blocks)
++        if use_gfx1151_indexer(device):
++            # Columns are logical block IDs. Stable score sorting keeps every
++            # strict winner and chooses smaller IDs at equal-score cutoffs.
++            picked = scores.sort(dim=-1, descending=True, stable=True)
++        else:
++            picked = scores.topk(count, dim=-1)
++        ids = picked.indices[:, :count].to(torch.int32).masked_fill(
++            picked.values[:, :count] == -torch.inf, -1
+         )
+         # the gather takes the width from ids and tiles it in 256-block programs
+         ids = F.pad(ids, (0, topk_blocks - ids.shape[1]), value=-1)

@@ -1,0 +1,403 @@
+diff --git a/sglang/srt/managers/scheduler.py b/sglang/srt/managers/scheduler.py
+index 26a0c85..6e61fd2 100644
+--- a/sglang/srt/managers/scheduler.py
++++ b/sglang/srt/managers/scheduler.py
+@@ -275,6 +275,9 @@ from sglang.srt.managers.scheduler_components.recv_skipper import (
+ from sglang.srt.managers.scheduler_components.request_receiver import (
+     SchedulerRequestReceiver,
+ )
++from sglang.srt.managers.scheduler_components.timing_record import (
++    SchedulingTimingRecorder,
++)
+ from sglang.srt.managers.scheduler_components.weight_updater import (
+     SchedulerWeightUpdaterManager,
+ )
+@@ -445,6 +448,8 @@ class Scheduler(
+ 
+     # Logical-to-physical KV capacity ratio; defaults to 1 before pool init.
+     kv_shard_widening: int = 1
++    # Set by init_chunked_prefill when SGLANG_SCHED_TIMING_RECORD=1 on TP rank 0.
++    timing_record: Optional[SchedulingTimingRecorder] = None
+ 
+     # Class-level default so on_idle's stall gate works even if a fork
+     # overrides init_load_publisher (which would otherwise not set it).
+@@ -1327,6 +1332,13 @@ class Scheduler(
+         self.is_mixed_chunk = (
+             self.chunked_prefill_size is not None and get_schedule().enable_mixed_chunk
+         )
++        # Default off (SGLANG_SCHED_TIMING_RECORD=1): one log line per prefill
++        # forward on TP rank 0 splitting queue, planning, decode and forward.
++        self.timing_record = SchedulingTimingRecorder.from_env(
++            tp_rank=get_parallel().tp_rank,
++            prefill_decode_interval=self.prefill_decode_interval,
++            chunked_prefill_size=self.chunked_prefill_size,
++        )
+ 
+     def maybe_init_dynamic_chunk_sizer(self) -> None:
+         """Profile a PP prefill latency model that sizes chunks per stage."""
+@@ -1350,10 +1362,15 @@ class Scheduler(
+ 
+     def _should_defer_prefill(self) -> bool:
+         if self._prefill_decode_interval_remaining == 0:
+-            return False
+-
+-        self._prefill_decode_interval_remaining -= 1
+-        return True
++            deferred = False
++        else:
++            self._prefill_decode_interval_remaining -= 1
++            deferred = True
++        if self.timing_record is not None:
++            self.timing_record.on_defer(
++                deferred, bool(self.waiting_queue) or self.chunked_req is not None
++            )
++        return deferred
+ 
+     def _arm_prefill_decode_interval(self, batch: Optional[ScheduleBatch]) -> None:
+         if self.prefill_decode_interval == 0 or batch is None:
+@@ -3278,6 +3295,8 @@ class Scheduler(
+             self._prefetch_kvcache(req)
+             self.waiting_queue.append(req)
+             req.time_stats.set_wait_queue_entry_time()
++            if self.timing_record is not None:
++                self.timing_record.on_enqueue(req)
+             req.arrival_processed_tokens = self.processed_tokens_counter
+         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
+             self._prefetch_kvcache(req)
+@@ -3725,7 +3744,17 @@ class Scheduler(
+         elif self._should_defer_prefill():
+             new_batch = None
+         else:
+-            prefill_plan = self.get_new_batch_prefill(running_batch)
++            timing_record = self.timing_record
++            if timing_record is not None and (
++                self.waiting_queue or self.chunked_req is not None
++            ):
++                plan_t0 = timing_record.clock()
++                prefill_plan = self.get_new_batch_prefill(running_batch)
++                timing_record.on_plan(
++                    prefill_plan.batch_to_run, plan_t0, timing_record.clock()
++                )
++            else:
++                prefill_plan = self.get_new_batch_prefill(running_batch)
+             new_batch = prefill_plan.batch_to_run
+             running_batch = prefill_plan.running_batch
+ 
+@@ -4794,6 +4823,8 @@ class Scheduler(
+         # Flush async trace ops here: in overlap mode this CPU work runs while
+         # the next batch's GPU forward is in flight, giving free overlap.
+         flush_trace_batch(batch.reqs)
++        timing_record = self.timing_record
++        t_result_start = timing_record.clock() if timing_record is not None else 0.0
+         snapshot = self.publish_load_snapshot(force=batch.forward_mode.is_extend())
+         # Router-facing gauge on the dedicated PUB socket, reusing the
+         # snapshot above rather than walking the queues again.
+@@ -4817,6 +4848,15 @@ class Scheduler(
+         elif batch.forward_mode.is_idle():
+             self.batch_result_processor.process_batch_result_idle(batch, result)
+ 
++        if timing_record is not None:
++            timing_record.on_result(
++                batch,
++                t_result_start,
++                timing_record.clock(),
++                waiting=len(self.waiting_queue),
++                running=len(self.running_batch.reqs),
++            )
++
+         # Submit this batch's queued host backups before the next scheduler step.
+         self.tree_cache.flush_pending_backups()
+ 
+diff --git a/sglang/srt/managers/scheduler_components/timing_record.py b/sglang/srt/managers/scheduler_components/timing_record.py
+new file mode 100644
+index 0000000..5b01ab2
+--- /dev/null
++++ b/sglang/srt/managers/scheduler_components/timing_record.py
+@@ -0,0 +1,287 @@
++"""Default-off per-chunk scheduler timing record.
++
++Set ``SGLANG_SCHED_TIMING_RECORD=1`` to log one structured line per prefill
++forward on TP rank 0, prefixed ``SCHED_TIMING `` and followed by compact JSON.
++It prices the parts of a request's time to first token that wall-clock logs
++cannot separate: queue wait, admission and prefix planning, decode passes that
++run between chunks, other requests' chunks, and the chunk's own forward.
++
++Design constraints (Z-prefill/C-engram/SCHEDULING-TIME-SPLIT.md):
++
++* One clock domain: ``time.perf_counter`` on TP rank 0. The scheduler's own
++  ``batch.launch_ts`` is ``time.monotonic``; it is re-based into this clock.
++* No device synchronisation. Timestamps are taken where the scheduler thread
++  already is. ``process_batch_result`` runs after the forward result reached
++  the host, so ``end`` is a host completion time.
++* Nothing is logged on the decode hot path. Decode and verify passes only add
++  to cumulative counters (one clock read per pass); the counters are sampled
++  into each prefill record.
++* A mixed batch is one joint prefill+decode forward. It is labelled ``MIXED``
++  and counted as extend wall time, never split between the two.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import os
++import time
++from typing import Any, Callable, Dict, List, Optional, Tuple
++
++logger = logging.getLogger(__name__)
++
++ENV_FLAG = "SGLANG_SCHED_TIMING_RECORD"
++LINE_PREFIX = "SCHED_TIMING "
++INIT_PREFIX = "SCHED_TIMING_INIT "
++SCHEMA_VERSION = 1
++# Requests that never finish a chunk sequence (aborts) must not grow the table.
++_MAX_TRACKED_REQUESTS = 4096
++
++# (clock, defer_waiting_passes, decode_wall_s, extend_wall_s, plan_wall_s)
++_Snapshot = Tuple[float, int, float, float, float]
++
++
++def _t(value: Optional[float]) -> Optional[float]:
++    return None if not value else round(value, 6)
++
++
++class SchedulingTimingRecorder:
++    """Cumulative counters plus one record per prefill forward."""
++
++    def __init__(
++        self,
++        emit: Optional[Callable[[str], Any]] = None,
++        clock: Callable[[], float] = time.perf_counter,
++        monotonic: Callable[[], float] = time.monotonic,
++        wall: Callable[[], float] = time.time,
++    ) -> None:
++        self._emit = emit if emit is not None else logger.info
++        self.clock = clock
++        self._wall = wall
++        # batch.launch_ts is a time.monotonic() reading; express it in `clock`.
++        self._mono_offset = monotonic() - clock()
++        self.seq = 0
++        self.prev_end: Optional[float] = None
++        # _should_defer_prefill() accounting. `waiting` means the call happened
++        # while a request sat in the waiting queue or a chunked request had
++        # more chunks to run.
++        self.defer_calls = 0
++        self.defer_passes = 0
++        self.defer_waiting_passes = 0
++        # get_new_batch_prefill() while work waited: admission and prefix
++        # planning (radix match, Mooncake lookup) on the scheduler thread.
++        self.plan_calls = 0
++        self.plan_empty = 0
++        self.plan_wall_s = 0.0
++        # Busy wall time per pass, from launch (or the previous result, if
++        # later) to host completion. Idle time between passes is excluded.
++        self.decode_passes = 0
++        self.decode_wall_s = 0.0
++        self.decode_pass_max_s = 0.0
++        self.extend_passes = 0
++        self.extend_wall_s = 0.0
++        self._ref: Dict[str, Tuple[str, int, _Snapshot]] = {}
++        self.emit_init()
++
++    @classmethod
++    def from_env(
++        cls,
++        tp_rank: int,
++        prefill_decode_interval: int = 0,
++        chunked_prefill_size: Optional[int] = None,
++        environ: Optional[Dict[str, str]] = None,
++    ) -> Optional["SchedulingTimingRecorder"]:
++        """None unless enabled; only TP rank 0 records."""
++        env = os.environ if environ is None else environ
++        if env.get(ENV_FLAG) != "1" or tp_rank != 0:
++            return None
++        recorder = cls()
++        recorder.emit_config(prefill_decode_interval, chunked_prefill_size)
++        return recorder
++
++    # ------------------------------------------------------------------ init
++    def emit_init(self) -> None:
++        self._emit(
++            INIT_PREFIX
++            + json.dumps(
++                {
++                    "v": SCHEMA_VERSION,
++                    "pid": os.getpid(),
++                    "clock": "perf_counter",
++                    "wall_minus_clock": round(self._wall() - self.clock(), 6),
++                    "mono_minus_clock": round(self._mono_offset, 6),
++                },
++                separators=(",", ":"),
++            )
++        )
++
++    def emit_config(
++        self, prefill_decode_interval: int, chunked_prefill_size: Optional[int]
++    ) -> None:
++        self._emit(
++            INIT_PREFIX
++            + json.dumps(
++                {
++                    "v": SCHEMA_VERSION,
++                    "prefill_decode_interval": prefill_decode_interval,
++                    "chunked_prefill_size": chunked_prefill_size,
++                },
++                separators=(",", ":"),
++            )
++        )
++
++    # ----------------------------------------------------------------- hooks
++    def _snapshot(self, now: float) -> _Snapshot:
++        return (
++            now,
++            self.defer_waiting_passes,
++            self.decode_wall_s,
++            self.extend_wall_s,
++            self.plan_wall_s,
++        )
++
++    def on_enqueue(self, req: Any) -> None:
++        """A request entered the waiting queue (retractions re-enter)."""
++        rid = req.rid
++        if len(self._ref) >= _MAX_TRACKED_REQUESTS and rid not in self._ref:
++            self._ref.pop(next(iter(self._ref)))
++        self._ref[rid] = ("queue", 0, self._snapshot(self.clock()))
++
++    def on_defer(self, deferred: bool, work_waiting: bool) -> None:
++        self.defer_calls += 1
++        if deferred:
++            self.defer_passes += 1
++            if work_waiting:
++                self.defer_waiting_passes += 1
++
++    def on_plan(self, batch: Any, t0: float, t1: float) -> None:
++        """get_new_batch_prefill() ran while work waited."""
++        self.plan_calls += 1
++        self.plan_wall_s += t1 - t0
++        if batch is None:
++            self.plan_empty += 1
++            return
++        # Counters as of the moment the batch exists, for per-request deltas.
++        batch.sched_timing_plan = (t0, t1, self._snapshot(t1))
++
++    def on_result(
++        self,
++        batch: Any,
++        t_result_start: float,
++        t_end: float,
++        waiting: int = 0,
++        running: int = 0,
++    ) -> None:
++        """A batch's result was processed (first tokens already streamed)."""
++        mode = batch.forward_mode
++        launch_ts = getattr(batch, "launch_ts", None)
++        launch = t_result_start if launch_ts is None else launch_ts - self._mono_offset
++        prev_end = self.prev_end
++        start = launch if prev_end is None else max(launch, prev_end)
++        wall = max(0.0, t_end - start)
++        gap_before = None if prev_end is None else launch - prev_end
++
++        if mode.is_decode() or mode.is_target_verify():
++            self.prev_end = t_end
++            self.decode_passes += 1
++            self.decode_wall_s += wall
++            if wall > self.decode_pass_max_s:
++                self.decode_pass_max_s = wall
++            return
++        if mode.is_mixed():
++            kind = "MIXED"
++        elif mode.is_extend_without_speculative():
++            kind = "EXTEND"
++        else:
++            # Idle, prebuilt and other passes carry no prefill or decode work.
++            return
++        self.prev_end = t_end
++        self.extend_passes += 1
++        self.extend_wall_s += wall
++
++        plan = getattr(batch, "sched_timing_plan", None)
++        plan_snapshot = plan[2] if plan is not None else self._snapshot(launch)
++        end_snapshot = self._snapshot(t_end)
++
++        reqs: List[Dict[str, Any]] = []
++        decoding = getattr(batch, "decoding_reqs", None) or ()
++        decode_rows = 0
++        prefix_lens = batch.prefix_lens or []
++        extend_lens = batch.extend_lens or []
++        for i, req in enumerate(batch.reqs):
++            if req in decoding:
++                decode_rows += 1
++                continue
++            prefix = int(prefix_lens[i]) if i < len(prefix_lens) else None
++            extend = int(extend_lens[i]) if i < len(extend_lens) else None
++            input_len = len(req.origin_input_ids)
++            pending = (
++                None if prefix is None or extend is None else input_len - prefix - extend
++            )
++            last = pending is not None and pending <= 0
++            ref_kind, chunk_idx, ref = self._ref.get(
++                req.rid, ("none", 0, plan_snapshot)
++            )
++            ts = req.time_stats
++            reqs.append(
++                {
++                    "rid": req.rid,
++                    "health": str(req.rid).startswith("HEALTH_CHECK"),
++                    "chunk": chunk_idx,
++                    "last": last,
++                    "recv": _t(ts.scheduler_recv_time),
++                    "queue_entry": _t(ts.wait_queue_entry_time),
++                    "first_forward": _t(ts.forward_entry_time),
++                    "prefix": prefix,
++                    "ext": extend,
++                    "input": input_len,
++                    "pending": pending,
++                    "cached": req.cached_tokens,
++                    "ref": ref_kind,
++                    "ref_t": _t(ref[0]),
++                    "defer_since_ref": plan_snapshot[1] - ref[1],
++                    "decode_s_since_ref": round(plan_snapshot[2] - ref[2], 6),
++                    "extend_s_since_ref": round(plan_snapshot[3] - ref[3], 6),
++                    "plan_s_since_ref": round(plan_snapshot[4] - ref[4], 6),
++                }
++            )
++            if last:
++                self._ref.pop(req.rid, None)
++            else:
++                self._ref[req.rid] = ("prev_chunk", chunk_idx + 1, end_snapshot)
++
++        self.seq += 1
++        record = {
++            "v": SCHEMA_VERSION,
++            "n": self.seq,
++            "kind": kind,
++            "iter": batch.forward_iter,
++            "launch": _t(launch),
++            "result_start": _t(t_result_start),
++            "end": _t(t_end),
++            "wall_s": round(wall, 6),
++            "gap_before_s": None if gap_before is None else round(gap_before, 6),
++            "plan_t0": _t(plan[0]) if plan is not None else None,
++            "plan_s": round(plan[1] - plan[0], 6) if plan is not None else None,
++            "M": batch.extend_num_tokens,
++            "decode_rows": decode_rows,
++            "waiting": waiting,
++            "running": running,
++            "wall_clock_end": round(self._wall(), 3),
++            "cum": {
++                "defer_calls": self.defer_calls,
++                "defer_passes": self.defer_passes,
++                "defer_waiting": self.defer_waiting_passes,
++                "plan_calls": self.plan_calls,
++                "plan_empty": self.plan_empty,
++                "plan_s": round(self.plan_wall_s, 6),
++                "decode_passes": self.decode_passes,
++                "decode_s": round(self.decode_wall_s, 6),
++                "decode_pass_max_s": round(self.decode_pass_max_s, 6),
++                "extend_passes": self.extend_passes,
++                "extend_s": round(self.extend_wall_s, 6),
++            },
++            "reqs": reqs,
++        }
++        self.decode_pass_max_s = 0.0
++        self._emit(LINE_PREFIX + json.dumps(record, separators=(",", ":")))

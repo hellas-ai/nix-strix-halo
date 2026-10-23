@@ -1,0 +1,128 @@
+--- a/sglang/srt/layers/engram_graph_prestage.py
++++ b/sglang/srt/layers/engram_graph_prestage.py
+@@ -2,7 +2,8 @@
+
+ The model's existing GPU hasher remains the sole owner of hash arithmetic and
+ request-history commits.  This module moves its two native-row reads out of the
+-captured forward.  It intentionally supports only exact C1/C2 decode buckets.
++captured forward.  It supports exact C1/C2 or C1/C2/C4/C8 decode buckets,
++without row padding.
+ """
+
+ import torch
+@@ -12,8 +13,9 @@
+
+ class NativeEngramGraphPrestage:
+     def __init__(self, model, max_bs: int, device):
+-        if max_bs != 2 or model.engram_hasher is None:
+-            raise ValueError("Engram graph prestage requires C1/C2 and a hasher")
++        if max_bs not in (2, 8) or model.engram_hasher is None:
++            raise ValueError("Engram graph prestage requires max_bs 2 or 8 and a hasher")
++        self.capture_bs = (1, 2) if max_bs == 2 else (1, 2, 4, 8)
+         layers = {}
+         for layer in model.layers:
+             engram = getattr(layer, "engram", None)
+@@ -23,11 +25,13 @@
+             raise ValueError("Engram graph prestage requires two native file stores")
+         self.hasher = model.engram_hasher
+         self.stores = (layers[0], layers[1])
+-        self.gpu_rows = torch.zeros((2, 2, 24, ROW_BYTES), dtype=torch.uint8, device=device)
++        self.gpu_rows = torch.zeros(
++            (max_bs, 2, 24, ROW_BYTES), dtype=torch.uint8, device=device
++        )
+         # Two frames bound page-locked memory even if the next decode arrives
+         # before the previous frame's H2D copy has completed.
+         self.host_frames = [
+-            torch.empty((2, 2, 24, ROW_BYTES), dtype=torch.uint8, pin_memory=True)
++            torch.empty((max_bs, 2, 24, ROW_BYTES), dtype=torch.uint8, pin_memory=True)
+             for _ in range(2)
+         ]
+         self.frame_done = [torch.cuda.Event() for _ in range(2)]
+@@ -44,7 +48,7 @@
+         bs = forward_batch.batch_size
+         if (
+             not forward_batch.forward_mode.is_decode()
+-            or bs not in (1, 2)
++            or bs not in self.capture_bs
+             or graph_bs != bs
+             or forward_batch.input_ids.shape != (bs,)
+             or forward_batch.positions.shape != (bs,)
+@@ -52,7 +56,9 @@
+             or forward_batch.out_cache_loc.shape != (bs,)
+             or forward_batch.engram_packed_rows is not None
+         ):
+-            raise ValueError("Engram graph prestage requires a fresh exact C1/C2 decode")
++            raise ValueError(
++                "Engram graph prestage requires a fresh exact configured decode bucket"
++            )
+
+         # This call also commits the canonical per-request GPU history.  Once
+         # attempted, any failure must terminate the worker rather than retry.
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -343,7 +343,7 @@
+                 if (
+                     self.capture_forward_mode != ForwardMode.DECODE
+                     or self.captured_req_width != 1
+-                    or self.capture_bs != [1, 2]
++                    or self.capture_bs not in ([1, 2], [1, 2, 4, 8])
+                     or self.enable_pdmux
+                     or self.enable_two_batch_overlap
+                     or model_runner.spec_algorithm.is_speculative()
+@@ -354,7 +354,7 @@
+                 ):
+                     raise ValueError(
+                         "file-backed Engram graphs require TP4, non-speculative DP1/CP1 "
+-                        "decode, exact C1/C2 buckets and one compute stream"
++                        "decode, exact [1,2] or [1,2,4,8] buckets and one compute stream"
+                     )
+                 self.engram_graph_prestage = NativeEngramGraphPrestage(
+                     inner_model, self.max_bs, self.device
+@@ -701,7 +701,7 @@
+     def can_run_graph(self, forward_batch: ForwardBatch):
+         if self.engram_graph_prestage is not None and (
+             not forward_batch.forward_mode.is_decode()
+-            or forward_batch.batch_size not in (1, 2)
++            or forward_batch.batch_size not in self.capture_bs
+         ):
+             return False
+         # Disable for token embedding overrides (dynamic per-request)
+--- a/sglang/srt/layers/attention/graph_variants.py
++++ b/sglang/srt/layers/attention/graph_variants.py
+@@ -109,7 +109,7 @@
+     )
+     # The native HIP radix backend already has the four decode branches below,
+     # but gfx1151 was excluded with the gfx95-only graph gate. Keep this opt-in
+-    # to the exact C1/C2 native backend and model geometry.
++    # to exact native capture buckets and the existing model geometry.
+     gfx1151_native_decode = False
+     if (
+         capture_forward_mode == ForwardMode.DECODE
+@@ -123,10 +123,12 @@
+         from sglang.srt.layers.attention.deepseek_v4_backend_hip_radix import (
+             DeepseekV4HipRadixBackend,
+         )
++        from sglang.srt.model_executor.runner.base_cuda_graph_runner import (
++            get_batch_sizes_to_capture,
++        )
+         from sglang.srt.runtime_context import get_parallel
+
+         backend = model_runner.attn_backend
+-        max_requests = model_runner.server_args.max_running_requests
+         span = getattr(text_config, "candidate_topk_blocks", 0) * getattr(
+             text_config, "candidate_block_size", 0
+         )
+@@ -137,8 +139,11 @@
+             and backend.index_topk == getattr(text_config, "index_topk", None)
+             and backend.low_ratio_candidate_span == span
+             and backend.low_ratio_identity_skip
+-            and type(max_requests) is int
+-            and 1 <= max_requests <= 2
++            and captured_req_width == 1
++            # Match the runner's exact qualified/proposed capture sets,
++            # including pool/alignment filters; other sizes remain eager.
++            and get_batch_sizes_to_capture(model_runner, captured_req_width)[0]
++            in ([1, 2], [1, 2, 4, 8])
+         )
+     if not (
+         (capture_forward_mode == ForwardMode.DECODE or dspark_target_verify)

@@ -1,0 +1,345 @@
+--- a/sglang/kernels/ops/gemm/fp8_kernel.py
++++ b/sglang/kernels/ops/gemm/fp8_kernel.py
+@@ -776,6 +776,129 @@
+     return C
+ 
+ 
++# The seven dense FP8 shapes of one TP4 rank (wqkv_a, wq_b, wo_b, shared
++# gate_up, shared down, Engram wkv, indexer wq_b). Mirrors the literal set in
++# `_use_gfx1151_fp8_prefill_cast` (kept literal there because tests/prefill-dispatch.py
++# execs that function alone); tests/bf16-shadow-cpu.py asserts the two stay equal.
++GFX1151_V41_DENSE_SHAPES = frozenset(
++    {
++        (1792, 5120),
++        (8192, 1280),
++        (5120, 2048),
++        (1152, 5120),
++        (5120, 576),
++        (25600, 6144),
++        (4096, 1280),
++    }
++)
++
++
++@functools.lru_cache(maxsize=1)
++def dsv41_bf16_shadow_min_m() -> int:
++    """Smallest row count that takes the bf16 shadow GEMM; 0 (default) disables it.
++
++    Read once. A `SGLANG_DSV41_` variable, so it is part of the Mooncake cache
++    namespace: KV pages written with shadow numerics never mix with FP8 ones.
++    """
++    return max(0, int(os.environ.get("SGLANG_DSV41_BF16_SHADOW_MIN_M", "0") or "0"))
++
++
++def dequant_block_fp8_weight_to_bf16(
++    weight: torch.Tensor, scale: torch.Tensor, block_size: List[int]
++) -> torch.Tensor:
++    """Exact bf16 copy of a block-scaled FP8 weight.
++
++    E4M3FN values have a 4-bit significand, so value * 2^k is exact in FP32 and
++    in bf16 (8-bit significand, FP32 exponent range) for the UE8M0 power-of-two
++    scales of the V4.1 checkpoint. Chunked over rows to bound the FP32 temporary.
++    """
++    n, k = weight.shape
++    block_n, block_k = block_size
++    assert n % block_n == 0 and k % block_k == 0, (weight.shape, block_size)
++    assert tuple(scale.shape) == (n // block_n, k // block_k), (
++        scale.shape,
++        weight.shape,
++    )
++    out = torch.empty((n, k), dtype=torch.bfloat16, device=weight.device)
++    rows = max(block_n, (1 << 24) // k // block_n * block_n)
++    for lo in range(0, n, rows):
++        hi = min(n, lo + rows)
++        w = weight[lo:hi].to(torch.float32).view(-1, block_n, k // block_k, block_k)
++        s = scale[lo // block_n : hi // block_n].to(torch.float32)
++        out[lo:hi] = (w * s.view(-1, 1, k // block_k, 1)).view(hi - lo, k).to(
++            torch.bfloat16
++        )
++    return out
++
++
++def block_fp8_scale_is_power_of_two(scale: torch.Tensor) -> bool:
++    """True when every scale is a finite, nonzero power of two (zero mantissa)."""
++    bits = scale.to(torch.float32).contiguous().view(torch.int32)
++    exponent = (bits >> 23) & 0xFF
++    return bool(
++        ((bits & 0x7FFFFF) == 0).all().item()
++        and (exponent != 0).all().item()
++        and (exponent != 0xFF).all().item()
++    )
++
++
++# K and the row strides are multiples of 32 (asserted by the wrapper), so their
++# divisibility specialization is one constant state and keeps the 8-byte loads and
++# 16-byte stores. The scale strides (K / 32, or 1 when transposed) are the ones
++# that would otherwise split the cache per shape.
++@triton.jit(do_not_specialize=["stride_sm", "stride_sg"])
++def _dequant_e4m3fn_group32_bf16(
++    Q,
++    S,
++    OUT,
++    K,
++    stride_qm,
++    stride_sm,
++    stride_sg,
++    stride_om,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0).to(tl.int64)
++    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    mask = col < K
++    value = _e4m3fn_to_fp32(
++        tl.load(Q + row * stride_qm + col, mask=mask, other=0.0)
++    )
++    scale = tl.load(S + row * stride_sm + (col // 32) * stride_sg, mask=mask, other=1.0)
++    tl.store(OUT + row * stride_om + col, (value * scale).to(tl.bfloat16), mask=mask)
++
++
++def dequant_group32_activation_to_bf16(
++    q: torch.Tensor, scale: torch.Tensor
++) -> torch.Tensor:
++    """Exact bf16 copy of a per-32 UE8M0-scaled FP8 activation (one pass).
++
++    Uses the same integer E4M3FN decoder as the GEMV and prefill kernels, so the
++    operand values equal what `_w8a8_block_fp8_matmul` multiplies.
++    """
++    assert q.dim() == 2 and q.stride(1) == 1 and q.dtype == torch.float8_e4m3fn
++    m, k = q.shape
++    assert k % 32 == 0 and tuple(scale.shape) == (m, k // 32), (q.shape, scale.shape)
++    assert q.stride(0) % 32 == 0 or m <= 1, q.stride()
++    assert scale.dtype == torch.float32
++    out = torch.empty((m, k), dtype=torch.bfloat16, device=q.device)
++    if m:
++        block = 1024
++        _dequant_e4m3fn_group32_bf16[(m, triton.cdiv(k, block))](
++            q,
++            scale,
++            out,
++            k,
++            q.stride(0),
++            scale.stride(0),
++            scale.stride(1),
++            out.stride(0),
++            BLOCK=block,
++            num_warps=4,
++        )
++    return out
++
++
+ def _use_gfx1151_fp8_prefill_cast(A, B, block_size, output_dtype):
+     """Use exact FP16 operands for native V4.1 prefill on gfx1151."""
+     return (
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -8,6 +8,11 @@
+ import torch
+ 
+ from sglang.kernels.ops.gemm.fp8_kernel import (
++    GFX1151_V41_DENSE_SHAPES,
++    block_fp8_scale_is_power_of_two,
++    dequant_block_fp8_weight_to_bf16,
++    dequant_group32_activation_to_bf16,
++    dsv41_bf16_shadow_min_m,
+     get_w8a8_channelwise_fp8_config,
+     triton_scaled_mm,
+     w8a8_block_fp8_matmul_deepgemm,
+@@ -1722,6 +1727,179 @@
+     return output.to(dtype=output_dtype).view(*output_shape)
+ 
+ 
++def dsv41_bf16_shadow_applies(
++    shadow, q_input, x_scale, block_size, output_dtype, bias
++) -> bool:
++    """Gate for the bf16 shadow GEMM: large M only, exactly the generic kernel's inputs."""
++    threshold = dsv41_bf16_shadow_min_m()
++    return (
++        bool(threshold)
++        and shadow is not None
++        and q_input.shape[0] >= threshold
++        and list(block_size) == [32, 32]
++        and bias is None
++        and output_dtype == torch.bfloat16
++        and q_input.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == torch.float32
++        and q_input.dim() == 2
++        and q_input.stride(1) == 1
++        and tuple(x_scale.shape) == (q_input.shape[0], q_input.shape[1] // 32)
++        and shadow.shape[1] == q_input.shape[1]
++        and q_input.device == shadow.device
++        and not torch.cuda.is_current_stream_capturing()
++    )
++
++
++class Dsv41Bf16ShadowLinear:
++    """Per-layer `w8a8_block_fp8_linear` that sends large-M calls to a bf16 GEMM.
++
++    Installed by `maybe_build_dsv41_bf16_shadow` over the layer's existing
++    `triton_w8a8_block_fp8_linear` partial, which stays the path for every row
++    count below SGLANG_DSV41_BF16_SHADOW_MIN_M (decode, speculative verify, tails).
++    The activation quantizer is the one the fallback runs, so both paths see the
++    same FP8 operands. The expanded operands are exact in bf16 and the products
++    exact in FP32; only the accumulation order differs from the generic kernel.
++    """
++
++    def __init__(self, fallback, shadow: torch.Tensor, weight: torch.Tensor):
++        self.fallback = fallback
++        self.shadow = shadow
++        self.__name__ = "dsv41_bf16_shadow_linear"
++        # The shadow belongs to this exact storage. Other callers hand the method's
++        # callable different weights (e.g. the DSpark draft's stacked wkv): those
++        # must never see this layer's shadow.
++        self._weight_ptr = weight.data_ptr()
++        self._weight_shape = tuple(weight.shape)
++
++    def __call__(
++        self,
++        input,
++        weight,
++        block_size,
++        weight_scale,
++        input_scale=None,
++        bias=None,
++    ):
++        if (
++            weight.data_ptr() != self._weight_ptr
++            or tuple(weight.shape) != self._weight_shape
++        ):
++            return self.fallback(
++                input=input,
++                weight=weight,
++                block_size=block_size,
++                weight_scale=weight_scale,
++                input_scale=input_scale,
++                bias=bias,
++            )
++        if input_scale is None:
++            input_2d = input.view(-1, input.shape[-1])
++            output_dtype = input_2d.dtype
++            threshold = dsv41_bf16_shadow_min_m()
++            if (
++                not threshold
++                or input_2d.shape[0] < threshold
++                or output_dtype != torch.bfloat16
++                # The fallback owns quantization during capture. Do not add an
++                # unused quantizer to the graph before handing it the raw input.
++                or torch.cuda.is_current_stream_capturing()
++            ):
++                return self.fallback(
++                    input=input,
++                    weight=weight,
++                    block_size=block_size,
++                    weight_scale=weight_scale,
++                    input_scale=input_scale,
++                    bias=bias,
++                )
++            q_input, x_scale = sglang_per_token_group_quant_fp8(
++                input_2d, block_size[1], scale_ue8m0=True
++            )
++        else:
++            q_input = input.view(-1, input.shape[-1])
++            x_scale, output_dtype = input_scale, torch.bfloat16
++        if dsv41_bf16_shadow_applies(
++            self.shadow, q_input, x_scale, block_size, output_dtype, bias
++        ):
++            output = torch.nn.functional.linear(
++                dequant_group32_activation_to_bf16(q_input, x_scale), self.shadow
++            )
++            return output.view(*input.shape[:-1], self.shadow.shape[0])
++        return self.fallback(
++            input=input,
++            weight=weight,
++            block_size=block_size,
++            weight_scale=weight_scale,
++            input_scale=input_scale,
++            bias=bias,
++        )
++
++
++_DSV41_SHADOW_BUILT = {"layers": 0, "bytes": 0, "shapes": set()}
++
++
++def maybe_build_dsv41_bf16_shadow(layer, method) -> None:
++    """Keep an exact bf16 copy of one dense FP8 weight for large-M prefill GEMMs.
++
++    Opt-in via SGLANG_DSV41_BF16_SHADOW_MIN_M; a no-op when unset. Costs
++    2 bytes per weight element on top of the FP8 copy decode keeps using
++    (3.83 GB per TP4 rank for the seven dense shapes of V4.1-Flash). Only layers
++    whose `w8a8_block_fp8_linear` is the V4.1 UE8M0 `triton_w8a8_block_fp8_linear`
++    partial qualify; the method's callable is wrapped, nothing else changes.
++    """
++    if not dsv41_bf16_shadow_min_m():
++        return
++    block_linear = method.w8a8_block_fp8_linear
++    if isinstance(block_linear, Dsv41Bf16ShadowLinear):  # weights reloaded
++        block_linear = block_linear.fallback
++    weight = layer.weight
++    scale = getattr(layer, "weight_scale_inv", None)
++    if (
++        not _is_hip
++        or method.use_mxfp8
++        or method.block_fp8_as_mxfp8
++        or scale is None
++        or method.weight_block_size is None
++        or list(method.weight_block_size) != [32, 32]
++        or getattr(layer, "keep_plain_weight_layout", False)
++        or getattr(block_linear, "func", None) is not triton_w8a8_block_fp8_linear
++        or getattr(block_linear, "keywords", {}).get("act_scale_ue8m0") is not True
++        or weight.dtype != torch.float8_e4m3fn
++        or weight.dim() != 2
++        or tuple(weight.shape) not in GFX1151_V41_DENSE_SHAPES
++        or scale.dtype != torch.float32
++        or tuple(scale.shape) != (weight.shape[0] // 32, weight.shape[1] // 32)
++        or not weight.is_cuda
++        or torch.cuda.get_device_properties(weight.device).gcnArchName.split(":")[0]
++        != "gfx1151"
++    ):
++        return
++    if not block_fp8_scale_is_power_of_two(scale.data):
++        # Non-UE8M0 scales would round when folded into bf16: keep the FP8 path.
++        logger.warning(
++            "dsv41 bf16 shadow skipped for %s: block scales are not powers of two",
++            tuple(weight.shape),
++        )
++        return
++    layer.dsv41_bf16_shadow = None  # drop a previous copy before allocating
++    shadow = dequant_block_fp8_weight_to_bf16(weight.data, scale.data, [32, 32])
++    layer.dsv41_bf16_shadow = shadow
++    method.w8a8_block_fp8_linear = Dsv41Bf16ShadowLinear(block_linear, shadow, weight)
++    built = _DSV41_SHADOW_BUILT
++    built["layers"] += 1
++    built["bytes"] += shadow.numel() * 2
++    shape = tuple(weight.shape)
++    if shape not in built["shapes"] or built["layers"] % 64 == 0:
++        built["shapes"].add(shape)
++        logger.info(
++            "dsv41 bf16 shadow (M >= %d): %s built; %d layers, %.2f GB so far",
++            dsv41_bf16_shadow_min_m(),
++            shape,
++            built["layers"],
++            built["bytes"] / 2**30,
++        )
++
++
+ @lru_cache(maxsize=1)
+ def _get_triton_mxfp8_downcast():
+     try:
+--- a/sglang/srt/layers/quantization/fp8.py
++++ b/sglang/srt/layers/quantization/fp8.py
+@@ -64,6 +64,7 @@
+     dispatch_w8a8_block_fp8_linear,
+     dispatch_w8a8_mxfp8_linear,
+     input_to_float8,
++    maybe_build_dsv41_bf16_shadow,
+     mxfp8_group_quantize,
+     normalize_e4m3fn_to_e4m3fnuz,
+     requant_block_scale_ue8m0_for_deepgemm,
+@@ -873,6 +874,8 @@
+                 with torch.no_grad():
+                     layer.weight_scale_inv.set_(scale_reordered)
+ 
++        maybe_build_dsv41_bf16_shadow(layer, self)
++
+     def _prepare_block_fp8_as_mxfp8(self, layer: Module) -> None:
+         layer.block_fp8_mxfp8_ready = False
+         if getattr(layer, "keep_plain_weight_layout", False):

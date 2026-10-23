@@ -1,0 +1,116 @@
+diff --git a/sglang/kernels/ops/moe/dsv41_prefill_combine.py b/sglang/kernels/ops/moe/dsv41_prefill_combine.py
+index 7eee5fb..fa73862 100644
+--- a/sglang/kernels/ops/moe/dsv41_prefill_combine.py
++++ b/sglang/kernels/ops/moe/dsv41_prefill_combine.py
+@@ -11,6 +11,8 @@ from contextlib import contextmanager
+ from contextvars import ContextVar
+ from dataclasses import dataclass
+ 
++import os
++
+ import torch
+ import triton
+ import triton.language as tl
+@@ -67,6 +69,21 @@ def _combine_routes_shared(
+     tl.store(OUT + row[:, None] * H + col[None, :], acc, live)
+ 
+ 
++# Opt-in tile (SGLANG_DSV41_COMBINE_TILE="BM,BN,WARPS", e.g. "2,1024,8"). The default (4, 256, 4) moves 512-byte pieces and reaches ~27% of
++# the memory bandwidth on the 1536-row call; the arithmetic order is per element, so every tile gives bit-identical results.
++def _combine_tile() -> tuple[int, int, int]:
++    value = os.environ.get("SGLANG_DSV41_COMBINE_TILE", "")
++    if not value:
++        return 4, 256, 4
++    bm, bn, warps = (int(x) for x in value.split(","))
++    if bm not in (1, 2, 4, 8) or bn not in (128, 256, 512, 1024, 2048) or warps not in (1, 2, 4, 8):
++        raise ValueError(f"SGLANG_DSV41_COMBINE_TILE={value!r}: BM in 1,2,4,8, BN in 128..2048, WARPS in 1,2,4,8")
++    return bm, bn, warps
++
++
++_COMBINE_TILE = _combine_tile()
++
++
+ def try_combine_routes_shared(
+     routed: torch.Tensor, topk_ids: torch.Tensor, state: _CombineState | None
+ ) -> torch.Tensor | None:
+@@ -94,9 +111,10 @@ def try_combine_routes_shared(
+     order = torch.argsort(topk_ids, dim=1, stable=True)
+     output = torch.empty((routed.shape[0], 5120), device=routed.device,
+                          dtype=torch.float32)
++    bm, bn, warps = _COMBINE_TILE
+     _combine_routes_shared[
+-        (triton.cdiv(routed.shape[0], 4), triton.cdiv(5120, 256))
+-    ](routed, order, shared, output, routed.shape[0], 5120, 4, 256,
+-      num_warps=4, enable_fp_fusion=False)
++        (triton.cdiv(routed.shape[0], bm), triton.cdiv(5120, bn))
++    ](routed, order, shared, output, routed.shape[0], 5120, bm, bn,
++      num_warps=warps, enable_fp_fusion=False)
+     state.used = True
+     return output
+diff --git a/sglang/kernels/ops/quantization/fp8_kernel.py b/sglang/kernels/ops/quantization/fp8_kernel.py
+index 73fc6a8..7c3ab91 100644
+--- a/sglang/kernels/ops/quantization/fp8_kernel.py
++++ b/sglang/kernels/ops/quantization/fp8_kernel.py
+@@ -16,6 +16,8 @@ import logging
+ from functools import lru_cache
+ from typing import Optional, Tuple
+ 
++import os
++
+ import torch
+ import triton
+ import triton.language as tl
+@@ -229,6 +231,40 @@ def _per_token_group_quant_8bit_ue8m0_rowmajor(
+     tl.store(s_ptr + group, scale)
+ 
+ 
++@triton.jit
++def _per_token_group_quant_8bit_ue8m0_rowmajor_blocked(
++    x_ptr,
++    q_ptr,
++    s_ptr,
++    n_groups,
++    group_size: tl.constexpr,
++    eps: tl.constexpr,
++    fp8_min: tl.constexpr,
++    fp8_max: tl.constexpr,
++    GROUPS: tl.constexpr,
++):
++    # Same arithmetic per group as `_per_token_group_quant_8bit_ue8m0_rowmajor`, but one program owns GROUPS consecutive groups
++    # (GROUPS * group_size contiguous values) instead of one: the one-group programs read 64-byte pieces and are launch-bound
++    # (0.6 ms for a [1536, 5120] bf16 tensor, 15% of the memory bandwidth).
++    first = tl.program_id(0) * GROUPS
++    g = first + tl.arange(0, GROUPS)
++    cols = tl.arange(0, group_size)
++    offs = g[:, None] * group_size + cols[None, :]
++    live = (g < n_groups)[:, None]
++    x = tl.load(x_ptr + offs, mask=live, other=0).to(tl.float32)
++    amax = tl.maximum(tl.max(tl.abs(x), 1), eps)
++    scale = tl.exp2(tl.ceil(tl.log2(amax / fp8_max)))
++    q = tl.clamp(x / scale[:, None], fp8_min, fp8_max).to(q_ptr.dtype.element_ty)
++    tl.store(q_ptr + offs, q, mask=live)
++    tl.store(s_ptr + g, scale, mask=g < n_groups)
++
++
++# Opt-in (SGLANG_DSV41_QUANT_BLOCKED=1): the blocked kernel for large row counts; small (decode) shapes keep one program per group.
++_QUANT_BLOCKED = os.environ.get("SGLANG_DSV41_QUANT_BLOCKED") == "1"
++_QUANT_BLOCKED_MIN_GROUPS = 16384
++_QUANT_BLOCKED_GROUPS = 16
++
++
+ def _per_token_group_quant_8bit_raw(
+     x: torch.Tensor,
+     group_size: int,
+@@ -543,6 +579,12 @@ def _run_per_token_group_quant_8bit_kernel(
+         groups = x.numel() // group_size
+         if groups == 0:
+             return
++        if (_QUANT_BLOCKED and groups >= _QUANT_BLOCKED_MIN_GROUPS and group_size == 32
++                and x.dtype in (torch.bfloat16, torch.float32)):
++            _per_token_group_quant_8bit_ue8m0_rowmajor_blocked[(triton.cdiv(groups, _QUANT_BLOCKED_GROUPS),)](
++                x, x_q, x_s, groups, group_size, eps, fp8_min, fp8_max, GROUPS=_QUANT_BLOCKED_GROUPS,
++            )
++            return
+         _per_token_group_quant_8bit_ue8m0_rowmajor[(groups,)](
+             x, x_q, x_s, group_size, eps, fp8_min, fp8_max,
+             BLOCK=triton.next_power_of_2(group_size),

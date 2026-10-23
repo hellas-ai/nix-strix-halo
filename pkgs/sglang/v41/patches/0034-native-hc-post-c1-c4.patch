@@ -1,0 +1,50 @@
+--- a/sglang/kernels/ops/layernorm/native_hc_post.py
++++ b/sglang/kernels/ops/layernorm/native_hc_post.py
+@@ -1,4 +1,4 @@
+-"""Exact-order gfx1151 C2 post-residual mixing for native V4.1 mHC."""
++"""Exact-order gfx1151 C1/C2/C4 post-residual mixing for native V4.1 mHC."""
+
+ import torch
+ import triton
+@@ -34,10 +34,10 @@
+ def native_hc_post_c2(x, residual, post, comb):
+     """Preserve FP32 product/add boundaries and one final BF16 rounding."""
+     if (
+-        x.shape != (2, 5120)
+-        or residual.shape != (2, 4, 5120)
+-        or post.shape != (2, 4)
+-        or comb.shape != (2, 4, 4)
++        x.ndim != 2 or x.shape[0] not in (1, 2, 4) or x.shape[1] != 5120
++        or residual.shape != (x.shape[0], 4, 5120)
++        or post.shape != (x.shape[0], 4)
++        or comb.shape != (x.shape[0], 4, 4)
+         or x.dtype != torch.bfloat16
+         or residual.dtype != torch.bfloat16
+         or post.dtype != torch.float32
+@@ -49,9 +49,9 @@
+         or torch.cuda.get_device_properties(x.device).gcnArchName.split(":")[0]
+         != "gfx1151"
+     ):
+-        raise ValueError("native HC post requires exact gfx1151 C2 operands")
++        raise ValueError("native HC post requires exact gfx1151 C1/C2/C4 operands")
+     output = torch.empty_like(residual)
+-    _hc_post_c2[(20, 4, 2)](
++    _hc_post_c2[(20, 4, x.shape[0])](
+         x, residual, post, comb, output, 5120, 256,
+         num_warps=4, num_stages=1, enable_fp_fusion=False,
+         allow_flush_denorm=False,
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -3257,8 +3257,10 @@
+                 getattr(self.config, "model_type", None) == "deepseek_v41"
+                 and self.hc_pre_from_prev_sublayer
+                 and self.hc_mult == 4 and self.hidden_size == 5120
+-                and x.shape == (2, 5120) and residual.shape == (2, 4, 5120)
+-                and post.shape == (2, 4) and comb.shape == (2, 4, 4)
++                and x.ndim == 2 and x.shape[0] in (1, 2, 4) and x.shape[1] == 5120
++                and residual.shape == (x.shape[0], 4, 5120)
++                and post.shape == (x.shape[0], 4)
++                and comb.shape == (x.shape[0], 4, 4)
+                 and x.dtype == residual.dtype == torch.bfloat16
+                 and post.dtype == comb.dtype == torch.float32
+                 and all(t.is_contiguous() for t in (x, residual, post, comb))

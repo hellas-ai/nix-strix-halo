@@ -1,0 +1,297 @@
+--- a/sglang/srt/layers/engram_preflight_status.py
++++ b/sglang/srt/layers/engram_preflight_status.py
+@@ -78,6 +78,30 @@
+         if any(code for row in result for code in row):
+             raise EngramPreflightError(generation, result)
+ 
++    def check_after_result_copy(
++        self, generation: int, host_status: torch.Tensor
++    ) -> None:
++        """Check the existing result D2H after copy_done, then permit reuse.
++
++        Any failure leaves the generation active. The caller must fail-stop the
++        whole TP service; there is no request retry or state rollback.
++        """
++        if self.active_generation != generation or not self.finished:
++            raise RuntimeError("stale or unfinished Engram result status")
++        if (
++            host_status is None
++            or host_status.is_cuda
++            or host_status.dtype != torch.int32
++            or host_status.shape != self.device_status.shape
++        ):
++            raise RuntimeError("missing or invalid Engram result status copy")
++        result = tuple(
++            (int(row[0]), int(row[1])) for row in host_status.tolist()
++        )
++        if any(code for row in result for code in row):
++            raise EngramPreflightError(generation, result)
++        self.retire(generation)
++
+     def retire(self, generation: int) -> None:
+         if self.active_generation != generation or not self.finished:
+             raise RuntimeError("stale or unfinished Engram status retirement")
+--- a/sglang/srt/layers/engram_native_preflight.py
++++ b/sglang/srt/layers/engram_native_preflight.py
+@@ -23,7 +23,10 @@
+ 
+ 
+ class EngramNativePreflight:
+-    def __init__(self, *, model, device, tp_rank: int, tp_size: int, group_name: str):
++    def __init__(
++        self, *, model, device, tp_rank: int, tp_size: int,
++        group_name: str, result_gate: bool = False,
++    ):
+         if model.engram_hasher is None:
+             raise ValueError("Engram preflight requires the canonical hasher")
+         layers = {}
+@@ -36,6 +39,7 @@
+         self.hasher = model.engram_hasher
+         self.stores = (layers[0], layers[1])
+         self.device = device
++        self.result_gate = result_gate
+         self.status = EngramPreflightStatus(
+             device=device, tp_rank=tp_rank, tp_size=tp_size, group_name=group_name
+         )
+@@ -50,7 +54,7 @@
+                 raise ValueError("Engram fault rank/layer/generation is out of range")
+             self.fault = (rank, layer, generation)
+ 
+-    def prepare(self, forward_batch) -> None:
++    def prepare(self, forward_batch):
+         if forward_batch.engram_packed_rows is not None:
+             raise RuntimeError("Engram preflight received already prepared rows")
+         mode = forward_batch.forward_mode
+@@ -113,14 +117,28 @@
+             if (fault_rank, fault_generation) == (self.status.tp_rank, generation):
+                 self.status.set_local_failure(fault_layer, 5)
+ 
+-        # Every rank joins even after a local lookup error. The status copy is
+-        # deliberately synchronizing and occurs before any model state write.
++        # Every rank joins even after a routine local lookup error. The normal
++        # scaffold reads status before target ModelRunner. The opt-in fatal-only
++        # arm carries status to the existing result D2H instead; internal state
++        # may be dirty on failure, and the whole TP service must stop before
++        # any cache/output publication.
+         self.status.finish(generation)
+-        try:
++        if not self.result_gate:
+             self.status.check_before_model(generation)
+-        finally:
+             self.status.retire(generation)
+         if device_rows is None or pending is None:
+-            raise RuntimeError("Engram preflight succeeded without rows/history")
+-        self.hasher.commit_preflight(pending)
++            if not self.result_gate:
++                raise RuntimeError("Engram preflight succeeded without rows/history")
++            # The reduced status is already nonzero. Keep a correctly shaped
++            # zero input so every rank can reach result-copy fail-stop. A GPU
++            # allocation failure here is catastrophic, not a recoverable miss.
++            if device_rows is None:
++                device_rows = torch.zeros(
++                    (rows, 2, 24, ROW_BYTES), dtype=torch.uint8, device=self.device
++                )
++        self.hasher.commit_preflight(
++            pending,
++            status_device=self.status.device_status if self.result_gate else None,
++        )
+         forward_batch.engram_packed_rows = device_rows
++        return (self.status, generation) if self.result_gate else None
+--- a/sglang/srt/managers/tp_worker.py
++++ b/sglang/srt/managers/tp_worker.py
+@@ -392,6 +392,12 @@
+             not self.is_draft_worker
+             and os.environ.get("SGLANG_ENGRAM_NATIVE_PREFLIGHT") == "1"
+         )
++        self._engram_result_gate = (
++            not self.is_draft_worker
++            and os.environ.get("SGLANG_ENGRAM_PREFLIGHT_RESULT_GATE") == "1"
++        )
++        if self._engram_result_gate and not self._engram_native_preflight_enabled:
++            raise ValueError("Engram result gate requires native preflight")
+         if self._engram_native_preflight_enabled:
+             parallel = get_parallel()
+             if (
+@@ -401,13 +407,21 @@
+                 or parallel.attn_cp_size != 1
+                 or parallel.attn_dp_size != 1
+                 or get_schedule().enable_mixed_chunk
++                or (
++                    self._engram_result_gate
++                    and (
++                        self.server_args.disaggregation_mode != "null"
++                        or not self.enable_spec
++                        or not get_spec().speculative_algorithm.is_dspark()
++                    )
++                )
+             ):
+                 raise ValueError(
+                     "Engram native preflight requires non-overlap TP4/PP1/CP1, "
+                     "no attention DP and no mixed chunk"
+                 )
+ 
+-    def _prepare_engram_before_model(self, forward_batch: ForwardBatch) -> None:
++    def _prepare_engram_before_model(self, forward_batch: ForwardBatch):
+         if not self._engram_native_preflight_enabled:
+             return
+         if forward_batch.forward_mode.is_idle():
+@@ -422,8 +436,9 @@
+                 tp_rank=parallel.tp_group.rank_in_group,
+                 tp_size=parallel.tp_size,
+                 group_name=parallel.tp_group.unique_name,
+-            )
+-        self._engram_native_preflight.prepare(forward_batch)
++                result_gate=self._engram_result_gate,
++            )
++        return self._engram_native_preflight.prepare(forward_batch)
+ 
+     def alloc_memory_pool(
+         self,
+@@ -676,7 +691,7 @@
+             return self._forward_batch_generation_dllm(forward_batch, batch)
+ 
+         if self.pp_group.is_last_rank:
+-            self._prepare_engram_before_model(forward_batch)
++            engram_status_ticket = self._prepare_engram_before_model(forward_batch)
+             out = self.model_runner.forward(
+                 forward_batch,
+                 pp_proxy_tensors=pp_proxy_tensors,
+@@ -688,6 +703,18 @@
+                 expert_distribution_metrics=out.expert_distribution_metrics,
+                 routed_experts_output=out.routed_experts_output,
+                 indexer_topk_output=out.indexer_topk_output,
++                engram_status_device=(
++                    engram_status_ticket[0].device_status
++                    if engram_status_ticket is not None else None
++                ),
++                engram_status_owner=(
++                    engram_status_ticket[0]
++                    if engram_status_ticket is not None else None
++                ),
++                engram_status_generation=(
++                    engram_status_ticket[1]
++                    if engram_status_ticket is not None else None
++                ),
+             )
+ 
+             capture_pre_sample_logits(batch, forward_batch, logits_output)
+--- a/sglang/srt/managers/utils.py
++++ b/sglang/srt/managers/utils.py
+@@ -73,6 +73,12 @@
+ 
+     # For overlap scheduling
+     copy_done: Optional[torch.cuda.Event] = None
++    # Fatal-only Engram arm: status belongs to this exact TP generation until
++    # the existing result D2H completes. Never use it for request recovery.
++    engram_status_device: Optional[torch.Tensor] = None
++    engram_status_host: Optional[torch.Tensor] = None
++    engram_status_owner: Optional[Any] = None
++    engram_status_generation: Optional[int] = None
+     delay_sample_func: Optional[callable] = None
+     future_indices: Optional[torch.Tensor] = None
+     speculative_num_draft_tokens: Optional[int] = None
+@@ -150,12 +156,42 @@
+     def get_num_generated_tokens(self, batch_size: int) -> int:
+         return self.num_correct_drafts + batch_size * self.num_non_draft_tokens_per_req
+ 
++    def check_engram_status_after_copy(self) -> None:
++        """Reject before cache/output publication, after copy_done synchronized."""
++        owner = self.engram_status_owner
++        if owner is None:
++            if any(
++                value is not None for value in (
++                    self.engram_status_device,
++                    self.engram_status_host,
++                    self.engram_status_generation,
++                )
++            ):
++                raise RuntimeError("Engram status carrier is incomplete")
++            return
++        if self.copy_done is None or self.engram_status_generation is None:
++            raise RuntimeError("Engram status result was not copied")
++        owner.check_after_result_copy(
++            self.engram_status_generation, self.engram_status_host
++        )
++        self.engram_status_owner = None
++        self.engram_status_device = None
++        self.engram_status_host = None
++        self.engram_status_generation = None
++
+     @torch.profiler.record_function("copy_result_to_cpu")
+     def copy_to_cpu(self, return_logprob: bool, return_hidden_states: bool = True):
+         """Copy tensors to CPU in overlap scheduling.
+         Only the tensors which are needed for processing results are copied,
+         e.g., next_token_ids, logits outputs
+         """
++        if self.engram_status_owner is not None:
++            if (
++                self.engram_status_device is None
++                or self.engram_status_generation is None
++            ):
++                raise RuntimeError("Engram status generation is incomplete")
++            self.engram_status_host = _async_d2h(self.engram_status_device)
+         if return_logprob:
+             if self.logits_output.next_token_logprobs is not None:
+                 self.logits_output.next_token_logprobs = _async_d2h(
+--- a/sglang/srt/speculative/dspark_components/dspark_verify.py
++++ b/sglang/srt/speculative/dspark_components/dspark_verify.py
+@@ -76,6 +76,9 @@
+ class TargetVerifyResult(msgspec.Struct, frozen=True):
+     logits_output: object
+     can_run_cuda_graph: bool
++    engram_status_device: Optional[torch.Tensor] = None
++    engram_status_owner: object = None
++    engram_status_generation: Optional[int] = None
+ 
+ 
+ def candidate_request_length_bound(
+@@ -349,6 +352,9 @@
+         return TargetVerifyResult(
+             logits_output=target_out.logits_output,
+             can_run_cuda_graph=target_out.can_run_cuda_graph,
++            engram_status_device=target_out.engram_status_device,
++            engram_status_owner=target_out.engram_status_owner,
++            engram_status_generation=target_out.engram_status_generation,
+         )
+ 
+     def commit_hidden(
+--- a/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
++++ b/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+@@ -1207,6 +1207,9 @@
+             next_draft_input=next_draft_input,
+             speculative_num_draft_tokens=int(self.verify_num_draft_tokens),
+             new_seq_lens=accept.new_seq_lens,
++            engram_status_device=target_verify.engram_status_device,
++            engram_status_owner=target_verify.engram_status_owner,
++            engram_status_generation=target_verify.engram_status_generation,
+         )
+ 
+     def _commit_target_mamba_states_after_verify(
+--- a/sglang/srt/managers/scheduler_components/batch_result_processor.py
++++ b/sglang/srt/managers/scheduler_components/batch_result_processor.py
+@@ -259,12 +259,14 @@
+         batch: ScheduleBatch,
+         result: Union[GenerationBatchResult, EmbeddingBatchResult],
+     ):
+-        skip_stream_req = None
+-        self.token_to_kv_pool_allocator.free_group_begin()
+-
+         if self.is_generation:
+             if result.copy_done is not None:
+                 result.copy_done.synchronize()
++            result.check_engram_status_after_copy()
++        skip_stream_req = None
++        self.token_to_kv_pool_allocator.free_group_begin()
++
++        if self.is_generation:
+             auxiliary_output_starts = self.snapshot_auxiliary_output_starts(
+                 batch, result
+             )
+@@ -925,6 +927,7 @@
+     ):
+         if result.copy_done is not None:
+             result.copy_done.synchronize()
++        result.check_engram_status_after_copy()
+         auxiliary_output_starts = self.snapshot_auxiliary_output_starts(batch, result)
+         auxiliary_output = result.auxiliary_host_output
+         if result.routed_experts_output is not None:

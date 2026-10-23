@@ -1,0 +1,28 @@
+diff --git a/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py b/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
+index 6d47d8a..5cfda74 100644
+--- a/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
++++ b/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
+@@ -630,7 +630,13 @@ def decode_routed_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_id
+         launch_prep_live(x, a1, topk_ids, masked_ids, live_rows)
+         topk_ids = masked_ids
+     gu = torch.empty((m, TOPK, N_GATE_UP), dtype=torch.bfloat16, device=dev)
+-    if aiter:
++    from sglang.kernels.ops.moe import dsv41_moe_grouped as grouped
++
++    grouped_gu = (not aiter) and grouped.decode_serves(m, True) and grouped.decode_weights_ok(s13, s2)
++    grouped_down = (not aiter) and grouped.decode_serves(m, False) and grouped.decode_weights_ok(s13, s2)
++    if grouped_gu:
++        grouped.decode_gate_up(a1, w13, s13, topk_ids, gu)
++    elif aiter:
+         installed, config, gate_up_config, align = _installed_gemm_context(m)
+         sorted_ids, expert_ids, post_padded = align(topk_ids, config["BLOCK_SIZE_M"], NUM_EXPERTS)
+         installed._run_mxfp4_gemm(a1, w13, gu, s13, topk_weights, topk_ids, sorted_ids, expert_ids, post_padded,
+@@ -647,6 +653,8 @@ def decode_routed_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_id
+     if aiter:
+         installed._run_mxfp4_gemm(a2, w2, ro, s2, topk_weights, topk_ids, sorted_ids, expert_ids, post_padded,
+                                   config=config, top_k=1, mul_routed_weight=False)
++    elif grouped_down:
++        grouped.decode_down(a2, w2, s2, topk_ids, ro)
+     else:
+         launch_down_wmma(a2, w2, s2, topk_ids, ro)
+     out = torch.empty((m, N_DOWN), dtype=torch.float32, device=dev)

@@ -1,0 +1,291 @@
+--- a/csrc/elementwise/deepseek_v4_topk.cu
++++ b/csrc/elementwise/deepseek_v4_topk.cu
+@@ -60,6 +60,11 @@
+   int64_t output_stride;
+   // Emit each row's picks in ascending order (see bitonic_sort_u32).
+   bool sort_output;
++  // Optional compact-block mapping used ONLY as the exact-score secondary key.
++  const int32_t* __restrict__ tie_break_ids;
++  const int32_t* __restrict__ tie_break_lens;
++  int64_t tie_break_stride;
++  uint32_t tie_break_bits;
+ };
+ 
+ __device__ __forceinline__ uint8_t convert_to_uint8(float x) {
+@@ -102,8 +107,126 @@
+   }
+ }
+ 
++// Return the logical token ID, excluding rounded-up newest-block padding.
++__device__ __forceinline__ bool logical_tie_id(
++    uint32_t idx, const int32_t* ids, uint32_t block_bits, uint32_t logical_length, uint32_t& logical) {
++  if (ids == nullptr) {
++    logical = idx;
++    return true;
++  }
++  const int32_t block = ids[idx >> block_bits];
++  if (block < 0) return false;
++  const uint64_t value = (static_cast<uint64_t>(block) << block_bits) | (idx & ((1u << block_bits) - 1u));
++  if (value >= logical_length) return false;
++  logical = static_cast<uint32_t>(value);
++  return true;
++}
++
++// Refine only an oversubscribed EXACT score cutoff. Larger complemented ID
++// keys mean smaller logical IDs. The original row is scanned, so candidate
++// publication order and the shared score-radix scratch order cannot pick ties.
++__device__ void emit_logical_cutoff_ties(
++    const float* input, int32_t* output, uint32_t length, uint32_t score_key,
++    uint32_t need, uint32_t output_base, const int32_t* ids,
++    uint32_t block_bits, uint32_t logical_length) {
++  __shared__ uint32_t histogram[256];
++  __shared__ uint32_t prefix, remaining, emitted;
++  const uint32_t tx = threadIdx.x;
++  if (tx == 0) { prefix = 0; remaining = need; emitted = 0; }
++  __syncthreads();
++  for (uint32_t round = 0; round < 4; ++round) {
++    if (tx < 256) histogram[tx] = 0;
++    __syncthreads();
++    const uint32_t shift = 24 - 8 * round;
++    const uint32_t mask = round == 0 ? 0u : (~0u << (32 - 8 * round));
++    for (uint32_t idx = tx; idx < length; idx += kBlockSize) {
++      uint32_t logical;
++      if (convert_to_uint32(input[idx]) == score_key && logical_tie_id(idx, ids, block_bits, logical_length, logical)) {
++        const uint32_t key = ~logical;
++        if ((key & mask) == prefix) ::atomicAdd(&histogram[(key >> shift) & 255u], 1);
++      }
++    }
++    __syncthreads();
++    if (tx == 0) {
++      uint32_t above = 0;
++      for (int bin = 255; bin >= 0; --bin) {
++        const uint32_t count = histogram[bin];
++        if (above + count >= remaining) {
++          prefix |= static_cast<uint32_t>(bin) << shift;
++          remaining -= above;
++          break;
++        }
++        above += count;
++      }
++    }
++    __syncthreads();
++  }
++  // Unique logical IDs make this exactly `need` members. Existing output
++  // sorting still decides presentation order; strict-score picks are untouched.
++  for (uint32_t idx = tx; idx < length; idx += kBlockSize) {
++    uint32_t logical;
++    if (convert_to_uint32(input[idx]) == score_key && logical_tie_id(idx, ids, block_bits, logical_length, logical) &&
++        ~logical >= prefix) {
++      const auto pos = ::atomicAdd(&emitted, 1);
++      output[output_base + pos] = static_cast<int32_t>(idx);
++    }
++  }
++  __syncthreads();
++}
++
++// A coarse bucket can exceed the shared index scratch. Never infer its
++// exact score threshold from a truncated subset: this exceptional path scans
++// the original row for every FP32 radix digit, without storing input indices.
++__device__ void radix_topk_rescan(
++    const float* input, int32_t* output, uint32_t length, uint32_t topk,
++    const int32_t* ids, uint32_t block_bits, uint32_t logical_length) {
++  __shared__ uint32_t histogram[256];
++  __shared__ uint32_t prefix, remaining, cutoff_count, emitted;
++  const uint32_t tx = threadIdx.x;
++  if (tx == 0) { prefix = 0; remaining = topk; emitted = 0; }
++  __syncthreads();
++  for (uint32_t round = 0; round < 4; ++round) {
++    if (tx < 256) histogram[tx] = 0;
++    __syncthreads();
++    const uint32_t shift = 24 - 8 * round;
++    const uint32_t mask = round == 0 ? 0u : (~0u << (32 - 8 * round));
++    for (uint32_t idx = tx; idx < length; idx += kBlockSize) {
++      const uint32_t key = convert_to_uint32(input[idx]);
++      if ((key & mask) == prefix) ::atomicAdd(&histogram[(key >> shift) & 255u], 1);
++    }
++    __syncthreads();
++    if (tx == 0) {
++      uint32_t above = 0;
++      for (int bin = 255; bin >= 0; --bin) {
++        const uint32_t count = histogram[bin];
++        if (above + count >= remaining) {
++          prefix |= static_cast<uint32_t>(bin) << shift;
++          remaining -= above;
++          cutoff_count = count;
++          break;
++        }
++        above += count;
++      }
++    }
++    __syncthreads();
++  }
++  const bool ambiguous = cutoff_count > remaining;
++  for (uint32_t idx = tx; idx < length; idx += kBlockSize) {
++    const uint32_t key = convert_to_uint32(input[idx]);
++    if (key > prefix || (!ambiguous && key == prefix)) {
++      output[::atomicAdd(&emitted, 1)] = static_cast<int32_t>(idx);
++    }
++  }
++  __syncthreads();
++  if (ambiguous) {
++    emit_logical_cutoff_ties(input, output, length, prefix, remaining,
++                            topk - remaining, ids, block_bits, logical_length);
++  }
++}
++
+ __device__ void
+-radix_topk(const float* __restrict__ input, int32_t* __restrict__ output, uint32_t length, uint32_t topk) {
++radix_topk(const float* __restrict__ input, int32_t* __restrict__ output, uint32_t length, uint32_t topk,
++           const int32_t* tie_break_ids, uint32_t tie_break_bits, uint32_t logical_length) {
+   constexpr uint32_t RADIX = 256;
+   constexpr uint32_t BLOCK_SIZE = kBlockSize;
+   constexpr uint32_t SMEM_INPUT_SIZE = kSMEM / (2 * sizeof(int32_t));
+@@ -165,6 +288,10 @@
+         }
+       }
+       __syncthreads();
++      return;
++    }
++    if (s_histogram[threshold_bin] - s_histogram[threshold_bin + 1] > SMEM_INPUT_SIZE) {
++      radix_topk_rescan(input, output, length, topk, tie_break_ids, tie_break_bits, logical_length);
+       return;
+     }
+     __syncthreads();
+@@ -190,6 +317,7 @@
+     __syncthreads();
+   }
+ 
++  uint32_t score_prefix = 0;
+   // stage 2: refine with 8bit radix passes
+ #pragma unroll 4
+   for (int round = 0; round < 4; ++round) {
+@@ -207,7 +335,10 @@
+     __syncthreads();
+ 
+     const auto threshold_bin = s_threshold_bin_id;
++    score_prefix |= threshold_bin << (24 - round * 8);
+     remain_topk -= s_histogram[threshold_bin + 1];
++    const bool logical_tie_break = round == 3 && remain_topk != 0 &&
++        s_histogram[threshold_bin] - s_histogram[threshold_bin + 1] > remain_topk;
+ 
+     if (remain_topk == 0) {
+       for (uint32_t i = tx; i < num_input; i += BLOCK_SIZE) {
+@@ -235,9 +366,9 @@
+         output[pos] = static_cast<int32_t>(idx);
+       } else if (bin == threshold_bin) {
+         if (round == 3) {
+-          const auto pos = ::atomicAdd(&s_last_remain, -1);
+-          if (pos > 0) {
+-            output[topk - pos] = static_cast<int32_t>(idx);
++          if (!logical_tie_break) {
++            const auto pos = ::atomicAdd(&s_last_remain, -1);
++            if (pos > 0) output[topk - pos] = static_cast<int32_t>(idx);
+           }
+         } else {
+           const auto pos = ::atomicAdd(&s_num_input[r_idx ^ 1], 1);
+@@ -251,6 +382,10 @@
+       }
+     }
+     __syncthreads();
++    if (logical_tie_break) {
++      emit_logical_cutoff_ties(input, output, length, score_prefix, remain_topk,
++                              topk - remain_topk, tie_break_ids, tie_break_bits, logical_length);
++    }
+   }
+ }
+ 
+@@ -391,7 +526,10 @@
+       s_topk_indices[i] = static_cast<int32_t>(i);
+     }
+   } else {
+-    radix_topk(score_ptr, s_topk_indices, static_cast<uint32_t>(seq_len), topk);
++    const auto tie_ids = params.tie_break_ids != nullptr ? params.tie_break_ids + bid * params.tie_break_stride : nullptr;
++    const auto logical_length = params.tie_break_lens != nullptr ? params.tie_break_lens[bid] : seq_len;
++    radix_topk(score_ptr, s_topk_indices, static_cast<uint32_t>(seq_len), topk,
++               tie_ids, params.tie_break_bits, static_cast<uint32_t>(logical_length));
+   }
+   __syncthreads();
+ 
+@@ -466,7 +604,10 @@
+     at::Tensor& page_indices,
+     int64_t page_size,
+     std::optional<at::Tensor> raw_indices_opt,
+-    bool sort_output) {
++    bool sort_output,
++    std::optional<at::Tensor> tie_break_ids_opt,
++    std::optional<at::Tensor> tie_break_lens_opt,
++    int64_t tie_break_block_size) {
+   CHECK_CUDA(scores);
+   CHECK_CUDA(seq_lens);
+   CHECK_CUDA(page_table);
+@@ -519,6 +660,33 @@
+         "raw_indices must be int32 with shape [B, topk], contiguous");
+     TORCH_CHECK(raw.size(0) == B && raw.size(1) == topk, "raw_indices shape must match page_indices [B, ", topk, "]");
+     raw_ptr = raw.data_ptr<int32_t>();
++  }
++
++  const int32_t* tie_ids = nullptr;
++  const int32_t* tie_lens = nullptr;
++  int64_t tie_stride = 0;
++  uint32_t tie_bits = 0;
++  TORCH_CHECK(tie_break_ids_opt.has_value() == tie_break_lens_opt.has_value(),
++              "tie_break_ids and tie_break_lens must be supplied together");
++  if (tie_break_ids_opt.has_value()) {
++    const auto& ids = tie_break_ids_opt.value();
++    const auto& lens = tie_break_lens_opt.value();
++    CHECK_CUDA(ids);
++    CHECK_CUDA(lens);
++    TORCH_CHECK(ids.device() == scores.device() && lens.device() == scores.device(), "tie tensors must use the scores device");
++    TORCH_CHECK(ids.dim() == 2 && ids.size(0) == B && ids.stride(1) == 1 && ids.scalar_type() == at::kInt,
++                "tie_break_ids must be int32 [B, blocks], contiguous along blocks");
++    TORCH_CHECK(lens.dim() == 1 && lens.size(0) == B && lens.is_contiguous() && lens.scalar_type() == at::kInt,
++                "tie_break_lens must be contiguous int32 [B]");
++    TORCH_CHECK(tie_break_block_size > 0 && tie_break_block_size <= INT32_MAX &&
++                (tie_break_block_size & (tie_break_block_size - 1)) == 0,
++                "tie_break_block_size must be a positive int32 power of two");
++    TORCH_CHECK(ids.size(1) >= (scores.size(1) + tie_break_block_size - 1) / tie_break_block_size,
++                "tie_break_ids must cover the compact score width");
++    tie_ids = ids.data_ptr<int32_t>();
++    tie_lens = lens.data_ptr<int32_t>();
++    tie_stride = ids.stride(0);
++    tie_bits = static_cast<uint32_t>(__builtin_ctzll(static_cast<unsigned long long>(tie_break_block_size)));
+   }
+ 
+   const TopKParams params{
+@@ -533,6 +701,10 @@
+       .topk = static_cast<uint32_t>(topk),
+       .output_stride = topk,
+       .sort_output = sort_output,
++      .tie_break_ids = tie_ids,
++      .tie_break_lens = tie_lens,
++      .tie_break_stride = tie_stride,
++      .tie_break_bits = tie_bits,
+   };
+ 
+   const auto stream = at::cuda::getCurrentCUDAStream().stream();
+--- a/include/sgl_kernel_ops.h
++++ b/include/sgl_kernel_ops.h
+@@ -171,7 +171,10 @@
+     at::Tensor& page_indices,
+     int64_t page_size,
+     std::optional<at::Tensor> raw_indices_opt = std::nullopt,
+-    bool sort_output = false);
++    bool sort_output = false,
++    std::optional<at::Tensor> tie_break_ids_opt = std::nullopt,
++    std::optional<at::Tensor> tie_break_lens_opt = std::nullopt,
++    int64_t tie_break_block_size = 1);
+ #endif
+ 
+ /*
+--- a/csrc/common_extension_rocm.cc
++++ b/csrc/common_extension_rocm.cc
+@@ -49,7 +49,8 @@
+ 
+   m.def(
+       "deepseek_v4_topk_transform_512(Tensor scores, Tensor seq_lens, Tensor page_table, Tensor! "
+-      "page_indices, int page_size, Tensor!? raw_indices, bool sort_output=False) -> ()");
++      "page_indices, int page_size, Tensor!? raw_indices, bool sort_output=False, "
++      "Tensor? tie_break_ids=None, Tensor? tie_break_lens=None, int tie_break_block_size=1) -> ()");
+   m.impl("deepseek_v4_topk_transform_512", torch::kCUDA, &deepseek_v4_topk_transform_512);
+ 
+   m.def(

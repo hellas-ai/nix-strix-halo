@@ -1,0 +1,30 @@
+diff --git a/sglang/srt/managers/scheduler.py b/sglang/srt/managers/scheduler.py
+index 6e61fd2..8ff286b 100644
+--- a/sglang/srt/managers/scheduler.py
++++ b/sglang/srt/managers/scheduler.py
+@@ -3083,6 +3083,25 @@ class Scheduler(
+             self._add_request_to_queue(req)
+             return
+ 
++        if (
++            get_exec().features.enable_decoder_swa_bounded_replay
++            and req.return_logprob
++            and 0 <= req.logprob_start_len < len(req.origin_input_ids)
++        ):
++            # Bounded replay never computes the late layers of prompt rows outside
++            # each chunk's tail. The model forward raises on such a request, and an
++            # exception there stops the whole tensor-parallel group, so refuse it
++            # here for every entry point (the OpenAI server and the gRPC gateway).
++            error_msg = (
++                "Prompt logprobs (logprob_start_len below the prompt length) are "
++                "not available with --enable-decoder-swa-bounded-replay; omit "
++                "logprob_start_len or set it to the prompt length."
++            )
++            req.logprob_start_len = -1
++            req.set_finish_with_abort(error_msg)
++            self._add_request_to_queue(req)
++            return
++
+         if (
+             get_device().mlx_enable_sampling
+             and req.return_logprob
