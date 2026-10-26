@@ -1,0 +1,15 @@
+diff --git a/sglang/srt/mem_cache/storage/mooncake_store/cache_namespace.py b/sglang/srt/mem_cache/storage/mooncake_store/cache_namespace.py
+index 6ec4b46..b5845dd 100644
+--- a/sglang/srt/mem_cache/storage/mooncake_store/cache_namespace.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/cache_namespace.py
+@@ -42,6 +42,10 @@ def direct_cache_namespace(pool_group, *, numerics_id: str, server_args) -> str:
+         "enable_tf32_matmul",
+         "triton_attention_reduce_in_fp32",
+         "enable_deterministic_inference",
++        # Late-layer SWA K/V differ (floored windows, tail rows only) under bounded
++        # replay, so objects written with either flag value must not cross.
++        "enable_decoder_swa_bounded_replay",
++        "enable_encoder_swa_bounded_replay",
+         "speculative_algorithm",
+         "speculative_num_draft_tokens",
+         "tp_size",

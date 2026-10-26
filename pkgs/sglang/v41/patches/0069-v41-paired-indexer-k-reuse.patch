@@ -1,0 +1,447 @@
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
+@@ -8,6 +8,7 @@
+ all lengths and page mappings remain device inputs during graph replay.
+ """
+ 
++import logging
+ import os
+ 
+ import torch
+@@ -31,6 +32,18 @@
+ # These are only read through scalar/gather loads, so alignment is no benefit
+ # (the amdgcn instruction mix is identical with and without the assumption).
+ _ROW_POINTER_ARGS = ["Q", "QS", "W", "PT", "LENS"]
++_PAIR_DIAG_COUNTS = {}
++_PAIR_DIAG_CALLS = {}
++_PAIR_DISPATCH_LOGGED = set()
++
++
++def _paired_indexer_diag_tensor(device):
++    """Diagnostic-only GPU counters; never read on the normal serving path."""
++    key = device.index
++    if key not in _PAIR_DIAG_COUNTS:
++        _PAIR_DIAG_COUNTS[key] = torch.zeros(4, dtype=torch.int32, device=device)
++        _PAIR_DIAG_CALLS[key] = 0
++    return _PAIR_DIAG_COUNTS[key]
+ 
+ 
+ def use_gfx1151_indexer(device: torch.device) -> bool:
+@@ -349,7 +362,8 @@
+ 
+ 
+ def paged_fp4_logits(
+-    q, q_scale, k, k_scale, weights, page_table, lengths, weight_scale, out
++    q, q_scale, k, k_scale, weights, page_table, lengths, weight_scale, out,
++    *, paired_single_request=False,
+ ):
+     """Fill every score, including -inf for padded or unreachable positions."""
+     rows, heads, packed_dim = q.shape
+@@ -363,6 +377,60 @@
+     assert page_table.shape[0] == rows and page_table.stride(1) == 1
+     assert lengths.numel() == rows and lengths.is_contiguous()
+     if rows == 0:
++        return out
++    # The only eligible shape is one full M1536 pure-EXTEND request.
++    # Historical synthetic M330 results do not establish serving provenance.
++    paired_prefill = (
++        os.environ.get("SGLANG_DSV41_PAIRED_INDEXER_K") == "1"
++        and heads == 32
++        and rows == 1536
++        and paired_single_request
++        and 4608 <= out.shape[1] <= 15872
++        and out.dtype == torch.float32
++        and out.is_contiguous()
++        and q.device.type == "cuda"
++        and use_gfx1151_indexer(q.device)
++        and os.environ.get("SGLANG_DSV41_PARALLEL_INDEXER_SCORE") == "1"
++    )
++    if paired_prefill:
++        from sglang.kernels.ops.attention.dsv4.fp4_indexer_pair_gfx1151 import (
++            paged_logits_pair_sequential,
++        )
++
++        # The optional diagnostic counts tile decisions on device. It is
++        # intentionally disabled during graph capture and ordinary timings.
++        diag = (os.environ.get("SGLANG_DSV41_PAIRED_INDEXER_DIAG") == "1"
++                and not torch.cuda.is_current_stream_capturing())
++        counts = _paired_indexer_diag_tensor(q.device) if diag else out
++        paged_logits_pair_sequential[(rows // 2, 2)](
++            q.view(torch.uint8), q_scale, k.view(torch.uint8), k_scale,
++            weights, page_table, lengths, out,
++            q.stride(0), q_scale.stride(0), weights.stride(0),
++            page_table.stride(0), out.shape[1], page_table.shape[1],
++            k.shape[0], counts, DIAG=diag, WEIGHT_SCALE=weight_scale,
++            BLOCK=32, num_warps=4, enable_fp_fusion=False,
++        )
++        # A one-time CPU-only dispatch marker per tested width. This proves
++        # the paired kernel launch was selected, not that any tile shared K.
++        dispatch_key = (q.device.index, rows, out.shape[1])
++        if dispatch_key not in _PAIR_DISPATCH_LOGGED:
++            logging.getLogger(__name__).info(
++                "DSV41 paired indexer dispatch active: rows=%s heads=%s width=%s device=%s paired_flag=%s parallel_score_flag=%s",
++                rows, heads, out.shape[1], q.device,
++                os.environ.get("SGLANG_DSV41_PAIRED_INDEXER_K"),
++                os.environ.get("SGLANG_DSV41_PARALLEL_INDEXER_SCORE"),
++            )
++            _PAIR_DISPATCH_LOGGED.add(dispatch_key)
++        if diag:
++            key = q.device.index
++            _PAIR_DIAG_CALLS[key] += 1
++            if _PAIR_DIAG_CALLS[key] % 64 == 0:
++                # One explicit diagnostic read per 64 launches; there is no
++                # per-step .item() or synchronization in the timed arm.
++                logging.getLogger(__name__).warning(
++                    "paired indexer diag launches=%d tiles,shared,same_page,safe=%s",
++                    _PAIR_DIAG_CALLS[key], counts.cpu().tolist(),
++                )
+         return out
+     kernel = _paged_logits_wmma if heads == 32 else _paged_logits
+     block = 32 if heads == 32 else 16
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_hip.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_hip.py
+@@ -337,6 +337,7 @@
+     decode_workspace: Optional[FP4DecodeWorkspace] = None,
+     prefill_workspace: Optional[FP4PrefillWorkspace] = None,
+     page_table_bucket: int = 4,
++    paired_single_request: bool = False,
+ ) -> torch.Tensor:
+     """Compute FP4 Q/K indexer logits with the decode or prefill FlyDSL kernel."""
+     if use_gfx1151_indexer(q_fp4.device):
+@@ -351,6 +352,7 @@
+         return paged_fp4_logits(
+             q_fp4, q_scale, k_payload, k_scale, weights, pages,
+             _as_int32_1d(c4_seq_lens), weight_scale, logits,
++            paired_single_request=paired_single_request,
+         )
+     from aiter.ops.flydsl import (
+         flydsl_pa_mqa_logits_fp4,
+--- a/sglang/srt/layers/attention/dsv4/indexer.py
++++ b/sglang/srt/layers/attention/dsv4/indexer.py
+@@ -76,6 +76,37 @@
+ 
+ 
+ _arange_cache = {}
++
++
++def _single_request_full_chunk_pair_eligible(
++    forward_batch: ForwardBatch,
++    indexer_metadata: PagedIndexerMetadata,
++    query_rows: int,
++    rows: slice,
++) -> bool:
++    """Prove same request/page table from CPU metadata; never inspect GPU values.
++
++    The HIP prefill page-table builder repeats the one request-pool index for
++    all query rows, then reads the same req_to_token row for each page table.
++    Keep this conservative: partial tiles, graph/padding, MIXED, verify, and
++    multi-request batches use the existing per-row kernel.
++    """
++    return (
++        forward_batch.forward_mode == ForwardMode.EXTEND
++        and forward_batch.batch_size == 1
++        and forward_batch.req_pool_indices.shape == (1,)
++        and query_rows == 1536
++        and forward_batch.extend_seq_lens_cpu == [query_rows]
++        and forward_batch.extend_num_tokens == query_rows
++        and forward_batch.input_ids.numel() == query_rows
++        and forward_batch._original_forward_mode is None
++        and forward_batch.tbo_parent_token_range is None
++        and rows.start == 0
++        and rows.stop == query_rows
++        and rows.step in (None, 1)
++        and indexer_metadata.page_table.shape[0] == query_rows
++        and not indexer_metadata.use_prefill_cuda_graph
++    )
+ 
+ 
+ def fp8_paged_mqa_logits_torch(
+@@ -996,6 +1027,9 @@
+             k_scale = token_to_kv_pool.get_index_k_fp4_scale_buffer(c4_indexer.layer_id)
+ 
+             def run_fp4_indexer(rows: slice) -> None:
++                paired_single_request = _single_request_full_chunk_pair_eligible(
++                    forward_batch, indexer_metadata, query_rows, rows
++                )
+                 logits = aiter_fp4_paged_mqa_logits(
+                     q_fp4=q_fp4[rows],
+                     q_scale=q_scale[rows],
+@@ -1008,6 +1042,7 @@
+                     is_decode=is_decode,
+                     decode_workspace=metadata.fp4_decode_workspace,
+                     prefill_workspace=metadata.fp4_prefill_workspace,
++                    paired_single_request=paired_single_request,
+                 )
+                 run_topk_transform(rows, logits)
+ 
+--- /dev/null
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_pair_gfx1151.py
+@@ -0,0 +1,173 @@
++"""Opt-in two-row gfx1151 indexer K reuse with exact per-row fallback.
++
++Same-page, safe-scale pairs share each decoded 32-K group. Other pairs retain
++the installed per-row WMMA/scalar choice. The caller must supply an even row
++count and keep this behind its verified serving geometry guard.
++"""
++
++import triton
++import triton.language as tl
++
++from sglang.kernels.ops.attention.dsv4.fp4_indexer_gfx1151 import (
++    _e2m1_bf16,
++    _group_dot,
++    _scalar_tile,
++)
++
++
++@triton.jit
++def _key_group(K, KS, page, off, live, GROUP, BLOCK: tl.constexpr):
++    dim = tl.arange(0, 32)
++    kb = tl.load(
++        K + page[None, :].to(tl.int64) * 4096 + GROUP * 1024
++        + off[None, :] * 16 + dim[:, None] // 2,
++        mask=live[None, :], other=0,
++    ).to(tl.int32)
++    k = _e2m1_bf16((kb >> ((dim[:, None] % 2) * 4)) & 15)
++    ke = tl.load(
++        KS + page.to(tl.int64) * 256 + GROUP * 64
++        + (off % 16) * 4 + off // 16,
++        mask=live, other=127,
++    ).to(tl.int32)
++    return k, ke
++
++
++@triton.jit
++def _row_group_dot(Q, QS, row, k, ke, q_stride, qs_stride,
++                   GROUP, BLOCK: tl.constexpr):
++    head = tl.arange(0, 32)
++    dim = tl.arange(0, 32)
++    qb = tl.load(
++        Q + row * q_stride + head[:, None] * 64
++        + GROUP * 16 + dim[None, :] // 2,
++    ).to(tl.int32)
++    q = _e2m1_bf16((qb >> ((dim[None, :] % 2) * 4)) & 15)
++    dot = tl.floor(tl.dot(q, k) * 4.0 + 0.5) * 0.25
++    qe = tl.load(
++        QS + row * qs_stride + GROUP * 64
++        + (head % 16) * 4 + head // 16,
++    ).to(tl.int32)
++    qscale = (qe << 23).to(tl.float32, bitcast=True)
++    kscale = (ke << 23).to(tl.float32, bitcast=True)
++    return dot * (qscale[:, None] * kscale[None, :])
++
++
++@triton.jit
++def _safe_scale_pair(QS, KS, row0, row1, page, off, live, qs_stride,
++                     BLOCK: tl.constexpr):
++    heads = tl.arange(0, 32)
++    groups = tl.arange(0, 4)
++    qe0 = tl.load(QS + row0 * qs_stride + groups[None, :] * 64
++                  + (heads[:, None] % 16) * 4 + heads[:, None] // 16).to(tl.int32)
++    qe1 = tl.load(QS + row1 * qs_stride + groups[None, :] * 64
++                  + (heads[:, None] % 16) * 4 + heads[:, None] // 16).to(tl.int32)
++    ke = tl.load(KS + page[:, None].to(tl.int64) * 256
++                 + groups[None, :] * 64 + (off[:, None] % 16) * 4
++                 + off[:, None] // 16, mask=live[:, None], other=127).to(tl.int32)
++    qlo = tl.minimum(tl.min(qe0), tl.min(qe1))
++    qhi = tl.maximum(tl.max(qe0), tl.max(qe1))
++    klo = tl.min(tl.where(live[:, None], ke, 255))
++    khi = tl.max(tl.where(live[:, None], ke, 0))
++    return ((qlo >= 2) & (qhi <= 252) & (klo >= 2) & (khi <= 252)
++            & (qlo + klo >= 130) & (qhi + khi <= 368)
++            & ((qhi - qlo) + (khi - klo) <= 8))
++
++
++@triton.jit
++def _single_row_score(Q, QS, K, KS, W, row, page, off, live,
++                      q_stride, qs_stride, w_stride, BLOCK: tl.constexpr):
++    # A mixed-page pair must preserve the installed per-row WMMA/scalar
++    # selection. Scalar scoring differs from WMMA even at safe scales.
++    safe = _safe_scale_pair(QS, KS, row, row, page, off, live,
++                            qs_stride, BLOCK)
++    if safe:
++        d0 = _group_dot(Q, QS, K, KS, row, page, off, live,
++                        q_stride, qs_stride, 0, 32, BLOCK)
++        d1 = _group_dot(Q, QS, K, KS, row, page, off, live,
++                        q_stride, qs_stride, 1, 32, BLOCK)
++        d2 = _group_dot(Q, QS, K, KS, row, page, off, live,
++                        q_stride, qs_stride, 2, 32, BLOCK)
++        d3 = _group_dot(Q, QS, K, KS, row, page, off, live,
++                        q_stride, qs_stride, 3, 32, BLOCK)
++        dots = (d0 + d1) + (d2 + d3)
++        heads = tl.arange(0, 32)
++        weights = tl.load(W + row * w_stride + heads).to(tl.float32)
++        return tl.sum(tl.maximum(dots, 0.0) * weights[:, None], axis=0)
++    else:
++        return _scalar_tile(Q, QS, K, KS, W, row, page, off, live,
++                            q_stride, qs_stride, w_stride, 32, BLOCK)
++
++
++@triton.jit(do_not_specialize=["pt_stride", "WIDTH", "PAGE_COLS", "PAGES"])
++def paged_logits_pair_sequential(
++    Q, QS, K, KS, W, PT, LENS, OUT,
++    q_stride, qs_stride, w_stride, pt_stride,
++    WIDTH, PAGE_COLS, PAGES, COUNTERS,
++    DIAG: tl.constexpr,
++    WEIGHT_SCALE: tl.constexpr, BLOCK: tl.constexpr = 32,
++):
++    row0 = tl.program_id(0) * 2
++    row1 = row0 + 1
++    length0 = tl.load(LENS + row0)
++    length1 = tl.load(LENS + row1)
++    for start in range(tl.program_id(1) * 1024, WIDTH, tl.num_programs(1) * 1024):
++        tail = start + tl.arange(0, 1024)
++        tl.store(OUT + row0 * WIDTH + tail, float("-inf"),
++                 mask=(tail < WIDTH) & (tail >= length0))
++        tl.store(OUT + row1 * WIDTH + tail, float("-inf"),
++                 mask=(tail < WIDTH) & (tail >= length1))
++    for start in range(tl.program_id(1) * BLOCK,
++                       tl.minimum(tl.maximum(length0, length1), WIDTH),
++                       tl.num_programs(1) * BLOCK):
++        pos = start + tl.arange(0, BLOCK)
++        table_live = (pos < WIDTH) & (pos // 64 < PAGE_COLS)
++        live0 = table_live & (pos < length0)
++        live1 = table_live & (pos < length1)
++        page0 = tl.load(PT + row0 * pt_stride + pos // 64,
++                        mask=table_live, other=-1)
++        page1 = tl.load(PT + row1 * pt_stride + pos // 64,
++                        mask=table_live, other=-1)
++        same_pages = tl.min(tl.where(live0 | live1, (page0 == page1).to(tl.int32), 1)) == 1
++        shared_live = (live0 | live1) & (page0 >= 0) & (page0 < PAGES)
++        off = pos % 64
++        safe_scale = _safe_scale_pair(QS, KS, row0, row1, page0, off,
++                                      shared_live, qs_stride, BLOCK)
++        if DIAG:
++            # Count per-32-key tile decisions only in the explicit diagnostic
++            # arm. Four atomics are absent from normal serving codegen.
++            tl.atomic_add(COUNTERS + 0, 1)
++            tl.atomic_add(COUNTERS + 1, (same_pages & safe_scale).to(tl.int32))
++            tl.atomic_add(COUNTERS + 2, same_pages.to(tl.int32))
++            tl.atomic_add(COUNTERS + 3, safe_scale.to(tl.int32))
++        if same_pages & safe_scale:
++            dots0 = tl.zeros((32, BLOCK), tl.float32)
++            dots1 = tl.zeros((32, BLOCK), tl.float32)
++            # Keep just one decoded 32-K group live, consume it for row0 then
++            # row1, and release it before loading the next group. The normal-
++            # scale guard bounds these FP32 partial sums to exact values.
++            for group in range(4):
++                k, ke = _key_group(K, KS, page0, off, shared_live, group, BLOCK)
++                dots0 += _row_group_dot(Q, QS, row0, k, ke, q_stride, qs_stride,
++                                        group, BLOCK)
++                dots1 += _row_group_dot(Q, QS, row1, k, ke, q_stride, qs_stride,
++                                        group, BLOCK)
++            head = tl.arange(0, 32)
++            weight0 = tl.load(W + row0 * w_stride + head).to(tl.float32)
++            weight1 = tl.load(W + row1 * w_stride + head).to(tl.float32)
++            score0 = tl.sum(tl.maximum(dots0, 0.0) * weight0[:, None], axis=0)
++            score1 = tl.sum(tl.maximum(dots1, 0.0) * weight1[:, None], axis=0)
++        else:
++            valid0 = live0 & (page0 >= 0) & (page0 < PAGES)
++            valid1 = live1 & (page1 >= 0) & (page1 < PAGES)
++            score0 = _single_row_score(Q, QS, K, KS, W, row0, page0, off,
++                                       valid0, q_stride, qs_stride, w_stride, BLOCK)
++            score1 = _single_row_score(Q, QS, K, KS, W, row1, page1, off,
++                                       valid1, q_stride, qs_stride, w_stride, BLOCK)
++        tl.store(OUT + row0 * WIDTH + pos,
++                 tl.where(live0 & (page0 >= 0) & (page0 < PAGES),
++                          score0 * WEIGHT_SCALE, float("-inf")),
++                 mask=(pos < WIDTH) & (pos < length0))
++        tl.store(OUT + row1 * WIDTH + pos,
++                 tl.where(live1 & (page1 >= 0) & (page1 < PAGES),
++                          score1 * WEIGHT_SCALE, float("-inf")),
++                 mask=(pos < WIDTH) & (pos < length1))
+--- a/sglang/srt/layers/attention/dsv4/low_ratio_backend_hip.py
++++ b/sglang/srt/layers/attention/dsv4/low_ratio_backend_hip.py
+@@ -44,6 +44,51 @@
+ _CANDIDATE_SCORE_BUDGET_BYTES = 1 << 30
+ 
+ 
++def _single_request_low_ratio_full_chunk_pair_eligible(
++    forward_batch: ForwardBatch,
++    metadata,
++    indexer_metadata: PagedIndexerMetadata,
++    ratio: int,
++    query_rows: int,
++    q_rows: int,
++    rows: slice,
++    seq_lens_cpu: List[int],
++    extend_lens_cpu: List[int],
++) -> bool:
++    """CPU-known same-request proof for the opt-in paired score kernel.
++
++    The prefill page-table builder repeats the sole req_pool index for every
++    token row; low-ratio expansion maps each row to the same index-K table.
++    Partial requests, late-layer tails, graphs, mixed/verify and TBO stay on
++    the installed per-row path. No GPU value or host synchronization is read.
++    """
++    return (
++        forward_batch.forward_mode.name == "EXTEND"
++        and forward_batch.batch_size == 1
++        and forward_batch.req_pool_indices.shape == (1,)
++        and metadata.late_layer_tail is None
++        and forward_batch._original_forward_mode is None
++        and forward_batch.tbo_parent_token_range is None
++        and ratio in (1, 2)
++        and indexer_metadata.compress_ratio == ratio
++        and query_rows == 1536
++        and q_rows == query_rows
++        and seq_lens_cpu is not None
++        and len(seq_lens_cpu) == 1
++        and seq_lens_cpu[0] >= query_rows
++        and extend_lens_cpu == [query_rows]
++        and forward_batch.extend_seq_lens_cpu == [query_rows]
++        and forward_batch.extend_num_tokens == query_rows
++        and forward_batch.input_ids.numel() == query_rows
++        and rows.start == 0
++        and rows.stop == query_rows
++        and rows.step in (None, 1)
++        and indexer_metadata.page_table.shape[0] == query_rows
++        and indexer_metadata.compressed_seq_lens.shape[0] == query_rows
++        and not indexer_metadata.use_prefill_cuda_graph
++    )
++
++
+ def _gemv_head_weight_rows(indexer, x: torch.Tensor) -> bool:
+     """Row counts indexer_head_weights / the split-K GEMV serve: a small contiguous bf16 batch."""
+     return (
+@@ -412,6 +457,10 @@
+     prefill_workspace = metadata.fp4_low_ratio_prefill_workspaces.get(ratio)
+ 
+     def score_rows(rows: slice) -> torch.Tensor:
++        paired_single_request = _single_request_low_ratio_full_chunk_pair_eligible(
++            forward_batch, metadata, indexer_metadata, ratio, num_tokens,
++            q_fp4.shape[0], rows, seq_lens_cpu, extend_lens_cpu,
++        )
+         return aiter_fp4_paged_mqa_logits(
+             q_fp4=q_fp4[rows],
+             q_scale=q_scale[rows],
+@@ -424,6 +473,7 @@
+             page_table_bucket=LOW_RATIO_PAGE_TABLE_BUCKET,
+             is_decode=False,
+             prefill_workspace=prefill_workspace if rows.start == 0 else None,
++            paired_single_request=paired_single_request,
+         )
+ 
+     def select_rows(
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
+@@ -378,14 +378,16 @@
+     assert lengths.numel() == rows and lengths.is_contiguous()
+     if rows == 0:
+         return out
+-    # The only eligible shape is one full M1536 pure-EXTEND request.
+-    # Historical synthetic M330 results do not establish serving provenance.
++    # Only a CPU-proven same-request full M1536 prefill may pair rows.
++    # V4.1 C1/C2 uses 64-page buckets of 64 keys; the tested end contexts
++    # span 12,288..65,536 key columns. M1/M4 and mixed requests fall back.
+     paired_prefill = (
+         os.environ.get("SGLANG_DSV41_PAIRED_INDEXER_K") == "1"
+         and heads == 32
+         and rows == 1536
+         and paired_single_request
+-        and 4608 <= out.shape[1] <= 15872
++        and 12288 <= out.shape[1] <= 65536
++        and out.shape[1] % 4096 == 0
+         and out.dtype == torch.float32
+         and out.is_contiguous()
+         and q.device.type == "cuda"

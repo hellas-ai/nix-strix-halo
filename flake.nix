@@ -677,6 +677,7 @@
             "amdgpu-smu-exporter"
             "amdtop"
             "ds4-rocm"
+            "ds41-node"
             "ec-su-axb35"
             "ec-su-axb35-monitor"
             "fastflowlm"
@@ -691,8 +692,17 @@
             "mlir-aie-env"
             "linux-multikernel"
             "mlx-rocm"
+            "mscclpp-rocm"
             "multikernel-demo-initrd"
+            "rocm-pm4-bootstrap"
+            "rocm-pm4-clr"
+            "rocm-pm4-clr-split"
+            "rocm-pm4-prepared-source"
+            "rocm-pm4-rocr"
+            "rocm-pm4-rocr-split"
+            "rocm-pm4-rocr-tmpring"
             "sglang-rocm"
+            "sglang-v41-rocm"
             "strix-halo-mes-firmware"
             "therock-amdsmi"
             "therock-python"
@@ -923,6 +933,7 @@
               ap self.packages.${system}.mlx-lm "mlx_lm.server"
                 "Run the MLX LM HTTP server on ROCm";
             sglang-rocm = ap pkgs.sglang-rocm "sglang" "Run SGLang with ROCm";
+            ds41-node = ap pkgs.ds41-node "ds41-node" "Run a DeepSeek V4.1 Flash TP4 rank";
 
             live-iso-vm =
               let
@@ -1273,6 +1284,15 @@
           {
             deadnix = runSourceCheck "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
             statix = runSourceCheck "statix" [ pkgs.statix ] "statix check .";
+            ds41-launcher = runSourceCheck "ds41-launcher" [ pkgs.python3 ] ''
+              bash -n lib/bench/ds41-node.sh
+              python3 lib/bench/test-ds41-model-check.py
+              bash lib/bench/test-ds41-node.sh
+            '';
+            vllm-bench-tests = runSourceCheck "vllm-bench-tests" [ pkgs.python3 ] ''
+              python3 lib/bench/test-vllm-transport-matrix.py
+              python3 lib/bench/test-vllm-stream-client.py
+            '';
             therock-updater-tests = runSourceCheck "therock-updater-tests" [
               pkgs.python3
             ] "python3 -m unittest discover -s pkgs/therock/scripts -p 'test_*.py'";
@@ -1284,6 +1304,9 @@
               pkgs.nixfmt-tree
             ] "treefmt --tree-root . --walk filesystem --fail-on-change .";
             cuda-host-driver-runtime = cudaHostDriverRuntime;
+            benchmark-hardware-lease = import ./lib/bench/tests/hardware-lease.nix {
+              inherit pkgs benchLib;
+            };
             multikernel-demo-initrd = multikernelInitrd;
             multikernel-kerf = multikernelKerf;
             multikernel-kernel-config = multikernelKernelConfig;
@@ -1301,6 +1324,7 @@
                 }
                 ''
                   bash -n ${./lib/bench/vllm-transport-matrix.sh}
+                  python3 -m py_compile ${./lib/bench/vllm-transport-matrix.py}
                   python3 -m py_compile ${./lib/bench/vllm-stream-client.py}
                   strix-halo-vllm-pair-bench-ci --scenario qwen-peak --dry-run | tee "$out"
                   grep -q "dry-run: not invoking" "$out"
