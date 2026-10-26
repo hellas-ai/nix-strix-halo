@@ -1,0 +1,32 @@
+DeepSeek V4: select paged MQA only on supported AITER architectures.
+
+The portable path accepts both sequence-length layouts passed by the backend.
+
+--- a/sglang/srt/arg_groups/model_hook.py
++++ b/sglang/srt/arg_groups/model_hook.py
+@@ -409,7 +409,13 @@
+                 envs.SGLANG_OPT_FP8_WO_A_GEMM.set(False)
+             envs.SGLANG_OPT_USE_JIT_INDEXER_METADATA.set(False)
+             envs.SGLANG_OPT_USE_TOPK_V2.set(True)
+-            envs.SGLANG_OPT_USE_AITER_INDEXER.set(True)
++            # AITER paged-MQA currently compiles only for CDNA gfx942/gfx950.
++            # Other ROCm devices use the portable paged-indexer implementation.
++            from sglang.srt.utils.common import is_gfx942_supported, is_gfx95_supported
++
++            envs.SGLANG_OPT_USE_AITER_INDEXER.set(
++                is_gfx942_supported() or is_gfx95_supported()
++            )
+             envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.set(False)
+             envs.SGLANG_OPT_USE_TILELANG_MHC_POST.set(False)
+             envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.set(True)
+--- a/sglang/srt/layers/attention/dsv4/indexer.py
++++ b/sglang/srt/layers/attention/dsv4/indexer.py
+@@ -94,6 +94,8 @@
+     assert q_fp8.shape == (batch_size, 1, num_heads, head_dim)
+     assert kvcache_fp8.shape[1:] == (block_size, 1, head_dim + 4)
+     assert weight.shape == (batch_size, num_heads)
++    if seq_lens.ndim == 2 and seq_lens.shape[1] == 1:
++        seq_lens = seq_lens.squeeze(-1)
+     assert seq_lens.shape == (batch_size,)
+     assert page_table.shape[0] == batch_size
+     assert clean_logits == False

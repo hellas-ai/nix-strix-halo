@@ -18,6 +18,9 @@
   rocmSdk,
   packageSuffix ? "rocm",
   hsaOverrideGfxVersion ? null,
+  runtimePatches ? map (name: ./patches + "/${name}") (
+    builtins.filter (lib.hasSuffix ".patch") (builtins.attrNames (builtins.readDir ./patches))
+  ),
 }:
 
 let
@@ -306,9 +309,9 @@ pythonPackages.buildPythonApplication rec {
   ];
 
   postInstall = ''
-    for patch_file in ${./patches}/*.patch; do
-      patch --batch --fuzz=0 -p1 -d "$out/${pythonSitePackages}" < "$patch_file"
-    done
+    ${lib.concatMapStringsSep "\n" (patch: ''
+      patch --batch --fuzz=0 -p1 -d "$out/${pythonSitePackages}" < ${patch}
+    '') runtimePatches}
     # Keep component checks in the same Python/ROCm environment as serving.
     cat > "$out/bin/sglang-python" <<'PY'
     #!${pythonPackages.python.interpreter}
@@ -343,6 +346,10 @@ pythonPackages.buildPythonApplication rec {
     }:${lib.escapeShellArg rocmRuntimeLibraryPath}:"$rocm_lib_path"
 
     wrap_args=(
+      # HIP initialization in a parent sets SDK variables inherited by spawned
+      # workers. Register this wheel's Kineto tool so they record device events,
+      # while preserving an explicit user-selected profiler tool.
+      --set-default ROCP_TOOL_LIBRARIES ${lib.escapeShellArg "${rocmSitePackages}/torch/lib/libtorch_cpu.so"}
       --set HIP_PLATFORM amd
       --set ROCM_HOME ${lib.escapeShellArg rocmSdkForJit}
       --set ROCM_PATH ${lib.escapeShellArg rocmSdkForJit}
