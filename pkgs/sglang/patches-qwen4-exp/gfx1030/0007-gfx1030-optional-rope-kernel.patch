@@ -1,0 +1,29 @@
+The gfx1030 closure intentionally omits sgl-kernel.  RotaryEmbedding imports
+its HIP fallback while constructing the layer even when Qwen's MRoPE subclass
+will use its own native/Triton forward.  Pin the portable native path when the
+optional extension is absent; subclasses resolve self.forward_native to their
+own implementation.
+
+--- a/sglang/srt/layers/rotary_embedding/base.py
++++ b/sglang/srt/layers/rotary_embedding/base.py
+@@ -114,11 +114,17 @@ class RotaryEmbedding(BaseFusedOp):
+             if _is_cuda:
+                 from sglang.kernels.ops.attention.rope import rotary_embedding
+             elif _is_hip:
+-                from sgl_kernel import rotary_embedding
++                try:
++                    from sgl_kernel import rotary_embedding
++                except ImportError:
++                    self.use_fallback_kernel = False
++                    self._forward_method = self.forward_native
++                    rotary_embedding = None
+             else:
+                 from vllm._custom_ops import rotary_embedding
+
+-            self.use_fallback_kernel = True
+-            self.fallback_rotary_embedding = rotary_embedding
++            if rotary_embedding is not None:
++                self.use_fallback_kernel = True
++                self.fallback_rotary_embedding = rotary_embedding
+         else:
+             self.use_fallback_kernel = False

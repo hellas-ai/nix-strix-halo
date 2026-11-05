@@ -1,0 +1,57 @@
+The generic unified radix cache imports the hierarchical host-pool types even
+when hierarchical caching is disabled.  Keep sgl-kernel's device-transfer
+extension at the feature boundary: gfx1030 can import and use the normal cache,
+while an attempted host-cache transfer fails with an explicit error.
+
+--- a/sglang/srt/mem_cache/memory_pool_host.py
++++ b/sglang/srt/mem_cache/memory_pool_host.py
+@@ -27,7 +27,7 @@
+ _is_npu = is_npu()
+ _is_xpu = is_xpu()
+ _is_mps = is_mps()
+-if _is_cuda or _is_hip:
++try:
+     from sgl_kernel.kvcacheio import (
+         transfer_kv_all_layer_direct_lf_pf,
+         transfer_kv_all_layer_mla,
+@@ -38,6 +38,20 @@
+         transfer_kv_per_layer_mla,
+         transfer_kv_per_layer_mla_pf_lf,
+     )
++except ImportError:
++    def _missing_kvcacheio(*args, **kwargs):
++        raise RuntimeError(
++            "Hierarchical host-cache transfer requires sgl_kernel.kvcacheio, "
++            "which is not available in this runtime closure."
++        )
++
++    transfer_kv_all_layer_direct_lf_pf = _missing_kvcacheio
++    transfer_kv_all_layer_mla = _missing_kvcacheio
++    transfer_kv_all_layer_mla_lf_pf = _missing_kvcacheio
++    transfer_kv_direct = _missing_kvcacheio
++    transfer_kv_per_layer_direct_pf_lf = _missing_kvcacheio
++    transfer_kv_per_layer_mla = _missing_kvcacheio
++    transfer_kv_per_layer_mla_pf_lf = _missing_kvcacheio
+ if _is_cuda or _is_hip:
+     from sglang.kernels.ops.mamba.transfer_mamba import (
+         transfer_kv_mamba_lf_pf,
+
+--- a/sglang/srt/mem_cache/hybrid_cache/hybrid_cache_controller.py
++++ b/sglang/srt/mem_cache/hybrid_cache/hybrid_cache_controller.py
+@@ -32,7 +32,6 @@
+ )
+ from sglang.srt.mem_cache.l2_transfer import L2Transfer
+ from sglang.srt.mem_cache.memory_pool_host import HostPoolGroup, PoolEntry
+-from sglang.srt.mem_cache.pool_host.mha import MHATokenToKVPoolHost
+
+ if TYPE_CHECKING:
+     from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+@@ -710,6 +709,8 @@
+             PoolName.DRAFT,
+             PoolName.DRAFT_SWA,
+         ):
++            from sglang.srt.mem_cache.pool_host.mha import MHATokenToKVPoolHost
++
+             entry = self.mem_pool_host.entry_map.get(transfer.name)
+             return entry is not None and isinstance(
+                 entry.host_pool, MHATokenToKVPoolHost

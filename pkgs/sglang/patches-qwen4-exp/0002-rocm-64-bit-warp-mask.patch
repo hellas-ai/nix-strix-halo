@@ -1,0 +1,21 @@
+ROCm 10 requires the mask passed to its *_sync warp intrinsics to be a 64-bit
+integer, including on RDNA wave32 targets.  Keep CUDA's 32-bit mask ABI and use
+the native 64-bit HIP mask under SGLang's existing USE_ROCM compile define.
+
+--- a/sglang/kernels/jit/csrc/moe/moe_align_kernel.cu
++++ b/sglang/kernels/jit/csrc/moe/moe_align_kernel.cu
+@@ -46,7 +46,13 @@ inline uint32_t next_pow2(uint32_t x) noexcept {
+ namespace moe {
+
+-__device__ __forceinline__ int warp_exclusive_scan(int v, unsigned mask = 0xffffffffu) {
++#ifdef USE_ROCM
++using warp_mask_t = unsigned long long;
++#else
++using warp_mask_t = unsigned;
++#endif
++
++__device__ __forceinline__ int warp_exclusive_scan(int v, warp_mask_t mask = ~warp_mask_t{0}) {
+   int original = v;
+ #pragma unroll
+   for (int offset = 1; offset < WARP_SIZE; offset <<= 1) {
+     int n = __shfl_up_sync(mask, v, offset);
