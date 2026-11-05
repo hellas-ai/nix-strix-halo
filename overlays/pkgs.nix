@@ -353,6 +353,15 @@ let
       };
       vllm-rocm = final."vllm-rocm-therock-${suffix}";
     }
+    // lib.optionalAttrs (supportsTherockRocm && supportsTherockPython && suffix == "gfx1151") {
+      sglang-v41-rocm = prev.callPackage ../pkgs/sglang/v41 {
+        pythonPackages = final.${therockPythonConfig.packagesAttr};
+        inherit (final) sglang-rocm;
+      };
+      ds41-node = prev.callPackage ../pkgs/ds41-node {
+        inherit (final) sglang-v41-rocm;
+      };
+    }
   );
 in
 commonPackages // darwinPackages // linuxPackages

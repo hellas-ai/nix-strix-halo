@@ -1,0 +1,86 @@
+--- a/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/fp8_utils.cuh
++++ b/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/fp8_utils.cuh
+@@ -58,8 +58,8 @@
+ // __HIP_SATFINITE -- the x2 fast path converts the value it was handed, not the clamped
+ // one (ROCm 7.2).
+ //
+-// gfx942 keeps the software cast below, top-segment bug and all -- this instruction does
+-// not produce the fnuz flavour that arch needs, so it takes a separate fix.
++// gfx942 keeps the software cast below; this instruction does not produce
++// the fnuz flavour that arch needs. Format selection is unchanged.
+ SGL_DEVICE fp8x2_e4m3_t pack_fp8(float x, float y) {
+   const fp32x2_t v{fp8_e4m3_clip(x), fp8_e4m3_clip(y)};
+   return __hip_cvt_float2_to_fp8x2(v, __HIP_NOSAT, __HIP_E4M3);
+@@ -69,10 +69,15 @@
+ // plus any target with no native fp8 convert.
+ SGL_DEVICE uint8_t cvt_float_to_fp8_e4m3(float val) {
+   val = fp8_e4m3_clip(val);
+-  if (val == 0.0f) return 0;
+-
+   uint32_t f32 = __float_as_uint(val);
+   uint8_t sign = static_cast<uint8_t>((f32 >> 31) << 7);
++  if (val == 0.0f) {
++#if HIP_FP8_TYPE_FNUZ
++    return 0;
++#else
++    return sign;
++#endif
++  }
+   int32_t exp32 = static_cast<int32_t>((f32 >> 23) & 0xFF) - 127;
+   uint32_t mant23 = f32 & 0x7FFFFF;
+ 
+@@ -95,22 +100,24 @@
+   int32_t exp8;
+   uint8_t mant3;
+ 
+-  if (exp32 < kMinSubnormExp) {
++  if (exp32 < kMinSubnormExp - 1) {
+ #if HIP_FP8_TYPE_FNUZ
+     // E4M3FNUZ (gfx942) has no negative zero: byte 0x80 is NaN, not -0.0.
+     // Returning `sign` (0x80) for an underflowing negative injects NaN into the
+     // fp8 KV cache -> NaN attention/logits. Flush underflow to +0 instead.
+     return 0;
+ #else
+-    // E4M3FN (gfx950): 0x80 == -0.0, harmless.
++    // E4M3FN: 0x80 is the signed zero encoding.
+     return sign;
+ #endif
+   } else if (exp32 < kMinNormExp) {
+     // Subnormal range
+-    int32_t shift = -(kBias - 1) - exp32;  // 1..3
+-    uint32_t subnorm_mant = (0x800000 | mant23) >> (shift + 20);
+-    uint32_t round_bit = ((0x800000 | mant23) >> (shift + 19)) & 1;
+-    subnorm_mant += round_bit;
++    int32_t shift = -(kBias - 1) - exp32 + 20;  // 21..24, including half-minimum
++    uint32_t significand = 0x800000 | mant23;
++    uint32_t subnorm_mant = significand >> shift;
++    uint32_t remainder = significand & ((1u << shift) - 1);
++    uint32_t halfway = 1u << (shift - 1);
++    subnorm_mant += remainder > halfway || (remainder == halfway && (subnorm_mant & 1));
+     mant3 = static_cast<uint8_t>(subnorm_mant & 0x07);
+     exp8 = 0;
+     if (subnorm_mant > 7) {
+@@ -120,14 +127,20 @@
+   } else {
+     exp8 = exp32 + kBias;
+     mant3 = static_cast<uint8_t>(mant23 >> 20);
+-    uint32_t round_bit = (mant23 >> 19) & 1;
+-    mant3 += round_bit;
++    uint32_t remainder = mant23 & 0xFFFFF;
++    mant3 += remainder > 0x80000 || (remainder == 0x80000 && (mant3 & 1));
+     if (mant3 > 7) {
+       mant3 = 0;
+       exp8++;
+     }
+-    if (exp8 >= kMaxExp) return sign | kSaturate;
++    if (exp8 > kMaxExp || (exp8 == kMaxExp && mant3 > (kSaturate & 7))) {
++      return sign | kSaturate;
++    }
+   }
++#if HIP_FP8_TYPE_FNUZ
++  // Rounded underflow must not turn a negative zero into the FNUZ NaN code.
++  if (exp8 == 0 && mant3 == 0) return 0;
++#endif
+   return sign | (static_cast<uint8_t>(exp8) << 3) | mant3;
+ }
+ 

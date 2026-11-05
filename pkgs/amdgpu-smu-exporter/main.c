@@ -161,7 +161,9 @@ static void emit_metrics(FILE *out, const uint8_t *data, size_t length)
                         read_le16(data, 62 + core * 2), 1.0);
     }
 
-    fprintf(out, "# HELP amd_smu_dram_bandwidth_bytes_per_second Time-filtered DRAM traffic.\n");
+    /* The v3.0 ABI carries MB/s in uint16_t. Firmware can wrap this field;
+     * a single sample cannot recover the number of wraps. */
+    fprintf(out, "# HELP amd_smu_dram_bandwidth_bytes_per_second Time-filtered SMU DRAM sample, scaled from MB/s. The 16-bit field wraps at 65536000000 bytes/s; it cannot report total bandwidth above that rate.\n");
     fprintf(out, "# TYPE amd_smu_dram_bandwidth_bytes_per_second gauge\n");
     emit_u16_scaled(out, "amd_smu_dram_bandwidth_bytes_per_second",
                     "direction=\"read\"", read_le16(data, 94), 1000000.0);

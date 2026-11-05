@@ -1,0 +1,27 @@
+--- a/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/kv_layout.cuh
++++ b/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/kv_layout.cuh
+@@ -131,7 +131,7 @@
+ }
+
+ /// V4.1 fp8 row: one ue8m0 scale per 32-element tile. `data_row` is the token's 512 B,
+-/// `scale_row` its 16 scale bytes. Scale `2^ceil(log2(max(amax / 448, 1e-4)))` stored as the
++/// `scale_row` its 16 scale bytes. Scale `2^ceil(log2(max(amax, 1e-4) / 448))` stored as the
+ /// ue8m0 byte, payload `e4m3(x / scale)` rounded to nearest even (|x / scale| <= 448, so it
+ /// never saturates).
+ template <uint32_t kVecSize>
+@@ -141,11 +141,12 @@
+   static_assert(kVecSize % 2 == 0 && kTileLanes >= 1 && (kTileLanes & (kTileLanes - 1)) == 0);
+
+   const float amax = warp::reduce_max<kTileLanes>(vec_amax(v));
+-  // ceil(log2(max(amax / 448, 1e-4))) exactly, from the bits of amax: 448 = 1.75 * 2^8, so the
+-  // quotient's exponent is amax's minus 8, plus one when the mantissa exceeds 1.75, floored at 2^-13.
++  // Match the official BF16 KV quantizer: floor amax before dividing by 448.
++  // 448 = 1.75 * 2^8; increment the quotient exponent iff the mantissa exceeds 1.75.
++  // ceil_pow2(1e-4 / 448) is 2^-22 (ue8m0 byte 105), including an all-zero tile.
+   const uint32_t bits = __float_as_uint(amax);
+   const int32_t exponent =
+-      max(static_cast<int32_t>(bits >> 23) - 8 + static_cast<int32_t>((bits & 0x7FFFFFu) > 0x600000u), 114);
++      max(static_cast<int32_t>(bits >> 23) - 8 + static_cast<int32_t>((bits & 0x7FFFFFu) > 0x600000u), 105);
+   // The scale is a power of two, so the multiply by its reciprocal is the exact quotient.
+   const float inv_scale = fp8::inv_scale_ue8m0(exponent);
+   AlignedVector<fp8x2_e4m3_t, kVecSize / 2> out;
