@@ -1,0 +1,195 @@
+--- a/sglang/srt/distributed/dsv41_compressed_ring.py
++++ b/sglang/srt/distributed/dsv41_compressed_ring.py
+@@ -14,6 +14,7 @@
+ 
+ _BLOCK = 256
+ _MIN_ROWS = int(os.environ.get("SGLANG_DSV41_COMPRESSED_RING_MIN_ROWS", "0"))
++_FUSED = os.environ.get("SGLANG_DSV41_FUSED_COMPRESSED_RING", "0") == "1"
+ _PREFILL = ContextVar("dsv41_compressed_prefill", default=False)
+ 
+ 
+@@ -75,6 +76,11 @@
+     contribution, then requantizes. The completed owner's shard is packaged
+     once more and circulated unchanged through the all-gather ring.
+     """
++    if _FUSED:
++        from sglang.srt.distributed.dsv41_fused_ring import fused_compressed_ring_all_reduce
++
++        return fused_compressed_ring_all_reduce(x, group)
++
+     world, rank = group.world_size, group.rank_in_group
+     assert world == 4 and x.numel() % (world * _BLOCK) == 0
+     chunks = x.contiguous().view(-1).chunk(world)
+--- /dev/null
++++ b/sglang/srt/distributed/dsv41_fused_ring.py
+@@ -0,0 +1,170 @@
++"""Default-off Triton fusion of V4.1 prefill TP4 compressed-ring packets.
++
++Only called through the pure-EXTEND, >=64-row, eager, HIP and TP4 guard in
++`dsv41_compressed_ring.py`; the exact decode path is unchanged.
++"""
++
++import torch
++import torch.distributed as dist
++import triton
++import triton.language as tl
++
++BLOCK = 256
++TBLOCK = tl.constexpr(256)
++
++
++@triton.jit
++def _round_to_even(x):
++    """Nearest integer with ties to even for finite values in [-127,127]."""
++    lower = tl.floor(x)
++    fraction = x - lower
++    lower_int = lower.to(tl.int32)
++    upward = (fraction > 0.5) | ((fraction == 0.5) & ((lower_int & 1) != 0))
++    return tl.where(upward, lower + 1.0, lower)
++
++
++@triton.jit
++def _pack_kernel(X, Packet, COUNT: tl.constexpr):
++    block = tl.program_id(0)
++    i = block * TBLOCK + tl.arange(0, TBLOCK)
++    x = tl.load(X + i).to(tl.float32)
++    amax = tl.maximum(tl.max(tl.abs(x), 0), 1.0e-12)
++    scale = amax * tl.full((), 1.0 / 127.0, tl.float32)
++    q = _round_to_even(tl.div_rn(x, scale))
++    q = tl.minimum(tl.maximum(q, -127.0), 127.0).to(tl.int8)
++    q_ptr = tl.cast(Packet, tl.pointer_type(tl.int8))
++    scale_ptr = tl.cast(Packet + COUNT, tl.pointer_type(tl.float32))
++    tl.store(q_ptr + i, q)
++    tl.store(scale_ptr + block, scale)
++
++
++@triton.jit
++def _reduce_pack_kernel(Recv, Local, Packet, COUNT: tl.constexpr):
++    block = tl.program_id(0)
++    i = block * TBLOCK + tl.arange(0, TBLOCK)
++    q_ptr = tl.cast(Recv, tl.pointer_type(tl.int8))
++    scale_ptr = tl.cast(Recv + COUNT, tl.pointer_type(tl.float32))
++    q = tl.load(q_ptr + i).to(tl.float32)
++    old_scale = tl.load(scale_ptr + block)
++    decoded = q * old_scale
++    local = tl.load(Local + i).to(tl.float32)
++    partial = decoded + local
++    amax = tl.maximum(tl.max(tl.abs(partial), 0), 1.0e-12)
++    scale = amax * tl.full((), 1.0 / 127.0, tl.float32)
++    new_q = _round_to_even(tl.div_rn(partial, scale))
++    new_q = tl.minimum(tl.maximum(new_q, -127.0), 127.0).to(tl.int8)
++    out_q = tl.cast(Packet, tl.pointer_type(tl.int8))
++    out_scale = tl.cast(Packet + COUNT, tl.pointer_type(tl.float32))
++    tl.store(out_q + i, new_q)
++    tl.store(out_scale + block, scale)
++
++
++@triton.jit
++def _unpack_all_kernel(
++    Packets, Output, COUNT: tl.constexpr, PACKET_BYTES: tl.constexpr,
++    OUT_BF16: tl.constexpr,
++):
++    block = tl.program_id(0)
++    blocks_per_chunk = COUNT // TBLOCK
++    owner = block // blocks_per_chunk
++    local_block = block % blocks_per_chunk
++    i = local_block * TBLOCK + tl.arange(0, TBLOCK)
++    packet = Packets + owner * PACKET_BYTES
++    q_ptr = tl.cast(packet, tl.pointer_type(tl.int8))
++    scale_ptr = tl.cast(packet + COUNT, tl.pointer_type(tl.float32))
++    q = tl.load(q_ptr + i).to(tl.float32)
++    scale = tl.load(scale_ptr + local_block)
++    value = q * scale
++    offset = block * TBLOCK + tl.arange(0, TBLOCK)
++    if OUT_BF16:
++        bits = value.to(tl.uint32, bitcast=True)
++        rounding_bias = 0x7FFF + ((bits >> 16) & 1)
++        bf16_bits = ((bits + rounding_bias) >> 16).to(tl.uint16)
++        out_ptr = tl.cast(Output, tl.pointer_type(tl.uint16))
++        tl.store(out_ptr + offset, bf16_bits)
++    else:
++        tl.store(Output + offset, value)
++
++
++def packet_bytes(chunk_count: int) -> int:
++    assert chunk_count % BLOCK == 0
++    return chunk_count + (chunk_count // BLOCK) * 4
++
++
++def pack_into(x: torch.Tensor, packet: torch.Tensor) -> None:
++    assert x.numel() % BLOCK == 0
++    assert packet.dtype == torch.uint8 and packet.numel() == packet_bytes(x.numel())
++    _pack_kernel[(x.numel() // BLOCK,)](
++        x, packet, x.numel(), num_warps=4, enable_fp_fusion=False
++    )
++
++
++def reduce_pack_into(recv: torch.Tensor, local: torch.Tensor, packet: torch.Tensor) -> None:
++    assert recv.numel() == packet.numel() == packet_bytes(local.numel())
++    _reduce_pack_kernel[(local.numel() // BLOCK,)](
++        recv, local, packet, local.numel(), num_warps=4, enable_fp_fusion=False
++    )
++
++
++def unpack_all_into(packets: torch.Tensor, output: torch.Tensor, chunk_count: int) -> None:
++    assert packets.shape == (4, packet_bytes(chunk_count))
++    assert output.numel() == 4 * chunk_count
++    _unpack_all_kernel[(output.numel() // BLOCK,)](
++        packets, output, chunk_count, packets.shape[1],
++        output.dtype == torch.bfloat16,
++        num_warps=4, enable_fp_fusion=False,
++    )
++
++
++def fused_compressed_ring_all_reduce(
++    x: torch.Tensor, group, packet_trace: list[torch.Tensor] | None = None
++) -> torch.Tensor:
++    """Same six-hop TP4 schedule; optional detached packet copies for bit gate."""
++    world = group.world_size
++    rank = getattr(group, "rank_in_group", getattr(group, "rank", None))
++    assert world == 4 and rank is not None and x.numel() % (world * BLOCK) == 0
++    chunks = x.contiguous().view(-1).chunk(world)
++    count = chunks[0].numel()
++    nbytes = packet_bytes(count)
++    send0 = torch.empty(nbytes, dtype=torch.uint8, device=x.device)
++    send1 = torch.empty_like(send0)
++    recv = torch.empty_like(send0)
++    gathered = torch.empty((world, nbytes), dtype=torch.uint8, device=x.device)
++    pack_into(chunks[rank], send0)
++    send = send0
++    prev_rank, next_rank = (rank - 1) % world, (rank + 1) % world
++
++    for step in range(world - 1):
++        recv_idx = (rank - step - 1) % world
++        if packet_trace is not None:
++            packet_trace.append(send.clone())
++        ops = [
++            dist.P2POp(dist.isend, send, next_rank, group.device_group),
++            dist.P2POp(dist.irecv, recv, prev_rank, group.device_group),
++        ]
++        for work in dist.batch_isend_irecv(ops):
++            work.wait()
++        output_packet = (
++            gathered[(rank + 1) % world]
++            if step == world - 2
++            else (send1 if step % 2 == 0 else send0)
++        )
++        reduce_pack_into(recv, chunks[recv_idx], output_packet)
++        send = output_packet
++
++    for step in range(world - 1):
++        recv_idx = (rank - step) % world
++        if packet_trace is not None:
++            packet_trace.append(send.clone())
++        ops = [
++            dist.P2POp(dist.isend, send, next_rank, group.device_group),
++            dist.P2POp(dist.irecv, gathered[recv_idx], prev_rank, group.device_group),
++        ]
++        for work in dist.batch_isend_irecv(ops):
++            work.wait()
++        send = gathered[recv_idx]
++    if packet_trace is not None:
++        packet_trace.append(send.clone())
++    result = torch.empty_like(x)
++    unpack_all_into(gathered, result, count)
++    return result

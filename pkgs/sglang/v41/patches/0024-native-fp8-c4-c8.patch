@@ -1,0 +1,166 @@
+--- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -1,4 +1,4 @@
+-"""Native V4.1 FP8 GEMV for one or two tokens on gfx1151.
++"""Native V4.1 FP8 GEMV for one, two, four or eight tokens on gfx1151.
+
+ The existing activation quantizer supplies E4M3FN values and decoded E8M0
+ scales. Native 32x32 weight blocks are reduced in FP32 and stored as BF16.
+@@ -217,3 +217,106 @@
+             q, qs, w, ws, output, n, k, 8, block_k,
+             num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
++
++
++@triton.jit
++def _native_c4_c8_gemv(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
++                       TOKENS: tl.constexpr, ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
++    # Preserve the qualified per-token reduction; reuse each weight tile for all
++    # live tokens without a second launch or cross-token arithmetic.
++    first = tl.program_id(0) * ROWS
++    rows = first + tl.arange(0, ROWS)
++    cols = tl.arange(0, BLOCK_K)
++    groups = tl.arange(0, BLOCK_K // 32)
++    accumulator0 = tl.zeros((ROWS,), tl.float32)
++    accumulator1 = tl.zeros((ROWS,), tl.float32)
++    accumulator2 = tl.zeros((ROWS,), tl.float32)
++    accumulator3 = tl.zeros((ROWS,), tl.float32)
++    if TOKENS == 8:
++        accumulator4 = tl.zeros((ROWS,), tl.float32)
++        accumulator5 = tl.zeros((ROWS,), tl.float32)
++        accumulator6 = tl.zeros((ROWS,), tl.float32)
++        accumulator7 = tl.zeros((ROWS,), tl.float32)
++    for start in range(0, K, BLOCK_K):
++        w = _e4m3fn_to_fp32(tl.load(W + rows[:, None] * K + start + cols[None, :]))
++        w_scale = tl.load(WS + (first // 32) * (K // 32) + start // 32 + groups)
++        q0 = _e4m3fn_to_fp32(tl.load(Q + 0 * K + start + cols))
++        dots0 = tl.sum(tl.reshape(w * q0[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++        a_scale0 = tl.load(QS + 0 * (K // 32) + start // 32 + groups)
++        scaled0 = (dots0 * a_scale0[None, :]) * w_scale[None, :]
++        accumulator0 = accumulator0 + tl.sum(scaled0, axis=1)
++        q1 = _e4m3fn_to_fp32(tl.load(Q + 1 * K + start + cols))
++        dots1 = tl.sum(tl.reshape(w * q1[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++        a_scale1 = tl.load(QS + 1 * (K // 32) + start // 32 + groups)
++        scaled1 = (dots1 * a_scale1[None, :]) * w_scale[None, :]
++        accumulator1 = accumulator1 + tl.sum(scaled1, axis=1)
++        q2 = _e4m3fn_to_fp32(tl.load(Q + 2 * K + start + cols))
++        dots2 = tl.sum(tl.reshape(w * q2[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++        a_scale2 = tl.load(QS + 2 * (K // 32) + start // 32 + groups)
++        scaled2 = (dots2 * a_scale2[None, :]) * w_scale[None, :]
++        accumulator2 = accumulator2 + tl.sum(scaled2, axis=1)
++        q3 = _e4m3fn_to_fp32(tl.load(Q + 3 * K + start + cols))
++        dots3 = tl.sum(tl.reshape(w * q3[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++        a_scale3 = tl.load(QS + 3 * (K // 32) + start // 32 + groups)
++        scaled3 = (dots3 * a_scale3[None, :]) * w_scale[None, :]
++        accumulator3 = accumulator3 + tl.sum(scaled3, axis=1)
++        if TOKENS == 8:
++            q4 = _e4m3fn_to_fp32(tl.load(Q + 4 * K + start + cols))
++            dots4 = tl.sum(tl.reshape(w * q4[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++            a_scale4 = tl.load(QS + 4 * (K // 32) + start // 32 + groups)
++            scaled4 = (dots4 * a_scale4[None, :]) * w_scale[None, :]
++            accumulator4 = accumulator4 + tl.sum(scaled4, axis=1)
++            q5 = _e4m3fn_to_fp32(tl.load(Q + 5 * K + start + cols))
++            dots5 = tl.sum(tl.reshape(w * q5[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++            a_scale5 = tl.load(QS + 5 * (K // 32) + start // 32 + groups)
++            scaled5 = (dots5 * a_scale5[None, :]) * w_scale[None, :]
++            accumulator5 = accumulator5 + tl.sum(scaled5, axis=1)
++            q6 = _e4m3fn_to_fp32(tl.load(Q + 6 * K + start + cols))
++            dots6 = tl.sum(tl.reshape(w * q6[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++            a_scale6 = tl.load(QS + 6 * (K // 32) + start // 32 + groups)
++            scaled6 = (dots6 * a_scale6[None, :]) * w_scale[None, :]
++            accumulator6 = accumulator6 + tl.sum(scaled6, axis=1)
++            q7 = _e4m3fn_to_fp32(tl.load(Q + 7 * K + start + cols))
++            dots7 = tl.sum(tl.reshape(w * q7[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++            a_scale7 = tl.load(QS + 7 * (K // 32) + start // 32 + groups)
++            scaled7 = (dots7 * a_scale7[None, :]) * w_scale[None, :]
++            accumulator7 = accumulator7 + tl.sum(scaled7, axis=1)
++    tl.store(Y + 0 * N + rows, accumulator0.to(tl.bfloat16))
++    tl.store(Y + 1 * N + rows, accumulator1.to(tl.bfloat16))
++    tl.store(Y + 2 * N + rows, accumulator2.to(tl.bfloat16))
++    tl.store(Y + 3 * N + rows, accumulator3.to(tl.bfloat16))
++    if TOKENS == 8:
++        tl.store(Y + 4 * N + rows, accumulator4.to(tl.bfloat16))
++        tl.store(Y + 5 * N + rows, accumulator5.to(tl.bfloat16))
++        tl.store(Y + 6 * N + rows, accumulator6.to(tl.bfloat16))
++        tl.store(Y + 7 * N + rows, accumulator7.to(tl.bfloat16))
++
++
++def native_c4_c8_gemv(q, qs, w, ws):
++    """Only the six flagged native TP4 projection shapes, exactly four/eight rows."""
++    shapes = {
++        (25600, 6144): 512, (5120, 2048): 512,
++        (1792, 5120): 512, (8192, 1280): 256,
++        (1152, 5120): 512, (5120, 576): 64,
++    }
++    if w.shape not in shapes or q.ndim != 2 or q.shape[0] not in (4, 8):
++        raise ValueError("C4/C8 native GEMV requires an exact supported projection")
++    n, k = w.shape
++    m = q.shape[0]
++    expected = ((q, (m, k), torch.float8_e4m3fn),
++                (qs, (m, k // 32), torch.float32),
++                (w, (n, k), torch.float8_e4m3fn),
++                (ws, (n // 32, k // 32), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError("C4/C8 native GEMV requires contiguous native operands")
++        if tensor.device != q.device or tensor.device.type != "cuda":
++            raise ValueError("C4/C8 native GEMV requires one HIP device")
++    if (not torch.version.hip or
++        torch.cuda.get_device_properties(q.device).gcnArchName.split(":")[0] != "gfx1151"):
++        raise ValueError("C4/C8 native GEMV is gfx1151-only")
++    output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
++    _native_c4_c8_gemv[(n // 8,)](
++        q, qs, w, ws, output, n, k, m, 8, shapes[(n, k)],
++        num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1459,7 +1459,7 @@
+     input_scale: Optional[torch.Tensor] = None,
+     bias: Optional[torch.Tensor] = None,
+     act_scale_ue8m0: bool = False,
+-    # Projection opt-ins select the guarded C1 and C2 implementations below.
++    # Projection opt-ins select exact guarded C1/C2/C4/C8 implementations.
+     engram_wkv_c1: bool = False,
+     native_wob_c1: bool = False,
+     native_wqkv_a_c1: bool = False,
+@@ -1655,6 +1655,39 @@
+         output = native_shared_expert_gemv(
+             q_input, x_scale, weight, weight_scale, native_v41_shared
+         )
++    elif (
++        _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape[0] in (4, 8)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++        and sum(bool(flag) for flag in (
++            engram_wkv_c1, native_wob_c1, native_wqkv_a_c1, native_wqb_c1,
++            native_v41_shared is not None,
++        )) == 1
++        and (
++            (engram_wkv_c1 and q_input.shape[1] == 6144 and weight.shape == (25600, 6144))
++            or (native_wob_c1 and q_input.shape[1] == 2048 and weight.shape == (5120, 2048))
++            or (native_wqkv_a_c1 and q_input.shape[1] == 5120 and weight.shape == (1792, 5120))
++            or (native_wqb_c1 and q_input.shape[1] == 1280 and weight.shape == (8192, 1280))
++            or (native_v41_shared == "gate_up" and q_input.shape[1] == 5120 and weight.shape == (1152, 5120))
++            or (native_v41_shared == "down" and q_input.shape[1] == 576 and weight.shape == (5120, 576))
++        )
++        and x_scale.shape == (q_input.shape[0], q_input.shape[1] // 32)
++        and weight_scale.shape == (weight.shape[0] // 32, weight.shape[1] // 32)
++    ):
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_c4_c8_gemv
++
++        output = native_c4_c8_gemv(q_input, x_scale, weight, weight_scale)
+     else:
+         output = w8a8_block_fp8_matmul_triton(
+             q_input, weight, x_scale, weight_scale, block_size, output_dtype=output_dtype

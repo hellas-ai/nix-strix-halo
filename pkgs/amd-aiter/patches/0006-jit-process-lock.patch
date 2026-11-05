@@ -1,0 +1,105 @@
+--- a/aiter/jit/utils/file_baton.py
++++ b/aiter/jit/utils/file_baton.py
+@@ -2,15 +2,18 @@
+ # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ 
+ # mypy: allow-untyped-defs
++import fcntl
+ import os
+-import time
+ import logging
+ 
+ logger = logging.getLogger("aiter")
+ 
+ 
+ class FileBaton:
+-    """A primitive, file-based synchronization utility."""
++    """A process lock on a persistent inode, released even if its owner dies.
++
++    Never unlink the lock file: waiters may already have the inode open.
++    """
+ 
+     def __init__(self, lock_file_path, wait_seconds=0.2):
+         """
+@@ -18,8 +21,8 @@
+ 
+         Args:
+             lock_file_path: The path to the file used for locking.
+-            wait_seconds: The seconds to periodically sleep (spin) when
+-                calling ``wait()``.
++            wait_seconds: Retained for API compatibility; ``wait()`` blocks
++                in the kernel rather than polling.
+         """
+         self.lock_file_path = lock_file_path
+         self.wait_seconds = wait_seconds
+@@ -27,31 +30,38 @@
+ 
+     def try_acquire(self):
+         """
+-        Try to atomically create a file under exclusive access.
++        Try to take an exclusive lock without waiting.
+ 
+         Returns:
+-            True if the file could be created, else False.
++            True if the lock was acquired, else False.
+         """
++        if self.fd is not None:
++            raise RuntimeError("FileBaton is already acquired")
++        fd = os.open(self.lock_file_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o666)
+         try:
+-            self.fd = os.open(self.lock_file_path, os.O_CREAT | os.O_EXCL)
+-            return True
+-        except FileExistsError:
++            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            os.close(fd)
+             return False
++        except BaseException:
++            os.close(fd)
++            raise
++        self.fd = fd
++        return True
+ 
+     def wait(self):
+         """
+-        Periodically sleeps for a certain amount until the baton is released.
+-
+-        The amount of time slept depends on the ``wait_seconds`` parameter
+-        passed to the constructor.
++        Wait for the current owner, without claiming its build succeeded.
+         """
+         logger.info(f"waiting for baton release at {self.lock_file_path}")
+-        while os.path.exists(self.lock_file_path):
+-            time.sleep(self.wait_seconds)
++        fd = os.open(self.lock_file_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o666)
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX)
++        finally:
++            os.close(fd)
+ 
+     def release(self):
+-        """Release the baton and removes its file."""
++        """Release the descriptor, preserving the inode for existing waiters."""
+         if self.fd is not None:
+-            os.close(self.fd)
+-
+-        os.remove(self.lock_file_path)
++            fd, self.fd = self.fd, None
++            os.close(fd)
+--- a/aiter/jit/core.py
++++ b/aiter/jit/core.py
+@@ -44,9 +44,11 @@
+         try:
+             ret = MainFunc()
+         finally:
+-            if FinalFunc is not None:
+-                FinalFunc()
+-            baton.release()
++            try:
++                if FinalFunc is not None:
++                    FinalFunc()
++            finally:
++                baton.release()
+     else:
+         baton.wait()
+         if WaitFunc is not None:

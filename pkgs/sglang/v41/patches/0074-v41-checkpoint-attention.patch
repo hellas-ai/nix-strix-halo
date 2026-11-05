@@ -1,0 +1,632 @@
+--- a/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
+@@ -12,6 +12,8 @@
+ """
+ 
+ from functools import lru_cache
++import logging
++import os
+ from typing import Optional, Tuple
+ 
+ import torch
+@@ -107,6 +109,64 @@
+         and page_extra in (128, 256)
+         and _is_gfx1151_attention_device(q.device)
+     )
++
++
++
++_checkpoint_attention_enabled = os.environ.get("SGLANG_DSV41_CHECKPOINT_ATTENTION") == "1"
++_checkpoint_attention_diag = os.environ.get("SGLANG_DSV41_CHECKPOINT_ATTN_DIAG") == "1"
++_checkpoint_attention_seen = set()
++
++
++def _use_checkpoint_attention(q, main, extra, main_ids, extra_ids,
++                              main_page, extra_page, s_q, split_k,
++                              main_length, extra_length, sink):
++    # This geometry was checked against the installed fixed BH16/BN64 kernels.
++    # Wider contexts/cache allocations retain the existing buffer-op policy.
++    if not _checkpoint_attention_enabled:
++        return False
++    rows = q.shape[0]
++    return (
++        q.ndim == 3 and q.shape[1:] == (16, 512)
++        and q.dtype == torch.bfloat16 and q.is_contiguous()
++        and ((split_k == 0 and 64 <= rows <= 1536)
++             or (split_k == 4 and rows in (1, 2, 4, 8, 16)))
++        and s_q == 1 and main_page == 256 and extra_page in (128, 256)
++        and main.dtype == extra.dtype == torch.uint8
++        and main.is_contiguous() and extra.is_contiguous()
++        and main.shape[-1] == extra.shape[-1] == 528
++        and main.numel() <= BUFFER_OPS_DISABLE_THRESHOLD
++        and extra.numel() <= BUFFER_OPS_DISABLE_THRESHOLD
++        and main_ids.shape == (rows, 128) and extra_ids.shape == (rows, 512)
++        and main_ids.dtype == extra_ids.dtype == torch.int32
++        and main_ids.is_contiguous() and extra_ids.is_contiguous()
++        and q.device == main.device == extra.device == main_ids.device == extra_ids.device
++        and (main_length is None) == (extra_length is None)
++        and all(x is None or (x.device == q.device and x.is_contiguous()
++                              and x.dtype == torch.int32 and x.numel() == rows)
++                for x in (main_length, extra_length))
++        and (sink is None or (sink.device == q.device and sink.is_contiguous()
++                               and sink.dtype == torch.float32 and sink.numel() == 16))
++        and _is_gfx1151_attention_device(q.device)
++    )
++
++
++def _run_checkpoint_attention(q, main, main_ids, main_page,
++                              extra, extra_ids, extra_page, sm_scale,
++                              main_length, extra_length, sink, s_q, split_k):
++    if split_k == 4:
++        from .dsv41_attention_split_checkpoint import attention
++    else:
++        from .dsv41_attention_checkpoint import attention
++    key = (q.shape[0], split_k, main_length is not None, sink is not None, extra_page)
++    if _checkpoint_attention_diag or key not in _checkpoint_attention_seen:
++        logging.getLogger(__name__).info(
++            "DSV41 checkpoint attention active: rows=%s split=%s lengths=%s sink=%s extra_page=%s",
++            *key,
++        )
++        _checkpoint_attention_seen.add(key)
++    return attention(q, main, main_ids, main_page, extra, extra_ids, extra_page,
++                     sm_scale, topk_length_main=main_length,
++                     topk_length_extra=extra_length, attn_sink=sink, s_q=s_q)
+ 
+ 
+ def _decide_splitk_dual_scope(
+@@ -1825,6 +1885,16 @@
+             ),
+         )
+     )
++    if kv_v41 and _use_checkpoint_attention(
++        q, kv_uint8_main, kv_uint8_extra, indices_main, indices_extra,
++        block_size_main, block_size_extra, s_q, split_k,
++        topk_length_main, topk_length_extra, attn_sink,
++    ):
++        return _run_checkpoint_attention(
++            q, kv_uint8_main, indices_main, block_size_main,
++            kv_uint8_extra, indices_extra, block_size_extra, sm_scale,
++            topk_length_main, topk_length_extra, attn_sink, s_q, split_k,
++        )
+     if split_k > 0:
+         topk_per_split = (total_topk + split_k - 1) // split_k
+ 
+@@ -2967,6 +3037,16 @@
+         ),
+     )
+ 
++    if kv_v41 and _use_checkpoint_attention(
++        q, kv_uint8_main, kv_uint8_extra, indices_main, indices_extra,
++        block_size_main, block_size_extra, s_q, split_k,
++        topk_length_main, topk_length_extra, attn_sink,
++    ):
++        return _run_checkpoint_attention(
++            q, kv_uint8_main, indices_main, block_size_main,
++            kv_uint8_extra, indices_extra, block_size_extra, sm_scale,
++            topk_length_main, topk_length_extra, attn_sink, s_q, split_k,
++        )
+     if split_k == 0:
+         # Fall back to non-splitk version
+         return fused_gather_attn_decode_dsv4_dual_scope(
+--- /dev/null
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_attention_checkpoint.py
+@@ -0,0 +1,351 @@
++import torch
++import triton
++import triton.language as tl
++_KV_FP8_TY = tl.float8e4nv
++
++@triton.jit
++def _load_v41_tile(base, data_offset, scale_offset, valid_2d, lanes, piece):
++    values = tl.load(
++        base[:, None] + data_offset[:, None] + piece * 64 + lanes[None, :],
++        mask=valid_2d, other=0,
++    ).to(_KV_FP8_TY, bitcast=True)
++    codes = tl.load(
++        base[:, None] + scale_offset[:, None] + piece * 2 + lanes[None, :] // 32,
++        mask=valid_2d, other=127,
++    ).to(tl.uint8)
++    scales = tl.math.exp2(codes.to(tl.float32) - 127.0).to(tl.bfloat16)
++    values = (values.to(tl.bfloat16) * scales).to(tl.bfloat16)
++    return tl.where(valid_2d, values, 0.0)
++
++
++@triton.jit
++def _score_block(
++    # KV cache parameters
++    kv_block_base,
++    nope_rope_offset,
++    scale_base_offset,
++    valid,
++    valid_2d,
++    # Query pointer and row; stream one 64-column piece at a time.
++    Q,
++    row,
++    # Accumulators (passed by reference via return)
++    # Softmax state
++    m_i,
++    l_i,
++    # Other parameters
++    offs_tile,
++    sm_scale,
++    # Constants
++    TILE_SIZE: tl.constexpr,
++    D_NOPE: tl.constexpr,
++    LOG2E: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    KV_V41: tl.constexpr = False,
++):
++    """
++    Process one block of KV tokens with batch loading.
++    Key optimization: Load all KV tiles first, then process them.
++    """
++    NEG_INF = float("-inf")
++
++    if KV_V41:
++        qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
++        kv_0 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 0)
++        q_0 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 0 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_0, tl.trans(kv_0)).to(tl.float32)
++        kv_1 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 1)
++        q_1 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 64 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_1, tl.trans(kv_1)).to(tl.float32)
++        kv_2 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 2)
++        q_2 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 128 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_2, tl.trans(kv_2)).to(tl.float32)
++        kv_3 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 3)
++        q_3 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 192 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_3, tl.trans(kv_3)).to(tl.float32)
++        kv_4 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 4)
++        q_4 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 256 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_4, tl.trans(kv_4)).to(tl.float32)
++        kv_5 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 5)
++        q_5 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 320 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_5, tl.trans(kv_5)).to(tl.float32)
++        kv_6 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 6)
++        q_6 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 384 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_6, tl.trans(kv_6)).to(tl.float32)
++        kv_7 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 7)
++        q_7 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 448 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_7, tl.trans(kv_7)).to(tl.float32)
++    else:
++        scale_ptrs = kv_block_base + scale_base_offset
++        scale_uint8_0 = tl.load(scale_ptrs, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_1 = tl.load(scale_ptrs + 1, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_2 = tl.load(scale_ptrs + 2, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_3 = tl.load(scale_ptrs + 3, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_4 = tl.load(scale_ptrs + 4, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_5 = tl.load(scale_ptrs + 5, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_6 = tl.load(scale_ptrs + 6, mask=valid, other=127).to(tl.uint8)
++
++        tile_base = kv_block_base[:, None] + nope_rope_offset[:, None]
++
++        # Batch load all tiles
++        nope_uint8_0 = tl.load(tile_base + offs_tile[None, :], mask=valid_2d, other=0)
++        nope_uint8_1 = tl.load(
++            tile_base + TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_2 = tl.load(
++            tile_base + 2 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_3 = tl.load(
++            tile_base + 3 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_4 = tl.load(
++            tile_base + 4 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_5 = tl.load(
++            tile_base + 5 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_6 = tl.load(
++            tile_base + 6 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        rope_ptrs = tile_base + D_NOPE + offs_tile[None, :] * 2
++        rope_lo = tl.load(rope_ptrs, mask=valid_2d, other=0).to(tl.uint16)
++        rope_hi = tl.load(rope_ptrs + 1, mask=valid_2d, other=0).to(tl.uint16)
++
++        scale_bf16_0 = tl.math.exp2(scale_uint8_0.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_1 = tl.math.exp2(scale_uint8_1.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_2 = tl.math.exp2(scale_uint8_2.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_3 = tl.math.exp2(scale_uint8_3.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_4 = tl.math.exp2(scale_uint8_4.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_5 = tl.math.exp2(scale_uint8_5.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_6 = tl.math.exp2(scale_uint8_6.to(tl.float32) - 127.0).to(tl.bfloat16)
++
++        qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
++
++        nope_fp8_0 = nope_uint8_0.to(_KV_FP8_TY, bitcast=True)
++        kv_0 = (nope_fp8_0.to(tl.bfloat16) * scale_bf16_0[:, None]).to(tl.bfloat16)
++        kv_0 = tl.where(valid_2d, kv_0, 0.0)
++        q_0 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 0 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_0, tl.trans(kv_0)).to(tl.float32)
++
++        nope_fp8_1 = nope_uint8_1.to(_KV_FP8_TY, bitcast=True)
++        kv_1 = (nope_fp8_1.to(tl.bfloat16) * scale_bf16_1[:, None]).to(tl.bfloat16)
++        kv_1 = tl.where(valid_2d, kv_1, 0.0)
++        q_1 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 64 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_1, tl.trans(kv_1)).to(tl.float32)
++
++        nope_fp8_2 = nope_uint8_2.to(_KV_FP8_TY, bitcast=True)
++        kv_2 = (nope_fp8_2.to(tl.bfloat16) * scale_bf16_2[:, None]).to(tl.bfloat16)
++        kv_2 = tl.where(valid_2d, kv_2, 0.0)
++        q_2 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 128 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_2, tl.trans(kv_2)).to(tl.float32)
++
++        nope_fp8_3 = nope_uint8_3.to(_KV_FP8_TY, bitcast=True)
++        kv_3 = (nope_fp8_3.to(tl.bfloat16) * scale_bf16_3[:, None]).to(tl.bfloat16)
++        kv_3 = tl.where(valid_2d, kv_3, 0.0)
++        q_3 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 192 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_3, tl.trans(kv_3)).to(tl.float32)
++
++        nope_fp8_4 = nope_uint8_4.to(_KV_FP8_TY, bitcast=True)
++        kv_4 = (nope_fp8_4.to(tl.bfloat16) * scale_bf16_4[:, None]).to(tl.bfloat16)
++        kv_4 = tl.where(valid_2d, kv_4, 0.0)
++        q_4 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 256 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_4, tl.trans(kv_4)).to(tl.float32)
++
++        nope_fp8_5 = nope_uint8_5.to(_KV_FP8_TY, bitcast=True)
++        kv_5 = (nope_fp8_5.to(tl.bfloat16) * scale_bf16_5[:, None]).to(tl.bfloat16)
++        kv_5 = tl.where(valid_2d, kv_5, 0.0)
++        q_5 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 320 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_5, tl.trans(kv_5)).to(tl.float32)
++
++        nope_fp8_6 = nope_uint8_6.to(_KV_FP8_TY, bitcast=True)
++        kv_6 = (nope_fp8_6.to(tl.bfloat16) * scale_bf16_6[:, None]).to(tl.bfloat16)
++        kv_6 = tl.where(valid_2d, kv_6, 0.0)
++        q_6 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 384 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_6, tl.trans(kv_6)).to(tl.float32)
++
++        kv_7 = (rope_lo | (rope_hi << 8)).to(tl.bfloat16, bitcast=True)
++        kv_7 = tl.where(valid_2d, kv_7, 0.0)
++        q_7 = tl.load(Q + row * 8192 + tl.arange(0, BLOCK_H)[:, None] * 512 + 448 + offs_tile[None, :], volatile=True).to(tl.bfloat16)
++        qk += tl.dot(q_7, tl.trans(kv_7)).to(tl.float32)
++    qk = qk * sm_scale
++    qk = tl.where(valid[None, :], qk, NEG_INF)
++
++    m_ij = tl.max(qk, axis=1)
++    m_new = tl.maximum(m_i, m_ij)
++    alpha = tl.where(m_i == NEG_INF, 0.0, tl.math.exp2((m_i - m_new) * LOG2E))
++    p = tl.where(qk == NEG_INF, 0.0, tl.math.exp2((qk - m_new[:, None]) * LOG2E))
++    l_new = alpha * l_i + tl.sum(p, axis=1)
++    p_bf16 = p.to(tl.bfloat16)
++
++    return p_bf16, alpha, m_new, l_new
++
++@triton.jit
++def _score_checkpoint(Q, Main, MainIds, Extra, ExtraIds, P, Alpha, Scale, LSE, Out,
++                      Sink, MainLength, ExtraLength,
++                      MAIN_K: tl.constexpr, EXTRA_K: tl.constexpr,
++                      MAIN_PAGE: tl.constexpr, EXTRA_PAGE: tl.constexpr,
++                      MAIN_STRIDE: tl.constexpr, EXTRA_STRIDE: tl.constexpr,
++                      HAS_SINK: tl.constexpr, HAS_MAIN_LENGTH: tl.constexpr,
++                      HAS_EXTRA_LENGTH: tl.constexpr, SM_SCALE,
++                      BLOCK_N: tl.constexpr = 64):
++    row = tl.program_id(0).to(tl.int64)
++    h = tl.arange(0, 16)
++    tile = tl.arange(0, 64)
++    n = tl.arange(0, BLOCK_N)
++    BLOCKS: tl.constexpr = ((MAIN_K + BLOCK_N - 1) // BLOCK_N) + ((EXTRA_K + BLOCK_N - 1) // BLOCK_N)
++    m_i = tl.full((16,), float('-inf'), tl.float32)
++    l_i = tl.zeros((16,), tl.float32)
++    acc0 = tl.zeros((16, 64), tl.float32)
++    for scope in tl.static_range(2):
++        if scope == 0:
++            cache = Main
++            indices = MainIds
++            TOPK = MAIN_K
++            PAGE = MAIN_PAGE
++            STRIDE = MAIN_STRIDE
++            OFFSET = 0
++            length = MAIN_K
++            if HAS_MAIN_LENGTH:
++                length = tl.load(MainLength + row)
++        else:
++            cache = Extra
++            indices = ExtraIds
++            TOPK = EXTRA_K
++            PAGE = EXTRA_PAGE
++            STRIDE = EXTRA_STRIDE
++            OFFSET = ((MAIN_K + BLOCK_N - 1) // BLOCK_N)
++            length = EXTRA_K
++            if HAS_EXTRA_LENGTH:
++                length = tl.load(ExtraLength + row)
++        for j in range(((TOPK + BLOCK_N - 1) // BLOCK_N)):
++            block = OFFSET + j
++            if j * BLOCK_N < length:
++                pos = j * BLOCK_N + n
++                idx = tl.load(indices + row * TOPK + pos, pos < TOPK, other=-1)
++                valid = (pos < TOPK) & (pos < length) & (idx != -1)
++                safe = tl.maximum(idx, 0).to(tl.int64)
++                base = cache + (safe // PAGE) * STRIDE
++                data = (safe % PAGE) * 512
++                scales = PAGE * 512 + (safe % PAGE) * 16
++                p, alpha, m_i, l_i = _score_block(
++                    base, data, scales, valid, valid[:, None],
++                    Q, row,
++                    m_i, l_i, tile, SM_SCALE, 64, 448,
++                    1.4426950408889634, 16, BLOCK_N, True)
++                # Exactly the reference first P→V piece, in the score
++                # pass, after the unchanged QK/softmax block. The other
++                # seven pieces replay the checkpointed P and alpha.
++                v0 = _load_v41_tile(base, data, scales, valid[:, None], tile, 0)
++                acc0 = acc0 * alpha[:, None] + tl.dot(p, v0).to(tl.float32)
++            else:
++                p = tl.zeros((16, BLOCK_N), tl.bfloat16)
++                alpha = tl.full((16,), 1.0, tl.float32)
++            tl.store(P + ((row * BLOCKS + block) * 16 + h[:, None]) * BLOCK_N + n[None, :], p)
++            tl.store(Alpha + (row * BLOCKS + block) * 16 + h, alpha)
++    lonely = l_i == 0.0
++    lse = m_i + tl.math.log2(tl.where(lonely, 1.0, l_i)) / 1.4426950408889634
++    if HAS_SINK:
++        sink = tl.load(Sink + h)
++        denominator = l_i + tl.math.exp2((sink - m_i) * 1.4426950408889634)
++        denominator = tl.where(denominator == 0.0, 1.0, denominator)
++        scale = 1.0 / denominator
++    else:
++        scale = tl.where(lonely, 0.0, 1.0 / l_i)
++    tl.store(Scale + row * 16 + h, tl.where(lonely, 0.0, scale))
++    tl.store(LSE + row * 16 + h, tl.where(lonely, float('+inf'), lse))
++    out0 = tl.where(scale[:, None] == 0.0, 0.0, acc0 * scale[:, None]).to(tl.bfloat16)
++    tl.store(Out + row * 8192 + h[:, None] * 512 + tile[None, :], out0)
++
++
++@triton.jit
++def _value_checkpoint(Main, MainIds, Extra, ExtraIds, P, Alpha, Scale, Out,
++                      MainLength, ExtraLength,
++                      MAIN_K: tl.constexpr, EXTRA_K: tl.constexpr,
++                      MAIN_PAGE: tl.constexpr, EXTRA_PAGE: tl.constexpr,
++                      MAIN_STRIDE: tl.constexpr, EXTRA_STRIDE: tl.constexpr,
++                      HAS_MAIN_LENGTH: tl.constexpr, HAS_EXTRA_LENGTH: tl.constexpr,
++                      BLOCK_N: tl.constexpr = 64):
++    row = tl.program_id(0).to(tl.int64)
++    piece = tl.program_id(1) + 1
++    h = tl.arange(0, 16)
++    tile = tl.arange(0, 64)
++    n = tl.arange(0, BLOCK_N)
++    BLOCKS: tl.constexpr = ((MAIN_K + BLOCK_N - 1) // BLOCK_N) + ((EXTRA_K + BLOCK_N - 1) // BLOCK_N)
++    acc = tl.zeros((16, 64), tl.float32)
++    for scope in tl.static_range(2):
++        if scope == 0:
++            cache = Main
++            indices = MainIds
++            TOPK = MAIN_K
++            PAGE = MAIN_PAGE
++            STRIDE = MAIN_STRIDE
++            OFFSET = 0
++            length = MAIN_K
++            if HAS_MAIN_LENGTH:
++                length = tl.load(MainLength + row)
++        else:
++            cache = Extra
++            indices = ExtraIds
++            TOPK = EXTRA_K
++            PAGE = EXTRA_PAGE
++            STRIDE = EXTRA_STRIDE
++            OFFSET = ((MAIN_K + BLOCK_N - 1) // BLOCK_N)
++            length = EXTRA_K
++            if HAS_EXTRA_LENGTH:
++                length = tl.load(ExtraLength + row)
++        for j in range(((TOPK + BLOCK_N - 1) // BLOCK_N)):
++            if j * BLOCK_N < length:
++                block = OFFSET + j
++                pos = j * BLOCK_N + n
++                idx = tl.load(indices + row * TOPK + pos, pos < TOPK, other=-1)
++                valid = (pos < TOPK) & (pos < length) & (idx != -1)
++                safe = tl.maximum(idx, 0).to(tl.int64)
++                base = cache + (safe // PAGE) * STRIDE
++                data = (safe % PAGE) * 512
++                scales = PAGE * 512 + (safe % PAGE) * 16
++                p = tl.load(P + ((row * BLOCKS + block) * 16 + h[:, None]) * BLOCK_N + n[None, :])
++                alpha = tl.load(Alpha + (row * BLOCKS + block) * 16 + h)
++                kv = _load_v41_tile(base, data, scales, valid[:, None], tile, piece)
++                acc = acc * alpha[:, None] + tl.dot(p, kv).to(tl.float32)
++    scale = tl.load(Scale + row * 16 + h)
++    out = tl.where(scale[:, None] == 0.0, 0.0, acc * scale[:, None]).to(tl.bfloat16)
++    tl.store(Out + row * 8192 + h[:, None] * 512 + piece * 64 + tile[None, :], out)
++
++
++def attention(q, main, main_ids, main_page, extra, extra_ids, extra_page,
++              sm_scale, topk_length_main=None, topk_length_extra=None,
++              attn_sink=None, s_q=1, **kwargs):
++    assert s_q == 1 and q.ndim == 3 and q.shape[1:] == (16, 512)
++    assert q.dtype == torch.bfloat16 and q.is_contiguous()
++    assert main.shape[-1] == extra.shape[-1] == 528
++    assert main.dtype == extra.dtype == torch.uint8
++    assert main.is_contiguous() and extra.is_contiguous()
++    assert main_page == 256 and extra_page in (128, 256)
++    assert main_ids.shape == (q.shape[0], 128) and extra_ids.shape == (q.shape[0], 512)
++    assert main_ids.is_contiguous() and extra_ids.is_contiguous()
++    rows = q.shape[0]
++    km, ke = main_ids.shape[1], extra_ids.shape[1]
++    blocks = triton.cdiv(km, 64) + triton.cdiv(ke, 64)
++    p = torch.empty((rows, blocks, 16, 64), device=q.device, dtype=torch.bfloat16)
++    alpha = torch.empty((rows, blocks, 16), device=q.device, dtype=torch.float32)
++    scale = torch.empty((rows, 16), device=q.device, dtype=torch.float32)
++    lse = torch.empty_like(scale)
++    out = torch.empty_like(q)
++    ml = topk_length_main if topk_length_main is not None else main_ids
++    el = topk_length_extra if topk_length_extra is not None else extra_ids
++    sink = attn_sink if attn_sink is not None else scale
++    common = dict(MAIN_K=km, EXTRA_K=ke, MAIN_PAGE=main_page, EXTRA_PAGE=extra_page,
++                  MAIN_STRIDE=main.stride(0), EXTRA_STRIDE=extra.stride(0),
++                  HAS_MAIN_LENGTH=topk_length_main is not None,
++                  HAS_EXTRA_LENGTH=topk_length_extra is not None,
++                  num_warps=4, num_stages=1)
++    _score_checkpoint[(rows,)](q, main, main_ids, extra, extra_ids, p, alpha, scale, lse, out,
++                               sink, ml, el, HAS_SINK=attn_sink is not None,
++                               SM_SCALE=sm_scale, **common)
++    _value_checkpoint[(rows,7)](main, main_ids, extra, extra_ids, p, alpha, scale, out,
++                                 ml, el, **common)
++    return out, lse
++
++fused_gather_attn_decode_dsv4_dual_scope = attention
++fused_gather_attn_decode_dsv4_dual_scope_low_overhead = attention
+--- /dev/null
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/dsv41_attention_split_checkpoint.py
+@@ -0,0 +1,165 @@
++"""Decode prototype: preserve deployed four-way split boundaries and FP32 combine."""
++import torch
++import triton
++import triton.language as tl
++from sglang.kernels.ops.attention.nsa_triton_decode.dsv41_attention_checkpoint import _score_block, _load_v41_tile
++
++def get_reference():
++    # Parent is fully initialized before the opt-in dispatch imports this module.
++    from sglang.kernels.ops.attention.nsa_triton_decode import triton_mla_kernels_decode_fused
++    return triton_mla_kernels_decode_fused
++
++@triton.jit
++def _score_split(Q, Main, MainIds, Extra, ExtraIds, P, Alpha, Scale, LSE, Out,
++                 MainLength, ExtraLength, sm_scale,
++                 ROWS: tl.constexpr, HAS_LENGTH: tl.constexpr,
++                 MAIN_STRIDE: tl.constexpr, EXTRA_STRIDE: tl.constexpr, EXTRA_PAGE: tl.constexpr):
++    row = tl.program_id(0).to(tl.int64)
++    split = tl.program_id(1)
++    slot = split * ROWS + row
++    h = tl.arange(0, 16)
++    n = tl.arange(0, 64)
++    tile = tl.arange(0, 64)
++    start = split * 160
++    end = start + 160
++    m = tl.full((16,), float('-inf'), tl.float32)
++    l = tl.zeros((16,), tl.float32)
++    acc0 = tl.zeros((16, 64), tl.float32)
++    block = 0
++    for scope in tl.static_range(2):
++        if scope == 0:
++            cache = Main
++            indices = MainIds
++            topk = 128
++            page = 256
++            stride = MAIN_STRIDE
++            begin = start
++            finish = tl.minimum(end, 128)
++            length = 128
++            if HAS_LENGTH:
++                length = tl.load(MainLength + row)
++        else:
++            cache = Extra
++            indices = ExtraIds
++            topk = 512
++            page = EXTRA_PAGE
++            stride = EXTRA_STRIDE
++            begin = tl.maximum(start, 128) - 128
++            finish = end - 128
++            length = 512
++            if HAS_LENGTH:
++                length = tl.load(ExtraLength + row)
++        for base_n in range(begin, finish, 64):
++            if base_n < length:
++                pos = base_n + n
++                idx = tl.load(indices + row * topk + pos, pos < finish, other=-1)
++                valid = (pos < finish) & (pos < length) & (idx != -1)
++                safe = tl.maximum(idx, 0).to(tl.int64)
++                base = cache + (safe // page) * stride
++                data = (safe % page) * 512
++                scales = page * 512 + (safe % page) * 16
++                p, alpha, m, l = _score_block(base, data, scales, valid, valid[:, None],
++                    Q, row, m, l, tile, sm_scale, 64, 448, 1.4426950408889634, 16, 64, True)
++                v0 = _load_v41_tile(base, data, scales, valid[:, None], tile, 0)
++                acc0 = acc0 * alpha[:, None] + tl.dot(p, v0).to(tl.float32)
++            else:
++                p = tl.zeros((16, 64), tl.bfloat16)
++                alpha = tl.full((16,), 1.0, tl.float32)
++            tl.store(P + ((slot * 4 + block) * 16 + h[:, None]) * 64 + n[None, :], p)
++            tl.store(Alpha + (slot * 4 + block) * 16 + h, alpha)
++            block += 1
++    scale = tl.where(l == 0.0, 0.0, 1.0 / l)
++    lse = m + tl.math.log2(tl.where(l == 0.0, 1.0, l)) / 1.4426950408889634
++    tl.store(Scale + slot * 16 + h, scale)
++    tl.store(LSE + slot * 16 + h, tl.where(l == 0.0, float('+inf'), lse))
++    partial0 = tl.where(scale[:, None] == 0.0, 0.0, acc0 * scale[:, None])
++    tl.store(Out + slot * 8192 + h[:, None] * 512 + tile[None, :], partial0)
++
++@triton.jit
++def _value_split(Main, MainIds, Extra, ExtraIds, P, Alpha, Scale, Out,
++                 MainLength, ExtraLength,
++                 ROWS: tl.constexpr, HAS_LENGTH: tl.constexpr,
++                 MAIN_STRIDE: tl.constexpr, EXTRA_STRIDE: tl.constexpr, EXTRA_PAGE: tl.constexpr):
++    row = tl.program_id(0).to(tl.int64)
++    split = tl.program_id(1) // 7
++    piece = tl.program_id(1) % 7 + 1
++    slot = split * ROWS + row
++    h = tl.arange(0, 16)
++    n = tl.arange(0, 64)
++    tile = tl.arange(0, 64)
++    start = split * 160
++    end = start + 160
++    block = 0
++    acc = tl.zeros((16, 64), tl.float32)
++    for scope in tl.static_range(2):
++        if scope == 0:
++            cache = Main
++            indices = MainIds
++            topk = 128
++            page = 256
++            stride = MAIN_STRIDE
++            begin = start
++            finish = tl.minimum(end, 128)
++            length = 128
++            if HAS_LENGTH:
++                length = tl.load(MainLength + row)
++        else:
++            cache = Extra
++            indices = ExtraIds
++            topk = 512
++            page = EXTRA_PAGE
++            stride = EXTRA_STRIDE
++            begin = tl.maximum(start, 128) - 128
++            finish = end - 128
++            length = 512
++            if HAS_LENGTH:
++                length = tl.load(ExtraLength + row)
++        for base_n in range(begin, finish, 64):
++            if base_n < length:
++                pos = base_n + n
++                idx = tl.load(indices + row * topk + pos, pos < finish, other=-1)
++                valid = (pos < finish) & (pos < length) & (idx != -1)
++                safe = tl.maximum(idx, 0).to(tl.int64)
++                base = cache + (safe // page) * stride
++                data = (safe % page) * 512
++                scales = page * 512 + (safe % page) * 16
++                p = tl.load(P + ((slot * 4 + block) * 16 + h[:, None]) * 64 + n[None, :])
++                alpha = tl.load(Alpha + (slot * 4 + block) * 16 + h)
++                kv = _load_v41_tile(base, data, scales, valid[:, None], tile, piece)
++                acc = acc * alpha[:, None] + tl.dot(p, kv).to(tl.float32)
++            block += 1
++    scale = tl.load(Scale + slot * 16 + h)
++    result = tl.where(scale[:, None] == 0.0, 0.0, acc * scale[:, None])
++    tl.store(Out + slot * 8192 + h[:, None] * 512 + piece * 64 + tile[None, :], result)
++
++def attention(q, main, main_ids, main_page, extra, extra_ids, extra_page, sm_scale,
++              topk_length_main=None, topk_length_extra=None, attn_sink=None, s_q=1, **kwargs):
++    reference=get_reference()
++    assert q.dtype == torch.bfloat16 and q.is_contiguous() and q.shape[1:] == (16, 512)
++    assert q.shape[0] in (1, 2, 4, 8, 16) and s_q == 1
++    assert main.shape[-1] == extra.shape[-1] == 528 and main_page == 256 and extra_page in (128, 256)
++    assert main.dtype == extra.dtype == torch.uint8
++    assert main.is_contiguous() and extra.is_contiguous()
++    assert main_ids.shape == (q.shape[0], 128) and extra_ids.shape == (q.shape[0], 512)
++    assert main_ids.is_contiguous() and extra_ids.is_contiguous()
++    assert (topk_length_main is None) == (topk_length_extra is None)
++    rows = q.shape[0]
++    p = torch.empty((4,rows,4,16,64), dtype=torch.bfloat16, device=q.device)
++    alpha = torch.empty((4,rows,4,16), dtype=torch.float32, device=q.device)
++    scale = torch.empty((4,rows,16), dtype=torch.float32, device=q.device)
++    partial_lse = torch.empty_like(scale)
++    partial = torch.empty((4,rows,16,512), dtype=torch.float32, device=q.device)
++    out = torch.empty_like(q)
++    lse = torch.empty((rows,16), dtype=torch.float32, device=q.device)
++    ml = topk_length_main if topk_length_main is not None else main_ids
++    el = topk_length_extra if topk_length_extra is not None else extra_ids
++    common = dict(ROWS=rows, HAS_LENGTH=topk_length_main is not None,
++        MAIN_STRIDE=main.stride(0), EXTRA_STRIDE=extra.stride(0), EXTRA_PAGE=extra_page, num_warps=4,num_stages=1)
++    _score_split[(rows,4)](q,main,main_ids,extra,extra_ids,p,alpha,scale,partial_lse,partial,ml,el,sm_scale,**common)
++    _value_split[(rows,28)](main,main_ids,extra,extra_ids,p,alpha,scale,partial,ml,el,**common)
++    sink = attn_sink if attn_sink is not None else lse[0,:]
++    reference._combine_splitk_kernel[(rows,1)](
++        partial,partial_lse,sink,out,lse,rows,reference._bucket_total_tokens(rows),16,512,
++        *partial.stride(),*partial_lse.stride(),*out.stride(),*lse.stride(),
++        HAS_ATTN_SINK=attn_sink is not None,BLOCK_H=16,BLOCK_D=128,num_warps=4,num_stages=1)
++    return out,lse
