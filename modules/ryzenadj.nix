@@ -14,18 +14,17 @@ let
 
   ryzenadj = "${pkgs.ryzenadj}/bin/ryzenadj";
 
-  # Curve optimizer encoding: positive values direct, negative as 1048576 + value
-  coallValue =
-    if cfg.curveOptimizer.offset >= 0 then
-      cfg.curveOptimizer.offset
-    else
-      1048576 + cfg.curveOptimizer.offset;
+  # RyzenAdj's CO commands use 0x100000 as the neutral value; negative
+  # offsets are encoded by subtracting their magnitude from that base.
+  coallValue = 1048576 + cfg.curveOptimizer.offset;
 
   # Base args (without curve optimizer - applied separately with grace period)
   baseArgs = lib.concatStrings [
     (mkArg "stapm-limit" cfg.stapmLimit)
     (mkArg "fast-limit" cfg.fastLimit)
     (mkArg "slow-limit" cfg.slowLimit)
+    (mkArg "slow-time" cfg.slowTime)
+    (mkArg "stapm-time" cfg.stapmTime)
     (mkArg "apu-slow-limit" cfg.apuSlowLimit)
     (mkArg "tctl-temp" cfg.tctlTemp)
     (mkArg "apu-skin-temp" cfg.apuSkinTemp)
@@ -38,6 +37,8 @@ let
     cfg.stapmLimit != null
     || cfg.fastLimit != null
     || cfg.slowLimit != null
+    || cfg.slowTime != null
+    || cfg.stapmTime != null
     || cfg.apuSlowLimit != null
     || cfg.tctlTemp != null
     || cfg.apuSkinTemp != null
@@ -155,6 +156,20 @@ in
       description = "Average Power Limit (PPT SLOW) in mW";
     };
 
+    slowTime = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      example = 60;
+      description = "Slow PPT time constant in seconds";
+    };
+
+    stapmTime = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      example = 600;
+      description = "STAPM time constant in seconds";
+    };
+
     apuSlowLimit = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
       default = null;
@@ -219,6 +234,16 @@ in
       {
         assertion = !(cfg.maxPerformance && cfg.powerSaving);
         message = "Cannot enable both maxPerformance and powerSaving";
+      }
+      {
+        assertion =
+          !cfg.curveOptimizer.enable
+          || (cfg.curveOptimizer.offset >= -50 && cfg.curveOptimizer.offset <= 30);
+        message = "services.ryzenadj.curveOptimizer.offset must be between -50 and 30";
+      }
+      {
+        assertion = cfg.curveOptimizer.graceSeconds >= 0;
+        message = "services.ryzenadj.curveOptimizer.graceSeconds must be non-negative";
       }
     ];
 

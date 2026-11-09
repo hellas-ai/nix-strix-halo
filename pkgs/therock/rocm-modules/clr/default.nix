@@ -1,7 +1,6 @@
 {
   lib,
   stdenv,
-  callPackage,
   fetchFromGitHub,
   fetchpatch,
   rocmUpdateScript,
@@ -16,7 +15,6 @@
   rocm-core,
   roctracer,
   rocminfo,
-  rocm-smi,
   rocprofiler-register,
   symlinkJoin,
   numactl,
@@ -261,49 +259,6 @@ stdenv.mkDerivation (finalAttrs: {
     inherit hipClangPath;
 
     updateScript = rocmUpdateScript { inherit finalAttrs; };
-
-    impureTests = {
-      # bash $(nix-build -A rocmPackages.clr.impureTests.rocm-smi)
-      rocm-smi = callPackage ./test-rocm-smi.nix {
-        inherit rocm-smi;
-        clr = finalAttrs.finalPackage;
-      };
-      # Simple subset of opencl-cts test_basic
-      opencl-cts = callPackage ./test-opencl-cts.nix {
-        clr = finalAttrs.finalPackage;
-      };
-      generic-arch = callPackage ./test-isa-compat.nix {
-        clr = finalAttrs.finalPackage;
-        name = "generic-arch";
-        offloadArches = [
-          "gfx9-generic"
-          "gfx10-1-generic"
-          "gfx10-3-generic"
-          "gfx11-generic"
-          "gfx12-generic"
-        ];
-      };
-      isa-compat = callPackage ./test-isa-compat.nix {
-        clr = finalAttrs.finalPackage;
-        name = "isa-compat";
-        offloadArches = [
-          "gfx900"
-          "gfx1010"
-          "gfx1030"
-        ];
-      };
-      spirv = callPackage ./test-isa-compat.nix {
-        clr = finalAttrs.finalPackage;
-        name = "spirv";
-        offloadArches = [
-          "amdgcnspirv"
-        ];
-      };
-      hiprtc-type-traits = callPackage ./test-hiprtc-type-traits.nix {
-        clr = finalAttrs.finalPackage;
-        inherit rocm-smi;
-      };
-    };
 
     selectGpuTargets =
       {

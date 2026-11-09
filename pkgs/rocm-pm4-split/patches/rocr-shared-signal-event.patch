@@ -1,0 +1,59 @@
+ROCR: signals created after KFD's signal events run out share one reserved event.
+
+Applies with -p1 at projects/rocr-runtime of rocm-10-sdk-pm4-prepared-source. KFD gives a
+process 4096 signal events. Past that, EventPool::alloc returned nullptr and the InterruptSignal
+was left without an event: hsaKmtWaitOnEvent_Ext(nullptr) returns INVALID_HANDLE without a
+syscall, so its waiters spin (the HIP hostcall listener at 100% CPU, 0 syscalls), and
+AsyncEventsLoop polls whenever such a signal has a handler (PrepareInterrupt: EopEvent() ==
+nullptr). The pool now reserves one event up front and hands it to every signal created after
+exhaustion. Several signals on one event is the pattern AqlQueue already uses (queue_event());
+a wake-up for another signal is spurious and the waiter re-checks its value.
+
+--- a/runtime/hsa-runtime/core/inc/interrupt_signal.h
++++ b/runtime/hsa-runtime/core/inc/interrupt_signal.h
+@@ -79,12 +79,16 @@
+     void free(HsaEvent* evt);
+     void clear() {
+       events_.clear();
++      shared_.reset();
+       allEventsAllocated = false;
+     }
+ 
+    private:
+     HybridMutex lock_;
+     std::vector<unique_event_ptr> events_;
++    // Reserved with the first event. Once KFD has no free signal-event slot, every new signal
++    // shares it, so its waiters still sleep on the interrupt instead of spinning without an event.
++    unique_event_ptr shared_;
+     bool allEventsAllocated;
+   };
+ 
+--- a/runtime/hsa-runtime/core/runtime/interrupt_signal.cpp
++++ b/runtime/hsa-runtime/core/runtime/interrupt_signal.cpp
+@@ -49,13 +49,15 @@
+ 
+ HsaEvent* InterruptSignal::EventPool::alloc() {
+   std::lock_guard<HybridMutex> lock(lock_);
++  if (!shared_ && !allEventsAllocated)
++    shared_.reset(InterruptSignal::CreateEvent(HSA_EVENTTYPE_SIGNAL, false));
+   if (events_.empty()) {
+     if (!allEventsAllocated) {
+       HsaEvent* evt = InterruptSignal::CreateEvent(HSA_EVENTTYPE_SIGNAL, false);
+-      if (evt == nullptr) allEventsAllocated = true;
+-      return evt;
++      if (evt != nullptr) return evt;
++      allEventsAllocated = true;
+     }
+-    return nullptr;
++    return shared_.get();
+   }
+   HsaEvent* ret = events_.back().release();
+   events_.pop_back();
+@@ -65,6 +67,7 @@
+ void InterruptSignal::EventPool::free(HsaEvent* evt) {
+   if (evt == nullptr) return;
+   std::lock_guard<HybridMutex> lock(lock_);
++  if (evt == shared_.get()) return;
+   events_.push_back(unique_event_ptr(evt));
+ }
+ 

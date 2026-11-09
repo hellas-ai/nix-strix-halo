@@ -1,0 +1,19 @@
+--- a/sglang/srt/managers/scheduler.py
++++ b/sglang/srt/managers/scheduler.py
+@@ -3454,6 +3454,16 @@
+             self.handle_embedding_request(tokenized_req)
+ 
+     def stash_chunked_request(self, req: Req):
++        if (
++            self.enable_overlap
++            and self.enable_unified_cache_external_linker
++            and req.kv.holds_mamba
++        ):
++            # The overlap loop stashes the previous chunk before processing its
++            # result.copy_done. KDA checkpoint writes may still be in flight.
++            # Fence donation and the linker's schedule-stream ready event on
++            # the complete producer forward, not merely its shared-buffer reads.
++            self.schedule_stream.wait_stream(self.forward_stream)
+         maybe_cache_unfinished_req(req, self.tree_cache, chunked=True)
+ 
+     def process_pending_chunked_abort(self) -> None:

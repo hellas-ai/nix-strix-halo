@@ -2,16 +2,13 @@
   lib,
   self,
   defaultRocmTarget,
-  cudaPkgsFor,
   benchLib,
 }:
 
 pkgs:
 let
   system = pkgs.stdenv.hostPlatform.system;
-  cudaPkgs = cudaPkgsFor system;
   modelsRoot = benchLib.defaultModelsRoot pkgs;
-  nvidiaRuntime = import ../nvidia-runtime.nix;
 
   flattenBenchmarks =
     benchmarks:
@@ -95,46 +92,12 @@ let
           inherit pkgs modelsRoot;
           package = pkgs.fastflowlm;
         }).benchmarks;
-      ds4Benchmarks =
-        (import ./ds4.nix {
-          inherit pkgs modelsRoot;
-          package = pkgs.ds4-rocm;
-          target = defaultTargetMetadata;
-        }).benchmarks;
-      vllmBenchmarks =
-        (import ./vllm.nix {
-          inherit pkgs modelsRoot;
-          package = pkgs.vllm-rocm;
-          target = defaultTargetMetadata;
-        }).benchmarks;
-      mlxRocmBenchmarks =
-        (import ./mlx.nix {
-          inherit pkgs;
-          package = pkgs.mlx-rocm;
-          target = defaultTargetMetadata;
-        }).benchmarks;
     in
-    flattenBenchmarks acceleratedBenchmarks
-    // flattenBenchmarks fastflowlmBenchmarks
-    // flattenBenchmarks ds4Benchmarks
-    // flattenBenchmarks vllmBenchmarks
-    // flattenBenchmarks mlxRocmBenchmarks
+    flattenBenchmarks acceleratedBenchmarks // flattenBenchmarks fastflowlmBenchmarks
   );
 
   darwinBenchmarks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin (
     let
-      ds4MetalBenchmarks =
-        (import ./ds4.nix {
-          inherit pkgs modelsRoot;
-          package = self.packages.${system}.ds4;
-          accelerator = "metal";
-        }).benchmarks;
-      ds4PiBenchmarks =
-        (import ./ds4-pi.nix {
-          inherit pkgs modelsRoot;
-          ds4Package = self.packages.${system}.ds4;
-          piWrapPackage = self.packages.${system}.pi-wrap;
-        }).benchmarks;
       mlxMetalBenchmarks =
         (import ./mlx.nix {
           inherit pkgs;
@@ -142,76 +105,8 @@ let
           accelerator = "metal";
         }).benchmarks;
     in
-    flattenBenchmarks ds4MetalBenchmarks
-    // flattenBenchmarks ds4PiBenchmarks
-    // flattenBenchmarks mlxMetalBenchmarks
+    flattenBenchmarks mlxMetalBenchmarks
   );
 
-  cudaRtx4090Benchmarks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-    let
-      inherit (nvidiaRuntime) fallbackLibraryPath libraryPath sandboxPaths;
-    in
-    {
-      bench-cuda-rtx4090-llama-cpp-master-device-smoke = benchLib.mkBenchmark {
-        pkgs = cudaPkgs;
-        name = "cuda-rtx4090-llama-cpp-master-device-smoke";
-        package = cudaPkgs.llama-cpp-master-cuda;
-        command = [
-          (cudaPkgs.writeShellScript "cuda-rtx4090-llama-cpp-master-device-smoke" ''
-            set -euo pipefail
-            cat /proc/driver/nvidia/version
-            driver_lib=${libraryPath}
-            if [ ! -e "$driver_lib/libcuda.so.1" ] && [ -e ${fallbackLibraryPath}/libcuda.so.1 ]; then
-              driver_lib=${fallbackLibraryPath}
-            fi
-            test -e "$driver_lib/libcuda.so.1"
-            export LD_LIBRARY_PATH="$driver_lib"
-            ${cudaPkgs.llama-cpp-master-cuda}/bin/llama-bench --list-devices
-          '')
-        ];
-        env = {
-          LD_LIBRARY_PATH = libraryPath;
-        };
-        requirements = {
-          systemFeatures = [
-            "rtx4090"
-            "benchmark"
-          ];
-          hostProfiles = [ "linux-nvidia-cuda" ];
-          sandboxPaths = [
-            "/dev/nvidia0"
-            "/dev/nvidiactl"
-            "/dev/nvidia-uvm"
-            "/dev/nvidia-uvm-tools"
-            "/dev/nvidia-caps"
-            "/proc/driver/nvidia"
-          ]
-          ++ sandboxPaths;
-        };
-        metadata = {
-          kind = "cuda-device-smoke";
-          suite = "cuda";
-          accelerator = "cuda";
-          scenario = "device-smoke";
-          target = {
-            vendor = "nvidia";
-            arch = "sm_89";
-            deviceClass = "rtx4090";
-            systemFeature = "rtx4090";
-            runtimeDriver = {
-              inherit libraryPath;
-            };
-          };
-          tool = {
-            backend = "cuda";
-            executable = "llama-bench --list-devices";
-            packageRole = "llama-cpp-master-cuda";
-          };
-        };
-        meta.platforms = [ "x86_64-linux" ];
-        description = "Run CUDA llama.cpp device smoke test";
-      };
-    }
-  );
 in
-flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks // cudaRtx4090Benchmarks
+flattenBenchmarks genericBenchmarks // linuxBenchmarks // darwinBenchmarks

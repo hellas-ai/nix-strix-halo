@@ -1,0 +1,115 @@
+--- a/sglang/kernels/ops/quantization/fp8_utils.py
++++ b/sglang/kernels/ops/quantization/fp8_utils.py
+@@ -62,3 +62,18 @@
+     value = tl.where(magnitude == 0x7F, 0x7E00, value).to(tl.uint16)
+     value = value | ((bits & 0x80) << 8)
+     return value.to(tl.float16, bitcast=True)
++
++
++@triton.jit
++def widen_e4m3fn_to_fp32(x):
++    bits = x.to(tl.uint8, bitcast=True).to(tl.uint32)
++    magnitude = bits & 0x7F
++    normal = (magnitude << 20) + 0x3C000000
++    subnormal = ((magnitude & 7).to(tl.float32) * 0.001953125).to(
++        tl.uint32, bitcast=True
++    )
++    value = tl.where(magnitude < 8, subnormal, normal)
++    value = tl.where(magnitude == 0x7F, 0x7FC00000, value).to(tl.uint32)
++    value = value | ((bits & 0x80) << 24)
++    return value.to(tl.float32, bitcast=True)
++
+--- a/sglang/kernels/ops/quantization/fp8_kernel.py
++++ b/sglang/kernels/ops/quantization/fp8_kernel.py
+@@ -27,6 +27,7 @@
+ from sglang.kernels.ops.quantization.fp8_utils import (
+     fp8_dtype_to_triton,
+     widen_e4m3fn_to_fp16,
++    widen_e4m3fn_to_fp32,
+ )
+ from sglang.srt.layers import deep_gemm_wrapper
+ from sglang.srt.utils import (
+@@ -1555,6 +1556,47 @@
+     return C
+ 
+ 
++@triton.jit
++def _gfx1151_block_fp8_gemv(
++    A,
++    B,
++    C,
++    As,
++    Bs,
++    N: tl.constexpr,
++    K: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    KG: tl.constexpr,
++):
++    rows = tl.program_id(0) * BLOCK_N + tl.arange(0, BLOCK_N)
++    offsets = tl.arange(0, KG * 128)
++    groups = tl.arange(0, KG)
++    acc = tl.zeros((BLOCK_N,), tl.float32)
++    for start in range(0, K // 128, KG):
++        k = start * 128 + offsets
++        a = tl.load(A + k)
++        b = tl.load(B + rows[:, None] * K + k[None, :])
++        a = widen_e4m3fn_to_fp32(a)
++        b = widen_e4m3fn_to_fp32(b)
++        a = a.to(tl.float32).reshape(KG, 128)
++        b = b.to(tl.float32).reshape(BLOCK_N, KG, 128)
++        dots = tl.sum(a[None, :, :] * b, axis=2)
++        scales_a = tl.load(As + start + groups)
++        scales_b = tl.load(
++            Bs + (rows // 128)[:, None] * (K // 128) + start + groups[None, :]
++        )
++        for g in tl.static_range(KG):
++            dot = tl.gather(dots, tl.full((BLOCK_N, 1), g, tl.int32), axis=1).reshape(
++                BLOCK_N
++            )
++            scale_a = tl.sum(tl.where(groups == g, scales_a, 0), axis=0)
++            scale_b = tl.gather(
++                scales_b, tl.full((BLOCK_N, 1), g, tl.int32), axis=1
++            ).reshape(BLOCK_N)
++            acc += dot * scale_a * scale_b
++    tl.store(C + rows, acc.to(C.dtype.element_ty))
++
++
+ def w8a8_block_fp8_matmul_triton(
+     A: torch.Tensor,
+     B: torch.Tensor,
+@@ -1581,6 +1623,35 @@
+     """
+ 
+     M, N, K, C = prepare_block_fp8_matmul_inputs(A, B, As, Bs, block_size, output_dtype)
++
++    # Restrict the vector path to measured GLM TP4 decode shapes. Keep
++    # activation quantization, K-group scaling order and BF16 output unchanged.
++    if (
++        _gfx1151_fp8_widen.value
++        and M == 1
++        and A.dtype == B.dtype == torch.float8_e4m3fn
++        and output_dtype == torch.bfloat16
++        and block_size == [128, 128]
++        and As.dtype == Bs.dtype == torch.float32
++        and As.is_contiguous()
++        and Bs.is_contiguous()
++        and (N, K)
++        in {
++            (6144, 4096),
++            (4096, 3072),
++            (2048, 4096),
++            (4096, 1536),
++            (4096, 4096),
++            (1024, 4096),
++            (4096, 512),
++        }
++    ):
++        groups = K // 128
++        kg = min(16, groups & -groups)
++        _gfx1151_block_fp8_gemv[(N // 2,)](
++            A, B, C, As, Bs, N, K, 2, kg, num_warps=4, num_stages=1
++        )
++        return C
+ 
+     block_n, block_k = block_size
+ 

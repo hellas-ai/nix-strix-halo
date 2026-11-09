@@ -1,0 +1,96 @@
+// Actual Socket declaration, pollConnect method and host exception definitions.
+// Constructor and all five syscall boundaries below are CPU-only surrogates.
+#include <cassert>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <mscclpp/errors.hpp>
+#define private public
+#include "socket.h"
+#undef private
+
+struct Case {
+  const char* name;
+  int rc, events, so_error, get_rc, poll_errno, get_errno, family;
+};
+static const Case cases[] = {
+  {"pollerr_refused",1,POLLERR,ECONNREFUSED,0,0,0,AF_INET},
+  {"pollerr_timeout",1,POLLERR,ETIMEDOUT,0,0,0,AF_INET},
+  {"pollerr_unreachable",1,POLLERR,EHOSTUNREACH,0,0,0,AF_INET},
+  {"pollerr_inprogress",1,POLLERR,EINPROGRESS,0,0,0,AF_INET},
+  {"pollerr_get_failure",1,POLLERR,0,-1,0,EBADF,AF_INET},
+  {"pollerr_zero_so_error",1,POLLERR,0,0,0,0,AF_INET},
+  {"writable_success",1,POLLOUT,0,0,0,0,AF_INET},
+  {"writable_refused",1,POLLOUT,ECONNREFUSED,0,0,0,AF_INET},
+  {"writable_timeout",1,POLLOUT,ETIMEDOUT,0,0,0,AF_INET},
+  {"writable_and_error",1,POLLOUT|POLLERR,ECONNREFUSED,0,0,0,AF_INET},
+  {"poll_timeout",0,0,0,0,0,0,AF_INET},
+  {"poll_syscall_error",-1,0,0,0,EINTR,0,AF_INET},
+  {"hangup_only",1,POLLHUP,0,0,0,0,AF_INET},
+  {"invalid_fd_event",1,POLLNVAL,0,0,0,0,AF_INET},
+  {"unexpected_empty_event",1,0,0,0,0,0,AF_INET},
+  {"unexpected_return_count",2,POLLERR,0,0,0,0,AF_INET},
+  {"pollerr_refused_ipv6",1,POLLERR,ECONNREFUSED,0,0,0,AF_INET6},
+};
+static const Case* current;
+static int polls, gets, closes, sockets, sleeps, socket_family;
+static int fixture_poll(pollfd* p, nfds_t n, int timeout) {
+  assert(n==1 && timeout==1 && p->fd==7 && p->events==POLLOUT);
+  ++polls; p->revents=current->events; errno=current->poll_errno;
+  return current->rc;
+}
+static int fixture_getsockopt(int fd,int level,int key,void* value,socklen_t* size) {
+  assert(fd==7 && level==SOL_SOCKET && key==SO_ERROR && *size==sizeof(int));
+  ++gets; errno=current->get_errno;
+  if(current->get_rc==0) *static_cast<int*>(value)=current->so_error;
+  return current->get_rc;
+}
+static int fixture_close(int fd) { assert(fd==7); ++closes; return 0; }
+static int fixture_socket(int family,int type,int protocol) {
+  assert(family==current->family && type==SOCK_STREAM && protocol==0);
+  ++sockets; socket_family=family; return 101;
+}
+static int fixture_usleep(unsigned n) { assert(n==SLEEP_INT); ++sleeps; return 0; }
+
+namespace mscclpp {
+/* SOURCE_ERRORS */
+Socket::Socket(const SocketAddress*,uint64_t magic,SocketType type,
+               volatile uint32_t*,int)
+    : fd_(7),acceptFd_(-1),connectRetries_(0),acceptRetries_(0),abortFlag_(nullptr),
+      asyncFlag_(1),state_(SocketStateConnectPolling),magic_(magic),type_(type),
+      addr_(),salen_(sizeof(sockaddr_in)) {
+  addr_.sa.sa_family=current->family;
+}
+Socket::~Socket() {}
+#define poll fixture_poll
+#define getsockopt fixture_getsockopt
+#define close fixture_close
+#define socket fixture_socket
+#define usleep fixture_usleep
+#define INFO(...) ((void)0)
+/* SOURCE_POLL */
+#undef INFO
+#undef usleep
+#undef socket
+#undef close
+#undef getsockopt
+#undef poll
+}
+
+int main() {
+  for(const auto& c:cases) {
+    current=&c; polls=gets=closes=sockets=sleeps=socket_family=0;
+    mscclpp::Socket s;
+    const char* kind="none"; int code=0;
+    try {s.pollConnect();}
+    catch(const mscclpp::SysError& e) {kind="sys_error";code=e.getErrorCode();}
+    catch(const mscclpp::Error& e) {
+      code=static_cast<int>(e.getErrorCode());
+      kind=e.getErrorCode()==mscclpp::ErrorCode::InternalError?"internal_error":"system_error";
+    }
+    std::printf("{\"case\":\"%s\",\"error\":\"%s\",\"code\":%d,\"state\":%d,"
+      "\"fd\":%d,\"retries\":%d,\"polls\":%d,\"gets\":%d,\"closes\":%d,"
+      "\"sockets\":%d,\"sleeps\":%d,\"socket_family\":%d}\n",
+      c.name,kind,code,s.state_,s.fd_,s.connectRetries_,polls,gets,closes,sockets,sleeps,socket_family);
+  }
+}

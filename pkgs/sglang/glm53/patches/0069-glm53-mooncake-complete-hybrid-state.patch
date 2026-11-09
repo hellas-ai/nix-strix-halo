@@ -1,0 +1,603 @@
+--- a/sglang/srt/environ.py
++++ b/sglang/srt/environ.py
+@@ -743,6 +743,8 @@
+     # ===================================================================
+     # HiCache storage backends and mmap allocation
+     # ===================================================================
++    # Immutable runtime/kernel build identity for persistent direct-cache objects.
++    SGLANG_CACHE_NUMERICS_ID = EnvStr("")
+     # Per-call cudaHostRegister limit in GB.
+     SGLANG_HICACHE_HOST_REGISTER_CHUNK_GB = EnvInt(256)
+     # Base token count for each MLA/DSA dedup broadcast chunk.
+--- a/sglang/srt/mem_cache/hybrid_cache/linker_pool_assembler.py
++++ b/sglang/srt/mem_cache/hybrid_cache/linker_pool_assembler.py
+@@ -419,6 +419,109 @@
+     return DevicePoolGroup(entries, num_layers, page_size, rank_replicated=True)
+
+
++
++class PackedDSADevicePoolEntry(DevicePoolEntry):
++    """One logical object spanning independently allocated physical KV pages.
++
++    A compressed index page belongs to the first physical token page in each
++    ``physical_page_size * index_kpool`` logical span. Never assume the physical
++    pages within a logical radix page are adjacent in memory.
++    """
++
++    def __init__(self, *, logical_page_size, physical_page_size, index_kpool=1,
++                 indexer=False, **kwargs):
++        super().__init__(page_size=physical_page_size, rows_are_pages=indexer,
++                         **kwargs)
++        self.page_size = logical_page_size
++        self.physical_page_size = physical_page_size
++        self.index_kpool = index_kpool
++        self.indexer = indexer
++        if logical_page_size % (physical_page_size * index_kpool):
++            raise ValueError("Packed DSA linker requires whole packed-index spans")
++
++    def get_page_buffer_meta(self, indices):
++        slots = indices.detach().to(device="cpu", dtype=torch.int64).flatten()
++        if slots.numel() % self.page_size:
++            raise ValueError("Packed DSA linker requires complete logical pages")
++        physical = slots.reshape(-1, self.physical_page_size)
++        starts = physical[:, 0]
++        if torch.any(starts.remainder(self.physical_page_size)) or not torch.equal(
++            physical, starts[:, None] + self._page_offsets
++        ):
++            raise ValueError("Packed DSA linker requires aligned physical pages")
++        pages = starts.reshape(-1, self.page_size // self.physical_page_size)
++        if self.indexer:
++            pages = pages[:, ::self.index_kpool] // self.physical_page_size
++        ptrs, sizes = [], []
++        for rows in pages.tolist():
++            for component in self.buffer_meta:
++                for base, stride, size in component:
++                    for row in rows:
++                        if row < 0 or row + self._row_span > self._row_count:
++                            raise ValueError("Packed DSA linker row outside allocation")
++                        ptrs.append(base + row * stride)
++                        sizes.append(size)
++        return ptrs, sizes
++
++    def prepare_locations(self, indices):
++        raise RuntimeError("Packed DSA requires transactional whole-object restore")
++
++
++def _build_glm_dsa_mamba_device_pool_group(kvcache, params, page_size):
++    from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
++
++    full = kvcache.full_kv_pool
++    req_pool = params.req_to_token_pool
++    mamba = req_pool.mamba_pool
++    if not (isinstance(full, DSATokenToKVPool)
++            and full.index_kpool_compress and full.index_kpool == 4):
++        raise ValueError("Direct Mamba linker supports compressed GLM DSA kpool4 only")
++    if (params.mtp_draft_device_pools or params.pp_size != 1
++            or not params.enable_mamba_extra_buffer
++            or getattr(req_pool, "mamba_ckpt_pool", None) is not None
++            or getattr(mamba, "enable_linear_replayssm", False)
++            or getattr(mamba, "enable_linear_replayssm_spec", False)):
++        raise ValueError("GLM direct linker requires PP1, native checkpoints, "
++                         "extra Mamba buffers, no draft or ReplaySSM")
++    full_mapping = dict(kvcache.full_attention_layer_id_mapping)
++    mamba_mapping = dict(req_pool.mamba_map)
++    kv = PackedDSADevicePoolEntry(
++        name=PoolName.KV, indices_from_pool=PoolName.KV, device_pool=full,
++        components=[full.kv_buffer], layer_mapping=full_mapping,
++        logical_page_size=page_size, physical_page_size=full.page_size,
++        index_kpool=full.index_kpool,
++    )
++    # indexShare layers deliberately have zero rows and no private index state.
++    index_buffers = full.index_k_with_scale_buffer
++    live = [i for i, buf in enumerate(index_buffers) if buf.shape[0] > 0]
++    compact = {old: new for new, old in enumerate(live)}
++    indexer = PackedDSADevicePoolEntry(
++        name=PoolName.INDEXER, indices_from_pool=PoolName.KV, device_pool=full,
++        components=[[index_buffers[i] for i in live]],
++        layer_mapping={g: compact[i] for g, i in full_mapping.items() if i in compact},
++        logical_page_size=page_size, physical_page_size=full.page_size,
++        index_kpool=full.index_kpool, indexer=True,
++    )
++    # KDA is sharded over TP even though latent DSA KV is replicated. Each rank
++    # persists its own complete pool group; rank0-only offload would lose states.
++    state = mamba.mamba_cache
++    temporal = [state.temporal[i] for i in range(len(mamba_mapping))]
++    conv = [[buf[i] for i in range(len(mamba_mapping))] for buf in state.conv]
++    if any(buf.numel() == 0 for buf in temporal):
++        raise ValueError("GLM direct linker requires a nonempty KDA temporal state")
++    mamba_entry = DevicePoolEntry(
++        name=PoolName.MAMBA, indices_from_pool=PoolName.MAMBA, device_pool=mamba,
++        components=[temporal, *conv], layer_mapping=mamba_mapping,
++        page_size=1, rows_are_pages=True, packed=False,
++        index_mapper=req_pool.translate_mamba_indices,
++    )
++    # Mooncake's existing MAMBA key scheme is temporal + one object per conv.
++    mamba_entry.conv_buffer = conv
++    mamba_entry.temporal_state_elem_size = temporal[0][0].numel()
++    return DevicePoolGroup([kv, indexer, mamba_entry],
++                           max(full_mapping.keys() | mamba_mapping.keys()) + 1,
++                           page_size, rank_replicated=False)
++
+ def resolve_hybrid_device_pool_group(
+     *,
+     kvcache: Any,
+--- a/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py
++++ b/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py
+@@ -1464,6 +1464,12 @@
+             ComponentType.MAMBA,
+         }
+
++    def build_direct_linker_pool_group(self, *, kvcache, params, page_size):
++        from sglang.srt.mem_cache.hybrid_cache.linker_pool_assembler import (
++            _build_glm_dsa_mamba_device_pool_group,
++        )
++        return _build_glm_dsa_mamba_device_pool_group(kvcache, params, page_size)
++
+     def build(
+         self,
+         *,
+--- a/sglang/srt/mem_cache/unified_cache/components/mamba.py
++++ b/sglang/srt/mem_cache/unified_cache/components/mamba.py
+@@ -29,6 +29,7 @@
+     CacheTransferPhase,
+     ComponentType,
+     EvictLayer,
++    ExternalLinkerLoadPhase,
+     LinkerTransferPhase,
+     LRURefreshPhase,
+     PrepareLoadBackResult,
+@@ -651,9 +652,58 @@
+         node: Optional[UnifiedTreeNode],
+         keys: Optional[Sequence[str]],
+     ) -> Optional[PoolTransfer]:
+-        raise AssertionError(
+-            "MambaComponent does not support external linker mode, will support soon"
++        if phase == LinkerTransferPhase.OFFLOAD:
++            if node is None or not node.hash_value:
++                return None
++            value = node.component_data[self.component_type].value
++            if value is None:
++                return None
++            return PoolTransfer(name=PoolName.MAMBA, device_indices=value,
++                                keys=[node.hash_value[-1]],
++                                hit_policy=PoolHitPolicy.TRAILING_PAGES)
++        if not keys:
++            return None
++        if phase == LinkerTransferPhase.LOOKUP:
++            return PoolTransfer(name=PoolName.MAMBA, keys=[keys[-1]],
++                                hit_policy=PoolHitPolicy.TRAILING_PAGES)
++        assert phase == LinkerTransferPhase.LOAD
++        allocator = self.cache.req_to_token_pool.mamba_allocator
++        # Reserve the tree checkpoint and a private request copy before the
++        # all-rank allocation vote. Both read the SAME endpoint state object.
++        slots = allocator.alloc(2)
++        if slots is None:
++            self.cache.evict_for_alloc(EvictParams(num_tokens=0, mamba_num=2))
++            slots = allocator.alloc(2)
++        if slots is None:
++            return None
++        return PoolTransfer(name=PoolName.MAMBA, device_indices=slots,
++                            keys=[keys[-1], keys[-1]],
++                            hit_policy=PoolHitPolicy.TRAILING_PAGES)
++
++    def update_external_linker_load(
++        self, phase, req, full_transfer, transfer, prefix_len, *,
++        insert_result=None, canonical_full=None,
++    ):
++        allocator = self.cache.req_to_token_pool.mamba_allocator
++        if phase == ExternalLinkerLoadPhase.ABORT:
++            allocator.free(transfer.device_indices)
++            return None
++        if phase == ExternalLinkerLoadPhase.PREPARE:
++            return transfer
++        assert phase == ExternalLinkerLoadPhase.COMMIT
++        # The wrapper has published (or reused) the checkpoint. Its first slot
++        # is tree-owned, or was freed by the wrapper when a checkpoint existed.
++        if req.kv.holds_mamba:
++            allocator.free(transfer.device_indices[1:])
++        else:
++            req.kv.mamba_pool_idx = transfer.device_indices[1]
++        # Always use the canonical checkpoint after insertion. A pre-existing
++        # resident checkpoint wins over a redundant remotely restored copy.
++        req.kv.mamba_cow_src_index = self.tree_core.get_component_device_value(
++            insert_result.last_device_node, self.component_type
+         )
++        req.kv.mamba_needs_clear = False
++        return None
+
+     # ---- HiCache Hooks ----
+
+--- a/sglang/srt/mem_cache/unified_cache/unified_cache_linker.py
++++ b/sglang/srt/mem_cache/unified_cache/unified_cache_linker.py
+@@ -19,6 +19,7 @@
+
+ from __future__ import annotations
+
++import logging
+ from abc import ABC, abstractmethod
+ from collections.abc import Sequence
+ from typing import TYPE_CHECKING, NamedTuple
+@@ -54,14 +55,28 @@
+     {
+         ComponentType.FULL,
+         ComponentType.SWA,
++        ComponentType.MAMBA,
+     }
+ )
+
++logger = logging.getLogger(__name__)
++
+
+ class UnifiedCacheLinker(ABC):
+     """External KV store reached directly from the device pools."""
+
+     layer_done_counter: object
++    restores_before_publish = False
++
++    def restore(self, rid: str, transfers: list[PoolTransfer]) -> bool:
++        """Restore into unpublished slots and quiesce all writes before returning.
++
++        Backends opting into restores_before_publish return False on a storage
++        miss/error. Neither success nor failure may leave DMA using these slots.
++        The wrapper agrees the outcome across ranks before publishing or freeing
++        them. No request state or radix-tree state has been changed at this point.
++        """
++        raise NotImplementedError
+
+     @abstractmethod
+     def lookup(self, rid: str, transfers: list[PoolTransfer]) -> list[int]:
+@@ -155,9 +170,13 @@
+                 component.name for component in sorted(unsupported, key=int)
+             )
+             raise ValueError(
+-                "External cache linker supports only Full and SWA tree "
++                "External cache linker supports only Full, SWA and Mamba tree "
+                 f"components; unsupported: {names}"
+             )
++
++        if (ComponentType.MAMBA in cache.tree_components
++                and not cache_linker.restores_before_publish):
++            raise ValueError("Mamba external linker requires transactional restore")
+
+         self.cache = cache
+         self.cache_linker = cache_linker
+@@ -172,6 +191,7 @@
+         )
+         # rid -> what match found, consumed by the next init_load_back.
+         self.hit_markers: dict[str, ExternalCacheHitMarker] = {}
++        self.failed_loads: set[str] = set()
+         # Loads in flight, each pinning its inserted endpoint until DMA completes.
+         self.pending_loads: dict[str, tuple[NodeId, DecLockRefParams]] = {}
+         # Offloads in flight, each holding a lock on its node until it lands.
+@@ -190,6 +210,8 @@
+     # ---- match: probe the remote store and report host_hit_length ----
+
+     def match(self, key: RadixKey, req: Req, result: MatchResult) -> MatchResult:
++        if req.rid in self.failed_loads:
++            return result
+         cache = self.cache
+         key, _ = key.maybe_to_bigram_view(cache.tree_core.is_eagle)
+         page = cache.page_size
+@@ -305,14 +327,38 @@
+                 LinkerTransferPhase.LOAD, None, tail_hashes
+             )
+             if transfer is None:
+-                self._update_load(
+-                    ExternalLinkerLoadPhase.ABORT,
+-                    req,
+-                    component_transfers,
+-                    prefix_len,
++                break
++            component_transfers.append((component, transfer))
++
++        allocated = len(component_transfers) == len(self._components)
++        transactional = self.cache_linker.restores_before_publish
++        if transactional:
++            allocated = self._all_ranks_ready(allocated)
++        restored = allocated
++        if allocated and transactional:
++            restored = self._all_ranks_ready(
++                self.cache_linker.restore(
++                    req.rid, [transfer for _, transfer in component_transfers]
+                 )
+-                return empty_indices, req.last_node
+-            component_transfers.append((component, transfer))
++            )
++        if not restored:
++            # PREPARE has not run: no full-to-SWA mapping, request boundary or
++            # tree entry points to these allocations yet. Every rank has also
++            # finished its I/O before the vote, so freeing them cannot race DMA.
++            self._update_load(
++                ExternalLinkerLoadPhase.ABORT, req, component_transfers, prefix_len
++            )
++            if transactional:
++                self.failed_loads.add(req.rid)
++                req.host_hit_length = 0
++                req.swa_host_hit_length = 0
++                req.mamba_host_hit_length = 0
++                logger.warning(
++                    "External cache restore failed for rid=%s; recomputing from "
++                    "the resident prefix on every cache rank",
++                    req.rid,
++                )
++            return empty_indices, req.last_node
+
+         full_transfer = component_transfers[0][1]
+         assert full_transfer.name == PoolName.KV
+@@ -385,12 +431,18 @@
+             canonical_full=canonical_tail,
+         )
+
+-        self._queue_load(req.rid, insert_result.last_device_node, load_transfers)
++        if not transactional:
++            self._queue_load(req.rid, insert_result.last_device_node, load_transfers)
+
+         cache.tree_core.mark_external_cache_stored_path(
+             insert_result.last_device_node, req.last_node
+         )
+         return canonical_tail, insert_result.last_device_node
++
++    def _all_ranks_ready(self, ready: bool) -> bool:
++        state = torch.tensor([int(ready)], dtype=torch.int)
++        self.cache._all_reduce_attn_groups(state, torch.distributed.ReduceOp.MIN)
++        return bool(state.item())
+
+     def _queue_load(
+         self, rid: str, node_id: NodeId, transfers: list[PoolTransfer]
+@@ -430,7 +482,8 @@
+         )
+         for component, transfer in transfers:
+             component_canonical = canonical_full
+-            if phase == ExternalLinkerLoadPhase.COMMIT:
++            if (phase == ExternalLinkerLoadPhase.COMMIT
++                    and transfer.name != PoolName.MAMBA):
+                 assert insert_result.adopted_ranges is not None
+                 coverage_start = prefix_len - len(transfer.device_indices)
+                 ranges = [
+@@ -579,6 +632,7 @@
+     def reset(self) -> None:
+         self.cache_linker.reset()
+         self.hit_markers.clear()
++        self.failed_loads.clear()
+         self._release_pending_locks()
+
+     def _release_pending_locks(self) -> None:
+@@ -594,6 +648,7 @@
+
+     def release_request(self, rid: str) -> None:
+         self.hit_markers.pop(rid, None)
++        self.failed_loads.discard(rid)
+         # TODO: Roll back the published tree and component state atomically before
+         # canceling; otherwise the tree may retain device slots that were never loaded.
+         if self.cache_linker.cancel_queued_load(rid):
+--- /dev/null
++++ b/sglang/srt/mem_cache/storage/mooncake_store/cache_namespace.py
+@@ -0,0 +1,116 @@
++"""Compatibility identity for serialized direct-linker objects.
++
++Device addresses and allocation capacity are intentionally excluded: objects
++describe one logical page, not the lifetime or size of a worker's allocation.
++The numerics identity must change when model/operator semantics change without
++a layout change (for example, different quantization or patched kernels).
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++
++
++def direct_cache_namespace(pool_group, *, numerics_id: str, server_args) -> str:
++    if not isinstance(numerics_id, str) or not numerics_id.strip():
++        raise ValueError(
++            "Mooncake direct caching requires cache_numerics_id in the storage "
++            "extra config or SGLANG_CACHE_NUMERICS_ID. Use a pinned runtime/kernel "
++            "build identity and change it when cache-producing numerics change."
++        )
++
++    # These options can change cache-producing arithmetic without changing bytes
++    # per page. The deployment's numerics_id covers its patched code/dependencies.
++    options = (
++        "model_path",
++        "context_length",
++        "json_model_override_args",
++        "revision",
++        "speculative_draft_model_path",
++        "speculative_draft_model_revision",
++        "dtype",
++        "quantization",
++        "kv_cache_dtype",
++        "model_impl",
++        "attention_backend",
++        "decode_attention_backend",
++        "prefill_attention_backend",
++        "dsv4_attn_backend",
++        "fp8_gemm_runner_backend",
++        "fp4_gemm_runner_backend",
++        "bf16_gemm_backend",
++        "moe_runner_backend",
++        "enable_tf32_matmul",
++        "triton_attention_reduce_in_fp32",
++        "enable_deterministic_inference",
++        "speculative_algorithm",
++        "speculative_num_draft_tokens",
++        "tp_size",
++        "pp_size",
++        "attn_cp_size",
++        "dcp_size",
++        "moe_ep_size",
++    )
++    kernel_env = {
++        key: value
++        for key, value in os.environ.items()
++        if key.startswith(
++            ("SGLANG_DSV4_", "SGLANG_DSV41_", "SGLANG_OPT_", "SGLANG_ENABLE_DSV41_",
++             "SGLANG_GLM53_", "SGLANG_DSA_", "SGLANG_KDA_")
++        )
++        or key
++        in (
++            "SGLANG_HACK_FLASHMLA_BACKEND",
++            "SGLANG_USE_AITER",
++            "SGLANG_ROCM_USE_MULTI_STREAM",
++            "NCCL_ALGO",
++            "NCCL_PROTO",
++        )
++    }
++    pools = []
++    for pool in sorted(pool_group.entries, key=lambda item: str(item.name)):
++        pools.append(
++            {
++                "name": str(pool.name),
++                "source": str(pool.indices_from_pool),
++                "page_size": pool.page_size,
++                "row_span": pool._row_span,
++                "packed": pool.packed,
++                "physical_page_size": getattr(pool, "physical_page_size", None),
++                "index_kpool": getattr(pool, "index_kpool", None),
++                "indexer": getattr(pool, "indexer", None),
++                "layers": sorted(
++                    (layer, indices) for layer, indices in pool.layer_mapping.items()
++                ),
++                "components": [
++                    [
++                        {
++                            "dtype": str(buffer.dtype),
++                            "shape": list(buffer.shape[1:]),
++                            "stride": list(buffer.stride()[1:]),
++                            "row_stride_bytes": meta[1],
++                            "serialized_bytes": meta[2],
++                            "object_offset": offset,
++                        }
++                        for buffer, meta, offset in zip(component, metadata, offsets)
++                    ]
++                    for component, metadata, offsets in zip(
++                        pool.components, pool.buffer_meta, pool._component_offsets
++                    )
++                ],
++            }
++        )
++    manifest = {
++        "schema": 2,
++        "numerics": numerics_id,
++        "options": {name: getattr(server_args, name, None) for name in options},
++        "kernel_env": kernel_env,
++        "page_size": pool_group.page_size,
++        "num_layers": pool_group.num_layers,
++        "rank_replicated": pool_group.rank_replicated,
++        "pools": pools,
++    }
++    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
++    return "direct-v2-" + hashlib.sha256(payload.encode()).hexdigest()
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -7,6 +7,7 @@
+
+ import torch
+
++from sglang.srt.environ import envs
+ from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+ from sglang.srt.mem_cache.hicache_storage import (
+     HiCacheStorageConfig,
+@@ -86,6 +87,11 @@
+
+
+ class MooncakeDirectLinker(UnifiedCacheLinker):
++    # A layer failure during forward can strand peers in GPU collectives and
++    # leave a published tree node partly initialized. Restore whole objects into
++    # private allocations first; the wrapper publishes only after a rank vote.
++    restores_before_publish = True
++
+     def __init__(
+         self,
+         server_args,
+@@ -116,6 +122,23 @@
+         extra_config, *_ = HybridCacheController.parse_storage_backend_extra_config(
+             get_memory().hicache_storage_backend_extra_config
+         )
++        from sglang.srt.mem_cache.storage.mooncake_store.cache_namespace import (
++            direct_cache_namespace,
++        )
++
++        extra_config = dict(extra_config or {})
++        namespace = direct_cache_namespace(
++            self.pool_group,
++            numerics_id=extra_config.pop(
++                "cache_numerics_id", envs.SGLANG_CACHE_NUMERICS_ID.get()
++            ),
++            server_args=server_args,
++        )
++        tenant_tag = extra_config.get("extra_backend_tag")
++        extra_config["extra_backend_tag"] = (
++            f"{tenant_tag}_{namespace}" if tenant_tag else namespace
++        )
++        logger.info("Mooncake direct cache compatibility namespace: %s", namespace)
+         storage_config = HiCacheStorageConfig(
+             tp_rank=tp_rank,
+             tp_size=tp_size,
+@@ -235,6 +258,54 @@
+         if rid in self.pending_loads:
+             raise RuntimeError(f"Mooncake load for rid={rid} is already queued.")
+         self.pending_loads[rid] = expanded
++        return True
++
++    def restore(self, rid: str, transfers: list[PoolTransfer]) -> bool:
++        # Order previous allocation/initialization work before external DMA.
++        # A device synchronization failure is not a recoverable cache miss.
++        device_module.current_stream().synchronize()
++        try:
++            expanded = self.pool_group.resolve_transfers(transfers)
++            if not expanded:
++                return False
++            for transfer in expanded:
++                pool = self.pools[transfer.name]
++                keys, _ = self.storage._get_hybrid_page_component_keys(
++                    list(transfer.keys), transfer
++                )
++                keys = self.storage._tag_keys(keys)
++                pointers, sizes = pool.get_page_buffer_meta(transfer.host_indices)
++                if len(pointers) != len(keys):
++                    pointers, sizes = self.storage._pack_multi_buffer_meta(
++                        keys, pointers, sizes
++                    )
++                expected = [
++                    sum(size) if isinstance(size, (list, tuple)) else size
++                    for size in sizes
++                ]
++                # The synchronous full-object API supports MEMORY and disk
++                # replicas, and waits for all submitted transfers before return.
++                # Require exact byte counts: a nonnegative short read is not a
++                # valid restore, even if the backend reports it as a success.
++                result = self.storage._get_batch_zero_copy_impl(keys, pointers, sizes)
++                if (
++                    result is None
++                    or isinstance(result, int)
++                    or list(result) != expected
++                ):
++                    raise RuntimeError(
++                        f"Mooncake restore failed for pool={transfer.name}: "
++                        f"transferred={result}, expected={expected}"
++                    )
++        except Exception:
++            logger.warning(
++                "Mooncake restore failed before publication for rid=%s",
++                rid,
++                exc_info=True,
++            )
++            return False
++        self.stats["load"] += 1
++        logger.info("Mooncake direct linker restore complete: pools=%d", len(expanded))
+         return True
+
+     def cancel_queued_load(self, rid: str) -> bool:
+@@ -378,8 +449,8 @@
+                 success = all(all(pool_results) for pool_results in results.values())
+                 if success:
+                     self.stats["offload"] += 1
+-                    if self.stats["offload"] == 1:
+-                        logger.info("Mooncake direct linker offload: tokens=%d", tokens)
++                    logger.info("Mooncake direct linker offload complete: tokens=%d pools=%d",
++                                tokens, len(expanded))
+                 self.offload_results.put(success)
+             except BaseException:
+                 logger.exception("Mooncake offload failed")

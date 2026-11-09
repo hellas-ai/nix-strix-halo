@@ -1,0 +1,70 @@
+diff --git a/sglang/srt/layers/moe/fused_moe_triton/layer.py b/sglang/srt/layers/moe/fused_moe_triton/layer.py
+--- a/sglang/srt/layers/moe/fused_moe_triton/layer.py
++++ b/sglang/srt/layers/moe/fused_moe_triton/layer.py
+@@ -31,6 +31,10 @@ from sglang.srt.layers.moe.kt_ep_wrapper import (
+     KTEPWrapperMethod,
+     create_kt_config_from_server_args,
+ )
++from sglang.srt.layers.moe.remote_ep_wrapper import (
++    RemoteEPWrapperMethod,
++    create_remote_ep_config_from_server_args,
++)
+ from sglang.srt.layers.moe.token_dispatcher import CombineInput, DispatchOutput
+ from sglang.srt.layers.moe.token_dispatcher.base import BaseDispatcher
+ from sglang.srt.layers.moe.token_dispatcher.flashinfer import FlashinferDispatcher
+@@ -318,8 +322,17 @@ class FusedMoE(torch.nn.Module):
+ 
+         self.quant_method: Optional[FusedMoEMethodBase] = None
+         server_args = get_global_server_args()
++        remote_ep_config = create_remote_ep_config_from_server_args(
++            server_args, layer_id
++        )
+         kt_config = create_kt_config_from_server_args(server_args, layer_id)
+-        if kt_config is not None:
++        if remote_ep_config is not None:
++            if quant_config is not None:
++                gpu_method = quant_config.get_quant_method(self, prefix)
++            else:
++                gpu_method = UnquantizedFusedMoEMethod(self.use_triton_kernels)
++            self.quant_method = RemoteEPWrapperMethod(gpu_method, remote_ep_config)
++        elif kt_config is not None:
+             if quant_config is not None:
+                 gpu_method = quant_config.get_quant_method(self, prefix)
+             else:
+diff --git a/sglang/srt/server_args.py b/sglang/srt/server_args.py
+--- a/sglang/srt/server_args.py
++++ b/sglang/srt/server_args.py
+@@ -1562,6 +1562,33 @@ class ServerArgs:
+         "All MoE layers except the final one use this value; the final layer always uses 0.",
+     ] = None
+ 
++    # -------------------------------------------------------------------------
++    # Remote heterogeneous expert parallelism (out-of-tree graft)
++    # -------------------------------------------------------------------------
++    remote_ep_placement: A[
++        Optional[str],
++        "[remote EP] JSON placement file mapping every expert ID to a node or GPU.",
++    ] = None
++    remote_ep_endpoints: A[
++        Optional[str],
++        "[remote EP] Comma-separated M1 expert-server endpoints in node-ID order.",
++    ] = None
++    remote_ep_transport: A[
++        str,
++        Arg(
++            help="[remote EP] M1 client transport backend.",
++            choices=["rccl-rdma"],
++        ),
++    ] = "rccl-rdma"
++    remote_ep_client_class: A[
++        Optional[str],
++        "[remote EP] MODULE:OBJECT implementing the RemoteEPClient protocol.",
++    ] = None
++    remote_ep_timeout_ms: A[
++        int,
++        "[remote EP] Per-layer foreign-executor timeout in milliseconds.",
++    ] = 30000
++
+     # -------------------------------------------------------------------------
+     # Diffusion LLM
+     # -------------------------------------------------------------------------

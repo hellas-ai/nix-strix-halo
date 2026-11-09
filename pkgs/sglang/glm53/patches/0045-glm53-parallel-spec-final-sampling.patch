@@ -1,0 +1,198 @@
+--- a/sglang/kernels/ops/speculative/reject_sampling.py
++++ b/sglang/kernels/ops/speculative/reject_sampling.py
+@@ -1,5 +1,138 @@
+ import triton
+ import triton.language as tl
++import os
++import torch
++
++
++@triton.jit
++def _glm53_chain_accept_kernel(
++    Predicts, AcceptIndex, AcceptTokenNum, Candidates, RetrieveIndex,
++    UniformSamples, TargetProbs, DraftProbs,
++    stride_cb, stride_cs, stride_ib, stride_is, stride_ab, stride_as,
++    stride_ub, stride_us, stride_pb, stride_ps, stride_pv,
++    stride_qb, stride_qs, stride_qv, NUM_SLOTS: tl.constexpr,
++):
++    b = tl.program_id(0)
++    row = 0
++    last = tl.load(RetrieveIndex + b * stride_ib)
++    tl.store(AcceptIndex + b * stride_ab, last)
++    accepted = 0
++    step = 1
++    keep_going = 1
++    while (step < NUM_SLOTS) and (keep_going == 1):
++        token = tl.load(Candidates + b * stride_cb + step * stride_cs)
++        p = tl.load(TargetProbs + b * stride_pb + row * stride_ps + token * stride_pv)
++        q = tl.load(DraftProbs + b * stride_qb + row * stride_qs + token * stride_qv)
++        coin = tl.load(UniformSamples + b * stride_ub + (step - 1) * stride_us)
++        if coin * q < p:
++            accepted += 1
++            tl.store(Predicts + last, token)
++            row = step
++            last = tl.load(RetrieveIndex + b * stride_ib + step * stride_is)
++            tl.store(AcceptIndex + b * stride_ab + accepted * stride_as, last)
++            step += 1
++        else:
++            keep_going = 0
++    tl.store(AcceptTokenNum + b, accepted)
++
++
++@triton.jit
++def _glm53_chain_final_tiles_kernel(
++    AcceptTokenNum, TargetProbs, DraftProbs, Exponentials,
++    PartialScores, PartialIds,
++    stride_pb, stride_ps, stride_pv, stride_qb, stride_qs, stride_qv,
++    VOCAB_SIZE: tl.constexpr, NUM_SLOTS: tl.constexpr,
++    NUM_TILES: tl.constexpr, BLOCK_V: tl.constexpr,
++):
++    tile = tl.program_id(0)
++    b = tl.program_id(1)
++    row = tl.load(AcceptTokenNum + b)
++    v = tile * BLOCK_V + tl.arange(0, BLOCK_V)
++    mask = v < VOCAB_SIZE
++    p = tl.load(TargetProbs + b * stride_pb + row * stride_ps + v * stride_pv, mask, 0).to(tl.float32)
++    noise = tl.load(Exponentials + b * VOCAB_SIZE + v, mask, 1)
++    noise = tl.maximum(noise, 1.1754943508222875e-38)
++    # All-accepted: draw from p. Rejected: draw from normalized relu(p - q).
++    # Gumbel-max via weight / Exp(1) needs no normalization or serial CDF.
++    if row == NUM_SLOTS - 1:
++        weight = p
++    else:
++        q = tl.load(DraftProbs + b * stride_qb + row * stride_qs + v * stride_qv, mask, 0).to(tl.float32)
++        q = tl.where(q == q, q, 0.)
++        weight = tl.maximum(p - q, 0.)
++    scores = weight / noise
++    best = tl.max(scores, 0)
++    best_id = tl.min(tl.where(mask & (scores == best), v, VOCAB_SIZE), 0)
++    # Retain p's winner as a numerical fallback if the residual has zero mass.
++    # Rejection then has zero theoretical probability; this keeps it valid.
++    p_scores = p / noise
++    p_best = tl.max(p_scores, 0)
++    p_best_id = tl.min(tl.where(mask & (p_scores == p_best), v, VOCAB_SIZE), 0)
++    out = (b * NUM_TILES + tile) * 2
++    tl.store(PartialScores + out, best)
++    tl.store(PartialIds + out, best_id)
++    tl.store(PartialScores + out + 1, p_best)
++    tl.store(PartialIds + out + 1, p_best_id)
++
++
++@triton.jit
++def _glm53_chain_final_reduce_kernel(
++    Predicts, AcceptTokenNum, RetrieveIndex, PartialScores, PartialIds,
++    stride_ib, stride_is, NUM_TILES: tl.constexpr,
++    VOCAB_SIZE: tl.constexpr, BLOCK_T: tl.constexpr,
++):
++    b = tl.program_id(0)
++    tile = tl.arange(0, BLOCK_T)
++    offset = (b * NUM_TILES + tile) * 2
++    score = tl.load(PartialScores + offset, tile < NUM_TILES, -1.)
++    ids = tl.load(PartialIds + offset, tile < NUM_TILES, VOCAB_SIZE)
++    best = tl.max(score, 0)
++    token = tl.min(tl.where(score == best, ids, VOCAB_SIZE), 0)
++    if best <= 0:
++        p_score = tl.load(PartialScores + offset + 1, tile < NUM_TILES, -1.)
++        p_ids = tl.load(PartialIds + offset + 1, tile < NUM_TILES, VOCAB_SIZE)
++        p_best = tl.max(p_score, 0)
++        token = tl.min(tl.where(p_score == p_best, p_ids, VOCAB_SIZE), 0)
++    row = tl.load(AcceptTokenNum + b)
++    dest = tl.load(RetrieveIndex + b * stride_ib + row * stride_is)
++    tl.store(Predicts + dest, token)
++
++
++def glm53_parallel_chain_speculative_sampling_triton(
++    predicts, accept_index, accept_token_num, candidates, retrive_index,
++    uniform_samples, target_probs, draft_probs,
++):
++    """Exact chain acceptance with vocabulary-parallel final sampling.
++
++    If E_v are independent Exp(1), argmax(weight_v / E_v) has probability
++    weight_v / sum(weight). Choosing weight=p after all accepts, or relu(p-q)
++    on rejection, is precisely the classic lossless speculative law. The
++    accept test and all committed indices remain the same as the baseline.
++    New RNG draws preserve the distribution, not its CDF sampler's seed trace.
++    """
++    bs, width = candidates.shape
++    vocab = target_probs.shape[-1]
++    block = 1024
++    tiles = triton.cdiv(vocab, block)
++    noise = torch.empty((bs, vocab), dtype=torch.float32, device=target_probs.device).exponential_()
++    scores = torch.empty((bs, tiles, 2), dtype=torch.float32, device=target_probs.device)
++    ids = torch.empty((bs, tiles, 2), dtype=torch.int32, device=target_probs.device)
++    _glm53_chain_accept_kernel[(bs,)](
++        predicts, accept_index, accept_token_num, candidates, retrive_index,
++        uniform_samples, target_probs, draft_probs,
++        *candidates.stride(), *retrive_index.stride(), *accept_index.stride(),
++        *uniform_samples.stride(), *target_probs.stride(), *draft_probs.stride(),
++        NUM_SLOTS=width, num_warps=4,
++    )
++    _glm53_chain_final_tiles_kernel[(tiles, bs)](
++        accept_token_num, target_probs, draft_probs, noise, scores, ids,
++        *target_probs.stride(), *draft_probs.stride(),
++        VOCAB_SIZE=vocab, NUM_SLOTS=width, NUM_TILES=tiles, BLOCK_V=block, num_warps=4,
++    )
++    _glm53_chain_final_reduce_kernel[(bs,)](
++        predicts, accept_token_num, retrive_index, scores, ids, *retrive_index.stride(),
++        NUM_TILES=tiles, VOCAB_SIZE=vocab, BLOCK_T=triton.next_power_of_2(tiles), num_warps=4,
++    )
+ 
+ 
+ @triton.jit
+@@ -175,7 +308,17 @@
+     threshold_single,
+     threshold_acc,
+     deterministic,  # not used
+-):
++    sampling_seed=None,
++):
++    if (
++        torch.version.hip is not None
++        and sampling_seed is None
++        and os.environ.get("SGLANG_GLM53_HIP_PARALLEL_SPEC_SAMPLING", "0") == "1"
++    ):
++        return glm53_parallel_chain_speculative_sampling_triton(
++            predicts, accept_index, accept_token_num, candidates, retrive_index,
++            uniform_samples, target_probs, draft_probs,
++        )
+     batch_size, num_slots = candidates.shape
+     vocab_size = target_probs.shape[-1]
+ 
+--- a/sglang/srt/speculative/eagle_utils.py
++++ b/sglang/srt/speculative/eagle_utils.py
+@@ -894,6 +894,7 @@
+             threshold_single=1.0,
+             threshold_acc=1.0,
+             deterministic=True,
++            sampling_seed=sampling_info.sampling_seed,
+         )
+         del target_probs, draft_probs, coins, coins_for_final_sampling
+         # Ranks draw different coins: rank 0's decision is the one every rank commits.
+--- a/sglang/srt/speculative/dflash_utils.py
++++ b/sglang/srt/speculative/dflash_utils.py
+@@ -1107,6 +1107,7 @@
+         else:
+             draft_probs = torch.zeros_like(target_probs)
+             verify_sampling = tree_speculative_sampling_target_only
++        sampling_kwargs = {"sampling_seed": sampling_info.sampling_seed} if is_hip() else {}
+         verify_sampling(
+             predicts=predicts,
+             accept_index=accept_index,
+@@ -1122,6 +1123,7 @@
+             threshold_single=threshold_single,
+             threshold_acc=threshold_acc,
+             deterministic=True,
++            **sampling_kwargs,
+         )
+         del target_probs, draft_probs, candidates_i64
+         del coins, coins_for_final_sampling
+--- a/sglang/kernels/ops/speculative/dspark/dspark_accept.py
++++ b/sglang/kernels/ops/speculative/dspark/dspark_accept.py
+@@ -134,6 +134,7 @@
+         threshold_single=1.0,
+         threshold_acc=1.0,
+         deterministic=True,
++        sampling_seed=sampling_info.sampling_seed,
+     )
+     correct_len = accept_token_num
+     if cutoff_verify_lens is not None:

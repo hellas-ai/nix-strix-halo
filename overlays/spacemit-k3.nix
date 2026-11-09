@@ -17,16 +17,6 @@ in
     spacemitK3Toolchain = final.spacemit-k3-toolchain;
   };
 
-  spacemit-k3-spine-mlir = buildPkgs.callPackage ../pkgs/spacemit/spine-mlir {
-    spacemitK3Toolchain = final.spacemit-k3-toolchain;
-  };
-
-  spine-triton-source = buildPkgs.callPackage ../pkgs/spacemit/spine-triton {
-    src = inputs.spine-triton;
-    version = inputVersion "0.5.5" inputs.spine-triton;
-    spineMlir = final.spacemit-k3-spine-mlir;
-  };
-
   llama-cpp-spacemit = buildPkgs.callPackage ../pkgs/llama-cpp-spacemit {
     src = inputs.llama-cpp-spacemit;
     version = llamaVersion;

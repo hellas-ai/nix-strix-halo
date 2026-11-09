@@ -1,0 +1,40 @@
+diff --git a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+index a93f8ee..0a2a2de 100644
+--- a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
++++ b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+@@ -239,5 +239,6 @@ def _modulate_scale_shift(
+     # Apply per-index affine modulation: x * (1 + scale[idx]) + shift[idx].
+     if (
+-        x.is_cuda
++        torch.version.hip is None
++        and x.is_cuda
+         and x.dtype == _BF16_DTYPE
+         and dtype == _BF16_DTYPE
+@@ -263,5 +264,6 @@ def _modulate_gate(
+     # Apply the per-index gated residual: x + gate[idx] * other.
+     if (
+-        x.is_cuda
++        torch.version.hip is None
++        and x.is_cuda
+         and x.dtype == _BF16_DTYPE
+         and dtype == _BF16_DTYPE
+@@ -278,5 +280,6 @@ def _silu_mul(hidden: torch.Tensor, *, reuse_input: bool) -> torch.Tensor:
+ def _silu_mul(hidden: torch.Tensor, *, reuse_input: bool) -> torch.Tensor:
+     if (
+-        reuse_input
++        torch.version.hip is None
++        and reuse_input
+         and hidden.is_cuda
+         and hidden.dtype == _BF16_DTYPE
+@@ -296,6 +299,7 @@ def _apply_qk_norm(
+     head_dim: int,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     if (
+-        q.is_cuda
++        torch.version.hip is None
++        and q.is_cuda
+         and q.dtype == _BF16_DTYPE
+         and q.dtype == k.dtype == q_norm.weight.dtype == k_norm.weight.dtype
+@@ -383 +387 @@ def _apply_rope_qk(
+-    if not q.is_cuda:
++    if not q.is_cuda or torch.version.hip is not None:

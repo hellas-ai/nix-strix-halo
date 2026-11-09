@@ -1,0 +1,20 @@
+CLR: HIP devices start in blocking-sync mode instead of active wait.
+
+Applies with -p1 at projects/clr of rocm-10-sdk-pm4-prepared-source. hip_context.cpp set
+SetActiveWait(true) on every device at init, so CLR created its dispatch signals as
+HSA_AMD_SIGNAL_AMD_GPU_ONLY (rocvirtual.cpp CreateSignal) and every host wait spun in
+BusyWaitSignal::WaitRelaxed. Device::Device() already initialises activeWait_ to false, which is
+what hipSetDeviceFlags(hipDeviceScheduleBlockingSync) selects: interrupt signals, and
+WaitForSignal spins 100 us before sleeping in KFD. Nothing in the GLM closure calls
+hipSetDeviceFlags, so the default is what runs.
+
+--- a/hipamd/src/hip_context.cpp
++++ b/hipamd/src/hip_context.cpp
+@@ -49,7 +49,6 @@
+ 
+   for (size_t i = 0; i < device_count; ++i) {
+     amd::Device* const amd_device = devices[i];
+-    amd_device->SetActiveWait(true);
+     // Use the eternal contexts that already exist in amd::Device for the new hip::Device
+     auto* device = new Device(&amd_device->context(), static_cast<unsigned int>(i));
+     if (!device || !device->Create()) {

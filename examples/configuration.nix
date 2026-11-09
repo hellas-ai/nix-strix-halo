@@ -18,7 +18,6 @@
     "${modulesPath}/installer/cd-dvd/installation-cd-base.nix"
 
     inputs.self.nixosModules.default
-    inputs.self.nixosModules.tuning
     inputs.self.nixosModules.ec-su-axb35
     inputs.self.nixosModules.rpc-server
     inputs.self.nixosModules.fastflowlm
@@ -63,7 +62,6 @@
   environment.systemPackages = with pkgs; [
     llama-cpp-rocm
     llama-cpp-vulkan
-    mlx-rocm
     fastflowlm
     ec-su-axb35-monitor
     thunderbolt-ibverbs-bench-tools

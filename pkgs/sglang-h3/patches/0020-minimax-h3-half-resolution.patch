@@ -1,0 +1,33 @@
+diff --git a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/request_validation.py b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/request_validation.py
+index e5ee5c2..86c17e2 100644
+--- a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/request_validation.py
++++ b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/request_validation.py
+@@ -83,9 +83,9 @@ def _validate_target(target: Any, *, profile: MiniMaxH3TaskProfile) -> dict[str,
+     # compatibility keys are ignored; only these three declared values are
+     # validated and emitted below.
+     short_edge = _require_int(target.get("short_edge"), f"{path}.short_edge")
+-    if short_edge != 768:
++    if short_edge not in {384, 768}:
+         raise ValueError(
+-            f"{path}.short_edge must be 768 for minimax_h3, got {short_edge}"
++            f"{path}.short_edge must be 384 or 768 for minimax_h3, got {short_edge}"
+         )
+     aspect_ratio = _require_str(target.get("aspect_ratio"), f"{path}.aspect_ratio")
+     if profile.aspect_ratio_forced_auto and aspect_ratio != "auto":
+diff --git a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/resolved_plan.py b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/resolved_plan.py
+index 75a041f..7117868 100644
+--- a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/resolved_plan.py
++++ b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/resolved_plan.py
+@@ -100,10 +100,10 @@ def _validate_base_short_edge(value: Any) -> int:
+     try:
+         short_edge = int(value)
+     except (TypeError, ValueError) as exc:
+-        raise ValueError("target.short_edge must be 768") from exc
+-    if short_edge != MINIMAX_H3_BASE_SHORT_EDGE or value != short_edge:
++        raise ValueError("target.short_edge must be 384 or 768") from exc
++    if short_edge not in {384, MINIMAX_H3_BASE_SHORT_EDGE} or value != short_edge:
+         raise ValueError(
+-            f"target.short_edge must be 768 for MiniMax H3 shape policy v2, got {value!r}"
++            f"target.short_edge must be 384 or 768 for MiniMax H3 shape policy v2, got {value!r}"
+         )
+     return short_edge

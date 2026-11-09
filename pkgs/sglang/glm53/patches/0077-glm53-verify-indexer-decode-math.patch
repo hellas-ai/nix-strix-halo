@@ -1,0 +1,42 @@
+--- a/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
++++ b/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
+@@ -168,6 +168,21 @@
+         weights = weights * self.n_heads**-0.5
+         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
+         return weights
++
++    def _get_verify_logits_head_gate(self, x, q_scale, width):
++        if not is_hip() or __import__("os").environ.get("SGLANG_GLM53_VERIFY_DECODE_MATH", "0") != "1":
++            return self._get_logits_head_gate(x, q_scale)
++        # Keep the FP32 projection's reduction geometry equal to DECODE.
++        # Rows are request-major; process each speculative position across the
++        # same request batch, then restore request-major order. Call the existing
++        # compiled gate on contiguous inputs, just as ordinary decode does.
++        assert width > 0 and x.shape[0] % width == 0
++        if width == 1:
++            return self._get_logits_head_gate(x, q_scale)
++        gates = [self._get_logits_head_gate(
++            x[step::width].contiguous(), q_scale[step::width].contiguous())
++            for step in range(width)]
++        return torch.stack(gates, dim=1).flatten(0, 1)
+ 
+     @staticmethod
+     def _get_index_k_read_buffer(pool, layer_id: int) -> torch.Tensor:
+@@ -1350,7 +1365,7 @@
+                 self.alt_stream.wait_stream(self.compress_gate_stream)
+             if return_indices:
+                 q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
+-                weights = self._get_logits_head_gate(x, q_scale)
++                weights = self._get_verify_logits_head_gate(x, q_scale, num_draft_tokens)
+             with torch.cuda.stream(self.alt_stream):
+                 _compress_write()
+             current_stream.wait_stream(self.alt_stream)
+@@ -1358,7 +1373,7 @@
+             _compress_write()
+             if return_indices:
+                 q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
+-                weights = self._get_logits_head_gate(x, q_scale)
++                weights = self._get_verify_logits_head_gate(x, q_scale, num_draft_tokens)
+ 
+         if not return_indices:
+             return None

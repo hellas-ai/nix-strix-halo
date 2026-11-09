@@ -1,0 +1,96 @@
+diff --git a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+index f4d2591..a93f8ee 100644
+--- a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
++++ b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+@@ -815,6 +815,45 @@ class MiniMaxH3TokenRefinerBlock(nn.Module):
+         cu_seqlens_host: tuple[int, ...] | None = None,
+         max_seqlen: int,
+     ) -> torch.Tensor:
++        with torch.no_grad():
++            trace_runtime_device = os.getenv("SGLANG_MINIMAX_H3_ATTENTION_TRACE") == "1"
++            if trace_runtime_device and not hasattr(self, "_hellas_fsdp_device_traced"):
++                fsdp_group = self._get_fsdp_state()._fsdp_param_group
++                first_fsdp_param = fsdp_group.fsdp_params[0]
++                print(
++                    "[h3-fsdp-device] "
++                    f"rank={torch.distributed.get_rank()} "
++                    f"block={type(self).__name__} "
++                    f"group={fsdp_group.device} "
++                    f"sharded={first_fsdp_param.sharded_param.device} "
++                    f"local={first_fsdp_param._sharded_local_tensor.device} "
++                    f"unsharded={first_fsdp_param.unsharded_param.device} "
++                    f"offload={first_fsdp_param.offload_to_cpu}",
++                    flush=True,
++                )
++                self._hellas_fsdp_device_traced = True
++            for module_name, module in self.named_modules():
++                for parameter_name, parameter in module._parameters.items():
++                    if (
++                        parameter is not None
++                        and not hasattr(parameter, "device_mesh")
++                        and parameter.device != x.device
++                    ):
++                        if trace_runtime_device:
++                            print(
++                                "[h3-runtime-device] "
++                                f"rank={torch.distributed.get_rank()} "
++                                f"block={type(self).__name__} "
++                                f"parameter={module_name}.{parameter_name} "
++                                f"shape={tuple(parameter.shape)} "
++                                f"dtype={parameter.dtype} "
++                                f"from={parameter.device} to={x.device}",
++                                flush=True,
++                            )
++                        parameter.data = parameter.data.to(device=x.device)
++                for name, buffer in module._buffers.items():
++                    if buffer is not None and buffer.device != x.device:
++                        module._buffers[name] = buffer.to(device=x.device)
+         x = x + self.attn(
+             self.norm1(x),
+             rope_cache=None,
+@@ -911,6 +950,45 @@ class MiniMaxH3DiTBlock(nn.Module):
+         norm1 -> scale/shift -> attention -> gated residual, followed by
+         norm2 -> scale/shift -> MLP -> gated residual.
+         """
++        with torch.no_grad():
++            trace_runtime_device = os.getenv("SGLANG_MINIMAX_H3_ATTENTION_TRACE") == "1"
++            if trace_runtime_device and not hasattr(self, "_hellas_fsdp_device_traced"):
++                fsdp_group = self._get_fsdp_state()._fsdp_param_group
++                first_fsdp_param = fsdp_group.fsdp_params[0]
++                print(
++                    "[h3-fsdp-device] "
++                    f"rank={torch.distributed.get_rank()} "
++                    f"block={type(self).__name__} "
++                    f"group={fsdp_group.device} "
++                    f"sharded={first_fsdp_param.sharded_param.device} "
++                    f"local={first_fsdp_param._sharded_local_tensor.device} "
++                    f"unsharded={first_fsdp_param.unsharded_param.device} "
++                    f"offload={first_fsdp_param.offload_to_cpu}",
++                    flush=True,
++                )
++                self._hellas_fsdp_device_traced = True
++            for module_name, module in self.named_modules():
++                for parameter_name, parameter in module._parameters.items():
++                    if (
++                        parameter is not None
++                        and not hasattr(parameter, "device_mesh")
++                        and parameter.device != x.device
++                    ):
++                        if trace_runtime_device:
++                            print(
++                                "[h3-runtime-device] "
++                                f"rank={torch.distributed.get_rank()} "
++                                f"block={type(self).__name__} "
++                                f"parameter={module_name}.{parameter_name} "
++                                f"shape={tuple(parameter.shape)} "
++                                f"dtype={parameter.dtype} "
++                                f"from={parameter.device} to={x.device}",
++                                flush=True,
++                            )
++                        parameter.data = parameter.data.to(device=x.device)
++                for name, buffer in module._buffers.items():
++                    if buffer is not None and buffer.device != x.device:
++                        module._buffers[name] = buffer.to(device=x.device)
+         if adaln_params is None:
+             adaln_params = self.adaln_proj(adaln_input)
+         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = adaln_params

@@ -1,0 +1,14 @@
+diff --git a/sglang/srt/entrypoints/openai/serving_chat.py b/sglang/srt/entrypoints/openai/serving_chat.py
+--- a/sglang/srt/entrypoints/openai/serving_chat.py
++++ b/sglang/srt/entrypoints/openai/serving_chat.py
+@@ -1210,6 +1210,10 @@ class OpenAIServingChat(OpenAIServingBase):
+         if self.default_chat_template_kwargs:
+             ctk = dict(request.chat_template_kwargs or {})
+             for k, v in self.default_chat_template_kwargs.items():
++                # Explicit request effort must take precedence over the default.
++                # Request template kwargs already win through setdefault below.
++                if k == "reasoning_effort" and request.reasoning_effort is not None:
++                    continue
+                 ctk.setdefault(k, v)
+             request.chat_template_kwargs = ctk
+             effort = ctk.get("reasoning_effort")

@@ -34,47 +34,14 @@
         "type": "github"
       }
     },
-    "ds4": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1792604638,
-        "narHash": "sha256-t+OSpkuKRbj1dCgLk1uDe4CEn0HeV20etu4NR9y3IQA=",
-        "owner": "antirez",
-        "repo": "ds4",
-        "rev": "f5127dfc829723eb6d7617c12d0db97dd7643149",
-        "type": "github"
-      },
-      "original": {
-        "owner": "antirez",
-        "repo": "ds4",
-        "type": "github"
-      }
-    },
-    "ds4-hip": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1780562402,
-        "narHash": "sha256-W0PW0274eHM3nYDtpwiMNKk3y4R42f4VpWKY5Nx9b8A=",
-        "owner": "ejpir",
-        "repo": "ds4-hip",
-        "rev": "3490c2e46c91331323dc0f2bfb7d3018e227fdff",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ejpir",
-        "ref": "rocm-upstream-shape-cyberneurova",
-        "repo": "ds4-hip",
-        "type": "github"
-      }
-    },
     "ec-su-axb35": {
       "flake": false,
       "locked": {
-        "lastModified": 1787229963,
-        "narHash": "sha256-R172f44zac7quY8apVi4qnJIPOwZgVPN2DMOJTkg5yg=",
+        "lastModified": 1783792693,
+        "narHash": "sha256-+fN7C07oYYZW6qp4kDlg51N1mAgQTbgPiQnf2wX1KUs=",
         "owner": "cmetz",
         "repo": "ec-su_axb35-linux",
-        "rev": "f62c2c228959a08683273a26ef3afd8991e69f6d",
+        "rev": "7a9f372edcaa99e562dece70204c4f609692a778",
         "type": "github"
       },
       "original": {
@@ -86,11 +53,11 @@
     "fastflowlm": {
       "flake": false,
       "locked": {
-        "lastModified": 1789666980,
-        "narHash": "sha256-fhjGxCzIcCp/PIEXukn01b9PhuDOIQE0U4PepoZrZNY=",
+        "lastModified": 1784320030,
+        "narHash": "sha256-kSOZvOqiiIMIRwcLivbRJwcBhkzr0fpeC8w3Q4iTj+M=",
         "owner": "FastFlowLM",
         "repo": "FastFlowLM",
-        "rev": "d2c76ccb1fa065fa96268f334c26175536f7e4b2",
+        "rev": "fd371409897d7c0abb4de4dbc5098b9b43c094ff",
         "type": "github"
       },
       "original": {
@@ -107,11 +74,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1790898470,
-        "narHash": "sha256-zTwuwezD0w3hpga6a6P8emidzAZFyWqlNeRBlpWOOl8=",
+        "lastModified": 1782949081,
+        "narHash": "sha256-vp6Y/Grm98ESt6ceOkWiHWyZRDV3J1RID4w+6NWK9yA=",
         "owner": "hercules-ci",
         "repo": "flake-parts",
-        "rev": "024633cd702b10285db5cb19b40ad48d2399ba60",
+        "rev": "17c9d6cdfc60c64f4ee8d306f9bc0b4ccb51481e",
         "type": "github"
       },
       "original": {
@@ -138,35 +105,37 @@
         "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
       }
     },
-    "llama-cpp-master": {
+    "linux-src_2": {
       "flake": false,
       "locked": {
-        "lastModified": 1790488957,
-        "narHash": "sha256-ckEFqkLHWFRN6ciR/gjBIflYLsnRwbql1naDEb0uKmQ=",
-        "owner": "ggml-org",
-        "repo": "llama.cpp",
-        "rev": "7ac59a6e3ad851cd41af00f678effab0598ba9a8",
-        "type": "github"
+        "lastModified": 1780549139,
+        "narHash": "sha256-HkhLiKigaUCQeH6z5enWhExJtW2LLh4NHVBrSlZc3XU=",
+        "ref": "refs/heads/next",
+        "rev": "503c5ae1e72aa9ed91925dafa3d82ee2e992747f",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
       },
       "original": {
-        "owner": "ggml-org",
-        "repo": "llama.cpp",
-        "type": "github"
+        "ref": "refs/heads/next",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
       }
     },
     "llama-cpp-spacemit": {
       "flake": false,
       "locked": {
-        "lastModified": 1792132956,
-        "narHash": "sha256-1AfctcSIiKgfRcPSuiTywnoZMrB+/6WK6TTKmPg7lMc=",
+        "lastModified": 1783141934,
+        "narHash": "sha256-Z8APQR0Xp9/zm+izIW0ICY8NhD5RQbZC/G49z3j9bJE=",
         "owner": "spacemit-com",
         "repo": "llama.cpp",
-        "rev": "6df9f7504da153d49c37887f895b2aca2baf8676",
+        "rev": "86d4ff230bdfef62de1cc4987783a8d29af66d49",
         "type": "github"
       },
       "original": {
         "owner": "spacemit-com",
-        "ref": "v0.2.3",
+        "ref": "v0.1.5",
         "repo": "llama.cpp",
         "type": "github"
       }
@@ -188,39 +157,22 @@
         "type": "github"
       }
     },
-    "mlx-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1784502612,
-        "narHash": "sha256-NzfjN2dCLbYKb/TcN5G1hvgdh0QtnJtl4vBUfxkOP4I=",
-        "owner": "NripeshN",
-        "repo": "mlx",
-        "rev": "75915908dfe5028335d318b10340313744fd3a8d",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NripeshN",
-        "ref": "rocm-support",
-        "repo": "mlx",
-        "type": "github"
-      }
-    },
     "nix-ai-tools": {
       "inputs": {
         "bun2nix": "bun2nix",
         "flake-parts": "flake-parts",
         "nixpkgs": [
-          "nixpkgs"
+          "nixpkgs-legacy"
         ],
         "systems": "systems",
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1793429632,
-        "narHash": "sha256-as+Ue5OQyPXaA9myksf2YOhTtHONATTFFjbmumxKW2M=",
+        "lastModified": 1784470748,
+        "narHash": "sha256-/A+1q5cjAdh/HH30MMzi7JDu1CM3mBoj2jFewUbq520=",
         "owner": "numtide",
         "repo": "nix-ai-tools",
-        "rev": "c16784396ad0473d85e058caf0f148d6856c4822",
+        "rev": "26b51974319a3931a16ae9eb7dd3f4b8b1c67fd9",
         "type": "github"
       },
       "original": {
@@ -265,6 +217,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-legacy": {
+      "locked": {
+        "lastModified": 1784356753,
+        "narHash": "sha256-12KrbMiWLcf8m7pCvAtZh1ZrgF85ZXDXvfR/fWTKy84=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "61b7c44c4073f0b827768aff0049561b5110ea5a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "61b7c44c4073f0b827768aff0049561b5110ea5a",
+        "type": "github"
+      }
+    },
     "pyproject-build-systems": {
       "inputs": {
         "nixpkgs": [
@@ -278,11 +246,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1793585423,
-        "narHash": "sha256-Fzdew7s0V4PHsBX0GDQ+1Zcd4HejuqAh9rAjSP9M6JQ=",
+        "lastModified": 1791170410,
+        "narHash": "sha256-pyru9MpuXRiyq0Bd4q0nHpL4T6HCuZT4B+alcgAYE4A=",
         "owner": "pyproject-nix",
         "repo": "build-system-pkgs",
-        "rev": "461a6a8540307fb9c05b8f6ad29e9720d2a621db",
+        "rev": "953d35d03a51dbecaf3feb3fb679eb63e90ebeb4",
         "type": "github"
       },
       "original": {
@@ -298,11 +266,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1793240426,
-        "narHash": "sha256-NPWgb6H4arnWyTKvYIys5U0xqd5QY74Z+lyTJA+7XGY=",
+        "lastModified": 1791657700,
+        "narHash": "sha256-vcCAvhtA7hG+/gOge29hYHy7I/dLkIsr5nLx4sFEQic=",
         "owner": "pyproject-nix",
         "repo": "pyproject.nix",
-        "rev": "bf7d4b1d6de61db02fd4e748395634f03006e5de",
+        "rev": "ddc400a6883b042646d0940e65971bb7f7e96107",
         "type": "github"
       },
       "original": {
@@ -313,20 +281,16 @@
     },
     "root": {
       "inputs": {
-        "ds4": "ds4",
-        "ds4-hip": "ds4-hip",
         "ec-su-axb35": "ec-su-axb35",
         "fastflowlm": "fastflowlm",
-        "llama-cpp-master": "llama-cpp-master",
         "llama-cpp-spacemit": "llama-cpp-spacemit",
         "mlx-metal-src": "mlx-metal-src",
-        "mlx-src": "mlx-src",
         "nix-ai-tools": "nix-ai-tools",
         "nix-darwin": "nix-darwin",
         "nixpkgs": "nixpkgs",
+        "nixpkgs-legacy": "nixpkgs-legacy",
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",
-        "spine-triton": "spine-triton",
         "therock-src-10-0-gfx1151-base-half-011b45bd": "therock-src-10-0-gfx1151-base-half-011b45bd",
         "therock-src-10-0-gfx1151-base-rocm-cmake-ec512d84": "therock-src-10-0-gfx1151-base-rocm-cmake-ec512d84",
         "therock-src-10-0-gfx1151-compiler-amd-llvm-1e702164": "therock-src-10-0-gfx1151-compiler-amd-llvm-1e702164",
@@ -357,43 +321,110 @@
         "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c": "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c",
         "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f": "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f",
         "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531": "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531",
-        "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa": "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa",
+        "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d"
+        ],
         "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf",
         "therock-src-10-0-gfx1151-root": "therock-src-10-0-gfx1151-root",
         "therock-src-10-0-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-10-0-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c",
+        "therock-src-7-15-gfx1151-base-half-011b45bd": [
+          "therock-src-10-0-gfx1151-base-half-011b45bd"
+        ],
+        "therock-src-7-15-gfx1151-base-rocm-cmake-ec512d84": [
+          "therock-src-10-0-gfx1151-base-rocm-cmake-ec512d84"
+        ],
+        "therock-src-7-15-gfx1151-compiler-amd-llvm-1e702164": "therock-src-7-15-gfx1151-compiler-amd-llvm-1e702164",
+        "therock-src-7-15-gfx1151-compiler-hipify-ea979a85": "therock-src-7-15-gfx1151-compiler-hipify-ea979a85",
+        "therock-src-7-15-gfx1151-compiler-spirv-llvm-translator-b9250448": [
+          "therock-src-10-0-gfx1151-compiler-spirv-llvm-translator-b9250448"
+        ],
+        "therock-src-7-15-gfx1151-debug-tools-rocgdb-source-e3322990": "therock-src-7-15-gfx1151-debug-tools-rocgdb-source-e3322990",
+        "therock-src-7-15-gfx1151-math-libs-libhipcxx-10b48ff4": "therock-src-7-15-gfx1151-math-libs-libhipcxx-10b48ff4",
+        "therock-src-7-15-gfx1151-rocm-libraries-36c771f3": "therock-src-7-15-gfx1151-rocm-libraries-36c771f3",
+        "therock-src-7-15-gfx1151-rocm-systems-9c0ec3e9": "therock-src-7-15-gfx1151-rocm-systems-9c0ec3e9",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-fmt-db1fc275": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-fmt-db1fc275"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-json-c887b002": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-compute-src-lib-external-json-c887b002"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-compute-src-vendored-pyyaml-b64e5974"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-abseil-cpp-471579c4"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-cereal-7f708e93"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-elfio-cf38c296"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-filesystem-807165f4": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-filesystem-807165f4"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-gotcha-10fa2c98": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-gotcha-10fa2c98"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-json-a3f85fd2": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-json-a3f85fd2"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-perfetto-9d309359"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-ptl-db721fa0"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-sdk-external-pybind11-6da66437"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976": "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976",
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-json-ef3d2b7e"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-onetbb-9159eae3"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-papi-ae8ec169"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-perfetto-c27c4344"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-1cc6846c"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-742cff1f"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-811a2531"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-pybind11-92d9411d"
+        ],
+        "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": [
+          "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf"
+        ],
+        "therock-src-7-15-gfx1151-root": "therock-src-7-15-gfx1151-root",
+        "therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": "therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c",
         "thunderbolt-ibverbs": "thunderbolt-ibverbs",
+        "thunderbolt-ibverbs-glm": "thunderbolt-ibverbs-glm",
         "uv2nix": "uv2nix",
-        "vllm-src": "vllm-src",
         "xdna-driver-src": "xdna-driver-src",
         "xrt-src": "xrt-src"
       }
     },
-    "spine-triton": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1780563047,
-        "narHash": "sha256-z7t6hb+rQXqjDt0OwdcWkeDXosi4Vw+LsSQ9IYL1Zqw=",
-        "ref": "refs/tags/0.5.5",
-        "rev": "c62b11c5ea994ed6f7ce1d5ac881f14fc5e4aba4",
-        "revCount": 444,
-        "submodules": true,
-        "type": "git",
-        "url": "https://github.com/spacemit-com/spine-triton.git"
-      },
-      "original": {
-        "ref": "refs/tags/0.5.5",
-        "submodules": true,
-        "type": "git",
-        "url": "https://github.com/spacemit-com/spine-triton.git"
-      }
-    },
     "systems": {
       "locked": {
-        "lastModified": 1791244623,
-        "narHash": "sha256-uuanbkFk8a313Zfrxdcz8Us/yQtaxNnKJtX8v0ZPpd8=",
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
         "owner": "nix-systems",
         "repo": "default",
-        "rev": "d36eeed142f88b5a636f2e3856a53c61654cf29b",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
         "type": "github"
       },
       "original": {
@@ -912,23 +943,6 @@
         "type": "github"
       }
     },
-    "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-exte-d76a29fa": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1689348038,
-        "narHash": "sha256-r0b1Wr/PtTk4kHOVhgSy3gi/GLED774Ys49J1E7B7WQ=",
-        "owner": "jrmadsen",
-        "repo": "pybind11",
-        "rev": "1a917f1852eb7819b671fc3fa862840f4c491a07",
-        "type": "github"
-      },
-      "original": {
-        "owner": "jrmadsen",
-        "repo": "pybind11",
-        "rev": "1a917f1852eb7819b671fc3fa862840f4c491a07",
-        "type": "github"
-      }
-    },
     "therock-src-10-0-gfx1151-rocm-systems-projects-rocprofiler-systems-external-timemory-fb6426bf": {
       "flake": false,
       "locked": {
@@ -980,9 +994,183 @@
         "type": "github"
       }
     },
+    "therock-src-7-15-gfx1151-compiler-amd-llvm-1e702164": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1784147967,
+        "narHash": "sha256-UpoXFyhaO0H4TFYgPRvBo/MxSKr9NpJQgTM+NunfqdY=",
+        "owner": "ROCm",
+        "repo": "llvm-project",
+        "rev": "92fe31231dd83aedaedd822daa2079ca8a445547",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "llvm-project",
+        "rev": "92fe31231dd83aedaedd822daa2079ca8a445547",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-compiler-hipify-ea979a85": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778159713,
+        "narHash": "sha256-hS13lgo2sDBfkOV5Nsiz0HixqgE9B0d7oRuU4o274ns=",
+        "owner": "ROCm",
+        "repo": "HIPIFY",
+        "rev": "c917282dbc1fe85d3814807a2c77d4288cff112d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "HIPIFY",
+        "rev": "c917282dbc1fe85d3814807a2c77d4288cff112d",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-debug-tools-rocgdb-source-e3322990": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1784124121,
+        "narHash": "sha256-oc/2aXdb8DJ+F9y2r91ocls+3EJtMKyOVDA6LQ6fEIE=",
+        "owner": "ROCm",
+        "repo": "rocgdb",
+        "rev": "1b5ded2e8e4239e9dc94b7c77c1b753cc7f68e26",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "rocgdb",
+        "rev": "1b5ded2e8e4239e9dc94b7c77c1b753cc7f68e26",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-math-libs-libhipcxx-10b48ff4": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782909735,
+        "narHash": "sha256-rXHXco98x1cD36MXA6UnJeBXK0s3PJibeSzwtr1eMV8=",
+        "owner": "ROCm",
+        "repo": "libhipcxx",
+        "rev": "3ea4c70920e0cdd1bab79d1897043090a93372b6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "libhipcxx",
+        "rev": "3ea4c70920e0cdd1bab79d1897043090a93372b6",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-libraries-36c771f3": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1784062192,
+        "narHash": "sha256-X9MoNiS5JDiM7q1GTQgfJYJ2kTRCYWEKGs6n4qsMpC8=",
+        "owner": "ROCm",
+        "repo": "rocm-libraries",
+        "rev": "fa9cdd186b222f6449a6be1710038bdee4faa328",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "rocm-libraries",
+        "rev": "fa9cdd186b222f6449a6be1710038bdee4faa328",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-9c0ec3e9": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1784212595,
+        "narHash": "sha256-M6jbvyL+R9yVZ3iezUx5w67oXWRHJBFgR+Bh/6TzF68=",
+        "owner": "ROCm",
+        "repo": "rocm-systems",
+        "rev": "8ceab8e581fbd0e191b1a0a56f9e59d8d1ca4e00",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "rocm-systems",
+        "rev": "8ceab8e581fbd0e191b1a0a56f9e59d8d1ca4e00",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-rocm-systems-projects-rocprofiler-systems-external-dyninst-5f477976": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781671772,
+        "narHash": "sha256-Q0GMeeGp8GNLYw5ydrWTGeaiU7rI267EXrsrOtRUPww=",
+        "owner": "ROCm",
+        "repo": "dyninst",
+        "rev": "5dff47bf6fb53e51cdc5e98c8ef6656080931ede",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "dyninst",
+        "rev": "5dff47bf6fb53e51cdc5e98c8ef6656080931ede",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-root": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1784405051,
+        "narHash": "sha256-mroWKdRD7qnOWpJI63s2h8fhZtvpHiD8f35aLtDu6m4=",
+        "owner": "ROCm",
+        "repo": "TheRock",
+        "rev": "1de3171d00f6de55e9ed517dc6ca6e825d1e4b55",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "TheRock",
+        "rev": "1de3171d00f6de55e9ed517dc6ca6e825d1e4b55",
+        "type": "github"
+      }
+    },
+    "therock-src-7-15-gfx1151-third-party-sysdeps-linux-amd-mesa-mesa-fork-a692c85c": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782156113,
+        "narHash": "sha256-DG3g3Ovdee/Sx6JFOYqEoRQFhm/z/4/Cmlj/kd6xxoA=",
+        "owner": "ROCm",
+        "repo": "mesa-fork",
+        "rev": "22abfc06d7cf4c115ca2e368505d75ba4af174b4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ROCm",
+        "repo": "mesa-fork",
+        "rev": "22abfc06d7cf4c115ca2e368505d75ba4af174b4",
+        "type": "github"
+      }
+    },
     "thunderbolt-ibverbs": {
       "inputs": {
         "linux-src": "linux-src",
+        "nixpkgs": [
+          "nixpkgs-legacy"
+        ]
+      },
+      "locked": {
+        "lastModified": 1782863499,
+        "narHash": "sha256-Qx7O5WgO5wY8hUkERu2l+miVL4fTPONQyvtDmBBk0Yo=",
+        "owner": "hellas-ai",
+        "repo": "thunderbolt-ibverbs",
+        "rev": "76ba39b630a70accb72f19388eefe48844b50eb8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hellas-ai",
+        "repo": "thunderbolt-ibverbs",
+        "type": "github"
+      }
+    },
+    "thunderbolt-ibverbs-glm": {
+      "inputs": {
+        "linux-src": "linux-src_2",
         "nixpkgs": [
           "nixpkgs"
         ]
@@ -1009,11 +1197,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791885023,
-        "narHash": "sha256-C3alQ2MEt0zVrUSho5NUDo3jmhbff72++bfwoqT9Omo=",
+        "lastModified": 1784369104,
+        "narHash": "sha256-47cxbcZODibHv3rELFQ9vZly0vUNkND/atn/U7HLeb0=",
         "owner": "numtide",
         "repo": "treefmt-nix",
-        "rev": "0d6d739a833ba9a9c93034862e4a7b061a062a1c",
+        "rev": "df3c0640565d04a0261253cdd89fce78ec50168a",
         "type": "github"
       },
       "original": {
@@ -1032,44 +1220,27 @@
         ]
       },
       "locked": {
-        "lastModified": 1793272761,
-        "narHash": "sha256-3CE1CEwprYlHRlRVkXDkhqec0jjF9Cti7tdk8vVDsCM=",
+        "lastModified": 1791815626,
+        "narHash": "sha256-39EtILDexiwJqShYD/yu1B73OvF6DigAqF040egC07g=",
         "owner": "pyproject-nix",
         "repo": "uv2nix",
-        "rev": "c361746c7d630d98b972378290547c8d35542a7a",
+        "rev": "37462fae7b37be45d78f754d1c39e8813ede0f80",
         "type": "github"
       },
       "original": {
         "owner": "pyproject-nix",
         "repo": "uv2nix",
-        "type": "github"
-      }
-    },
-    "vllm-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1790029969,
-        "narHash": "sha256-VCyNfE6r+lP0Yn5qmOqOU5VI9VrGCBNldMne7Jq86xI=",
-        "owner": "vllm-project",
-        "repo": "vllm",
-        "rev": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
-        "type": "github"
-      },
-      "original": {
-        "owner": "vllm-project",
-        "ref": "v0.30.0",
-        "repo": "vllm",
         "type": "github"
       }
     },
     "xdna-driver-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1784758690,
-        "narHash": "sha256-YUiM9u9vtISttbThTt9fTtBB/w3d5UatGyVK5mAgWNM=",
+        "lastModified": 1780591096,
+        "narHash": "sha256-pG9fptnKMoHbK2HSBObfflCyBt9k0uDO/leKvtsKUnA=",
         "ref": "1.7",
-        "rev": "4e5aed38f3b74a5a9a2c7a6222eaff1a8be54305",
-        "revCount": 874,
+        "rev": "0fb464f6e043fdaf8d9007b76bd9e9a666ffe870",
+        "revCount": 873,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/amd/xdna-driver"

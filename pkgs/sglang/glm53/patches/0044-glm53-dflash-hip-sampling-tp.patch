@@ -1,0 +1,87 @@
+--- a/sglang/srt/speculative/dflash_worker_v2.py
++++ b/sglang/srt/speculative/dflash_worker_v2.py
+@@ -651,7 +651,7 @@
+                         "Disable DFLASH draft cuda graph because dp attention "
+                         "is enabled (draft runs eager)."
+                     )
+-            if is_cuda() and capture_decode_cuda_graph:
++            if (is_cuda() or is_hip()) and capture_decode_cuda_graph:
+                 available_mem = self._tp_sync.available_memory_gb(
+                     SpecTpSyncSite.DFLASH_MEM,
+                     self.device,
+@@ -754,7 +754,7 @@
+     def prewarm_sampling(self) -> SamplingPrewarmResult:
+         """Rehearse the non-greedy verify path so an undersized graph-pool
+         borrow surfaces at startup rather than under traffic."""
+-        if not is_cuda() or not is_dflash_sampling_verify_available():
++        if not (is_cuda() or is_hip()) or not is_dflash_sampling_verify_available():
+             return self.model_runner.prewarm_sampling()
+ 
+         block_size = int(self.block_size)
+@@ -2664,6 +2664,10 @@
+         draft_tokens = self._draft_block_tokens_buf[:bs]
+         draft_tokens[:, 0].copy_(block_ids[:, 0])
+         draft_tokens[:, 1:].copy_(draft_next)
++        # Every rank must verify the same candidate context. Synchronizing only
++        # accept lengths after the target forward is too late for sampled
++        # selector proposals: each rank may have drawn a different path.
++        self._tp_sync.sync(SpecTpSyncSite.DFLASH_SELECTOR, draft_tokens)
+ 
+         # GLM-5.3 campaign (0042): verify only the first `width` block tokens at this batch size.
+         width = block_size
+--- a/sglang/srt/speculative/dflash_utils.py
++++ b/sglang/srt/speculative/dflash_utils.py
+@@ -63,6 +63,7 @@
+     )
+ 
+     tree_speculative_sampling_target_only = None
++    _DFLASH_SAMPLING_VERIFY_AVAILABLE = True
+ else:
+     top_k_renorm_prob = None
+     top_p_renorm_prob = None
+@@ -1086,13 +1087,27 @@
+             uniform_top_k_value=uniform_top_k_value,
+             use_sparse_topk=use_sparse_topk,
+         )
+-        draft_probs = torch.zeros_like(target_probs)
+         candidates_i64 = (
+             candidates
+             if candidates.dtype == torch.int64
+             else candidates.to(torch.int64)
+         )
+-        tree_speculative_sampling_target_only(
++        if is_hip():
++            from sglang.kernels.ops.speculative.reject_sampling import (
++                chain_speculative_sampling_triton,
++            )
++
++            # Non-selector DFlash drafts are deterministic argmax proposals.
++            # Their q is a point mass, so classic chain rejection preserves p.
++            draft_probs = torch.zeros_like(target_probs[:, :-1])
++            if draft_token_num > 1:
++                draft_probs.scatter_(2, candidates_i64[:, 1:, None], 1.0)
++            verify_sampling = chain_speculative_sampling_triton
++            threshold_single = threshold_acc = 1.0
++        else:
++            draft_probs = torch.zeros_like(target_probs)
++            verify_sampling = tree_speculative_sampling_target_only
++        verify_sampling(
+             predicts=predicts,
+             accept_index=accept_index,
+             accept_token_num=accept_token_num,
+@@ -1129,6 +1144,15 @@
+     use_sparse_topk: bool = True,
+ ) -> torch.Tensor:
+     device = next_token_logits.device
++    if is_hip():
++        # Match HIP's ordinary torch sampler, including min-p and mixed greedy
++        # rows. CUDA's sequential top-k/top-p renormalization changes the
++        # distribution when top-k and top-p are both active.
++        from sglang.srt.speculative.eagle_utils import _glm53_hip_chain_target_probs
++
++        return _glm53_hip_chain_target_probs(
++            next_token_logits, sampling_info, draft_token_num
++        ).view(bs, draft_token_num, -1).contiguous()
+     need_top_k = bool(getattr(sampling_info, "need_top_k_sampling", True))
+     need_top_p = bool(getattr(sampling_info, "need_top_p_sampling", False))
+     expanded_temperature = torch.repeat_interleave(

@@ -1,0 +1,315 @@
+--- a/sglang/srt/speculative/dflash_worker_v2.py
++++ b/sglang/srt/speculative/dflash_worker_v2.py
+@@ -28,7 +28,7 @@
+ from sglang.srt.managers.schedule_batch import ScheduleBatch
+ from sglang.srt.managers.scheduler import GenerationBatchResult
+ from sglang.srt.managers.tp_worker import TpModelWorker
+-from sglang.srt.model_executor.cuda_graph_config import Backend
++from sglang.srt.model_executor.cuda_graph_config import Backend, Phase, with_phase
+ from sglang.srt.model_executor.forward_batch_info import (
+     CaptureHiddenMode,
+     ForwardBatch,
+@@ -95,6 +95,31 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
++GLM53_DFLASH_VERIFY_WIDTHS_ENV = "SGLANG_GLM53_DFLASH_VERIFY_WIDTHS"
++
++
++def _glm53_dflash_verify_widths(block_size: int) -> Optional[List[int]]:
++    """GLM-5.3 campaign (0042): DFlash verify width per running-request count, e.g. "8,4,4,2" (batch sizes past the
++    list reuse its last entry). The draft still proposes the whole block (one forward whatever the width); only the
++    first `width` block tokens (bonus + width - 1 drafts) go through the target verify. Unset: the whole block."""
++    raw = os.environ.get(GLM53_DFLASH_VERIFY_WIDTHS_ENV, "").strip()
++    if not raw:
++        return None
++    try:
++        widths = [int(part) for part in raw.split(",") if part.strip()]
++    except ValueError as e:
++        raise ValueError(f"{GLM53_DFLASH_VERIFY_WIDTHS_ENV}={raw!r}: expected integers") from e
++    # Width 1 would verify only the bonus token, which the selector's sampling verify cannot express.
++    if not widths or any(width < 2 or width > block_size for width in widths):
++        raise ValueError(
++            f"{GLM53_DFLASH_VERIFY_WIDTHS_ENV}={raw!r}: widths must be in 2..{block_size} (the block size)"
++        )
++    return widths
++
++
++def _glm53_width_for(widths: List[int], batch_size: int) -> int:
++    return widths[min(max(batch_size, 1), len(widths)) - 1]
++
+ _FusedKVMaterializeHelper = None
+ 
+ 
+@@ -471,6 +496,9 @@
+                 )
+         self.draft_model.set_block_size(self.block_size)
+         self.speculative_num_draft_tokens = int(self.block_size)
++        # GLM-5.3 campaign (0042): width -> (target attention backend, target-verify graph runner).
++        self._glm53_widths = _glm53_dflash_verify_widths(int(self.block_size))
++        self._glm53_width_states: dict = {}
+         if self._is_domino and self.block_size <= 1:
+             raise ValueError(
+                 "DFLASH Domino requires speculative_num_draft_tokens > 1, "
+@@ -647,6 +675,53 @@
+             self._draft_worker.init_cuda_graphs(
+                 capture_decode_cuda_graph=capture_decode_cuda_graph
+             )
++        if self._glm53_widths is not None:
++            self._glm53_build_width_states()
++
++    def _glm53_build_width_states(self) -> None:
++        """One target attention backend + target-verify graph set per narrower width (graphs only for the batch
++        sizes that use it); the scheduler-built pair serves the full block."""
++        from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
++            DecodeCudaGraphRunner,
++        )
++        from sglang.srt.utils.common import get_available_gpu_memory
++
++        mr = self.model_runner
++        block = int(self.block_size)
++        self._glm53_width_states[block] = (mr.attn_backend, mr.decode_cuda_graph_runner)
++        graph_cfg = get_exec().graph.cuda_graph_config
++        graphs = graph_cfg.decode.backend != Backend.DISABLED and mr.decode_cuda_graph_runner is not None
++        capture_bs = list(graph_cfg.decode.bs or [])
++        before = get_available_gpu_memory(self.device, self.gpu_id)
++        for width in sorted(set(self._glm53_widths)):
++            if width in self._glm53_width_states:
++                continue
++            bs_list = [b for b in capture_bs if _glm53_width_for(self._glm53_widths, b) == width]
++            config = with_phase(graph_cfg, Phase.DECODE, bs=bs_list or capture_bs, max_bs=max(bs_list or capture_bs or [1]))
++            workspace = mr.init_new_workspace
++            try:
++                with (
++                    get_spec().override(speculative_num_draft_tokens=width),
++                    get_exec().graph.override(cuda_graph_config=config, cuda_graph_bs_decode=bs_list or capture_bs),
++                ):
++                    backend = mr._get_attention_backend(init_new_workspace=True)
++                    runner = (
++                        DecodeCudaGraphRunner(mr, attn_backend=backend, speculative_num_draft_tokens=width)
++                        if graphs and bs_list
++                        else None
++                    )
++            finally:
++                mr.init_new_workspace = workspace
++            self._glm53_width_states[width] = (backend, runner)
++            if self.ps.tp_rank == 0:
++                logger.info("DFLASH verify width %d: target graphs for bs=%s", width, bs_list if runner else [])
++        if self.ps.tp_rank == 0:
++            logger.info(
++                "DFLASH per-batch-size verify widths %s (block %d); extra target state memory %.2f GB",
++                self._glm53_widths,
++                block,
++                before - get_available_gpu_memory(self.device, self.gpu_id),
++            )
+ 
+     def _prewarm_batch_size(self, block_size: int) -> int:
+         """Largest batch the non-greedy verify path can see in one step."""
+@@ -1419,13 +1494,17 @@
+         gamma = block - 1
+         vocab = int(next_token_logits.shape[-1])
+         # A fresh dense q would zero the whole vocabulary to carry top_k per row.
+-        buffer = self._draft_probs_buf
++        # GLM-5.3 campaign (0042): one buffer per verify width (gamma), so alternating widths keep theirs.
++        bufs = getattr(self, "_glm53_draft_probs_bufs", None)
++        if bufs is None:
++            bufs = self._glm53_draft_probs_bufs = {}
++        buffer = bufs.get(gamma)
+         if buffer is None or buffer.shape[0] < bs or buffer.shape[1:] != (gamma, vocab):
+             cap = bs if buffer is None else max(bs, buffer.shape[0] * 2)
+             buffer = torch.zeros(
+                 (cap, gamma, vocab), dtype=torch.float32, device=candidates.device
+             )
+-            self._draft_probs_buf = buffer
++            bufs[gamma] = buffer
+         draft_probs = buffer[:bs]
+         try:
+             draft_probs.scatter_(-1, candidate_ids, q_rows.float())
+@@ -2033,7 +2112,7 @@
+         self._accept_bonus_buffer_cap = new_cap
+ 
+     def _next_accept_bonus_buffers(
+-        self, bs: int
++        self, bs: int, width: Optional[int] = None
+     ) -> tuple[
+         torch.Tensor,
+         torch.Tensor,
+@@ -2049,7 +2128,12 @@
+             self._accept_len_buf[:bs],
+             self._commit_lens_bufs[slot][:bs],
+             self._bonus_id_bufs[slot][:bs],
+-            self._out_tokens_bufs[slot][:bs],
++            # GLM-5.3 campaign (0042): a contiguous [bs, width] view for a narrower verify window.
++            (
++                self._out_tokens_bufs[slot][:bs]
++                if width is None or int(width) == int(self.block_size)
++                else self._out_tokens_bufs[slot].view(-1)[: bs * int(width)].view(bs, int(width))
++            ),
+             self._new_seq_lens_bufs[slot][:bs],
+         )
+ 
+@@ -2062,8 +2146,10 @@
+         draft_input,
+         prefix_lens: torch.Tensor,
+         bs: int,
++        width: Optional[int] = None,
+     ):
+         new_seq_lens = None
++        width = int(self.block_size) if width is None else int(width)
+         target_predict = None
+         if self._selector_sample is not None:
+             selector_candidate_ids, selector_q_rows = self._selector_sample
+@@ -2093,7 +2179,7 @@
+             out_tokens, commit_lens = _commit_accept(candidates, accept_len, bonus)
+         else:
+             target_predict = torch.argmax(next_token_logits, dim=-1).view(
+-                bs, int(self.block_size)
++                bs, width
+             )
+             self._tp_sync.sync(SpecTpSyncSite.DFLASH_ACCEPT_GREEDY, target_predict)
+             if self._use_triton_accept_bonus:
+@@ -2104,7 +2190,7 @@
+                         bonus,
+                         out_tokens,
+                         new_seq_lens,
+-                    ) = self._next_accept_bonus_buffers(bs)
++                    ) = self._next_accept_bonus_buffers(bs, width)
+                     _compute_dflash_accept_bonus_triton_unchecked(
+                         candidates=candidates,
+                         target_top1=target_predict,
+@@ -2579,6 +2665,62 @@
+         draft_tokens[:, 0].copy_(block_ids[:, 0])
+         draft_tokens[:, 1:].copy_(draft_next)
+ 
++        # GLM-5.3 campaign (0042): verify only the first `width` block tokens at this batch size.
++        width = block_size
++        if self._glm53_widths is not None:
++            width = _glm53_width_for(self._glm53_widths, bs)
++        if width < block_size:
++            draft_tokens = draft_tokens[:, :width].contiguous()
++            positions = positions_2d[:, :width].reshape(-1)
++            verify_out_cache_loc_2d = verify_out_cache_loc_2d[:, :width].contiguous()
++            verify_out_cache_loc = verify_out_cache_loc_2d.reshape(-1)
++            if self._selector_sample is not None:
++                candidate_ids, q_rows = self._selector_sample
++                self._selector_sample = (
++                    candidate_ids[:, : width - 1].contiguous(),
++                    q_rows[:, : width - 1].contiguous(),
++                )
++        target_state = self._glm53_width_states.get(width)
++        saved_target_state = None
++        if target_state is not None and width != block_size:
++            saved_target_state = (self.model_runner.attn_backend, self.model_runner.decode_cuda_graph_runner)
++            self.model_runner.attn_backend, self.model_runner.decode_cuda_graph_runner = target_state
++        try:
++            return self._glm53_verify_and_commit(
++                batch=batch,
++                bs=bs,
++                width=width,
++                block_size=block_size,
++                draft_tokens=draft_tokens,
++                positions=positions,
++                verify_out_cache_loc=verify_out_cache_loc,
++                verify_out_cache_loc_2d=verify_out_cache_loc_2d,
++                draft_input=draft_input,
++                prefix_lens=prefix_lens,
++                grammar_barrier=grammar_barrier,
++                on_publish=on_publish,
++            )
++        finally:
++            if saved_target_state is not None:
++                self.model_runner.attn_backend, self.model_runner.decode_cuda_graph_runner = saved_target_state
++
++    def _glm53_verify_and_commit(
++        self,
++        *,
++        batch,
++        bs: int,
++        width: int,
++        block_size: int,
++        draft_tokens: torch.Tensor,
++        positions: torch.Tensor,
++        verify_out_cache_loc: torch.Tensor,
++        verify_out_cache_loc_2d: torch.Tensor,
++        draft_input,
++        prefix_lens: torch.Tensor,
++        grammar_barrier,
++        on_publish,
++    ) -> GenerationBatchResult:
++
+         # Must stay ahead of the target verify launch below.
+         grammar_tree = (
+             GrammarTree.from_linear_chain(draft_tokens) if batch.has_grammar else None
+@@ -2592,7 +2734,7 @@
+         verify_input = DFlashVerifyInput(
+             draft_token=verify_input_ids,
+             positions=positions,
+-            draft_token_num=int(self.block_size),
++            draft_token_num=int(width),
+             custom_mask=custom_mask,
+             capture_hidden_mode=CaptureHiddenMode.FULL,
+         )
+@@ -2606,8 +2748,8 @@
+         seq_lens_cpu_backup = batch.seq_lens_cpu
+         seq_lens_sum_backup = batch.seq_lens_sum
+         if seq_lens_cpu_backup is not None:
+-            # Verify host bound = committed prefix + one verify block (matches draft).
+-            verify_host_seq_lens = seq_lens_cpu_backup + block_size
++            # Verify host bound = committed prefix + the verify window (0042: width <= block).
++            verify_host_seq_lens = seq_lens_cpu_backup + width
+             batch.seq_lens_cpu = verify_host_seq_lens
+             batch.seq_lens_sum = int(verify_host_seq_lens.sum())
+         elif draft_input.nxt_kv_lens_cpu is not None:
+@@ -2660,7 +2802,7 @@
+             apply_dflash_verify_logits_adjustments(
+                 next_token_logits=logits_output.next_token_logits,
+                 sampling_info=sampling_info,
+-                draft_token_num=int(self.block_size),
++                draft_token_num=int(width),
+             )
+ 
+         # Constrain every chain position before accept picks from it.
+@@ -2682,6 +2824,7 @@
+             draft_input=draft_input,
+             prefix_lens=prefix_lens,
+             bs=bs,
++            width=width,
+         )
+ 
+         if SIMULATE_ACC_LEN > 0:
+@@ -2696,7 +2839,7 @@
+                 # The sampling-verify branch does not materialize the target argmax.
+                 target_predict = torch.argmax(
+                     logits_output.next_token_logits, dim=-1
+-                ).view(bs, int(self.block_size))
++                ).view(bs, int(width))
+             apply_dflash_simulated_acceptance(
+                 candidates=candidates,
+                 target_predict=target_predict,
+@@ -2717,7 +2860,7 @@
+                 batch,
+                 logits_output,
+                 out_tokens.reshape(-1),
+-                chain_stride=block_size,
++                chain_stride=width,
+             )
+ 
+         if self._need_mamba_verify_commit:
+@@ -2742,7 +2885,7 @@
+             raise RuntimeError(
+                 "DFLASH verify requires target hidden states, but got None."
+             )
+-        hidden = hidden.view(bs, int(self.block_size), -1)
++        hidden = hidden.view(bs, int(width), -1)
+ 
+         self._append_target_hidden_to_draft_kv_by_loc(
+             target_hidden=hidden.reshape(-1, hidden.shape[-1]),
+@@ -2766,7 +2909,7 @@
+             accept_lens=commit_lens,
+             can_run_cuda_graph=can_run_cuda_graph,
+             next_draft_input=next_draft_input,
+-            speculative_num_draft_tokens=int(self.block_size),
++            speculative_num_draft_tokens=int(width),
+             # The non-overlap (sync) scheduler path advances batch.seq_lens
+             # from the result; overlap carries it via next_draft_input instead.
+             new_seq_lens=new_seq_lens,

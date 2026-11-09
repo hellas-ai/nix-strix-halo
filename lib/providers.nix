@@ -22,10 +22,6 @@ let
     # nixpkgs already publishes. Doesn't pull in any TheRock attrs.
     "nixpkgs"
 
-    # TheRock built from source via pkgs/therock/rocm-from-source.
-    # Implemented in overlays/rocm.nix — the dispatcher swaps the
-    # binary therock-rocm output for the source build of the same target.
-    "therock-source"
   ];
 
   pythonProviders = [
@@ -39,11 +35,7 @@ let
     "therock-wheels"
   ];
 
-  pythonProviderStubs = [
-    # Reserved for PyTorch + Triton built from source against the chosen
-    # rocm provider.
-    "therock-source"
-  ];
+  pythonProviderStubs = [ ];
 
   assertProvider =
     kind: providers: tag:

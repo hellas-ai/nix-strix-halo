@@ -1,0 +1,14 @@
+diff --git a/sglang/multimodal_gen/runtime/launch_server.py b/sglang/multimodal_gen/runtime/launch_server.py
+index d0daeea9..75017a9b 100644
+--- a/sglang/multimodal_gen/runtime/launch_server.py
++++ b/sglang/multimodal_gen/runtime/launch_server.py
+@@ -37,0 +38,8 @@
++try:
++    # The CLI imports ROCm-aware platform code before starting workers. Fork
++    # would inherit that initialized HIP context and PyTorch refuses to reuse
++    # it. The programmatic DiffGenerator entrypoint already makes this choice;
++    # apply it to `sglang serve` as well.
++    mp.set_start_method("spawn", force=True)
++except RuntimeError:
++    pass
++

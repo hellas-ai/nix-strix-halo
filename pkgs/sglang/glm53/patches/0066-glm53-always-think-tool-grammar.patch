@@ -1,0 +1,19 @@
+diff --git a/sglang/srt/entrypoints/openai/serving_chat.py b/sglang/srt/entrypoints/openai/serving_chat.py
+--- a/sglang/srt/entrypoints/openai/serving_chat.py
++++ b/sglang/srt/entrypoints/openai/serving_chat.py
+@@ -1238,6 +1238,15 @@ class OpenAIServingChat(OpenAIServingBase):
+             enable_thinking = (request.chat_template_kwargs or {}).get(
+                 "enable_thinking"
+             )
++            # An always-thinking template has already opened <think>, even
++            # when protocol normalization maps reasoning_effort="none" to
++            # enable_thinking=False. Its grammar must allow </think>.
++            reasoning_config = self.template_manager.reasoning_config
++            if (
++                reasoning_config is not None
++                and reasoning_config.special_case == "always"
++            ):
++                enable_thinking = True
+             parser = FunctionCallParser(request.tools or [], self.tool_call_parser)
+             tool_call_constraint = parser.get_structure_constraint(
+                 request.tool_choice,

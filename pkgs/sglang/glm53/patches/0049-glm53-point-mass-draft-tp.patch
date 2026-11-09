@@ -1,0 +1,71 @@
+--- a/sglang/srt/speculative/spec_utils.py
++++ b/sglang/srt/speculative/spec_utils.py
+@@ -152,6 +152,23 @@
+     return sample_p, sample_index
+ 
+ 
++def glm53_draft_topk(probs: torch.Tensor, topk: int):
++    """Keep deterministic HIP chain proposals identical before each forward.
++
++    GroupCoordinator.broadcast uses the captured pynccl communicator in graph
++    capture, as in sample_draft_proposal. Trees and other devices stay unchanged.
++    """
++    topk_p, topk_index = fast_topk(probs, topk, dim=-1)
++    if _is_hip and topk == 1:
++        from sglang.srt.distributed import get_tp_group
++
++        group = get_tp_group()
++        if group.world_size > 1:
++            group.broadcast(topk_index, src=0)
++            topk_p = probs.gather(1, topk_index)
++    return topk_p, topk_index
++
++
+ def glm53_draft_temperatures(sampling_info) -> torch.Tensor:
+     """GLM-5.3 campaign (0041): the draft proposal temperature per row. Greedy requests are stored as temperature
+     1 with top_k 1, so a sampled rejection-sampling proposal would draw them at temperature 1 and lose acceptance;
+--- a/sglang/srt/speculative/eagle_worker_v2.py
++++ b/sglang/srt/speculative/eagle_worker_v2.py
+@@ -106,6 +106,7 @@
+     get_plan_stream,
+     load_token_map,
+     glm53_draft_temperatures,
++    glm53_draft_topk,
+     renorm_draft_probs,
+     sample_draft_proposal,
+     select_top_k_tokens,
+@@ -119,7 +120,6 @@
+ from sglang.srt.utils.common import (
+     MultiprocessingSerializer,
+     empty_context,
+-    fast_topk,
+     get_available_gpu_memory,
+     is_cpu,
+     is_cuda,
+@@ -791,7 +791,7 @@
+                         forward_batch.sampling_info,
+                         get_spec().speculative_use_rejection_sampling,
+                     )
+-                    topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
++                    topk_p, topk_index = glm53_draft_topk(probs, self.topk)
+                     forward_batch.positions.add_(1)
+                 maybe_detect_oob(
+                     topk_index,
+@@ -982,7 +982,7 @@
+                 batch.sampling_info,
+                 use_rejection_sampling,
+             )
+-            topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
++            topk_p, topk_index = glm53_draft_topk(probs, self.topk)
+         return EagleDraftInput(
+             topk_p=topk_p,
+             topk_index=topk_index,
+@@ -1136,7 +1136,7 @@
+                 batch.sampling_info,
+                 get_spec().speculative_use_rejection_sampling,
+             )
+-            ret_topk_p, ret_topk_index = fast_topk(probs, self.topk, dim=-1)
++            ret_topk_p, ret_topk_index = glm53_draft_topk(probs, self.topk)
+             ret_draft_probs = None
+         ret_hidden_states = draft_logits_output.hidden_states
+ 

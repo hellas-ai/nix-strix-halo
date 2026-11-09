@@ -1,34 +1,18 @@
 {
   lib,
+  mediaRuntime ? false,
   target,
   rocmTargets,
   therockRocmSources,
   therockPythonWheelSources,
   therockRocmSourcePins,
   therockRocmSourceTrees,
-  therockRocmThirdPartySources,
   therockPythonConfig ? import ./python-config.nix { inherit lib; },
 }:
 final: prev:
 let
   therockPython = prev.${therockPythonConfig.packageAttr};
   therockPythonPackages = prev.${therockPythonConfig.packagesAttr};
-
-  targetBySuffix = lib.listToAttrs (
-    map (rocmTarget: {
-      name = rocmTarget.packageSuffix;
-      value = rocmTarget;
-    }) rocmTargets
-  );
-
-  targetFor =
-    suffix:
-    if builtins.hasAttr suffix targetBySuffix then
-      targetBySuffix.${suffix}
-    else
-      throw "missing TheRock target config for ${suffix}";
-
-  hsaOverrideFor = rocmTarget: rocmTarget.hsaOverride or null;
 
   sourcePinsByTarget = therockRocmSourcePins.targets;
 
@@ -70,27 +54,13 @@ let
   mkTherockRocmSdkAttrs =
     suffix: source:
     let
-      rocmTarget = targetFor suffix;
       sdk = prev.callPackage ./rocm-sdk {
         target = suffix;
         inherit (source) version url hash;
       };
-      env = prev.callPackage ./rocm-env {
-        therockRocmSdk = sdk;
-        rdmaCore = final.rdma-core;
-        packageSuffix = suffix;
-        hsaOverrideGfxVersion = hsaOverrideFor rocmTarget;
-      };
-      rocshmemEnv = prev.callPackage ./rocm-rocshmem-env {
-        therockRocmSdk = sdk;
-        therockRocmEnv = env;
-        packageSuffix = suffix;
-      };
     in
     {
       "therock-rocm-${suffix}" = sdk;
-      "therock-rocm-${suffix}-env" = env;
-      "therock-rocm-${suffix}-rocshmem-env" = rocshmemEnv;
     };
 
   therockRocmSdkPerArch = lib.foldl' lib.recursiveUpdate { } (
@@ -101,25 +71,27 @@ let
     rocmTarget:
     let
       suffix = rocmTarget.packageSuffix;
-      wheelSources = pythonWheelSourcesFor rocmTarget;
+      baseWheelSources = pythonWheelSourcesFor rocmTarget;
+      wheelSources =
+        baseWheelSources
+        // lib.optionalAttrs mediaRuntime {
+          packages = baseWheelSources.packages // {
+            rocm-bootstrap = therockPythonWheelSources.mediaBootstrap;
+          };
+        };
       wheels = prev.callPackage ./python-wheels {
-        inherit therockPython therockPythonPackages wheelSources;
+        inherit
+          therockPython
+          therockPythonPackages
+          wheelSources
+          mediaRuntime
+          ;
       };
     in
     assert lib.assertMsg (wheelSources.pythonTag == therockPythonConfig.pythonTag)
       "TheRock wheel pin for ${suffix} uses ${wheelSources.pythonTag}, but Python config expects ${therockPythonConfig.pythonTag}";
     {
-      "therock-python-${suffix}" = prev.callPackage ./python-env {
-        inherit
-          therockPython
-          wheels
-          wheelSources
-          ;
-      };
       "therock-python-wheels-${suffix}" = wheels;
-      "therock-amdsmi-${suffix}" = therockPythonPackages.callPackage ./amdsmi {
-        wheels = final."therock-python-wheels-${suffix}";
-      };
       "torch-rocm-${suffix}" = final."therock-python-wheels-${suffix}";
     };
 
@@ -129,44 +101,12 @@ let
     map mkTherockPythonStack therockPythonTargets
   );
 
-  therockFromSourceThirdPartyFetches = {
-    esmiIbLibrarySource = prev.fetchgit {
-      inherit (therockRocmThirdPartySources.esmiIbLibrary) url rev hash;
-    };
-    esmiIbLibraryRev = therockRocmThirdPartySources.esmiIbLibrary.rev;
-    rocprofilerOtf2Archive = prev.fetchurl {
-      url = "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/otf2-3.0.3.tar.gz";
-      hash = "sha256-GKOQX3kXNAOH4+3I5XZvMasa9B9OzFZl2mx2nKIcTug=";
-    };
-    rocprofilerSysBinutilsArchive = prev.fetchurl {
-      url = "https://ftpmirror.gnu.org/gnu/binutils/binutils-2.46.0.tar.gz";
-      hash = "sha256-hgj+RKt95kX2rQqJgxO3UziEJJDWCa24XJ+ygnw3avI=";
-    };
-    spirvHeadersSource = prev.fetchzip {
-      inherit (therockRocmThirdPartySources.spirvHeaders) url hash;
-      stripRoot = true;
-    };
-  };
-
-  mkTherockFromSourceStack =
+  mkTherockSourceStack =
     rocmTarget:
     let
       suffix = rocmTarget.packageSuffix;
       source = sourceFor rocmTarget;
-      cmakeConfig = {
-        target = suffix;
-        amdgpuTargets = rocmTarget.buildTargets;
-        distBundleName = suffix;
-      };
-      projectTargetUnexcludes = lib.optionalAttrs (builtins.elem suffix rocmTarget.buildTargets) {
-        rocprofiler-compute = [ suffix ];
-      };
       sourceTreeInputs = lockedSourceTreeFor rocmTarget;
-      compilerSourceTreeInputs = sourceTreeInputs // {
-        submodules = builtins.filter (
-          submodule: !(lib.hasPrefix "rocm-systems/projects/rocprofiler-" submodule.path)
-        ) sourceTreeInputs.submodules;
-      };
 
       mkLockedSource =
         source: lockedInputs:
@@ -219,62 +159,19 @@ let
           '';
 
       sourceTree = mkLockedSource source sourceTreeInputs;
-      compilerSourceTree = mkLockedSource source compilerSourceTreeInputs;
-
-      amdLlvm = prev.callPackage ./rocm-from-source {
-        stdenv = prev.llvmPackages_21.stdenv;
-        llvmPackages = prev.llvmPackages_21;
-        # Unbounded LLVM/Flang parallelism can consume well over 100 GiB on a
-        # 128-thread builder and trip the fleet's early-OOM guard. Thirty-two
-        # jobs keeps the heavyweight build parallel without making it fragile
-        # when the builder is doing other work.
-        buildJobs = 32;
-        inherit (cmakeConfig) target amdgpuTargets distBundleName;
-        inherit (source) version;
-        profile = "compiler";
-        therockSource = compilerSourceTree;
-        thirdPartySources = { };
-        buildTargets = [ "artifact-amd-llvm" ];
-        installMode = "prebuilt-stages";
-        inherit (therockFromSourceThirdPartyFetches) spirvHeadersSource;
-      };
-
-      fromSource = prev.callPackage ./rocm-from-source (
-        {
-          stdenv = prev.llvmPackages_21.stdenv;
-          llvmPackages = prev.llvmPackages_21;
-          inherit (cmakeConfig) target amdgpuTargets distBundleName;
-          inherit (source) version;
-          buildJobs = 32;
-          profile = "full";
-          therockSource = sourceTree;
-          prebuiltStageTree = amdLlvm;
-          thirdPartySources = therockRocmThirdPartySources.archives;
-          inherit projectTargetUnexcludes;
-        }
-        // therockFromSourceThirdPartyFetches
-      );
     in
     {
       "therock-rocm-source-${suffix}" = sourceTree;
-      "therock-amd-llvm-${suffix}" = amdLlvm;
-      "therock-rocm-from-source-${suffix}" = fromSource;
-      "therock-rocm-from-source-${suffix}-configure" = fromSource.override {
-        nameSuffix = "configure";
-        prebuiltStageTree = null;
-        installMode = "configure-only";
-      };
-      "therock-rocm-third-party-mirror-${suffix}" = fromSource.thirdPartyMirror;
       "therock-rocm-${suffix}-core" = final.therockRocmPackages.${suffix}.rocm-core;
       "therock-rocm-${suffix}-cmake" = final.therockRocmPackages.${suffix}.rocm-cmake;
     };
 
-  therockFromSourceTargets = builtins.filter (
+  therockSourceTargets = builtins.filter (
     rocmTarget: builtins.hasAttr rocmTarget.therockSourceTarget sourcePinsByTarget
   ) rocmTargets;
 
-  therockFromSourcePerArch = lib.foldl' lib.recursiveUpdate { } (
-    map mkTherockFromSourceStack therockFromSourceTargets
+  therockSourcePerArch = lib.foldl' lib.recursiveUpdate { } (
+    map mkTherockSourceStack therockSourceTargets
   );
 in
 {
@@ -282,10 +179,9 @@ in
     prev.callPackage ./rocm-modules {
       therockSource = final."therock-rocm-source-${target.packageSuffix}";
       therockVersion = defaultSource.rocmVersion or (normalizeRocmVersion defaultSource.version);
-      inherit (therockFromSourceThirdPartyFetches) esmiIbLibrarySource esmiIbLibraryRev;
     }
   );
 }
 // therockRocmSdkPerArch
 // therockPythonPerArch
-// therockFromSourcePerArch
+// therockSourcePerArch

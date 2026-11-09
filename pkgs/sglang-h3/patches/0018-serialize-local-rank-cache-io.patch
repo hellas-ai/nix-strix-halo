@@ -1,0 +1,109 @@
+diff --git a/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+index d84297d..719aa4f 100644
+--- a/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
++++ b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+@@ -11,6 +11,7 @@
++import fcntl
+ import hashlib
+ import json
+ import os
+ import re
+ import uuid
+ from collections.abc import Callable, Mapping, Sequence
+@@ -17,3 +18,4 @@
++from contextlib import contextmanager
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Any
+@@ -323,6 +325,70 @@ class MiniMaxH3RankWeightCache:
+         dist.broadcast_object_list(values, src=0)
+         return values[0]
+-
++
++    def _serialize_local_rank_io(self) -> bool:
++        return (
++            self.world_size > 1
++            and not _truthy_environment(_EXTERNAL_RANK_ENV)
++            and os.environ.get("MASTER_ADDR", "").strip().lower()
++            in {"localhost", "127.0.0.1", "::1"}
++        )
++
++    @contextmanager
++    def _local_rank_io_lock(self):
++        """Bound rank-file residency on a single multi-GPU host.
++
++        Four 15-GiB V620 rank files otherwise enter the page cache and pinned
++        copy path together.  That can consume the entire 128-GiB host before
++        any rank reaches the final cache-hit collective.  External ranks live
++        on separate hosts and deliberately keep their parallel I/O.
++        """
++        if not self._serialize_local_rank_io():
++            yield
++            return
++        runtime_dir = Path(f"/run/user/{os.getuid()}")
++        if not runtime_dir.is_dir():
++            runtime_dir = Path("/run/lock")
++        lock_path = runtime_dir / "sglang-minimax-h3-rank-cache.lock"
++        with lock_path.open("a+b") as lock_file:
++            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
++            try:
++                yield
++            finally:
++                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
++
++    @staticmethod
++    def _discard_file_cache(path: Path) -> None:
++        descriptor: int | None = None
++        try:
++            descriptor = os.open(path, os.O_RDONLY)
++            os.posix_fadvise(
++                descriptor,
++                0,
++                0,
++                os.POSIX_FADV_DONTNEED,
++            )
++        except (AttributeError, OSError):
++            pass
++        finally:
++            if descriptor is not None:
++                os.close(descriptor)
++
++    def _rank_file_sha256(self, path: Path) -> str:
++        with self._local_rank_io_lock():
++            try:
++                return _sha256_file(path)
++            finally:
++                self._discard_file_cache(path)
++
++    @contextmanager
++    def _open_rank_file(self, path: Path):
++        with self._local_rank_io_lock():
++            try:
++                with safe_open(path, framework="pt", device="cpu") as checkpoint:
++                    yield checkpoint
++            finally:
++                self._discard_file_cache(path)
++
+     def _file_metadata(self, signature: str) -> dict[str, str]:
+         return self.base_metadata | {
+             "rank": str(self.rank),
+@@ -366,9 +432,9 @@ class MiniMaxH3RankWeightCache:
+         ):
+             raise ValueError("completion manifest rank checksum is invalid")
+-        if _sha256_file(cache_path) != expected_sha256:
++        if self._rank_file_sha256(cache_path) != expected_sha256:
+             raise ValueError("rank cache file checksum mismatch")
+         expected_metadata = self._file_metadata(signature)
+-        with safe_open(cache_path, framework="pt", device="cpu") as checkpoint:
++        with self._open_rank_file(cache_path) as checkpoint:
+             if checkpoint.metadata() != expected_metadata:
+                 raise ValueError("rank cache safetensors metadata mismatch")
+             if set(checkpoint.keys()) != set(spec):
+@@ -432,6 +498,6 @@ class MiniMaxH3RankWeightCache:
+             # whole-file CPU dict needlessly exhausts a 128 GiB host before
+             # the already-sharded tensors reach their V620s.
+-            with safe_open(cache_path, framework="pt", device="cpu") as checkpoint:
++            with self._open_rank_file(cache_path) as checkpoint:
+                 for name, template in current_state.items():
+                     expected = spec[name]
+                     local = checkpoint.get_tensor(name)

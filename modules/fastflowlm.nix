@@ -154,7 +154,7 @@ in
 
   config = mkMerge [
     {
-      boot.kernelParams = mkIf cfg.setIommuPt [ "iommu=pt" ];
+      boot.kernelParams = mkIf (cfg.enable && cfg.setIommuPt) [ "iommu=pt" ];
     }
 
     (mkIf cfg.enable {

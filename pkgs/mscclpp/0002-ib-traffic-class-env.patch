@@ -1,0 +1,74 @@
+diff --git a/include/mscclpp/env.hpp b/include/mscclpp/env.hpp
+--- a/include/mscclpp/env.hpp
++++ b/include/mscclpp/env.hpp
+@@ -110,6 +110,11 @@
+   /// Default is false.
+   const bool forceDisableNvls;
+ 
++  /// Env name: `MSCCLPP_IB_TC`. The GRH traffic-class byte for IB/RoCE QPs.
++  /// Strict decimal digits in the range 0..255; malformed values throw InvalidUsage.
++  /// Default is 0. Read once with the global environment; set before creating endpoints.
++  const unsigned int ibTrafficClass;
++
+  private:
+   Env();
+ 
+diff --git a/src/core/env.cpp b/src/core/env.cpp
+--- a/src/core/env.cpp
++++ b/src/core/env.cpp
+@@ -37,6 +37,25 @@
+   }
+ }
+ 
++// Keep this byte parser separate from readEnv<int>, which uses permissive atoi.
++// Do not log from the constructor: logging itself depends on env().
++static unsigned int readIbTrafficClass() {
++  const char* value = getenv("MSCCLPP_IB_TC");
++  if (value == nullptr) return 0;
++  const auto invalid = []() {
++    throw mscclpp::Error("MSCCLPP_IB_TC must be decimal digits in [0,255]", mscclpp::ErrorCode::InvalidUsage);
++  };
++  if (*value == '\0') invalid();
++  unsigned int result = 0;
++  for (const char* p = value; *p != '\0'; ++p) {
++    if (*p < '0' || *p > '9') invalid();
++    // result is at most 255 before each step, so the multiplication cannot overflow.
++    result = result * 10 + static_cast<unsigned int>(*p - '0');
++    if (result > 255) invalid();
++  }
++  return result;
++}
++
+ template <typename T>
+ void logEnv(const std::string& envName, const T& env) {
+   if (!getenv(envName.c_str())) return;
+@@ -65,7 +84,8 @@
+       ncclSharedLibPath(readEnv<std::string>("MSCCLPP_NCCL_LIB_PATH", "")),
+       forceNcclFallbackOperation(readEnv<std::string>("MSCCLPP_FORCE_NCCL_FALLBACK_OPERATION", "")),
+       ncclSymmetricMemory(readEnv<bool>("MSCCLPP_NCCL_SYMMETRIC_MEMORY", false)),
+-      forceDisableNvls(readEnv<bool>("MSCCLPP_FORCE_DISABLE_NVLS", false)) {}
++      forceDisableNvls(readEnv<bool>("MSCCLPP_FORCE_DISABLE_NVLS", false)),
++      ibTrafficClass(readIbTrafficClass()) {}
+ 
+ std::shared_ptr<Env> env() {
+   static std::shared_ptr<Env> globalEnv = std::shared_ptr<Env>(new Env());
+@@ -93,6 +113,7 @@
+     logEnv("MSCCLPP_FORCE_NCCL_FALLBACK_OPERATION", globalEnv->forceNcclFallbackOperation);
+     logEnv("MSCCLPP_NCCL_SYMMETRIC_MEMORY", globalEnv->ncclSymmetricMemory);
+     logEnv("MSCCLPP_FORCE_DISABLE_NVLS", globalEnv->forceDisableNvls);
++    logEnv("MSCCLPP_IB_TC", globalEnv->ibTrafficClass);
+   }
+   return globalEnv;
+ }
+diff --git a/src/core/ib.cc b/src/core/ib.cc
+--- a/src/core/ib.cc
++++ b/src/core/ib.cc
+@@ -249,7 +249,7 @@
+     qp_attr.ah_attr.grh.flow_label = 0;
+     qp_attr.ah_attr.grh.sgid_index = gidIndex_;
+     qp_attr.ah_attr.grh.hop_limit = 255;
+-    qp_attr.ah_attr.grh.traffic_class = 0;
++    qp_attr.ah_attr.grh.traffic_class = static_cast<uint8_t>(env()->ibTrafficClass);
+   } else {
+     qp_attr.ah_attr.is_global = 0;
+   }

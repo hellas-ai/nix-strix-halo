@@ -3,7 +3,6 @@ updates:
   - package-ecosystem: "nix"
     directories:
       - "/"
-      - "/lib/hydra/benchmark"
     schedule:
       interval: "daily"
       time: "07:00"
@@ -21,7 +20,7 @@ updates:
       # wheel adopts that MLX release; source-only bumps cannot build.
       - dependency-name: "mlx-metal-src"
       # TheRock source inputs are generated from pkgs/therock/sources/rocm-source.json
-      # and must be bumped atomically by pkgs/therock/scripts/update-source-tree.py.
+      # and must be bumped atomically with the qualified source assemblers.
       - dependency-name: "therock-src-*"
       # GitHub Dependabot's Nix updater does not currently support private inputs.
       - dependency-name: "thunderbolt-ibverbs"

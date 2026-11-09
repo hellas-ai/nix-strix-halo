@@ -1,0 +1,77 @@
+diff --git a/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+index 90da266..d84297d 100644
+--- a/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
++++ b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+@@ -446,6 +446,21 @@ class MiniMaxH3RankWeightCache:
+                             f"rank cache dtype mismatch for {name!r}: "
+                             f"{local.dtype} != {expected['dtype']}"
+                         )
++                    # Ordinary folded encoder parameters already own their
++                    # final CPU storage. Copy each cache tensor into that
++                    # storage immediately instead of retaining a complete
++                    # rank-sized CPU dictionary until load_state_dict(). Four
++                    # concurrent H3 ranks otherwise keep roughly 56 GiB of
++                    # transient encoder tensors while transformer restore is
++                    # allocating its GPU shards.
++                    if not assign and parameter_factory is None:
++                        if isinstance(template, DTensor):
++                            raise ValueError(
++                                "non-assigning rank cache restore does not support DTensor state"
++                            )
++                        with torch.no_grad():
++                            template.copy_(local.to(device=target_device))
++                        continue
+                     if isinstance(template, DTensor):
+                         local = local.to(device=target_device)
+                         tensor = DTensor.from_local(
+@@ -466,13 +481,14 @@ class MiniMaxH3RankWeightCache:
+                             ordinary_parameter_names.append(name)
+                     else:
+                         reconstructed[name] = tensor
+-            incompatible = model.load_state_dict(
+-                reconstructed,
+-                strict=True,
+-                assign=assign,
+-            )
+-            if incompatible.missing_keys or incompatible.unexpected_keys:
+-                raise ValueError(f"rank cache incompatible keys: {incompatible}")
++            if assign:
++                incompatible = model.load_state_dict(
++                    reconstructed,
++                    strict=True,
++                    assign=True,
++                )
++                if incompatible.missing_keys or incompatible.unexpected_keys:
++                    raise ValueError(f"rank cache incompatible keys: {incompatible}")
+             # FSDP state-dict hooks may place root-level parameters that are not
+             # represented by DTensors back on the template device. These TP
+             # stragglers are not managed by FSDP, so bind the already validated
+diff --git a/sglang/multimodal_gen/test/unit/test_minimax_h3_rank_weight_cache.py b/sglang/multimodal_gen/test/unit/test_minimax_h3_rank_weight_cache.py
+index 5f5072f..d81d3fe 100644
+--- a/sglang/multimodal_gen/test/unit/test_minimax_h3_rank_weight_cache.py
++++ b/sglang/multimodal_gen/test/unit/test_minimax_h3_rank_weight_cache.py
+@@ -82,3 +82,24 @@ def test_atomic_rank_file_manifest_and_restore(tmp_path: Path):
++def test_nonassigning_restore_streams_without_load_state_dict(
++    tmp_path: Path, monkeypatch
++):
++    model = nn.Linear(4, 3)
++    expected = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
++    cache = _cache(tmp_path)
++    assert cache.store(model)
++
++    with torch.no_grad():
++        for parameter in model.parameters():
++            parameter.zero_()
++
++    def forbidden_load_state_dict(*args, **kwargs):
++        raise AssertionError("streamed non-assigning restore must copy directly")
++
++    monkeypatch.setattr(model, "load_state_dict", forbidden_load_state_dict)
++    assert cache.restore(model, target_device=torch.device("cpu"), assign=False)
++    for name, tensor in model.state_dict().items():
++        torch.testing.assert_close(tensor, expected[name], rtol=0, atol=0)
++
++
+ def test_restore_moves_ordinary_state_to_explicit_target_device(tmp_path: Path):
+     model = nn.Linear(4, 3)
+     cache = _cache(tmp_path)

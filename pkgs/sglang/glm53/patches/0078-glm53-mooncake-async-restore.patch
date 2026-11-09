@@ -1,0 +1,368 @@
+--- a/sglang/srt/mem_cache/unified_cache/unified_cache_linker.py
++++ b/sglang/srt/mem_cache/unified_cache/unified_cache_linker.py
+@@ -22,6 +22,7 @@
+ import logging
+ from abc import ABC, abstractmethod
+ from collections.abc import Sequence
++from concurrent.futures import Future
+ from typing import TYPE_CHECKING, NamedTuple
+ 
+ import torch
+@@ -68,13 +69,14 @@
+     layer_done_counter: object
+     restores_before_publish = False
+ 
+-    def restore(self, rid: str, transfers: list[PoolTransfer]) -> bool:
+-        """Restore into unpublished slots and quiesce all writes before returning.
++    def submit_restore(self, rid: str, transfers: list[PoolTransfer]) -> Future:
++        """Start restoring into unpublished slots; never blocks the scheduler.
+ 
+-        Backends opting into restores_before_publish return False on a storage
+-        miss/error. Neither success nor failure may leave DMA using these slots.
+-        The wrapper agrees the outcome across ranks before publishing or freeing
+-        them. No request state or radix-tree state has been changed at this point.
++        Backends opting into restores_before_publish complete futures in
++        submission order. The result is False on a storage miss/error, and the
++        future is done only once no DMA uses these slots. The wrapper agrees
++        the outcome across ranks before publishing or freeing them. No request
++        state or radix-tree state has been changed at this point.
+         """
+         raise NotImplementedError
+ 
+@@ -143,11 +145,14 @@
+     ``prefix_key`` covers the device-cached prefix plus the restorable tail, so
+     it is what gets inserted once the tail lands. ``tail_hashes`` are the
+     per-page storage hashes of that tail alone, starting at ``device_hit_len``.
++    ``host_fields`` are the (full, SWA, Mamba) host hit lengths reported to
++    admission, repeated while the restore is in flight.
+     """
+ 
+     prefix_key: RadixKey
+     tail_hashes: list[str]
+     device_hit_len: int
++    host_fields: tuple[int, int, int]
+ 
+ 
+ class _PendingOffload(NamedTuple):
+@@ -156,6 +161,24 @@
+     publish_node_ids: list[NodeId]
+ 
+ 
++class _PendingRestore:
++    """A transactional restore in flight while its request waits in the queue.
++
++    ``outcome`` is the all-rank agreed result, set by ``settle_restores``.
++    ``orphaned`` means the request no longer wants it (aborted, or its device
++    prefix changed); the slots are freed once the DMA has settled.
++    """
++
++    __slots__ = ("hit", "component_transfers", "future", "outcome", "orphaned")
++
++    def __init__(self, hit, component_transfers, future):
++        self.hit = hit
++        self.component_transfers = component_transfers
++        self.future = future
++        self.outcome: bool | None = None
++        self.orphaned = False
++
++
+ class UnifiedCacheLinkerWrapper:
+     """Drives an external KV store on behalf of one :class:`UnifiedRadixCache`."""
+ 
+@@ -196,6 +219,8 @@
+         self.pending_loads: dict[str, tuple[NodeId, DecLockRefParams]] = {}
+         # Offloads in flight, each holding a lock on its node until it lands.
+         self.pending_offloads: list[_PendingOffload] = []
++        # Transactional restores in submission order (rid -> state).
++        self.restores: dict[str, _PendingRestore] = {}
+ 
+         cache.tree_core.enable_external_cache_linker = True
+         cache.write_through_threshold = 1
+@@ -205,7 +230,7 @@
+         return self.cache_linker.layer_done_counter
+ 
+     def has_hit(self, rid: str) -> bool:
+-        return rid in self.hit_markers
++        return rid in self.hit_markers or rid in self.restores
+ 
+     # ---- match: probe the remote store and report host_hit_length ----
+ 
+@@ -216,6 +241,16 @@
+         key, _ = key.maybe_to_bigram_view(cache.tree_core.is_eagle)
+         page = cache.page_size
+         device_hit_len = int(result.device_indices.numel())
++        pending = self.restores.get(req.rid)
++        if pending is not None:
++            # Keep the in-flight promise while the device prefix it extends is
++            # unchanged. Otherwise drop it: the request recomputes from what is
++            # resident, and the restored slots are freed once the DMA settles.
++            if pending.hit.device_hit_len == device_hit_len:
++                return self._with_host_hit(result, pending.hit.host_fields)
++            self._orphan_restore(req.rid)
++            self.failed_loads.add(req.rid)
++            return result
+         if device_hit_len >= len(key):
+             return result
+ 
+@@ -256,7 +291,15 @@
+             prefix_key=key[: device_hit_len + hit_tokens],
+             tail_hashes=list(tail_hashes[:hit_pages]),
+             device_hit_len=device_hit_len,
++            host_fields=(hit_tokens, swa_host_hit_length, mamba_host_hit_length),
+         )
++        return self._with_host_hit(
++            result, (hit_tokens, swa_host_hit_length, mamba_host_hit_length)
++        )
++
++    @staticmethod
++    def _with_host_hit(result: MatchResult, host_fields) -> MatchResult:
++        hit_tokens, swa_host_hit_length, mamba_host_hit_length = host_fields
+         return result._replace(
+             last_host_node=result.best_match_node,
+             host_hit_length=hit_tokens,
+@@ -309,38 +352,54 @@
+ 
+     # ---- init_load_back: remote -> device, then insert ----
+ 
+-    def load_back(self, req: Req) -> tuple[torch.Tensor, NodeId]:
++    def load_back(self, req: Req) -> tuple[torch.Tensor, NodeId] | None:
++        """Load the external hit; None while a transactional restore is in flight.
++
++        A transactional restore never runs on the scheduler thread. The first
++        call allocates and submits it, and the request stays queued until
++        ``settle_restores`` has agreed the outcome on every rank.
++        """
+         cache = self.cache
+         empty_indices = cache.tree_core.empty_match_result.device_indices
+-        hit = self.hit_markers.pop(req.rid, None)
+-        if hit is None:
+-            return empty_indices, req.last_node
++        transactional = self.cache_linker.restores_before_publish
++        pending = self.restores.get(req.rid)
++        if pending is not None:
++            if pending.outcome is None:
++                return None
++            del self.restores[req.rid]
++            hit, restored = pending.hit, pending.outcome
++            component_transfers = pending.component_transfers
++        else:
++            hit = self.hit_markers.pop(req.rid, None)
++            if hit is None:
++                return empty_indices, req.last_node
++            # Build per-component linker transfers.
++            component_transfers: list[tuple[TreeComponent, PoolTransfer]] = []
++            for component in self._components:
++                transfer = component.build_external_linker_transfer(
++                    LinkerTransferPhase.LOAD, None, hit.tail_hashes
++                )
++                if transfer is None:
++                    break
++                component_transfers.append((component, transfer))
++
++            allocated = len(component_transfers) == len(self._components)
++            if transactional:
++                allocated = self._all_ranks_ready(allocated)
++            if allocated and transactional:
++                self.restores[req.rid] = _PendingRestore(
++                    hit,
++                    component_transfers,
++                    self.cache_linker.submit_restore(
++                        req.rid, [transfer for _, transfer in component_transfers]
++                    ),
++                )
++                return None
++            restored = allocated
+ 
+         device_hit_len = hit.device_hit_len
+         tail_hashes = hit.tail_hashes
+         prefix_len = device_hit_len + len(tail_hashes) * cache.page_size
+-
+-        # Build per-component linker transfers.
+-        component_transfers: list[tuple[TreeComponent, PoolTransfer]] = []
+-        for component in self._components:
+-            transfer = component.build_external_linker_transfer(
+-                LinkerTransferPhase.LOAD, None, tail_hashes
+-            )
+-            if transfer is None:
+-                break
+-            component_transfers.append((component, transfer))
+-
+-        allocated = len(component_transfers) == len(self._components)
+-        transactional = self.cache_linker.restores_before_publish
+-        if transactional:
+-            allocated = self._all_ranks_ready(allocated)
+-        restored = allocated
+-        if allocated and transactional:
+-            restored = self._all_ranks_ready(
+-                self.cache_linker.restore(
+-                    req.rid, [transfer for _, transfer in component_transfers]
+-                )
+-            )
+         if not restored:
+             # PREPARE has not run: no full-to-SWA mapping, request boundary or
+             # tree entry points to these allocations yet. Every rank has also
+@@ -605,6 +664,46 @@
+     def num_completed_loads(self) -> int:
+         return self.cache_linker.num_completed_loads()
+ 
++    def _unsettled_restores(self) -> list[tuple[str, _PendingRestore]]:
++        return [(rid, p) for rid, p in self.restores.items() if p.outcome is None]
++
++    def num_settled_restores(self) -> int:
++        """Leading unsettled restores whose DMA is done here (FIFO completion)."""
++        count = 0
++        for _, pending in self._unsettled_restores():
++            if not pending.future.done():
++                break
++            count += 1
++        return count
++
++    def settle_restores(self, count: int) -> None:
++        """Agree the first ``count`` restore outcomes, done on every rank."""
++        if count == 0:
++            return
++        settled = self._unsettled_restores()[:count]
++        # A device failure raises here: it is not a recoverable cache miss.
++        successes = torch.tensor(
++            [int(pending.future.result()) for _, pending in settled], dtype=torch.int
++        )
++        self.cache._all_reduce_attn_groups(successes, torch.distributed.ReduceOp.MIN)
++        for (rid, pending), success in zip(settled, successes.tolist()):
++            pending.outcome = bool(success)
++            if pending.orphaned:
++                self._drop_restore(rid)
++
++    def _orphan_restore(self, rid: str) -> None:
++        pending = self.restores[rid]
++        if pending.outcome is None:
++            pending.orphaned = True  # settle_restores frees it after the DMA
++        else:
++            self._drop_restore(rid)
++
++    def _drop_restore(self, rid: str) -> None:
++        pending = self.restores.pop(rid)
++        self._update_load(
++            ExternalLinkerLoadPhase.ABORT, None, pending.component_transfers, 0
++        )
++
+     def drain_loads(self, finish_count: int) -> None:
+         for _ in range(finish_count):
+             for rid in self.cache_linker.pop_completed_load():
+@@ -633,6 +732,7 @@
+         self.cache_linker.reset()
+         self.hit_markers.clear()
+         self.failed_loads.clear()
++        self.restores.clear()
+         self._release_pending_locks()
+ 
+     def _release_pending_locks(self) -> None:
+@@ -649,6 +749,8 @@
+     def release_request(self, rid: str) -> None:
+         self.hit_markers.pop(rid, None)
+         self.failed_loads.discard(rid)
++        if rid in self.restores:
++            self._orphan_restore(rid)
+         # TODO: Roll back the published tree and component state atomically before
+         # canceling; otherwise the tree may retain device slots that were never loaded.
+         if self.cache_linker.cancel_queued_load(rid):
+@@ -657,4 +759,5 @@
+ 
+     def close(self) -> None:
+         self.cache_linker.close()
++        self.restores.clear()
+         self._release_pending_locks()
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -5,7 +5,8 @@
+ import logging
+ import os
+ import threading
+-from concurrent.futures import Future
++import time
++from concurrent.futures import Future, ThreadPoolExecutor
+ from queue import Empty, Queue
+ 
+ import torch
+@@ -213,6 +214,11 @@
+             name=f"mooncake-offload-tp{tp_rank}",
+         )
+         self.offload_thread.start()
++        # One worker: restores complete in submission order, as the wrapper's
++        # cross-rank settlement requires.
++        self.restore_executor = ThreadPoolExecutor(
++            max_workers=1, thread_name_prefix=f"mooncake-restore-tp{tp_rank}"
++        )
+ 
+     def _diagnostic_transfer_bytes(self, phase: str, transfer: PoolTransfer) -> None:
+         """Opt-in content-free hashes of the exact device spans passed to I/O.
+@@ -313,10 +319,21 @@
+         self.pending_loads[rid] = expanded
+         return True
+ 
+-    def restore(self, rid: str, transfers: list[PoolTransfer]) -> bool:
++    def submit_restore(self, rid: str, transfers: list[PoolTransfer]) -> Future:
+         # Order previous allocation/initialization work before external DMA.
++        ready_event = device_module.Event()
++        ready_event.record()
++        return self.restore_executor.submit(
++            self._restore_when_ready, ready_event, rid, transfers
++        )
++
++    def _restore_when_ready(self, ready_event, rid, transfers) -> bool:
+         # A device synchronization failure is not a recoverable cache miss.
+-        device_module.current_stream().synchronize()
++        ready_event.synchronize()
++        return self.restore(rid, transfers)
++
++    def restore(self, rid: str, transfers: list[PoolTransfer]) -> bool:
++        start = time.perf_counter()
+         try:
+             expanded = self.pool_group.resolve_transfers(transfers)
+             if not expanded:
+@@ -383,7 +400,12 @@
+             )
+             return False
+         self.stats["load"] += 1
+-        logger.info("Mooncake direct linker restore complete: pools=%d", len(expanded))
++        logger.info(
++            "Mooncake direct linker restore complete: rid=%s pools=%d seconds=%.3f",
++            rid,
++            len(expanded),
++            time.perf_counter() - start,
++        )
+         return True
+ 
+     def cancel_queued_load(self, rid: str) -> bool:
+@@ -551,6 +573,7 @@
+ 
+     def reset(self) -> None:
+         self.pending_loads.clear()
++        self.restore_executor.submit(lambda: None).result()
+         self.load_queue.join()
+         self.offload_queue.join()
+         while True:
+@@ -571,5 +594,6 @@
+         self.offload_queue.put(None)
+         self.load_thread.join()
+         self.offload_thread.join()
++        self.restore_executor.shutdown(wait=True)
+         logger.info("Mooncake direct linker stats: %s", self.stats)
+         self.storage.close()
+--- a/sglang/srt/mem_cache/unified_radix_cache.py
++++ b/sglang/srt/mem_cache/unified_radix_cache.py
+@@ -3284,12 +3284,14 @@
+                 [
+                     self.linker.num_completed_loads(),
+                     self.linker.num_completed_offloads(),
++                    self.linker.num_settled_restores(),
+                 ],
+                 dtype=torch.int,
+                 device="cpu",
+             )
+             self._all_reduce_attn_groups(finish_counts, torch.distributed.ReduceOp.MIN)
+-            load_count, offload_count = map(int, finish_counts.tolist())
++            load_count, offload_count, restore_count = map(int, finish_counts.tolist())
++            self.linker.settle_restores(restore_count)
+             self.linker.drain_loads(load_count)
+             local_successes = self.linker.take_completed_offloads(offload_count)
+             if local_successes:

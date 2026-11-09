@@ -1,0 +1,32 @@
+diff --git a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py
+index 0f4e664..9aad4bc 100644
+--- a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py
++++ b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py
+@@ -95,14 +95,22 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
+             if (parallel_encode or replica_rank == 0) and any(
+                 key not in batch.extra for key in output_keys
+             ):
+                 try:
+-                    with self.use_declared_component(
+-                        component_name="video_vae",
+-                        module=self.video_vae,
+-                    ) as video_vae:
++                    if server_args.vae_cpu_offload:
++                        # A rank-local FSDP shard and the 9.7-GiB H3 video VAE
++                        # cannot coexist on a 32-GiB V620. Encode the single
++                        # FL2VA keyframe where the explicitly offloaded VAE lives.
++                        video_vae = self.video_vae
+                         assert video_vae is not None
+-                        self.video_vae = video_vae
+                         self._encode_keyframes_from_plan(batch, plan, routed)
++                    else:
++                        with self.use_declared_component(
++                            component_name="video_vae",
++                            module=self.video_vae,
++                        ) as video_vae:
++                            assert video_vae is not None
++                            self.video_vae = video_vae
++                            self._encode_keyframes_from_plan(batch, plan, routed)
+                 except Exception as exc:
+                     owner_exception = exc
+                     owner_error = f"{type(exc).__name__}: {exc}"

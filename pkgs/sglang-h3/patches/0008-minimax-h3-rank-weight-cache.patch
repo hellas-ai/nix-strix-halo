@@ -1,0 +1,1243 @@
+diff --git a/sglang/multimodal_gen/runtime/loader/component_loaders/text_encoder_loader.py b/sglang/multimodal_gen/runtime/loader/component_loaders/text_encoder_loader.py
+index 8c9e85e..940b909 100644
+--- a/sglang/multimodal_gen/runtime/loader/component_loaders/text_encoder_loader.py
++++ b/sglang/multimodal_gen/runtime/loader/component_loaders/text_encoder_loader.py
+@@ -28,6 +28,9 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader imp
+     ComponentLoader,
+ )
+ from sglang.multimodal_gen.runtime.loader.fsdp_load import shard_model
++from sglang.multimodal_gen.runtime.loader.minimax_h3_rank_weight_cache import (
++    create_minimax_h3_rank_weight_cache,
++)
+ from sglang.multimodal_gen.runtime.loader.utils import (
+     set_default_torch_dtype,
+     skip_init_modules,
+@@ -435,6 +438,7 @@ class TextEncoderLoader(ComponentLoader):
+         # idle DiT replica during the encoding stage) instead of the default TP
+         # group, so every encoder folds without threading the group through each layer.
+         fold_ctx = nullcontext()
++        folding_group = None
+         if getattr(model_config, "parallel_folding_mode", None) is not None:
+             folding_group = get_folding_tp_group(model_config)
+             if (
+@@ -459,13 +463,43 @@ class TextEncoderLoader(ComponentLoader):
+                 model = model_cls(model_config)
+
+             weights_to_load = {name for name, _ in model.named_parameters()}
+-            loaded_weights = model.load_weights(
+-                self._get_all_weights(
++            h3_rank_cache = None
++            loaded_from_h3_rank_cache = False
++            h3_rank_cache_eligible = (
++                not fsdp_cpu_offload
++                and isinstance(folding_group, GroupCoordinator)
++                and folding_group.world_size == dist.get_world_size()
++            )
++            if h3_rank_cache_eligible:
++                h3_rank_cache = create_minimax_h3_rank_weight_cache(
+                     model,
+-                    model_path,
+-                    to_cpu=should_offload,
++                    component="text_encoder",
++                    canonical_paths=[model_path],
++                    dtype_policy=PRECISION_TO_TYPE[dtype],
++                )
++                if h3_rank_cache is not None:
++                    try:
++                        loaded_from_h3_rank_cache = h3_rank_cache.restore(
++                            model,
++                            target_device=model_device,
++                            assign=False,
++                        )
++                    except Exception as exc:
++                        logger.warning(
++                            "MiniMax H3 rank cache restore failed; using canonical "
++                            "weights: %s",
++                            exc,
++                        )
++            if loaded_from_h3_rank_cache:
++                loaded_weights = weights_to_load
++            else:
++                loaded_weights = model.load_weights(
++                    self._get_all_weights(
++                        model,
++                        model_path,
++                        to_cpu=should_offload,
++                    )
+                 )
+-            )
+
+             if should_offload:
+                 # Disable FSDP for MPS as it's not compatible
+@@ -528,4 +562,14 @@ class TextEncoderLoader(ComponentLoader):
+                     allowed_missing_patterns,
+                 )
+
++            if h3_rank_cache is not None and not loaded_from_h3_rank_cache:
++                try:
++                    h3_rank_cache.store(model)
++                except Exception as exc:
++                    logger.warning(
++                        "MiniMax H3 rank cache staging failed; canonical weights "
++                        "remain active: %s",
++                        exc,
++                    )
++
+         return model
+diff --git a/sglang/multimodal_gen/runtime/loader/fsdp_load.py b/sglang/multimodal_gen/runtime/loader/fsdp_load.py
+index d49a505..3c15069 100644
+--- a/sglang/multimodal_gen/runtime/loader/fsdp_load.py
++++ b/sglang/multimodal_gen/runtime/loader/fsdp_load.py
+@@ -13,6 +13,7 @@ from itertools import chain
+ from typing import Any
+
+ import torch
++import torch.distributed as dist
+ from torch import nn
+ from torch.distributed import DeviceMesh, init_device_mesh
+ from torch.distributed._tensor import distribute_tensor
+@@ -37,6 +38,9 @@ from sglang.multimodal_gen.runtime.loader.utils import (
+     hf_to_custom_state_dict,
+     set_default_torch_dtype,
+ )
++from sglang.multimodal_gen.runtime.loader.minimax_h3_rank_weight_cache import (
++    create_minimax_h3_rank_weight_cache,
++)
+ from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
+ from sglang.multimodal_gen.runtime.loader.weight_utils import (
+     safetensors_weights_iterator,
+@@ -242,6 +246,14 @@ def maybe_load_fsdp_model(
+
+     with set_default_torch_dtype(default_torch_dtype), torch.device("meta"):
+         model = model_cls(**init_params)
++    if (
++        type(model).__module__
++        == "sglang.multimodal_gen.runtime.models.dits.minimax_h3"
++        and type(model).__name__ == "MiniMaxH3DiTModel"
++    ):
++        # fully_shard dynamically wraps the concrete class. Preserve the exact
++        # pre-FSDP identity for the H3-only derived-cache gate.
++        model._minimax_h3_rank_weight_cache_component = "transformer"
+
+     # Check if we should use FSDP
+     use_fsdp = fsdp_inference
+@@ -298,30 +310,69 @@ def maybe_load_fsdp_model(
+
+     param_names_mapping_fn = get_param_names_mapping(model.param_names_mapping)
+
++    h3_rank_cache = None
++    loaded_from_h3_rank_cache = False
++    h3_rank_cache_eligible = (
++        use_fsdp
++        and not load_cpu_offload
++        and init_params.get("quant_config") is None
++        and hsdp_replicate_dim == 1
++        and hsdp_shard_dim == dist.get_world_size()
++    )
++    if h3_rank_cache_eligible:
++        h3_rank_cache = create_minimax_h3_rank_weight_cache(
++            model,
++            component="transformer",
++            canonical_paths=weight_dir_list,
++            dtype_policy=default_torch_dtype,
++        )
++        if h3_rank_cache is not None:
++            try:
++                loaded_from_h3_rank_cache = h3_rank_cache.restore(
++                    model,
++                    target_device=weight_load_plan.checkpoint_load_device,
++                    assign=True,
++                    parameter_factory=_make_param_like,
++                )
++            except Exception as exc:
++                logger.warning(
++                    "MiniMax H3 rank cache restore failed; using canonical weights: %s",
++                    exc,
++                )
++
+     # 2. load model from disk
+-    weight_iterator = safetensors_weights_iterator(weight_dir_list)
+-    preprocess_loaded_state_dict = getattr(model, "preprocess_loaded_state_dict", None)
+-    if preprocess_loaded_state_dict is not None:
+-        weight_iterator = preprocess_loaded_state_dict(weight_iterator)
+     bnb_quant_states = None
+-    if _is_bitsandbytes_quant_config(init_params.get("quant_config")):
+-        normal_weights, raw_quant_state = split_bitsandbytes_4bit_state(weight_iterator)
+-        bnb_quant_states = build_bitsandbytes_4bit_quant_states(
+-            [name for name, _ in normal_weights],
+-            raw_quant_state,
+-            device,
+-            param_names_mapping_fn,
++    if loaded_from_h3_rank_cache:
++        model.reverse_param_names_mapping = {
++            name: (name, None, None) for name in model.state_dict()
++        }
++    else:
++        weight_iterator = safetensors_weights_iterator(weight_dir_list)
++        preprocess_loaded_state_dict = getattr(
++            model, "preprocess_loaded_state_dict", None
++        )
++        if preprocess_loaded_state_dict is not None:
++            weight_iterator = preprocess_loaded_state_dict(weight_iterator)
++        if _is_bitsandbytes_quant_config(init_params.get("quant_config")):
++            normal_weights, raw_quant_state = split_bitsandbytes_4bit_state(
++                weight_iterator
++            )
++            bnb_quant_states = build_bitsandbytes_4bit_quant_states(
++                [name for name, _ in normal_weights],
++                raw_quant_state,
++                device,
++                param_names_mapping_fn,
++            )
++            weight_iterator = iter(normal_weights)
++        load_model_from_full_model_state_dict(
++            model,
++            weight_iterator,
++            weight_load_plan.checkpoint_load_device,
++            param_dtype,
++            strict=strict,
++            cpu_offload=load_cpu_offload,
++            param_names_mapping=param_names_mapping_fn,
+         )
+-        weight_iterator = iter(normal_weights)
+-    load_model_from_full_model_state_dict(
+-        model,
+-        weight_iterator,
+-        weight_load_plan.checkpoint_load_device,
+-        param_dtype,
+-        strict=strict,
+-        cpu_offload=load_cpu_offload,
+-        param_names_mapping=param_names_mapping_fn,
+-    )
+     if bnb_quant_states:
+         attach_bitsandbytes_4bit_quant_states(
+             dict(model.named_parameters()), bnb_quant_states
+@@ -353,6 +404,15 @@ def maybe_load_fsdp_model(
+         if isinstance(p, torch.nn.Parameter):
+             p.requires_grad = False
+
++    if h3_rank_cache is not None and not loaded_from_h3_rank_cache:
++        try:
++            h3_rank_cache.store(model)
++        except Exception as exc:
++            logger.warning(
++                "MiniMax H3 rank cache staging failed; canonical weights remain active: %s",
++                exc,
++            )
++
+     # 4. deferred cpu offload
+     if defer_cpu_offload:
+         model.to("cpu")
+diff --git a/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+new file mode 100644
+index 0000000..12bf553
+--- /dev/null
++++ b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+@@ -0,0 +1,671 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Opt-in, derived rank-local weight cache for MiniMax H3.
++
++The Hugging Face snapshot remains the source of truth. Cache files are only
++accepted after every rank validates the same completed generation against the
++currently constructed model, and every failure falls back to canonical weights.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import re
++import uuid
++from collections.abc import Callable, Mapping, Sequence
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++import torch
++import torch.distributed as dist
++from safetensors import safe_open
++from safetensors.torch import save_file
++from torch import nn
++from torch.distributed.tensor import DTensor
++
++from sglang.multimodal_gen.runtime.distributed import get_world_group
++from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
++
++logger = init_logger(__name__)
++
++MINIMAX_H3_RANK_WEIGHT_CACHE_DIR_ENV = (
++    "SGLANG_MINIMAX_H3_RANK_WEIGHT_CACHE_DIR"
++)
++MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR_ENV = (
++    "SGLANG_MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR"
++)
++MINIMAX_H3_RANK_WEIGHT_CACHE_SCHEMA = "hellas.minimax_h3.rank_weights.v1"
++# Bump this whenever construction, parameter mapping, TP folding, or FSDP
++# placement semantics change. It deliberately includes the pinned SGLang base.
++MINIMAX_H3_RANK_WEIGHT_CACHE_ABI = (
++    "sglang-b6a09f38fcc5e96574324b4acc19d421c539cfc6-h3-rank-v1"
++)
++
++_EXTERNAL_RANK_ENV = "SGLANG_DIFFUSION_EXTERNAL_RANK"
++_READ_ROOTS = (
++    Path("/models/.cache/hellas/h3-rank-shards"),
++    Path("/mnt/Home/src/hellas-ai-video/artifacts/h3-rank-shards"),
++)
++_STAGING_ROOT = Path(
++    "/mnt/Home/src/hellas-ai-video/artifacts/h3-rank-shards"
++)
++_HF_REVISION = re.compile(r"[0-9a-f]{40,64}")
++_RANK_FILE = re.compile(r"rank-(\d{5})-([0-9a-f]{32})\.safetensors")
++_H3_MODEL_TYPES = {
++    "text_encoder": (
++        "sglang.multimodal_gen.runtime.models.encoders.minimax_h3_qwen3vl",
++        "MiniMaxH3Qwen3VLEncoder",
++    ),
++    "transformer": (
++        "sglang.multimodal_gen.runtime.models.dits.minimax_h3",
++        "MiniMaxH3DiTModel",
++    ),
++}
++
++
++def _truthy_environment(name: str) -> bool:
++    return os.environ.get(name, "0").strip().lower() in {"1", "true"}
++
++
++def _supported_rank_launch() -> bool:
++    if _truthy_environment(_EXTERNAL_RANK_ENV):
++        return True
++    if not dist.is_initialized():
++        return False
++    try:
++        rank = int(os.environ["RANK"])
++        local_rank = int(os.environ["LOCAL_RANK"])
++        world_size = int(os.environ["WORLD_SIZE"])
++    except (KeyError, ValueError):
++        return False
++    # SGLang's ordinary single-host launcher assigns global rank == local GPU
++    # rank and initializes the workers through a loopback rendezvous. Accept
++    # that exact shape without pretending it is the external torchrun mode.
++    return (
++        os.environ.get("MASTER_ADDR", "").strip().lower()
++        in {"localhost", "127.0.0.1", "::1"}
++        and world_size > 1
++        and rank == local_rank == dist.get_rank()
++        and world_size == dist.get_world_size()
++    )
++
++
++def _path_is_within(path: Path, root: Path) -> bool:
++    try:
++        path.relative_to(root)
++    except ValueError:
++        return False
++    return True
++
++
++def _configured_root(name: str, *, write: bool) -> Path | None:
++    raw = os.environ.get(name)
++    if raw is None or not raw.strip():
++        return None
++    requested = Path(raw.strip()).expanduser()
++    if not requested.is_absolute():
++        raise ValueError(f"{name} must be an absolute path")
++    resolved = requested.resolve(strict=False)
++    allowed_roots = (_STAGING_ROOT,) if write else _READ_ROOTS
++    resolved_roots = tuple(root.resolve(strict=False) for root in allowed_roots)
++    if not any(_path_is_within(resolved, root) for root in resolved_roots):
++        allowed = ", ".join(str(root) for root in resolved_roots)
++        raise ValueError(f"{name} must resolve within one of: {allowed}")
++    return resolved
++
++
++def _canonical_identity(paths: Sequence[str | Path]) -> tuple[str, str]:
++    if not paths:
++        raise ValueError("canonical MiniMax H3 weight paths are empty")
++    identities: list[tuple[str, Path, Path]] = []
++    for original in paths:
++        source = Path(original)
++        if not source.exists():
++            raise ValueError(f"canonical weight path does not exist: {source}")
++        # Snapshot files are symlinks into HF's blobs directory. Resolve the
++        # containing component path, but preserve the filename, or the revision
++        # carried by snapshots/<commit>/ would be lost.
++        resolved = (
++            source.resolve(strict=True)
++            if source.is_dir()
++            else source.parent.resolve(strict=True) / source.name
++        )
++        parts = resolved.parts
++        try:
++            snapshot_index = max(
++                index for index, part in enumerate(parts[:-1]) if part == "snapshots"
++            )
++        except ValueError as exc:
++            raise ValueError(
++                f"canonical weight path is not inside a Hugging Face snapshot: {resolved}"
++            ) from exc
++        revision = parts[snapshot_index + 1]
++        if _HF_REVISION.fullmatch(revision) is None:
++            raise ValueError(
++                f"canonical weight path has an invalid snapshot revision: {resolved}"
++            )
++        snapshot_root = Path(*parts[: snapshot_index + 2])
++        component_path = resolved if resolved.is_dir() else resolved.parent
++        identities.append((revision, snapshot_root, component_path))
++
++    revisions = {revision for revision, _, _ in identities}
++    snapshot_roots = {root for _, root, _ in identities}
++    if len(revisions) != 1 or len(snapshot_roots) != 1:
++        raise ValueError("canonical weight paths span multiple model revisions")
++    revision = identities[0][0]
++    snapshot_root = identities[0][1]
++    component_path = Path(os.path.commonpath([str(item[2]) for item in identities]))
++    relative_component = component_path.relative_to(snapshot_root).as_posix()
++    if relative_component in ("", "."):
++        raise ValueError("canonical component path must be below the snapshot root")
++    return revision, relative_component
++
++
++def _dtype_name(dtype: torch.dtype) -> str:
++    return str(dtype).removeprefix("torch.")
++
++
++def _tensor_spec(tensor: torch.Tensor) -> dict[str, Any]:
++    if isinstance(tensor, DTensor):
++        local = tensor.to_local()
++        return {
++            "kind": "dtensor",
++            "dtype": _dtype_name(tensor.dtype),
++            "global_shape": list(tensor.shape),
++            "global_stride": list(tensor.stride()),
++            "local_shape": list(local.shape),
++            "mesh_shape": list(tensor.device_mesh.mesh.shape),
++            "mesh_dim_names": list(tensor.device_mesh.mesh_dim_names or ()),
++            "placements": [repr(placement) for placement in tensor.placements],
++        }
++    return {
++        "kind": "tensor",
++        "dtype": _dtype_name(tensor.dtype),
++        "global_shape": list(tensor.shape),
++        "global_stride": list(tensor.stride()),
++        "local_shape": list(tensor.shape),
++        "mesh_shape": [],
++        "mesh_dim_names": [],
++        "placements": [],
++    }
++
++
++def _state_spec(state: Mapping[str, torch.Tensor]) -> dict[str, dict[str, Any]]:
++    return {name: _tensor_spec(state[name]) for name in sorted(state)}
++
++
++def _state_signature(spec: Mapping[str, Mapping[str, Any]]) -> str:
++    payload = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
++    return hashlib.sha256(payload).hexdigest()
++
++
++def _directory_fsync(directory: Path) -> None:
++    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
++    try:
++        os.fsync(descriptor)
++    finally:
++        os.close(descriptor)
++
++
++def _sha256_file(path: Path, block_size: int = 16 * 1024 * 1024) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        while block := stream.read(block_size):
++            digest.update(block)
++    return digest.hexdigest()
++
++
++def _atomic_safetensors_write(
++    path: Path,
++    tensors: Mapping[str, torch.Tensor],
++    metadata: Mapping[str, str],
++) -> None:
++    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
++    partial = path.parent / f".{path.name}.{os.getpid()}.partial"
++    partial.unlink(missing_ok=True)
++    try:
++        save_file(dict(tensors), str(partial), metadata=dict(metadata))
++        with partial.open("rb") as stream:
++            os.fsync(stream.fileno())
++        os.replace(partial, path)
++        _directory_fsync(path.parent)
++    except BaseException:
++        partial.unlink(missing_ok=True)
++        raise
++
++
++def _atomic_json_write(path: Path, value: Mapping[str, Any]) -> None:
++    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
++    partial = path.parent / f".{path.name}.{os.getpid()}.partial"
++    partial.unlink(missing_ok=True)
++    try:
++        with partial.open("w", encoding="utf-8") as stream:
++            json.dump(value, stream, sort_keys=True, separators=(",", ":"))
++            stream.write("\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(partial, path)
++        _directory_fsync(path.parent)
++    except BaseException:
++        partial.unlink(missing_ok=True)
++        raise
++
++
++def _cpu_local_state(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
++    result: dict[str, torch.Tensor] = {}
++    for name, tensor in state.items():
++        local = tensor.to_local() if isinstance(tensor, DTensor) else tensor
++        if local.is_meta:
++            raise ValueError(f"cannot cache meta tensor {name!r}")
++        # Clone breaks any tied storage because safetensors rejects aliases.
++        result[name] = local.detach().to(device="cpu").contiguous().clone()
++    return result
++
++
++def _collective_group():
++    try:
++        return get_world_group()
++    except (AssertionError, RuntimeError):
++        return None
++
++
++@dataclass
++class MiniMaxH3RankWeightCache:
++    read_root: Path | None
++    staging_root: Path | None
++    relative_dir: Path
++    base_metadata: dict[str, str]
++    rank: int
++    world_size: int
++    world_group: Any | None = None
++
++    @property
++    def read_dir(self) -> Path | None:
++        return None if self.read_root is None else self.read_root / self.relative_dir
++
++    @property
++    def staging_dir(self) -> Path | None:
++        return (
++            None
++            if self.staging_root is None
++            else self.staging_root / self.relative_dir
++        )
++
++    def _all_gather(self, value: dict[str, Any]) -> list[dict[str, Any]]:
++        if self.world_size == 1:
++            return [value]
++        gathered: list[dict[str, Any] | None] = [None] * self.world_size
++        group = (
++            self.world_group.cpu_group
++            if self.world_group is not None
++            else None
++        )
++        dist.all_gather_object(gathered, value, group=group)
++        if any(not isinstance(item, dict) for item in gathered):
++            raise RuntimeError("MiniMax H3 rank cache collective returned invalid status")
++        return [item for item in gathered if isinstance(item, dict)]
++
++    def _broadcast(self, value: Any) -> Any:
++        if self.world_size == 1:
++            return value
++        if self.world_group is not None:
++            return self.world_group.broadcast_object(value, src=0)
++        values = [value if self.rank == 0 else None]
++        dist.broadcast_object_list(values, src=0)
++        return values[0]
++
++    def _file_metadata(self, signature: str) -> dict[str, str]:
++        return self.base_metadata | {
++            "rank": str(self.rank),
++            "state_signature": signature,
++        }
++
++    def _validate_local_entry(
++        self,
++        spec: Mapping[str, Mapping[str, Any]],
++        signature: str,
++    ) -> Path:
++        if self.read_dir is None:
++            raise ValueError("rank cache read root is not configured")
++        manifest_path = self.read_dir / "complete.json"
++        with manifest_path.open(encoding="utf-8") as stream:
++            manifest = json.load(stream)
++        if manifest.get("metadata") != self.base_metadata:
++            raise ValueError("completion manifest metadata mismatch")
++        rank_files = manifest.get("rank_files")
++        expected_ranks = {str(rank) for rank in range(self.world_size)}
++        if not isinstance(rank_files, dict) or set(rank_files) != expected_ranks:
++            raise ValueError("completion manifest rank set mismatch")
++        entry = rank_files.get(str(self.rank))
++        if not isinstance(entry, dict) or entry.get("rank") != self.rank:
++            raise ValueError("completion manifest local rank mismatch")
++        if entry.get("state_signature") != signature:
++            raise ValueError("completion manifest state signature mismatch")
++        filename = entry.get("file")
++        match = _RANK_FILE.fullmatch(filename) if isinstance(filename, str) else None
++        if match is None or int(match.group(1)) != self.rank:
++            raise ValueError("completion manifest rank filename is invalid")
++        cache_path = self.read_dir / filename
++        if cache_path.parent != self.read_dir:
++            raise ValueError("completion manifest rank filename escapes cache directory")
++        if cache_path.stat().st_size != entry.get("size"):
++            raise ValueError("rank cache file size mismatch")
++        expected_sha256 = entry.get("sha256")
++        if (
++            not isinstance(expected_sha256, str)
++            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
++        ):
++            raise ValueError("completion manifest rank checksum is invalid")
++        if _sha256_file(cache_path) != expected_sha256:
++            raise ValueError("rank cache file checksum mismatch")
++        expected_metadata = self._file_metadata(signature)
++        with safe_open(cache_path, framework="pt", device="cpu") as checkpoint:
++            if checkpoint.metadata() != expected_metadata:
++                raise ValueError("rank cache safetensors metadata mismatch")
++            if set(checkpoint.keys()) != set(spec):
++                raise ValueError("rank cache key set mismatch")
++            for name, expected in spec.items():
++                shape = list(checkpoint.get_slice(name).get_shape())
++                if shape != expected["local_shape"]:
++                    raise ValueError(
++                        f"rank cache shape mismatch for {name!r}: "
++                        f"{shape} != {expected['local_shape']}"
++                    )
++        return cache_path
++
++    def _load_local_tensors(
++        self,
++        path: Path,
++        spec: Mapping[str, Mapping[str, Any]],
++    ) -> dict[str, torch.Tensor]:
++        result: dict[str, torch.Tensor] = {}
++        with safe_open(path, framework="pt", device="cpu") as checkpoint:
++            for name, expected in spec.items():
++                tensor = checkpoint.get_tensor(name)
++                if list(tensor.shape) != expected["local_shape"]:
++                    raise ValueError(f"rank cache shape changed while reading {name!r}")
++                if _dtype_name(tensor.dtype) != expected["dtype"]:
++                    raise ValueError(
++                        f"rank cache dtype mismatch for {name!r}: "
++                        f"{tensor.dtype} != {expected['dtype']}"
++                    )
++                result[name] = tensor
++        return result
++
++    def restore(
++        self,
++        model: nn.Module,
++        *,
++        target_device: torch.device,
++        assign: bool,
++        parameter_factory: Callable[
++            [torch.nn.Parameter, torch.Tensor], torch.nn.Parameter
++        ]
++        | None = None,
++    ) -> bool:
++        if self.read_dir is None:
++            return False
++        current_state = model.state_dict()
++        spec = _state_spec(current_state)
++        signature = _state_signature(spec)
++        cache_path: Path | None = None
++        try:
++            cache_path = self._validate_local_entry(spec, signature)
++            validation = {"ok": True, "error": None}
++        except Exception as exc:
++            validation = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
++        validations = self._all_gather(validation)
++        if not all(item.get("ok") is True for item in validations):
++            if self.rank == 0:
++                logger.warning(
++                    "MiniMax H3 rank cache validation failed; using canonical weights: %s",
++                    [item.get("error") for item in validations if not item.get("ok")],
++                )
++            return False
++
++        try:
++            assert cache_path is not None
++            local_tensors = self._load_local_tensors(cache_path, spec)
++            reconstructed: dict[str, torch.Tensor] = {}
++            ordinary_parameter_names: list[str] = []
++            parameters = dict(model.named_parameters())
++            for name, template in current_state.items():
++                local = local_tensors[name]
++                if isinstance(template, DTensor):
++                    local = local.to(device=target_device)
++                    tensor = DTensor.from_local(
++                        local,
++                        device_mesh=template.device_mesh,
++                        placements=template.placements,
++                        run_check=False,
++                        shape=template.shape,
++                        stride=template.stride(),
++                    )
++                else:
++                    tensor = local.to(device=target_device)
++                actual_param = parameters.get(name)
++                if actual_param is not None and parameter_factory is not None:
++                    reconstructed[name] = parameter_factory(actual_param, tensor)
++                    if not isinstance(template, DTensor):
++                        ordinary_parameter_names.append(name)
++                else:
++                    reconstructed[name] = tensor
++            incompatible = model.load_state_dict(
++                reconstructed,
++                strict=True,
++                assign=assign,
++            )
++            if incompatible.missing_keys or incompatible.unexpected_keys:
++                raise ValueError(f"rank cache incompatible keys: {incompatible}")
++            # FSDP state-dict hooks may place root-level parameters that are not
++            # represented by DTensors back on the template device. These TP
++            # stragglers are not managed by FSDP, so bind the already validated
++            # rank-local tensors directly to their owning modules. Canonical
++            # loading likewise keeps them on the transformer compute device.
++            if assign and parameter_factory is not None:
++                for name in ordinary_parameter_names:
++                    module_name, separator, parameter_name = name.rpartition(".")
++                    module = model.get_submodule(module_name) if separator else model
++                    module._parameters[parameter_name] = reconstructed[name]
++                    restored = module._parameters[parameter_name]
++                    if restored is None or restored.device != target_device:
++                        raise RuntimeError(
++                            f"rank cache left unmanaged parameter {name!r} on "
++                            f"{None if restored is None else restored.device}, "
++                            f"expected {target_device}"
++                        )
++            load_status = {"ok": True, "error": None}
++        except Exception as exc:
++            load_status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
++        load_statuses = self._all_gather(load_status)
++        if not all(item.get("ok") is True for item in load_statuses):
++            if self.rank == 0:
++                logger.warning(
++                    "MiniMax H3 rank cache load failed; reloading canonical weights: %s",
++                    [item.get("error") for item in load_statuses if not item.get("ok")],
++                )
++            return False
++        if self.rank == 0:
++            logger.info("Loaded MiniMax H3 rank-local weights from %s", self.read_dir)
++        return True
++
++    def store(self, model: nn.Module) -> bool:
++        if self.staging_dir is None:
++            return False
++        generation = self._broadcast(uuid.uuid4().hex if self.rank == 0 else None)
++        if not isinstance(generation, str) or re.fullmatch(r"[0-9a-f]{32}", generation) is None:
++            raise RuntimeError("MiniMax H3 rank cache generation broadcast failed")
++        filename = f"rank-{self.rank:05d}-{generation}.safetensors"
++        cache_path = self.staging_dir / filename
++        state = model.state_dict()
++        spec = _state_spec(state)
++        signature = _state_signature(spec)
++        try:
++            tensors = _cpu_local_state(state)
++            _atomic_safetensors_write(
++                cache_path,
++                tensors,
++                self._file_metadata(signature),
++            )
++            local_status = {
++                "ok": True,
++                "error": None,
++                "rank": self.rank,
++                "file": filename,
++                "size": cache_path.stat().st_size,
++                "sha256": _sha256_file(cache_path),
++                "state_signature": signature,
++            }
++        except Exception as exc:
++            local_status = {
++                "ok": False,
++                "error": f"{type(exc).__name__}: {exc}",
++                "rank": self.rank,
++            }
++        statuses = self._all_gather(local_status)
++        if not all(item.get("ok") is True for item in statuses):
++            cache_path.unlink(missing_ok=True)
++            if self.rank == 0:
++                logger.warning(
++                    "Could not stage MiniMax H3 rank cache; canonical weights remain active: %s",
++                    [item.get("error") for item in statuses if not item.get("ok")],
++                )
++            return False
++
++        manifest_status: dict[str, Any] | None = None
++        if self.rank == 0:
++            try:
++                rank_files = {str(item["rank"]): item for item in statuses}
++                manifest = {
++                    "metadata": self.base_metadata,
++                    "rank_files": rank_files,
++                }
++                assert self.staging_dir is not None
++                _atomic_json_write(self.staging_dir / "complete.json", manifest)
++                manifest_status = {"ok": True, "error": None}
++            except Exception as exc:
++                manifest_status = {
++                    "ok": False,
++                    "error": f"{type(exc).__name__}: {exc}",
++                }
++        manifest_status = self._broadcast(manifest_status)
++        if not isinstance(manifest_status, dict) or not manifest_status.get("ok"):
++            cache_path.unlink(missing_ok=True)
++            if self.rank == 0:
++                logger.warning(
++                    "Could not publish MiniMax H3 rank cache manifest: %s",
++                    None
++                    if not isinstance(manifest_status, dict)
++                    else manifest_status.get("error"),
++                )
++            return False
++        if self.rank == 0:
++            logger.info("Staged complete MiniMax H3 rank cache in %s", self.staging_dir)
++        return True
++
++
++def create_minimax_h3_rank_weight_cache(
++    model: nn.Module,
++    *,
++    component: str,
++    canonical_paths: Sequence[str | Path],
++    dtype_policy: torch.dtype,
++) -> MiniMaxH3RankWeightCache | None:
++    if not _supported_rank_launch():
++        return None
++    if component not in _H3_MODEL_TYPES:
++        return None
++    expected_module, expected_name = _H3_MODEL_TYPES[component]
++    original_type_in_mro = any(
++        cls.__module__ == expected_module and cls.__name__ == expected_name
++        for cls in type(model).__mro__
++    )
++    marked_before_fsdp = (
++        getattr(model, "_minimax_h3_rank_weight_cache_component", None) == component
++    )
++    if not original_type_in_mro and not marked_before_fsdp:
++        return None
++    read_requested = os.environ.get(MINIMAX_H3_RANK_WEIGHT_CACHE_DIR_ENV)
++    staging_requested = os.environ.get(
++        MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR_ENV
++    )
++    if not (read_requested and read_requested.strip()) and not (
++        staging_requested and staging_requested.strip()
++    ):
++        return None
++    if not dist.is_initialized():
++        logger.warning(
++            "MiniMax H3 rank cache requested before distributed initialization; "
++            "using canonical weights"
++        )
++        return None
++
++    try:
++        read_root = _configured_root(
++            MINIMAX_H3_RANK_WEIGHT_CACHE_DIR_ENV, write=False
++        )
++    except Exception as exc:
++        logger.warning("Ignoring invalid MiniMax H3 rank cache read root: %s", exc)
++        read_root = None
++    try:
++        staging_root = _configured_root(
++            MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR_ENV, write=True
++        )
++    except Exception as exc:
++        logger.warning("Ignoring invalid MiniMax H3 rank cache staging root: %s", exc)
++        staging_root = None
++    if read_root is None and staging_root is None:
++        return None
++
++    try:
++        revision, component_path = _canonical_identity(canonical_paths)
++    except Exception as exc:
++        logger.warning(
++            "Cannot identify canonical MiniMax H3 revision for rank cache; "
++            "using canonical weights: %s",
++            exc,
++        )
++        return None
++
++    rank = dist.get_rank()
++    world_size = dist.get_world_size()
++    world_group = _collective_group()
++    identity = {
++        "schema": MINIMAX_H3_RANK_WEIGHT_CACHE_SCHEMA,
++        "abi": MINIMAX_H3_RANK_WEIGHT_CACHE_ABI,
++        "model_revision": revision,
++        "component": component,
++        "component_path": component_path,
++        "world_size": str(world_size),
++        "dtype_policy": _dtype_name(dtype_policy),
++    }
++    identity_digest = hashlib.sha256(
++        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
++    ).hexdigest()[:20]
++    relative_dir = (
++        Path("minimax-h3")
++        / revision
++        / f"{component}-{identity_digest}"
++        / f"world-{world_size:05d}"
++    )
++    return MiniMaxH3RankWeightCache(
++        read_root=read_root,
++        staging_root=staging_root,
++        relative_dir=relative_dir,
++        base_metadata=identity,
++        rank=rank,
++        world_size=world_size,
++        world_group=world_group,
++    )
++
++
++__all__ = [
++    "MINIMAX_H3_RANK_WEIGHT_CACHE_ABI",
++    "MINIMAX_H3_RANK_WEIGHT_CACHE_DIR_ENV",
++    "MINIMAX_H3_RANK_WEIGHT_CACHE_SCHEMA",
++    "MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR_ENV",
++    "MiniMaxH3RankWeightCache",
++    "create_minimax_h3_rank_weight_cache",
++]
+diff --git a/sglang/multimodal_gen/test/unit/test_minimax_h3_rank_weight_cache.py b/sglang/multimodal_gen/test/unit/test_minimax_h3_rank_weight_cache.py
+new file mode 100644
+index 0000000..c3f8e02
+--- /dev/null
++++ b/sglang/multimodal_gen/test/unit/test_minimax_h3_rank_weight_cache.py
+@@ -0,0 +1,330 @@
++# SPDX-License-Identifier: Apache-2.0
++"""MiniMax H3 derived rank-local weight cache contracts."""
++
++from __future__ import annotations
++
++import json
++import multiprocessing
++from datetime import timedelta
++from pathlib import Path
++
++import pytest
++import torch
++import torch.distributed as dist
++from torch import nn
++from torch.distributed.device_mesh import init_device_mesh
++from torch.distributed.tensor import DTensor, Replicate, Shard
++
++from sglang.multimodal_gen.runtime.loader.minimax_h3_rank_weight_cache import (
++    MINIMAX_H3_RANK_WEIGHT_CACHE_ABI,
++    MINIMAX_H3_RANK_WEIGHT_CACHE_DIR_ENV,
++    MINIMAX_H3_RANK_WEIGHT_CACHE_SCHEMA,
++    MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR_ENV,
++    MiniMaxH3RankWeightCache,
++    _canonical_identity,
++    _configured_root,
++    _supported_rank_launch,
++    create_minimax_h3_rank_weight_cache,
++)
++
++
++def _cache(
++    root: Path,
++    *,
++    relative: str = "unit-cache",
++    rank: int = 0,
++    world_size: int = 1,
++    read: bool = True,
++    stage: bool = True,
++) -> MiniMaxH3RankWeightCache:
++    return MiniMaxH3RankWeightCache(
++        read_root=root if read else None,
++        staging_root=root if stage else None,
++        relative_dir=Path(relative),
++        base_metadata={
++            "schema": MINIMAX_H3_RANK_WEIGHT_CACHE_SCHEMA,
++            "abi": MINIMAX_H3_RANK_WEIGHT_CACHE_ABI,
++            "model_revision": "a" * 40,
++            "component": "test",
++            "component_path": "FL2VA/test",
++            "world_size": str(world_size),
++            "dtype_policy": "float32",
++        },
++        rank=rank,
++        world_size=world_size,
++    )
++
++
++def test_atomic_rank_file_manifest_and_restore(tmp_path: Path):
++    model = nn.Linear(4, 3)
++    expected = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
++    cache = _cache(tmp_path)
++
++    assert cache.store(model)
++    assert cache.read_dir is not None
++    entries = list(cache.read_dir.iterdir())
++    assert sum(path.name == "complete.json" for path in entries) == 1
++    assert sum(path.suffix == ".safetensors" for path in entries) == 1
++    assert not any("partial" in path.name for path in entries)
++
++    with torch.no_grad():
++        for parameter in model.parameters():
++            parameter.zero_()
++    assert cache.restore(model, target_device=torch.device("cpu"), assign=False)
++    for name, tensor in model.state_dict().items():
++        torch.testing.assert_close(tensor, expected[name], rtol=0, atol=0)
++
++
++def test_restore_moves_ordinary_state_to_explicit_target_device(tmp_path: Path):
++    model = nn.Linear(4, 3)
++    cache = _cache(tmp_path)
++
++    assert cache.store(model)
++    assert cache.restore(
++        model,
++        target_device=torch.device("meta"),
++        assign=True,
++    )
++    assert {tensor.device.type for tensor in model.state_dict().values()} == {"meta"}
++
++
++def test_manifest_mismatch_falls_back_without_touching_model(tmp_path: Path):
++    model = nn.Linear(2, 2, bias=False)
++    cache = _cache(tmp_path)
++    assert cache.store(model)
++    assert cache.read_dir is not None
++    manifest_path = cache.read_dir / "complete.json"
++    manifest = json.loads(manifest_path.read_text())
++    manifest["metadata"]["abi"] = "wrong"
++    manifest_path.write_text(json.dumps(manifest))
++
++    with torch.no_grad():
++        model.weight.fill_(17)
++    assert not cache.restore(model, target_device=torch.device("cpu"), assign=False)
++    torch.testing.assert_close(model.weight, torch.full_like(model.weight, 17))
++
++
++def test_read_only_cache_never_writes(tmp_path: Path):
++    model = nn.Linear(2, 2)
++    cache = _cache(tmp_path, read=True, stage=False)
++    assert not cache.store(model)
++    assert not (tmp_path / "unit-cache").exists()
++
++
++def test_staging_root_rejects_paths_outside_artifact_tree(monkeypatch):
++    monkeypatch.setenv(
++        MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR_ENV,
++        "/models/.cache/hellas/h3-rank-shards",
++    )
++    with pytest.raises(ValueError, match="must resolve within"):
++        _configured_root(MINIMAX_H3_RANK_WEIGHT_CACHE_STAGING_DIR_ENV, write=True)
++
++
++def test_canonical_identity_preserves_snapshot_revision_for_blob_symlink(
++    tmp_path: Path,
++):
++    revision = "b" * 40
++    snapshot_component = tmp_path / "snapshots" / revision / "FL2VA" / "transformer"
++    blob = tmp_path / "blobs" / "weight"
++    snapshot_component.mkdir(parents=True)
++    blob.parent.mkdir()
++    blob.write_bytes(b"weight")
++    weight = snapshot_component / "model.safetensors"
++    weight.symlink_to(blob)
++
++    assert _canonical_identity([weight]) == (revision, "FL2VA/transformer")
++
++
++def _set_internal_rank_environment(monkeypatch, *, rank: int = 2) -> None:
++    monkeypatch.delenv("SGLANG_DIFFUSION_EXTERNAL_RANK", raising=False)
++    monkeypatch.setenv("MASTER_ADDR", "localhost")
++    monkeypatch.setenv("RANK", str(rank))
++    monkeypatch.setenv("LOCAL_RANK", str(rank))
++    monkeypatch.setenv("WORLD_SIZE", "4")
++    monkeypatch.setattr(dist, "is_initialized", lambda: True)
++    monkeypatch.setattr(dist, "get_rank", lambda: rank)
++    monkeypatch.setattr(dist, "get_world_size", lambda: 4)
++
++
++def test_internal_single_host_rank_launch_is_supported(monkeypatch):
++    _set_internal_rank_environment(monkeypatch)
++    assert _supported_rank_launch()
++
++
++def test_external_rank_launch_stays_supported(monkeypatch):
++    monkeypatch.setenv("SGLANG_DIFFUSION_EXTERNAL_RANK", "1")
++    monkeypatch.setattr(dist, "is_initialized", lambda: False)
++    assert _supported_rank_launch()
++
++
++@pytest.mark.parametrize(
++    ("name", "value"),
++    (
++        ("MASTER_ADDR", "strix-1"),
++        ("RANK", "1"),
++        ("LOCAL_RANK", "1"),
++        ("WORLD_SIZE", "8"),
++    ),
++)
++def test_internal_rank_launch_rejects_nonlocal_or_incoherent_environment(
++    monkeypatch, name: str, value: str
++):
++    _set_internal_rank_environment(monkeypatch)
++    monkeypatch.setenv(name, value)
++    assert not _supported_rank_launch()
++
++
++def test_internal_single_host_rank_can_create_h3_cache(monkeypatch, tmp_path: Path):
++    _set_internal_rank_environment(monkeypatch)
++    monkeypatch.setenv(
++        MINIMAX_H3_RANK_WEIGHT_CACHE_DIR_ENV,
++        "/models/.cache/hellas/h3-rank-shards",
++    )
++    revision = "c" * 40
++    component_path = tmp_path / "snapshots" / revision / "text_encoder"
++    component_path.mkdir(parents=True)
++    model_type = type(
++        "MiniMaxH3Qwen3VLEncoder",
++        (nn.Linear,),
++        {
++            "__module__": (
++                "sglang.multimodal_gen.runtime.models.encoders.minimax_h3_qwen3vl"
++            )
++        },
++    )
++    model = model_type(2, 2)
++
++    cache = create_minimax_h3_rank_weight_cache(
++        model,
++        component="text_encoder",
++        canonical_paths=[component_path],
++        dtype_policy=torch.bfloat16,
++    )
++
++    assert cache is not None
++    assert cache.rank == 2
++    assert cache.world_size == 4
++    assert cache.relative_dir.parts[-1] == "world-00004"
++
++
++def _gloo_worker(rank: int, rendezvous: str, root: str, results) -> None:
++    dist.init_process_group(
++        "gloo",
++        init_method=f"file://{rendezvous}",
++        rank=rank,
++        world_size=2,
++        timeout=timedelta(seconds=20),
++    )
++    try:
++        cache_root = Path(root)
++        ordinary = nn.Linear(4, 4, bias=False)
++        with torch.no_grad():
++            ordinary.weight.fill_(rank + 1)
++        ordinary_cache = _cache(
++            cache_root,
++            relative="gloo-ordinary",
++            rank=rank,
++            world_size=2,
++        )
++        assert ordinary_cache.store(ordinary)
++        with torch.no_grad():
++            ordinary.weight.zero_()
++        assert ordinary_cache.restore(
++            ordinary, target_device=torch.device("cpu"), assign=False
++        )
++        torch.testing.assert_close(
++            ordinary.weight, torch.full_like(ordinary.weight, rank + 1)
++        )
++
++        mesh = init_device_mesh(
++            "cpu",
++            mesh_shape=(1, 2),
++            mesh_dim_names=("replicate", "shard"),
++        )
++        placements = (Replicate(), Shard(0))
++        local = torch.full((2, 2), rank + 3, dtype=torch.float32)
++        distributed = DTensor.from_local(
++            local,
++            device_mesh=mesh,
++            placements=placements,
++            run_check=False,
++            shape=torch.Size((4, 2)),
++            stride=(2, 1),
++        )
++        dtensor_model = nn.Module()
++        dtensor_model.weight = nn.Parameter(distributed, requires_grad=False)
++        dtensor_cache = _cache(
++            cache_root,
++            relative="gloo-dtensor",
++            rank=rank,
++            world_size=2,
++        )
++        assert dtensor_cache.store(dtensor_model)
++
++        empty = DTensor.from_local(
++            torch.zeros_like(local),
++            device_mesh=mesh,
++            placements=placements,
++            run_check=False,
++            shape=torch.Size((4, 2)),
++            stride=(2, 1),
++        )
++        restored_model = nn.Module()
++        restored_model.weight = nn.Parameter(empty, requires_grad=False)
++        assert dtensor_cache.restore(
++            restored_model,
++            target_device=torch.device("cpu"),
++            assign=True,
++            parameter_factory=lambda _parameter, tensor: nn.Parameter(
++                tensor, requires_grad=False
++            ),
++        )
++        torch.testing.assert_close(restored_model.weight.to_local(), local)
++        full = restored_model.weight.full_tensor()
++        expected_full = torch.cat(
++            (torch.full((2, 2), 3.0), torch.full((2, 2), 4.0)), dim=0
++        )
++        torch.testing.assert_close(full, expected_full)
++
++        dist.barrier()
++        if rank == 0:
++            assert ordinary_cache.read_dir is not None
++            manifest = json.loads(
++                (ordinary_cache.read_dir / "complete.json").read_text()
++            )
++            rank_one_file = manifest["rank_files"]["1"]["file"]
++            (ordinary_cache.read_dir / rank_one_file).unlink()
++        dist.barrier()
++        with torch.no_grad():
++            ordinary.weight.fill_(99)
++        assert not ordinary_cache.restore(
++            ordinary, target_device=torch.device("cpu"), assign=False
++        )
++        torch.testing.assert_close(ordinary.weight, torch.full_like(ordinary.weight, 99))
++        results.put((rank, "ok"))
++    finally:
++        dist.destroy_process_group()
++
++
++def test_two_rank_gloo_cache_consensus_and_dtensor_restore(tmp_path: Path):
++    context = multiprocessing.get_context("fork")
++    results = context.Queue()
++    rendezvous = tmp_path / "gloo-rendezvous"
++    processes = [
++        context.Process(
++            target=_gloo_worker,
++            args=(rank, str(rendezvous), str(tmp_path), results),
++        )
++        for rank in range(2)
++    ]
++    for process in processes:
++        process.start()
++    for process in processes:
++        process.join(timeout=30)
++    hung = [process for process in processes if process.is_alive()]
++    for process in hung:
++        process.terminate()
++        process.join()
++    assert not hung, "two-rank cache test deadlocked"
++    assert [process.exitcode for process in processes] == [0, 0]
++    assert sorted(results.get(timeout=2) for _ in range(2)) == [(0, "ok"), (1, "ok")]

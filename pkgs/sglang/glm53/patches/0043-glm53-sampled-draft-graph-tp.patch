@@ -1,0 +1,64 @@
+--- a/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -416,9 +416,9 @@
+ 
+         sampling_info = SamplingBatchInfo(
+             temperatures=self.temperatures[:num_seqs],
+-            top_ps=torch.ones((num_seqs,), dtype=torch.float),
+-            top_ks=torch.full((num_seqs,), -1, dtype=torch.int32),
+-            min_ps=torch.zeros((num_seqs,), dtype=torch.float),
++            top_ps=torch.ones((num_seqs,), dtype=torch.float, device=self.temperatures.device),
++            top_ks=torch.full((num_seqs,), -1, dtype=torch.int32, device=self.temperatures.device),
++            min_ps=torch.zeros((num_seqs,), dtype=torch.float, device=self.temperatures.device),
+             is_all_greedy=False,
+             is_any_greedy=False,
+             need_top_p_sampling=False,
+--- a/sglang/srt/speculative/spec_utils.py
++++ b/sglang/srt/speculative/spec_utils.py
+@@ -191,8 +191,19 @@
+     only if q is exactly the distribution X was drawn from, so callers must hand
+     the returned q (not a recomputed one) to the verify.
+     """
+-    probs = torch.softmax(next_token_logits / temperatures, dim=-1)
++    probs = torch.softmax(next_token_logits.float() / temperatures, dim=-1)
+     topk_p, topk_index = fast_sample(probs, num_samples=1)
++    if _is_hip:
++        from sglang.srt.distributed import get_tp_group
++
++        # HIP graph replay does not guarantee that rank RNG states remain in
++        # sync. Every draft forward and the target must consume the same token.
++        # Rank 0 retains the exact q used for its draw and owns verification;
++        # other ranks need only the proposal IDs, not a full-vocabulary q copy.
++        group = get_tp_group()
++        if group.world_size > 1:
++            group.broadcast(topk_index, src=0)
++            topk_p = probs.gather(1, topk_index)
+     return probs, topk_p, topk_index
+ 
+ 
+--- a/sglang/srt/speculative/eagle_worker_v2.py
++++ b/sglang/srt/speculative/eagle_worker_v2.py
+@@ -971,14 +971,17 @@
+ 
+         # Assemble the next-iter draft spec_info from the extend output.
+         use_rejection_sampling = get_spec().speculative_use_rejection_sampling
+-        probs = renorm_draft_probs(
+-            logits_output.next_token_logits,
+-            batch.sampling_info,
+-            use_rejection_sampling,
+-        )
+         if use_rejection_sampling:
+-            topk_p, topk_index = fast_sample(probs, num_samples=1)
++            probs, topk_p, topk_index = sample_draft_proposal(
++                logits_output.next_token_logits,
++                glm53_draft_temperatures(batch.sampling_info),
++            )
+         else:
++            probs = renorm_draft_probs(
++                logits_output.next_token_logits,
++                batch.sampling_info,
++                use_rejection_sampling,
++            )
+             topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
+         return EagleDraftInput(
+             topk_p=topk_p,

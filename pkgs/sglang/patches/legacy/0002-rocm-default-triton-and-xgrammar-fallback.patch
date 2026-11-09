@@ -1,0 +1,49 @@
+diff --git a/sglang/srt/constrained/xgrammar_backend.py b/sglang/srt/constrained/xgrammar_backend.py
+index a0b4493..968bddd 100644
+--- a/sglang/srt/constrained/xgrammar_backend.py
++++ b/sglang/srt/constrained/xgrammar_backend.py
+@@ -42,7 +42,12 @@ from sglang.srt.utils import is_hip
+ _is_hip = is_hip()
+ 
+ if _is_hip:
+-    from sgl_kernel import apply_token_bitmask_inplace_cuda
++    try:
++        from sgl_kernel import apply_token_bitmask_inplace_cuda
++    except ImportError:
++        from sglang.kernels.ops.grammar.bitmask_ops import (
++            apply_token_bitmask_inplace_triton as apply_token_bitmask_inplace_cuda,
++        )
+ else:
+     from sglang.kernels.ops.grammar.bitmask_ops import (
+         apply_token_bitmask_inplace_triton,
+diff --git a/sglang/srt/server_args.py b/sglang/srt/server_args.py
+index b62c0c7..8937118 100644
+--- a/sglang/srt/server_args.py
++++ b/sglang/srt/server_args.py
+@@ -5522,6 +5522,9 @@ class ServerArgs:
+             ):
+                 return "trtllm_mha"
+             elif is_hip():
++                rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH") or os.environ.get("GPU_ARCHS", "")
++                if rocm_arch.startswith(("gfx11", "gfx12")):
++                    return "triton"
+                 return "aiter"
+             elif is_mps():
+                 return "torch_native"
+@@ -5537,12 +5540,14 @@ class ServerArgs:
+             elif is_sm100_supported():
+                 return "flashinfer"
+             elif is_hip():
++                rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH") or os.environ.get("GPU_ARCHS", "")
++                if rocm_arch.startswith(("gfx11", "gfx12")):
++                    return "triton"
+                 head_num = model_config.get_num_kv_heads(self.tp_size)
+                 # TODO current aiter only support head number 16 or 128 head number
+                 if head_num == 128 or head_num == 16:
+                     return "aiter"
+-                else:
+-                    return "triton"
++                return "triton"
+             elif is_mps():
+                 return "torch_native"
+             else:

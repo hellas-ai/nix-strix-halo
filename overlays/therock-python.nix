@@ -3,6 +3,8 @@
 # nixpkgs defaults.
 {
   lib,
+  mediaRuntime ? false,
+  legacyRuntime ? false,
   target,
   pythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
 }:
@@ -50,7 +52,6 @@ final: prev: {
             };
         in
         {
-          amdsmi = final."therock-amdsmi-${s}";
           torch = wheels;
           torchvision = wheels;
           triton = wheels;
@@ -61,6 +62,20 @@ final: prev: {
           "rocm-sdk-devel" = wheels;
           "rocm-sdk-libraries-${s}" = wheels;
 
+          # Package checks must not pick up an unrelated builder GPU.  The
+          # architecture-specific hardware smokes remain separate derivations.
+        }
+        // lib.optionalAttrs (!legacyRuntime && !mediaRuntime) {
+          safetensors = pyprev.safetensors.overridePythonAttrs (old: {
+            preCheck = (old.preCheck or "") + ''
+              export CUDA_VISIBLE_DEVICES=-1
+              export HIP_VISIBLE_DEVICES=-1
+              export ROCR_VISIBLE_DEVICES=-1
+            '';
+          });
+
+        }
+        // {
           "compressed-tensors" = pyprev."compressed-tensors".overridePythonAttrs (old: {
             doCheck = false;
             dependencies = (old.dependencies or [ ]) ++ [
@@ -94,10 +109,14 @@ final: prev: {
           # PyTorch reports HIP support.  Its nixpkgs expression does not know
           # about TheRock, so make the SDK headers and libraries visible to
           # that extension build explicitly.
+        }
+        // lib.optionalAttrs (!legacyRuntime) {
           torchao = pyprev.torchao.overridePythonAttrs (old: {
             nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ rocmSdk ];
             buildInputs = (old.buildInputs or [ ]) ++ [ rocmSdk ];
           });
+        }
+        // {
           "mistral-common" = (disablePythonChecks pyprev."mistral-common").overridePythonAttrs (old: {
             pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [
               "numpy"

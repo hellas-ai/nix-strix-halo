@@ -1,0 +1,54 @@
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1271,6 +1271,41 @@
+     ).view(*output_shape)
+ 
+ 
++# GLM-5.3 campaign (0015): prefill chunks of at least SGLANG_GLM53_BF16_SHADOW_MIN_M rows run GLM's dense block-FP8
++# projections as a BF16 GEMM (hipBLASLt) on a dequantised copy of the weight: gfx1151 has no FP8 matrix instructions,
++# so the FP8 Triton kernel converts every tile it loads. Decode and verify (at most 8 rows) keep the FP8 kernels. The
++# copy is built on first use (eager prefill, never inside graph capture) and costs ~1.4 GB per TP4 rank.
++_GLM53_BF16_SHADOW_MIN_M = int(__import__("os").environ.get("SGLANG_GLM53_BF16_SHADOW_MIN_M", "0") or "0")
++_GLM53_BF16_SHADOWS: dict = {}
++
++
++def _glm53_bf16_shadow(weight: torch.Tensor, weight_scale: torch.Tensor, block_size: List[int]) -> torch.Tensor:
++    key = (weight.data_ptr(), tuple(weight.shape))
++    shadow = _GLM53_BF16_SHADOWS.get(key)
++    if shadow is None:
++        n, k = weight.shape
++        bn, bk = block_size
++        s = weight_scale.to(torch.float32)
++        shadow = (
++            (weight.to(torch.float32).view(n // bn, bn, k // bk, bk) * s[:, None, :, None])
++            .view(n, k)
++            .to(torch.bfloat16)
++            .contiguous()
++        )
++        _GLM53_BF16_SHADOWS[key] = shadow
++    return shadow
++
++
++def _glm53_bf16_shadow_applies(input_2d: torch.Tensor, weight: torch.Tensor, block_size: List[int]) -> bool:
++    if _GLM53_BF16_SHADOW_MIN_M <= 0 or input_2d.shape[0] < _GLM53_BF16_SHADOW_MIN_M:
++        return False
++    if input_2d.dtype != torch.bfloat16 or list(block_size) != [128, 128] or weight.dim() != 2:
++        return False
++    from sglang.kernels.ops.gemm.glm53_wmma_gemv import SHAPES
++
++    return tuple(weight.shape) in SHAPES and not torch.cuda.is_current_stream_capturing()
++
++
+ def triton_w8a8_block_fp8_linear(
+     input: torch.Tensor,
+     weight: torch.Tensor,
+@@ -1292,6 +1327,9 @@
+         input_2d = input.view(-1, input.shape[-1])
+         output_dtype = input_2d.dtype
+         output_shape = [*input.shape[:-1], weight.shape[0]]
++        if _glm53_bf16_shadow_applies(input_2d, weight, block_size):
++            output = torch.nn.functional.linear(input_2d, _glm53_bf16_shadow(weight, weight_scale, block_size), bias)
++            return output.view(*output_shape)
+         q_input, x_scale = per_token_group_quant_fp8(
+             input_2d, block_size[1], column_major_scales=False
+         )

@@ -32,6 +32,7 @@ let
   defaults = evaluate { };
   custom = evaluate {
     stateDirectory = "/var/lib/vllm-test";
+    host = "0.0.0.0";
     revision = "test-revision";
     enablePrefixCaching = true;
     enableAutoToolChoice = true;
@@ -93,6 +94,7 @@ pkgs.runCommand "ci-vllm-metal-module" { nativeBuildInputs = [ pkgs.python3 ]; }
   assert "--speculative-config" not in args
   assert default["home"] == "/var/lib/vllm-metal"
   args = custom["argv"]
+  assert args[args.index("--host") + 1] == "0.0.0.0"
   assert "--enable-prefix-caching" in args
   assert "--no-enable-prefix-caching" not in args
   assert args[args.index("--revision") + 1] == "test-revision"

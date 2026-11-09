@@ -1,0 +1,131 @@
+diff --git a/sglang/multimodal_gen/runtime/loader/fsdp_load.py b/sglang/multimodal_gen/runtime/loader/fsdp_load.py
+--- a/sglang/multimodal_gen/runtime/loader/fsdp_load.py
++++ b/sglang/multimodal_gen/runtime/loader/fsdp_load.py
+@@ -7,5 +7,6 @@
+ # Copyright 2025 The sglang-diffusion Authors.
+
++import os
+ from collections import Counter, defaultdict
+ from collections.abc import Callable, Generator
+ from itertools import chain
+@@ -466,16 +467,54 @@ def load_model_from_full_model_state_dict(
+-    # map names from checkpoint to customized names
+-    custom_param_sd, reverse_param_names_mapping = hf_to_custom_state_dict(
+-        full_sd_iterator,
+-        param_names_mapping,
+-        valid_target_names=set(meta_sd.keys()),
+-    )  # type: ignore
++    stream_identity_weights = os.environ.get(
++        "SGLANG_H3_STREAMING_WEIGHT_LOAD", "0"
++    ).lower() in {"1", "true"}
++    reverse_param_names_mapping = {}
++    if stream_identity_weights:
++        # MiniMax-H3 has an identity checkpoint-name mapping. Consume and TP/FSDP
++        # shard each mmap tensor before advancing the safetensors generator,
++        # rather than retaining the complete 62 GiB checkpoint on every rank.
++        logger.info("Streaming identity-mapped checkpoint weights into local shards")
++        custom_param_sd = {}
++
++        def stream_param_items():
++            for source_param_name, full_tensor in full_sd_iterator:
++                if param_names_mapping is None:
++                    mapped = (source_param_name, None, None)
++                else:
++                    mapped = param_names_mapping(source_param_name)
++                target_param_name, merge_index, num_params_to_merge = mapped
++                if (
++                    target_param_name != source_param_name
++                    or merge_index is not None
++                    or num_params_to_merge is not None
++                ):
++                    raise ValueError(
++                        "SGLANG_H3_STREAMING_WEIGHT_LOAD requires an identity "
++                        "parameter mapping"
++                    )
++                reverse_param_names_mapping[target_param_name] = (
++                    source_param_name,
++                    merge_index,
++                    num_params_to_merge,
++                )
++                yield target_param_name, full_tensor
++
++        param_items = stream_param_items()
++    else:
++        # General models may rename or merge tensors and still need the full
++        # conversion dictionary used by upstream SGLang.
++        custom_param_sd, reverse_param_names_mapping = hf_to_custom_state_dict(
++            full_sd_iterator,
++            param_names_mapping,
++            valid_target_names=set(meta_sd.keys()),
++        )  # type: ignore
++        param_items = (
++            (target_param_name, custom_param_sd[target_param_name])
++            for target_param_name in sorted(custom_param_sd)
++        )
+
+     is_fsdp_model = isinstance(model, FSDPModule) or any(
+         hasattr(p, "device_mesh") for p in meta_sd.values()
+     )
+-
+-    # sort parameter names to ensure all ranks process parameters in the same order
+-    sorted_param_names = sorted(custom_param_sd.keys())
+
+     sharded_sd = {}
+     skipped_checkpoint_keys: list[str] = []
+@@ -492,9 +531,8 @@ def load_model_from_full_model_state_dict(
+         tuple[torch.dtype, torch.dtype], list[str]
+     ] = defaultdict(list)
+
+-    # shard from loaded state_dict, custom_param_sd -> sharded_sd
+-    for target_param_name in sorted_param_names:
+-        full_tensor = custom_param_sd[target_param_name]
++    # Convert one full checkpoint tensor at a time into its local shard.
++    for target_param_name, full_tensor in param_items:
+         meta_sharded_param = meta_sd.get(target_param_name)
+
+         if meta_sharded_param is None:
+@@ -546,21 +584,29 @@ def load_model_from_full_model_state_dict(
+
+         if not hasattr(meta_sharded_param, "device_mesh"):
+-            full_tensor = full_tensor.to(
+-                device=checkpoint_load_device, dtype=target_dtype
+-            )
+             actual_param = _get_param_for_weight_loading(
+                 model, param_dict, target_param_name
+             )
+             weight_loader = (
+                 getattr(actual_param, "weight_loader", None)
+                 if actual_param is not None
+                 else None
+             )
++            # H3's unquantized TP loaders can narrow/copy on CPU. Move only the
++            # local rows or columns to the V620 instead of first copying every
++            # full checkpoint tensor to every GPU.
++            weight_load_device = (
++                torch.device("cpu")
++                if stream_identity_weights and weight_loader is not None
++                else checkpoint_load_device
++            )
++            full_tensor = full_tensor.to(
++                device=weight_load_device, dtype=target_dtype
++            )
+             if weight_loader is not None:
+                 assert actual_param is not None
+                 sharded_tensor = torch.empty_like(
+                     meta_sharded_param,
+-                    device=checkpoint_load_device,
++                    device=weight_load_device,
+                     dtype=target_dtype,
+                 )
+                 # Preserve requires_grad flag to avoid errors with non-floating dtypes
+@@ -580,6 +626,10 @@ def load_model_from_full_model_state_dict(
+                         f"param_cls={type(actual_param).__name__}"
+                     ) from exc
+                 sharded_tensor = temp_param.data
++                if stream_identity_weights and weight_load_device.type == "cpu":
++                    sharded_tensor = sharded_tensor.to(
++                        device=checkpoint_load_device, dtype=target_dtype
++                    )
+             else:
+                 # In cases where parts of the model aren't sharded, some parameters will be plain tensors
+                 sharded_tensor = full_tensor

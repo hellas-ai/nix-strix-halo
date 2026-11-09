@@ -1,0 +1,340 @@
+--- /dev/null
++++ b/sglang/kernels/ops/moe/glm53_moe_wmma.py
+@@ -0,0 +1,243 @@
++"""Block-FP8 MoE GEMM for GLM-5.3-Flash prefill on gfx1151 (sglang-glm53-rocm patch 0016).
++
++gfx1151 (RDNA3.5) has WMMA for FP16/BF16 but no FP8 matrix instructions. SGLang's fused_moe_kernel widens both FP8
++operands to FP16 inside the dot (widen_e4m3fn_to_fp16: subnormal and NaN handling through float converts and
++selects), and Triton's AMD pipeline hoists that conversion past the LDS load into the WMMA operand layout, where RDNA3
++duplicates every operand across the two half-waves and across warps. The shipped prefill config runs ~4,700 VALU
++instructions per 8 WMMAs in that older profile, which measured ~3 TFLOP/s (x-moe tune sweep). Instruction counts
++identify conversion work; they do not establish the hardware roofline.
++
++This kernel keeps the maths and removes the conversion cost:
++  * activations: the same per-token-group FP8 quantisation (scale = max(|x|, 1e-10) / 448 per 128 columns, identical
++    expression), written as FP16 holding the exact e4m3 value (every e4m3 value is an FP16 value), so the inner loop
++    loads A without converting it;
++  * weights: signed e4m3 byte s -> FP16 bits ((s ^ ((s + 1) & 0x80)) << 7), exactly value * 2^-8 for finite
++    normals/subnormals and signed quiet NaNs for both NaN encodings. The 2^8 is folded into the block scale. An opaque
++    identity asm pins the conversion to the coalesced load layout so it runs once per element before the LDS store;
++  * K is consumed in 64- or 128-wide sub-blocks to limit live operands (some default tiles still spill); each 128x128
++    block's partial sum is scaled by a_scale * b_scale with fused_moe_kernel's expression and WMMA chain order.
++Individual products are exact, including subnormal weights (glm53-moe-wmma-special-check.py exhausts every finite
++operand pair on the GPU). Accumulation/rounding can move a few ppm of outputs by one BF16 ulp; the kernel is not a
++bitwise replacement for fused_moe_kernel. Routing (moe_align_block_size) and the rest of the MoE runner
++are unchanged; fused_moe.py makes the alignment block BLOCK_M when this path is on.
++
++    SGLANG_GLM53_MOE_WMMA=1              enable (default off)
++    SGLANG_GLM53_MOE_WMMA_BLOCK_M=auto   rows per tile = routing alignment block (auto: by tokens, AUTO_BLOCK_M)
++    SGLANG_GLM53_MOE_WMMA_BLOCK_N/_WARPS/_BLOCK_K/_GROUP_M/_STAGES   override AUTO_TILES (0 = auto)
++"""
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++_INTERPRET = os.environ.get("TRITON_INTERPRET", "0") == "1"
++NUM_EXPERTS = 288
++SHAPES = {(1024, 4096), (4096, 512)}  # (N, K) of gate_up and down at TP4
++
++
++def enabled() -> bool:
++    return os.environ.get("SGLANG_GLM53_MOE_WMMA", "0") == "1"
++
++
++# Tiles by tokens in the forward, from lib/bench/glm53-moe-wmma-check.py on strix-2 (uniform routing over 288 experts,
++# runs/x-moe16): BLOCK_M is the routing alignment and must be shared by gate_up and down; (BLOCK_N, warps, BLOCK_K) per
++# projection. ~28 routed rows per expert at 1,024 tokens, ~114 at 4,096.
++AUTO_BLOCK_M = ((1536, 32), (1 << 30, 64))
++AUTO_TILES = {
++    # (N, K): ((max tokens, BLOCK_N, warps, BLOCK_K), ...)
++    (1024, 4096): ((1536, 64, 4, 128), (3072, 64, 8, 128), (1 << 30, 64, 4, 64)),
++    (4096, 512): ((1536, 64, 8, 128), (1 << 30, 64, 4, 64)),
++}
++
++
++def block_m(num_tokens: int = 1024) -> int:
++    v = os.environ.get("SGLANG_GLM53_MOE_WMMA_BLOCK_M", "auto")
++    if v != "auto":
++        return int(v)
++    return next(bm for limit, bm in AUTO_BLOCK_M if num_tokens <= limit)
++
++
++def _tiles(n: int, k: int, num_tokens: int):
++    for limit, bn, warps, bk in AUTO_TILES.get((n, k), ((1 << 30, 64, 4, 64),)):
++        if num_tokens <= limit:
++            return bn, warps, bk
++    return 64, 4, 64
++
++
++def applies(w_shape, block_shape) -> bool:
++    """Weights [E, N, K] block-FP8 with GLM-5.3's TP4 expert shapes."""
++    return (
++        enabled()
++        and block_shape is not None
++        and list(block_shape) == [128, 128]
++        and len(w_shape) == 3
++        and w_shape[0] == NUM_EXPERTS
++        and (w_shape[1], w_shape[2]) in SHAPES
++    )
++
++
++@triton.jit
++def _pin(x):
++    # Opaque identity (no instruction): Triton cannot move the conversion above it into the WMMA operand layout.
++    return tl.inline_asm_elementwise(asm="", constraints="=v,0", args=[x], dtype=x.dtype, is_pure=False, pack=1)
++
++
++@triton.jit
++def _e4m3_bits_to_f16_div256(u):
++    # Sign extension supplies FP16's sign at bit 15 after the shift. Bit 14 is the copied byte sign XOR
++    # the incremented sign: it is set only at s=127/-1 (the two e4m3fn NaNs), and clear for every finite value.
++    # Bits 13..7 preserve the exponent/mantissa, giving the exact finite value / 256, including subnormals.
++    s = u.to(tl.int8, bitcast=True).to(tl.int16)
++    h = ((s ^ ((s + 1) & 0x80)) << 7).to(tl.int16)
++    return h.to(tl.float16, bitcast=True)
++
++
++@triton.jit
++def _quant_widen_kernel(X, Q, S, stride_x, stride_q, stride_s, eps, bit8_min, bit8_max, GROUPS: tl.constexpr,
++                        GROUPS_P2: tl.constexpr):
++    # One row, all of its 128-column groups: the same expression as _per_token_group_quant_8bit, then the e4m3 value
++    # widened exactly to FP16.
++    row = tl.program_id(0).to(tl.int64)
++    g = tl.arange(0, GROUPS_P2)
++    c = tl.arange(0, 128)
++    gm = g < GROUPS
++    y = tl.load(X + row * stride_x + g[:, None] * 128 + c[None, :], mask=gm[:, None], other=0.0).to(tl.float32)
++    absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
++    y_s = absmax / bit8_max
++    y_s_inv = 1.0 / y_s
++    q = tl.clamp(y * y_s_inv[:, None], bit8_min, bit8_max).to(tl.float8e4nv)
++    q16 = _e4m3_bits_to_f16_div256(q.to(tl.uint8, bitcast=True)) * 256.0
++    tl.store(Q + row * stride_q + g[:, None] * 128 + c[None, :], q16, mask=gm[:, None])
++    tl.store(S + row * stride_s + g, y_s, mask=gm)
++
++
++@triton.jit
++def _widen_kernel(Q8, Q16, n, BLOCK: tl.constexpr):
++    offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
++    mask = offs < n
++    u = tl.load(Q8 + offs, mask=mask, other=0)
++    tl.store(Q16 + offs, _e4m3_bits_to_f16_div256(u) * 256.0, mask=mask)
++
++
++@triton.jit
++def _moe_wmma_kernel(
++    A, A_scale, B, B_scale, C, topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
++    num_valid_tokens, EM, stride_am, stride_asm, stride_cm,
++    N: tl.constexpr, K: tl.constexpr, TOP_K: tl.constexpr, MUL_ROUTED_WEIGHT: tl.constexpr,
++    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr,
++    PIN: tl.constexpr,
++):
++    pid = tl.program_id(0)
++    num_pid_m = tl.cdiv(EM, BLOCK_M)
++    num_pid_n: tl.constexpr = N // BLOCK_N
++    num_pid_in_group = GROUP_SIZE_M * num_pid_n
++    group_id = pid // num_pid_in_group
++    first_pid_m = group_id * GROUP_SIZE_M
++    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
++    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
++    pid_n = (pid % num_pid_in_group) // group_size_m
++    if pid_m * BLOCK_M >= tl.load(num_tokens_post_padded):
++        return
++    offs_token = tl.load(sorted_token_ids + pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
++    token_mask = offs_token < num_valid_tokens
++    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    c_ptrs = C + offs_token[:, None] * stride_cm + offs_n[None, :]
++    expert = tl.load(expert_ids + pid_m).to(tl.int64)
++    if expert == -1:
++        tl.store(c_ptrs, tl.zeros((BLOCK_M, BLOCK_N), dtype=C.dtype.element_ty), mask=token_mask[:, None])
++        return
++    KB: tl.constexpr = K // 128
++    offs_k = tl.arange(0, BLOCK_K)
++    a_rows = offs_token // TOP_K
++    a_ptrs = A + a_rows[:, None] * stride_am + offs_k[None, :]
++    b_ptrs = B + expert * N * K + offs_n[None, :].to(tl.int64) * K + offs_k[:, None]
++    as_ptrs = A_scale + a_rows * stride_asm
++    bs_ptrs = B_scale + expert * (N // 128) * KB + (offs_n // 128) * KB
++    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
++    for kb in range(KB):
++        d = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
++        for ks in tl.static_range(128 // BLOCK_K):
++            a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
++            b = _e4m3_bits_to_f16_div256(tl.load(b_ptrs))
++            if PIN:
++                b = _pin(b)
++            d = tl.dot(a, b, d)
++            a_ptrs += BLOCK_K
++            b_ptrs += BLOCK_K
++        a_s = tl.load(as_ptrs + kb, mask=token_mask, other=0.0)
++        b_s = tl.load(bs_ptrs + kb)
++        # fused_moe_kernel's expression for BLOCK_N <= 128: dot * (a_scale * b_scale); d is exactly dot * 2^-8 here.
++        acc += d * (a_s[:, None] * b_s[None, :] * 256.0)
++    if MUL_ROUTED_WEIGHT:
++        w = tl.load(topk_weights + offs_token, mask=token_mask, other=0.0)
++        acc = acc * w[:, None]
++    tl.store(c_ptrs, acc.to(C.dtype.element_ty), mask=token_mask[:, None])
++
++
++def quant_widen(x: torch.Tensor, eps: float = 1e-10):
++    """BF16/FP32 [M, K] -> (FP16 [M, K] holding the e4m3-quantised values, FP32 [M, K/128] scales)."""
++    assert x.ndim == 2 and x.shape[1] % 128 == 0 and x.stride(1) == 1
++    m, k = x.shape
++    q = torch.empty((m, k), device=x.device, dtype=torch.float16)
++    s = torch.empty((m, k // 128), device=x.device, dtype=torch.float32)
++    if m:
++        _quant_widen_kernel[(m,)](x, q, s, x.stride(0), q.stride(0), s.stride(0), eps, -448.0, 448.0, GROUPS=k // 128,
++                                  GROUPS_P2=triton.next_power_of_2(k // 128),
++                                  num_warps=4 if k >= 1024 else 1)
++    return q, s
++
++
++def widen(q8: torch.Tensor) -> torch.Tensor:
++    """FP8 e4m3fn -> FP16, exact."""
++    q8 = q8.contiguous()
++    out = torch.empty(q8.shape, device=q8.device, dtype=torch.float16)
++    n = q8.numel()
++    if n:
++        _widen_kernel[(triton.cdiv(n, 4096),)](q8.view(torch.uint8), out, n, BLOCK=4096, num_warps=4)
++    return out
++
++
++def moe_gemm(
++    a16: torch.Tensor,
++    a_scale: torch.Tensor,
++    w: torch.Tensor,
++    w_scale: torch.Tensor,
++    c: torch.Tensor,
++    topk_weights: torch.Tensor,
++    sorted_token_ids: torch.Tensor,
++    expert_ids: torch.Tensor,
++    num_tokens_post_padded: torch.Tensor,
++    mul_routed_weight: bool,
++    top_k: int,
++    num_valid_tokens: int,
++    bm: int,
++    bn: int = 0,
++    warps: int = 0,
++    stages: int = 0,
++    group_m: int = 0,
++    bk: int = 0,
++    num_tokens: int = 0,
++):
++    """C[token, :] = (A[token // top_k] @ W[expert].T) * scales (* routed weight), BF16 out, rows per sorted ids."""
++    e, n, k = w.shape
++    auto_bn, auto_warps, auto_bk = _tiles(n, k, num_tokens or max(num_valid_tokens // 8, 1))
++    env = os.environ.get
++    bn = bn or int(env("SGLANG_GLM53_MOE_WMMA_BLOCK_N", "0")) or auto_bn
++    warps = warps or int(env("SGLANG_GLM53_MOE_WMMA_WARPS", "0")) or auto_warps
++    bk = bk or int(env("SGLANG_GLM53_MOE_WMMA_BLOCK_K", "0")) or auto_bk
++    if n % bn:
++        bn = 64
++    assert a16.dtype == torch.float16 and a16.shape[1] == k and a16.stride(1) == 1
++    assert a_scale.dtype == torch.float32 and a_scale.shape[1] == k // 128
++    assert w_scale.is_contiguous() and tuple(w_scale.shape) == (e, n // 128, k // 128)
++    assert w.is_contiguous() and c.stride(-1) == 1
++    em = sorted_token_ids.shape[0]
++    grid = (triton.cdiv(em, bm) * (n // bn),)
++    _moe_wmma_kernel[grid](
++        a16, a_scale, w.view(torch.uint8), w_scale, c, topk_weights, sorted_token_ids, expert_ids,
++        num_tokens_post_padded, num_valid_tokens, em, a16.stride(0), a_scale.stride(0), c.stride(-2),
++        N=n, K=k, TOP_K=top_k, MUL_ROUTED_WEIGHT=mul_routed_weight, BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk,
++        GROUP_SIZE_M=group_m or int(env("SGLANG_GLM53_MOE_WMMA_GROUP_M", "8")), PIN=not _INTERPRET,
++        num_warps=warps, num_stages=stages or int(env("SGLANG_GLM53_MOE_WMMA_STAGES", "1")),
++    )
+--- a/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
++++ b/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
+@@ -20,6 +20,7 @@
+     sglang_per_token_group_quant_fp8,
+ )
+ from sglang.kernels.ops.quantization.fp8_utils import widen_e4m3fn_to_fp16, widen_e4m3fn_to_fp32
++from sglang.kernels.ops.moe import glm53_moe_wmma as _glm53_moe_wmma
+ from sglang.kernels.ops.quantization.int8_kernel import (
+     per_token_group_quant_int8,
+     per_token_quant_int8,
+@@ -886,6 +887,10 @@
+ ) -> None:
+     assert topk_weights.stride(1) == 1
+     assert sorted_token_ids.stride(0) == 1
++    # sglang-glm53-rocm 0016: fused_moe.py marks configs whose routing alignment it made for glm53_moe_wmma.
++    glm53_moe_wmma_aligned = bool(config.get("GLM53_MOE_WMMA", False))
++    if glm53_moe_wmma_aligned:
++        config = {k: v for k, v in config.items() if k != "GLM53_MOE_WMMA"}
+ 
+     if fuse_swiglu:
+         # The epilogue assumes an interleaved-gate/up bf16 up-GEMM writing a
+@@ -899,6 +904,41 @@
+         assert not lora_preserve_base
+         assert compute_type == tl.bfloat16
+ 
++    if (
++        _gfx1151_fp8_widen.value
++        and use_fp8_w8a8
++        and _glm53_moe_wmma.applies(B.shape, block_shape)
++        and B.dtype == torch.float8_e4m3fn
++        and topk_ids.ndim == 2
++        and topk_ids.shape[0] > _GLM53_MOE_GEMV_MAX_ROWS
++        and glm53_moe_wmma_aligned
++        and A.dtype in (torch.bfloat16, torch.float8_e4m3fn)
++        and A.shape[1] == B.shape[2]
++        and A.stride(1) == 1
++        and C.dtype == torch.bfloat16
++        and compute_type == tl.bfloat16
++        and B_scale is not None
++        and B_scale.dtype == torch.float32
++        and bias is None
++        and B_zp is None
++        and not any(
++            (a_use_tma, b_use_tma, c_sorted, fuse_sum_all_reduce, fuse_add_to_output, mask_output,
++             lora_preserve_base, fuse_swiglu)
++        )
++    ):
++        # sglang-glm53-rocm 0016: block-FP8 MoE GEMM with the FP8->FP16 conversion done once per element
++        # (glm53_moe_wmma.py); same quantisation and per-row maths as fused_moe_kernel below.
++        if A.dtype == torch.float8_e4m3fn:
++            assert A_scale is not None
++            a16 = _glm53_moe_wmma.widen(A)
++        else:
++            a16, A_scale = _glm53_moe_wmma.quant_widen(A.contiguous())
++        _glm53_moe_wmma.moe_gemm(
++            a16, A_scale, B, B_scale, C, topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
++            mul_routed_weight, top_k, topk_ids.numel(), config["BLOCK_SIZE_M"], num_tokens=topk_ids.shape[0],
++        )
++        return
++
+     if use_fp8_w8a8:
+         swap_ab = should_enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
+     else:
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
+@@ -15,6 +15,8 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
++from sglang.kernels.ops.moe import glm53_moe_wmma as _glm53_moe_wmma
++from sglang.kernels.ops.moe.fused_moe_triton_kernels import _GLM53_MOE_GEMV_MAX_ROWS
+ from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
+     act_and_mul_triton,
+     invoke_fused_moe_kernel,
+@@ -474,6 +476,19 @@
+             "Down MoE TMA is enabled (USE_TMA=true in the down-projection config)."
+         )
+ 
++    if (
++        _is_hip
++        and use_fp8_w8a8
++        and _glm53_moe_wmma.applies(w1.shape, block_shape)
++        and _glm53_moe_wmma.applies(w2.shape, block_shape)
++        and num_tokens > _GLM53_MOE_GEMV_MAX_ROWS
++    ):
++        # sglang-glm53-rocm 0016: the WMMA MoE kernel tiles rows by the routing alignment block; the marker tells
++        # invoke_fused_moe_kernel that the alignment was made for it.
++        config["BLOCK_SIZE_M"] = _glm53_moe_wmma.block_m(num_tokens)
++        config["GLM53_MOE_WMMA"] = True
++        down_config = dict(down_config or config, BLOCK_SIZE_M=config["BLOCK_SIZE_M"], GLM53_MOE_WMMA=True)
++
+     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+         topk_ids, config["BLOCK_SIZE_M"], E
+     )

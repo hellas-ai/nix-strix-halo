@@ -1,0 +1,220 @@
+--- a/sglang/srt/speculative/eagle_utils.py
++++ b/sglang/srt/speculative/eagle_utils.py
+@@ -703,6 +703,55 @@
+     )
+ 
+ 
++def _glm53_hip_spec_sampling_enabled() -> bool:
++    import os
++
++    return os.environ.get("SGLANG_GLM53_HIP_SPEC_SAMPLING", "1") != "0"
++
++
++def _glm53_hip_chain_target_probs(
++    next_token_logits: torch.Tensor,
++    sampling_info: SamplingBatchInfo,
++    draft_token_num: int,
++) -> torch.Tensor:
++    """GLM-5.3 campaign (0041): verify-row target distributions on HIP without
++    sgl_kernel's CUDA renorm ops: temperature softmax, then top-k / top-p / min-p
++    on one descending sort (the semantics of the torch sampler), renormalised.
++    Greedy rows (top_k 1) become one-hot on their argmax."""
++    import torch.nn.functional as F
++
++    rows = lambda t: torch.repeat_interleave(t, draft_token_num, dim=0)
++    probs = F.softmax(
++        next_token_logits.float() / rows(sampling_info.temperatures), dim=-1
++    )
++    if not (
++        sampling_info.need_top_k_sampling
++        or sampling_info.need_top_p_sampling
++        or sampling_info.need_min_p_sampling
++    ):
++        return probs
++    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
++    if sampling_info.need_top_k_sampling:
++        top_ks = rows(sampling_info.top_ks)
++        probs_sort.masked_fill_(
++            torch.arange(probs.shape[-1], device=probs.device).view(1, -1)
++            >= top_ks.view(-1, 1),
++            0.0,
++        )
++    if sampling_info.need_top_p_sampling:
++        probs_sum = torch.cumsum(probs_sort, dim=-1)
++        probs_sort.masked_fill_(
++            (probs_sum - probs_sort) > rows(sampling_info.top_ps).view(-1, 1), 0.0
++        )
++    if sampling_info.need_min_p_sampling:
++        probs_sort.masked_fill_(
++            probs_sort < (probs_sort[:, :1] * rows(sampling_info.min_ps).view(-1, 1)),
++            0.0,
++        )
++    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
++    return torch.zeros_like(probs).scatter_(-1, probs_idx, probs_sort)
++
++
+ def eagle_sample(
+     verify_input: EagleVerifyInput,
+     batch: ScheduleBatch,
+@@ -781,7 +830,83 @@
+ 
+     # Sample tokens
+     target_predict = None
+-    if sampling_info.is_all_greedy or _is_cpu or _is_hip or _is_xpu:
++    # GLM-5.3 campaign (0041): stock HIP verifies every request greedily (sgl_kernel's sampling ops are CUDA-only),
++    # silently turning temperature/top-p requests into greedy decoding once speculation is on. For chain drafts
++    # (topk 1) run lossless speculative sampling instead with the Triton chain kernel: by default the draft is a
++    # point mass on its argmax token (accept it with probability p_target(token), resample a rejection from p_target
++    # without it); with --speculative-use-rejection-sampling the drafts are sampled from the draft distribution q and
++    # verified with coin * q < p, which accepts far more often at temperature 1. SGLANG_GLM53_HIP_SPEC_SAMPLING=0
++    # restores the greedy fallback.
++    hip_chain_sampling = (
++        _is_hip
++        and not sampling_info.is_all_greedy
++        and verify_input.tree_topk == 1
++        and _glm53_hip_spec_sampling_enabled()
++    )
++    if hip_chain_sampling:
++        from sglang.kernels.ops.speculative.reject_sampling import (
++            chain_speculative_sampling_triton,
++        )
++
++        width = verify_input.draft_token_num
++        target_probs = _glm53_hip_chain_target_probs(
++            next_token_logits, sampling_info, width
++        ).reshape(bs, width, -1)
++        if get_spec().speculative_use_rejection_sampling and width > 1:
++            # --speculative-use-rejection-sampling: drafts were drawn from the draft's own distribution q (greedy
++            # rows from a one-hot q), so the verify is the classic Leviathan test coin * q(x) < p(x).
++            draft_probs = verify_input.draft_probs
++            if draft_probs is None or draft_probs.shape[-1] != target_probs.shape[-1]:
++                raise ValueError(
++                    "Rejection sampling requires the draft proposal distribution "
++                    "(target vocab) on the verify input"
++                )
++            draft_probs = draft_probs.reshape(bs, width - 1, -1).float()
++        else:
++            draft_probs = torch.zeros(
++                (bs, max(width - 1, 1), target_probs.shape[-1]),
++                dtype=target_probs.dtype,
++                device=device,
++            )
++            if width > 1:
++                draft_probs.scatter_(
++                    2, candidates[:, 1:].to(torch.int64).unsqueeze(-1), 1.0
++                )
++        coins, coins_for_final_sampling = _verify_coins(
++            sampling_info=sampling_info,
++            seq_lens=batch.seq_lens,
++            draft_token_num=width,
++            candidates=candidates,
++            device=device,
++        )
++        chain_speculative_sampling_triton(
++            predicts=predict,
++            accept_index=accept_index,
++            accept_token_num=num_correct_drafts,
++            candidates=candidates,
++            retrive_index=verify_input.retrieve_index,
++            retrive_next_token=verify_input.retrieve_next_token,
++            retrive_next_sibling=verify_input.retrieve_next_sibling,
++            uniform_samples=coins,
++            uniform_samples_for_final_sampling=coins_for_final_sampling,
++            target_probs=target_probs,
++            draft_probs=draft_probs,
++            threshold_single=1.0,
++            threshold_acc=1.0,
++            deterministic=True,
++        )
++        del target_probs, draft_probs, coins, coins_for_final_sampling
++        # Ranks draw different coins: rank 0's decision is the one every rank commits.
++        tp_group = (
++            get_parallel().attn_tp_group
++            if is_dp_attention_enabled()
++            else get_tp_group()
++        )
++        if tp_group.world_size > 1:
++            tp_group.broadcast(predict, src=0)
++            tp_group.broadcast(accept_index, src=0)
++            tp_group.broadcast(num_correct_drafts, src=0)
++    elif sampling_info.is_all_greedy or _is_cpu or _is_hip or _is_xpu:
+         target_predict = torch.argmax(next_token_logits, dim=-1)
+         target_predict = target_predict.reshape(bs, verify_input.draft_token_num)
+         predict, accept_index, num_correct_drafts = verify_tree_greedy_func(
+--- a/sglang/srt/speculative/spec_utils.py
++++ b/sglang/srt/speculative/spec_utils.py
+@@ -152,6 +152,20 @@
+     return sample_p, sample_index
+ 
+ 
++def glm53_draft_temperatures(sampling_info) -> torch.Tensor:
++    """GLM-5.3 campaign (0041): the draft proposal temperature per row. Greedy requests are stored as temperature
++    1 with top_k 1, so a sampled rejection-sampling proposal would draw them at temperature 1 and lose acceptance;
++    a ~0 temperature keeps their proposal the draft argmax (q one-hot). Graph-captured sampling infos carry
++    top_k -1 and are left alone (the graph runner copies the adjusted temperatures in)."""
++    temperatures = sampling_info.temperatures
++    top_ks = getattr(sampling_info, "top_ks", None)
++    if top_ks is None or top_ks.shape[0] != temperatures.shape[0]:
++        return temperatures
++    return torch.where(
++        top_ks.view(-1, 1) == 1, torch.full_like(temperatures, 1e-5), temperatures
++    )
++
++
+ def renorm_draft_probs(
+     next_token_logits: torch.Tensor,
+     sampling_info,
+@@ -165,7 +179,9 @@
+     """
+     if not use_rejection_sampling or not next_token_logits.size(0):
+         return torch.softmax(next_token_logits, dim=-1)
+-    return torch.softmax(next_token_logits / sampling_info.temperatures, dim=-1)
++    return torch.softmax(
++        next_token_logits / glm53_draft_temperatures(sampling_info), dim=-1
++    )
+ 
+ 
+ def sample_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.Tensor):
+--- a/sglang/srt/speculative/eagle_worker_v2.py
++++ b/sglang/srt/speculative/eagle_worker_v2.py
+@@ -105,6 +105,7 @@
+     fast_sample,
+     get_plan_stream,
+     load_token_map,
++    glm53_draft_temperatures,
+     renorm_draft_probs,
+     sample_draft_proposal,
+     select_top_k_tokens,
+@@ -766,7 +767,7 @@
+                 if get_spec().speculative_use_rejection_sampling:
+                     probs, topk_p, topk_index = sample_draft_proposal(
+                         logits_output.next_token_logits,
+-                        forward_batch.sampling_info.temperatures,
++                        glm53_draft_temperatures(forward_batch.sampling_info),
+                     )
+                     draft_probs_list.append(probs)
+                     forward_batch.positions.add_(1)
+@@ -1116,7 +1117,7 @@
+         if get_spec().speculative_use_rejection_sampling:
+             ret_draft_probs, ret_topk_p, ret_topk_index = sample_draft_proposal(
+                 draft_logits_output.next_token_logits,
+-                batch.sampling_info.temperatures,
++                glm53_draft_temperatures(batch.sampling_info),
+             )
+         elif self.topk == 1 and not _is_hip:
+             # Gated to CUDA: see #26358 — ROCm's argmax tie-break corrupts
+--- a/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -621,8 +621,11 @@
+             get_spec().speculative_use_rejection_sampling
+             and forward_batch.sampling_info is not None
+         ):
++            from sglang.srt.speculative.spec_utils import glm53_draft_temperatures
++
++            # GLM-5.3 campaign (0041): greedy rows propose the draft argmax.
+             self.temperatures[:raw_bs].copy_(
+-                forward_batch.sampling_info.temperatures[:raw_bs]
++                glm53_draft_temperatures(forward_batch.sampling_info)[:raw_bs]
+             )
+ 
+         # TODO(ch-wan): support num_token_non_padded

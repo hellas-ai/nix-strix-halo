@@ -1,0 +1,135 @@
+--- /dev/null
++++ b/sglang/kernels/ops/gemm/glm53_wmma_gemv.py
+@@ -0,0 +1,100 @@
++"""WMMA GEMV for GLM-5.3 block-FP8 projections at 2..8 token rows on gfx1151.
++
++    y[m, n] = sum_b xs[m, b] * ws[n // 128, b] * sum_{k in block b} x[m, k] * w[n, k]   (E4M3FN x and w, 128x128 blocks)
++
++The DS4 v41 kernel (dsv41_wmma_gemv.py) with GLM's scale layout: activation scales per 128-wide token group and FP32
++weight scales per 128x128 block (weight_scale_inv), instead of DeepSeek V4.1's 32-wide groups. Each 32-wide slice of a
++row is one fp16 WMMA dot on a 16-row tile (rows padded with zeros), so the weight is streamed once whatever the row count
++(2..8), where the generic Triton block-FP8 matmul is tuned for prefill tiles. E4M3FN -> fp16 is the same exact bit move
++(value * 2**-8 for every finite code; the 2**16 is folded into the scales). Split-K partials are summed in a fixed order,
++so a row's result does not depend on how many rows share the call. Not bitwise with the generic kernel.
++SGLANG_GLM53_WMMA_GEMV=1 enables it for SHAPES.
++"""
++import functools
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++# GLM-5.3 TP4 FP8 dense projection shapes (N, K): the batch-one GEMV set of the contiguous-decode patch.
++SHAPES = {(6144, 4096), (4096, 3072), (2048, 4096), (4096, 1536), (4096, 4096), (1024, 4096), (4096, 512)}
++MIN_ROWS = 2
++MAX_ROWS = 8
++BLOCK_M = 16
++BLOCK_N = 64
++GROUPS = 4  # 32-wide slices per iteration: one 128 block
++
++
++@functools.lru_cache(maxsize=None)
++def enabled() -> bool:
++    return os.environ.get("SGLANG_GLM53_WMMA_GEMV", "0") == "1"
++
++
++def serves(n: int, k: int, rows: int) -> bool:
++    return (n, k) in SHAPES and MIN_ROWS <= rows <= MAX_ROWS
++
++
++@triton.jit
++def _e4m3_to_f16_scaled(code_u8):
++    code = code_u8.to(tl.uint16)
++    bits = ((code & 0x7F) << 7) | ((code & 0x80) << 8)
++    return bits.to(tl.float16, bitcast=True)
++
++
++@triton.jit
++def _wmma_fp8_gemv_partial(X, XS, W, WS, P, M, N: tl.constexpr, K: tl.constexpr, K_SPLIT: tl.constexpr,
++                           BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUPS: tl.constexpr):
++    pid_n = tl.program_id(0)
++    pid_k = tl.program_id(1)
++    offs_m = tl.arange(0, BLOCK_M)
++    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_k = tl.arange(0, 32)
++    m_mask = offs_m < M
++    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
++    k_begin = pid_k * K_SPLIT
++    STEP: tl.constexpr = 32 * GROUPS
++    ITERS: tl.constexpr = K_SPLIT // STEP
++    KB: tl.constexpr = K // 128
++    for it in range(ITERS):
++        # Rotate the K walk per output block so programs spread over DRAM channels.
++        k0 = k_begin + ((it + pid_n) % ITERS) * STEP
++        part = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
++        for j in tl.static_range(GROUPS):
++            kk = k0 + j * 32
++            x = tl.load(X + offs_m[:, None] * K + kk + offs_k[None, :], mask=m_mask[:, None], other=0)
++            w = tl.load(W + offs_n[:, None] * K + kk + offs_k[None, :])
++            part += tl.dot(_e4m3_to_f16_scaled(x), tl.trans(_e4m3_to_f16_scaled(w)), out_dtype=tl.float32)
++        b = k0 // 128
++        sx = tl.load(XS + offs_m * KB + b, mask=m_mask, other=0.0)
++        sw = tl.load(WS + (offs_n // 128) * KB + b)
++        acc += part * (sx[:, None] * 65536.0) * sw[None, :]
++    tl.store(P + pid_k * BLOCK_M * N + offs_m[:, None] * N + offs_n[None, :], acc)
++
++
++@triton.jit
++def _sum_partials(P, Y, M, N: tl.constexpr, SPLITS: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK: tl.constexpr):
++    pid = tl.program_id(0)
++    offs = pid * BLOCK + tl.arange(0, BLOCK)
++    live = offs < M * N
++    acc = tl.zeros((BLOCK,), tl.float32)
++    for s in tl.static_range(SPLITS):
++        acc += tl.load(P + s * BLOCK_M * N + offs, mask=live, other=0.0)
++    tl.store(Y + offs, acc.to(tl.bfloat16), mask=live)
++
++
++def wmma_gemv(x, xs, w, ws, out=None):
++    """x [m,K] E4M3FN, xs [m,K/128] f32, w [N,K] E4M3FN, ws [N/128,K/128] f32 -> [m,N] BF16 (into out if given)."""
++    m, k = x.shape
++    n = w.shape[0]
++    if not serves(n, k, m):
++        raise ValueError("glm53 WMMA GEMV does not serve this shape / row count")
++    splits = max(1, k // 1024)
++    partial = torch.empty((splits, BLOCK_M, n), dtype=torch.float32, device=x.device)
++    _wmma_fp8_gemv_partial[(n // BLOCK_N, splits)](
++        x.view(torch.uint8), xs, w.view(torch.uint8), ws, partial, m, n, k, k // splits, BLOCK_M, BLOCK_N, GROUPS,
++        num_warps=4, num_stages=2)
++    output = out if out is not None else torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
++    block = 1024
++    _sum_partials[(triton.cdiv(m * n, block),)](partial, output, m, n, splits, BLOCK_M, block, num_warps=4)
++    return output
+--- a/sglang/kernels/ops/quantization/fp8_kernel.py
++++ b/sglang/kernels/ops/quantization/fp8_kernel.py
+@@ -1653,6 +1653,29 @@
+         )
+         return C
+ 
++    # 2..8 rows (MTP verify, small prefills): opt-in WMMA GEMV for the same GLM shapes (glm53_wmma_gemv.py).
++    if (
++        2 <= M <= 8
++        and A.dtype == B.dtype == torch.float8_e4m3fn
++        and output_dtype == torch.bfloat16
++        and block_size == [128, 128]
++        and As.dtype == Bs.dtype == torch.float32
++        and A.is_contiguous()
++        and B.is_contiguous()
++        and Bs.is_contiguous()
++        and As.shape[-1] == K // 128
++        and As.stride(-1) == 1
++        and As.numel() == M * (K // 128)
++        and (As.dim() == 1 or As.stride(-2) == K // 128)
++    ):
++        from sglang.kernels.ops.gemm import glm53_wmma_gemv
++
++        if glm53_wmma_gemv.enabled() and glm53_wmma_gemv.serves(N, K, M):
++            glm53_wmma_gemv.wmma_gemv(
++                A.reshape(M, K), As.reshape(M, K // 128), B, Bs, out=C.view(M, N)
++            )
++            return C
++
+     block_n, block_k = block_size
+ 
+     configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])

@@ -1,0 +1,55 @@
+--- a/sglang/srt/mem_cache/hybrid_cache/linker_pool_assembler.py
++++ b/sglang/srt/mem_cache/hybrid_cache/linker_pool_assembler.py
+@@ -200,6 +200,18 @@
+             if source is None or not source.keys:
+                 continue
+             indices = source.device_indices
++            if source_name == PoolName.MAMBA:
++                # One canonical endpoint is read from storage. LOAD reserves a
++                # second slot for the request, but that slot is initialized by
++                # the existing canonical-checkpoint CoW before model forward.
++                # Mooncake's batched API maps keys to one destination; duplicate
++                # keys silently leave one destination uninitialized.
++                if len(source.keys) != 1 or (
++                    indices is not None and indices.numel() not in (1, 2)
++                ):
++                    raise ValueError("Mamba transfer requires one checkpoint endpoint")
++                if indices is not None:
++                    indices = indices[:1]
+             resolved.append(
+                 replace(
+                     source,
+--- a/sglang/srt/mem_cache/unified_cache/components/mamba.py
++++ b/sglang/srt/mem_cache/unified_cache/components/mamba.py
+@@ -668,8 +668,9 @@
+                                 hit_policy=PoolHitPolicy.TRAILING_PAGES)
+         assert phase == LinkerTransferPhase.LOAD
+         allocator = self.cache.req_to_token_pool.mamba_allocator
+-        # Reserve the tree checkpoint and a private request copy before the
+-        # all-rank allocation vote. Both read the SAME endpoint state object.
++        # Reserve the tree checkpoint and a private request slot before the
++        # all-rank allocation vote. Only the checkpoint is read from storage;
++        # the request slot is initialized by canonical-checkpoint CoW.
+         slots = allocator.alloc(2)
+         if slots is None:
+             self.cache.evict_for_alloc(EvictParams(num_tokens=0, mamba_num=2))
+@@ -677,7 +678,7 @@
+         if slots is None:
+             return None
+         return PoolTransfer(name=PoolName.MAMBA, device_indices=slots,
+-                            keys=[keys[-1], keys[-1]],
++                            keys=[keys[-1]],
+                             hit_policy=PoolHitPolicy.TRAILING_PAGES)
+ 
+     def update_external_linker_load(
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -274,6 +274,8 @@
+                     list(transfer.keys), transfer
+                 )
+                 keys = self.storage._tag_keys(keys)
++                if len(set(keys)) != len(keys):
++                    raise ValueError("Mooncake restore requires unique destination keys")
+                 pointers, sizes = pool.get_page_buffer_meta(transfer.host_indices)
+                 if len(pointers) != len(keys):
+                     pointers, sizes = self.storage._pack_multi_buffer_meta(

@@ -1,0 +1,212 @@
+diff --git a/sglang/multimodal_gen/runtime/layers/attention/backends/sdpa.py b/sglang/multimodal_gen/runtime/layers/attention/backends/sdpa.py
+index c9c8991..5272a99 100644
+--- a/sglang/multimodal_gen/runtime/layers/attention/backends/sdpa.py
++++ b/sglang/multimodal_gen/runtime/layers/attention/backends/sdpa.py
+@@ -88,8 +88,27 @@ class SDPAImpl(AttentionImpl):
+         if query.shape[1] != key.shape[1]:
+             attn_kwargs["enable_gqa"] = True
+         with self._sdpa_context(query):
+-            output = torch.nn.functional.scaled_dot_product_attention(
+-                query, key, value, **attn_kwargs
+-            )
++            arch = ""
++            if query.device.type == "cuda":
++                arch = getattr(
++                    torch.cuda.get_device_properties(query.device), "gcnArchName", ""
++                ).split(":", 1)[0]
++            if (
++                arch == "gfx1030"
++                and not self.causal
++                and query.dtype == torch.bfloat16
++                and query.shape == key.shape == value.shape
++                and query.shape[-1] == 128
++                and query.shape[-2] > 2048
++            ):
++                from sglang.multimodal_gen.runtime.layers.attention.backends.triton_h3 import (
++                    h3_attention,
++                )
++
++                output = h3_attention(query, key, value, self.softmax_scale)
++            else:
++                output = torch.nn.functional.scaled_dot_product_attention(
++                    query, key, value, **attn_kwargs
++                )
+         output = output.transpose(1, 2)
+         return output
+diff --git a/sglang/multimodal_gen/runtime/layers/attention/backends/triton_h3.py b/sglang/multimodal_gen/runtime/layers/attention/backends/triton_h3.py
+new file mode 100644
+index 0000000..5d1f9b0
+--- /dev/null
++++ b/sglang/multimodal_gen/runtime/layers/attention/backends/triton_h3.py
+@@ -0,0 +1,171 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Bounded exact BF16 attention for H3 on gfx1030."""
++
++import functools
++import os
++import time
++
++import torch
++import triton
++import triton.language as tl
++import triton.runtime.cache as triton_cache
++
++
++_trace_call = 0
++_nix_cache_id = os.environ.get("SGLANG_NIX_TRITON_CACHE_ID")
++if _nix_cache_id:
++    # Nix already content-addresses the immutable Triton compiler closure.
++    # Avoid hashing libtriton.so (>1 GiB on remote /nix/store) in every rank.
++    @functools.lru_cache
++    def _nix_triton_key():
++        return f"{triton.__version__}-{_nix_cache_id}"
++
++    triton_cache.triton_key = _nix_triton_key
++
++
++@triton.jit
++def _h3_attention_forward(
++    q_ptr,
++    k_ptr,
++    v_ptr,
++    output_ptr,
++    stride_qb,
++    stride_qh,
++    stride_qs,
++    stride_qd,
++    stride_kb,
++    stride_kh,
++    stride_ks,
++    stride_kd,
++    stride_vb,
++    stride_vh,
++    stride_vs,
++    stride_vd,
++    stride_ob,
++    stride_oh,
++    stride_os,
++    stride_od,
++    heads: tl.constexpr,
++    sequence,
++    scale,
++    BLOCK_M: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    HEAD_DIM: tl.constexpr,
++):
++    query_block = tl.program_id(0)
++    batch_head = tl.program_id(1)
++    batch = batch_head // heads
++    head = batch_head % heads
++
++    query_rows = query_block * BLOCK_M + tl.arange(0, BLOCK_M)
++    key_rows = tl.arange(0, BLOCK_N)
++    dimensions = tl.arange(0, HEAD_DIM)
++
++    q_base = q_ptr + batch * stride_qb + head * stride_qh
++    k_base = k_ptr + batch * stride_kb + head * stride_kh
++    v_base = v_ptr + batch * stride_vb + head * stride_vh
++    output_base = output_ptr + batch * stride_ob + head * stride_oh
++
++    query = tl.load(
++        q_base
++        + query_rows[:, None] * stride_qs
++        + dimensions[None, :] * stride_qd,
++        mask=query_rows[:, None] < sequence,
++        other=0.0,
++    )
++    row_max = tl.full([BLOCK_M], -float("inf"), tl.float32)
++    row_sum = tl.zeros([BLOCK_M], tl.float32)
++    accumulator = tl.zeros([BLOCK_M, HEAD_DIM], tl.float32)
++    log2_scale = scale * 1.4426950408889634
++
++    for key_start in range(0, sequence, BLOCK_N):
++        current_keys = key_start + key_rows
++        key = tl.load(
++            k_base
++            + dimensions[:, None] * stride_kd
++            + current_keys[None, :] * stride_ks,
++            mask=current_keys[None, :] < sequence,
++            other=0.0,
++        )
++        scores = tl.dot(query, key) * log2_scale
++        valid = (query_rows[:, None] < sequence) & (
++            current_keys[None, :] < sequence
++        )
++        scores = tl.where(valid, scores, -float("inf"))
++        next_max = tl.maximum(row_max, tl.max(scores, axis=1))
++        correction = tl.exp2(row_max - next_max)
++        probabilities = tl.exp2(scores - next_max[:, None])
++        accumulator *= correction[:, None]
++        value = tl.load(
++            v_base
++            + current_keys[:, None] * stride_vs
++            + dimensions[None, :] * stride_vd,
++            mask=current_keys[:, None] < sequence,
++            other=0.0,
++        )
++        accumulator = tl.dot(probabilities.to(tl.bfloat16), value, accumulator)
++        row_sum = row_sum * correction + tl.sum(probabilities, axis=1)
++        row_max = next_max
++
++    result = accumulator / row_sum[:, None]
++    tl.store(
++        output_base
++        + query_rows[:, None] * stride_os
++        + dimensions[None, :] * stride_od,
++        result.to(tl.bfloat16),
++        mask=query_rows[:, None] < sequence,
++    )
++
++
++def h3_attention(
++    query: torch.Tensor,
++    key: torch.Tensor,
++    value: torch.Tensor,
++    scale: float | None,
++):
++    assert query.dtype == key.dtype == value.dtype == torch.bfloat16
++    assert query.shape == key.shape == value.shape
++    assert query.ndim == 4 and query.shape[-1] == 128
++    global _trace_call
++    _trace_call += 1
++    batch, heads, sequence, head_dim = query.shape
++    output = torch.empty_like(query)
++    grid = (triton.cdiv(sequence, 64), batch * heads)
++    trace = os.environ.get("SGLANG_MINIMAX_H3_ATTENTION_TRACE") == "1"
++    if trace:
++        rank = os.environ.get("RANK", "?")
++        print(
++            f"[h3-attention] rank={rank} call={_trace_call} "
++            f"shape={tuple(query.shape)} grid={grid}",
++            flush=True,
++        )
++        torch.cuda.synchronize(query.device)
++        started = time.monotonic()
++    _h3_attention_forward[grid](
++        query,
++        key,
++        value,
++        output,
++        *query.stride(),
++        *key.stride(),
++        *value.stride(),
++        *output.stride(),
++        heads=heads,
++        sequence=sequence,
++        scale=scale if scale is not None else head_dim**-0.5,
++        BLOCK_M=64,
++        BLOCK_N=64,
++        HEAD_DIM=head_dim,
++        num_warps=4,
++        num_stages=1,
++        waves_per_eu=2,
++        allow_flush_denorm=True,
++    )
++    if trace:
++        torch.cuda.synchronize(query.device)
++        print(
++            f"[h3-attention] rank={rank} call={_trace_call} "
++            f"finished={time.monotonic() - started:.6f}s",
++            flush=True,
++        )
++    return output

@@ -1,0 +1,16 @@
+diff --git a/src/core/bootstrap/socket.cc b/src/core/bootstrap/socket.cc
+--- a/src/core/bootstrap/socket.cc
++++ b/src/core/bootstrap/socket.cc
+@@ -674,8 +674,10 @@ void Socket::pollConnect() {
+   if (ret == -1) throw SysError("poll failed", errno);
+   if (ret == 0) return;
+ 
+-  /* check socket status */
+-  if ((ret == 1 && (pfd.revents & POLLOUT)) == 0) {
++  // A pending connect error can report POLLERR without POLLOUT. Read SO_ERROR
++  // so it reaches the same retry/error handling as writable completion.
++  // Other unexpected events retain the existing early error.
++  if ((ret == 1 && (pfd.revents & (POLLOUT | POLLERR))) == 0) {
+     throw Error("poll failed", ErrorCode::InternalError);
+   }
+   if (getsockopt(fd_, SOL_SOCKET, SO_ERROR, (void*)&ret, &rlen) == -1) {

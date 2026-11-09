@@ -1,0 +1,24 @@
+--- a/sglang/srt/mem_cache/unified_cache/unified_tree_core.py
++++ b/sglang/srt/mem_cache/unified_cache/unified_tree_core.py
+@@ -1317,6 +1317,21 @@
+
+     def _should_backup_after_insert(self, state: _InsertWalkState) -> bool:
+         """Check whether the insert target needs a Host backup."""
++        # Hybrid chunked prefill donates a complete immutable KDA checkpoint,
++        # then clears the request's tracking marker. A short final extend may
++        # never insert that checkpoint again with chunked=False. Persist it now,
++        # after component commit, rather than waiting for a second request hit.
++        # Transactional remote restores already own stored objects and must not
++        # enqueue a redundant backup while their publication is being committed.
++        if (self.enable_external_cache_linker and not self.is_write_back
++                and state.params.chunked
++                and not state.params.track_adopted_ranges
++                and ComponentType.MAMBA in self.components_by_type):
++            node = state.target_node
++            if (node is not self.root_node and not node.evicted
++                    and node.component_data[ComponentType.MAMBA].value is not None):
++                return self._needs_external_linker_offload(node)
++
+         if state.is_new_leaf:
+             return self._inc_hit_count_and_check(
+                 state.target_node, state.params.chunked

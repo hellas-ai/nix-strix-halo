@@ -1,0 +1,100 @@
+// Actual declaration, pollConnect and host exceptions; constructor/syscalls mocked.
+#include <cassert>
+#include <cerrno>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <mscclpp/errors.hpp>
+#define private public
+#include "socket.h"
+#undef private
+
+struct Case {
+  const char* name;
+  int async, abortable, flags, socket_rc, socket_errno, get_rc, get_errno,
+      set_rc, set_errno, so_error;
+};
+static const Case cases[] = {
+  {"async_preserves_flags",1,0,O_APPEND,101,0,0,0,0,0,ECONNREFUSED},
+  {"abortable_preserves_flags",0,1,O_APPEND,101,0,0,0,0,0,ETIMEDOUT},
+  {"synchronous_unchanged",0,0,O_APPEND,101,0,0,0,0,0,ECONNREFUSED},
+  {"async_zero_flags",1,0,0,101,0,0,0,0,0,ECONNREFUSED},
+  {"socket_creation_failure",1,0,O_APPEND,-1,EMFILE,0,0,0,0,ECONNREFUSED},
+  {"get_flags_failure",1,0,O_APPEND,101,0,-1,EIO,0,0,ECONNREFUSED},
+  {"set_flags_failure",1,0,O_APPEND,101,0,0,0,-1,EINVAL,ECONNREFUSED},
+  {"connected_no_recreation",1,0,O_APPEND,101,0,0,0,0,0,0},
+  {"fatal_error_no_recreation",1,0,O_APPEND,101,0,0,0,0,0,EHOSTUNREACH},
+};
+static const Case* current;
+static uint32_t abort_flag;
+static int gets,closes,sockets,sleeps,get_flags,set_flags,new_fd_flags;
+static int fixture_poll(pollfd* p,nfds_t n,int timeout) {
+  assert(n==1 && timeout==1 && p->fd==7 && p->events==POLLOUT);
+  p->revents=POLLERR;return 1;
+}
+static int fixture_getsockopt(int fd,int level,int key,void* value,socklen_t* size) {
+  assert(fd==7 && level==SOL_SOCKET && key==SO_ERROR && *size==sizeof(int));
+  ++gets; *static_cast<int*>(value)=current->so_error;return 0;
+}
+static int fixture_close(int fd) {assert(fd==7);++closes;return 0;}
+static int fixture_socket(int family,int type,int protocol) {
+  assert(family==AF_INET && type==SOCK_STREAM && protocol==0);
+  ++sockets;errno=current->socket_errno;new_fd_flags=current->flags;
+  return current->socket_rc;
+}
+static int fixture_usleep(unsigned n) {assert(n==SLEEP_INT);++sleeps;return 0;}
+[[maybe_unused]] static int fixture_fcntl(int fd,int op,...) {
+  assert(fd==101);
+  if(op==F_GETFL) {
+    ++get_flags;errno=current->get_errno;
+    return current->get_rc==-1?-1:new_fd_flags;
+  }
+  assert(op==F_SETFL);
+  va_list args;va_start(args,op);int flags=va_arg(args,int);va_end(args);
+  assert(flags==(current->flags|O_NONBLOCK));
+  ++set_flags;errno=current->set_errno;
+  if(current->set_rc==0)new_fd_flags=flags;
+  return current->set_rc;
+}
+
+namespace mscclpp {
+/* SOURCE_ERRORS */
+Socket::Socket(const SocketAddress*,uint64_t magic,SocketType type,
+               volatile uint32_t*,int)
+    :fd_(7),acceptFd_(-1),connectRetries_(0),acceptRetries_(0),
+     abortFlag_(current->abortable?&abort_flag:nullptr),asyncFlag_(current->async),
+     state_(SocketStateConnectPolling),magic_(magic),type_(type),addr_(),salen_(sizeof(sockaddr_in)) {
+  addr_.sa.sa_family=AF_INET;
+}
+Socket::~Socket() {}
+#define poll fixture_poll
+#define getsockopt fixture_getsockopt
+#define close fixture_close
+#define socket fixture_socket
+#define usleep fixture_usleep
+#define fcntl fixture_fcntl
+#define INFO(...) ((void)0)
+/* SOURCE_POLL */
+#undef INFO
+#undef fcntl
+#undef usleep
+#undef socket
+#undef close
+#undef getsockopt
+#undef poll
+}
+
+int main() {
+  for(const auto& c:cases) {
+    current=&c;gets=closes=sockets=sleeps=get_flags=set_flags=new_fd_flags=0;
+    mscclpp::Socket s;const char* kind="none";int code=0;
+    try{s.pollConnect();}
+    catch(const mscclpp::SysError& e){kind="sys_error";code=e.getErrorCode();}
+    catch(const mscclpp::Error& e){kind="system_error";code=static_cast<int>(e.getErrorCode());}
+    std::printf("{\"case\":\"%s\",\"error\":\"%s\",\"code\":%d,\"state\":%d,\"fd\":%d,"
+      "\"retries\":%d,\"gets\":%d,\"closes\":%d,\"sockets\":%d,\"sleeps\":%d,"
+      "\"get_flags\":%d,\"set_flags\":%d,\"new_fd_flags\":%d}\n",
+      c.name,kind,code,s.state_,s.fd_,s.connectRetries_,gets,closes,sockets,sleeps,
+      get_flags,set_flags,new_fd_flags);
+  }
+}

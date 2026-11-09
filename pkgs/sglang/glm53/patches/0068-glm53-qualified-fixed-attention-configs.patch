@@ -1,0 +1,40 @@
+--- a/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py
++++ b/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py
+@@ -248,3 +248,3 @@
+ @triton.autotune(
+-    configs=_SPLIT_DIM_CONFIGS,
++    configs=[triton.Config({'BLOCK_N': 16}, num_warps=4, num_stages=1)],
+     key=["topk", "H", "USE_FP8_DOT", "SEQ_BUCKET"],
+--- a/sglang/kernels/ops/attention/fla/chunk_intra.py
++++ b/sglang/kernels/ops/attention/fla/chunk_intra.py
+@@ -37,7 +37,3 @@
+ @triton.autotune(
+-    configs=[
+-        triton.Config({"BK": BK, "BV": 64}, num_warps=num_warps)
+-        for BK in [32, 64]
+-        for num_warps in [1, 2, 4]
+-    ],
++    configs=[triton.Config({'BK': 32, 'BV': 64}, num_warps=4, num_stages=3)],
+     key=["H", "K", "BC", "V", "FUSE_RECOMPUTE", "FUSE_DIAGONAL"],
+--- a/sglang/kernels/ops/attention/fla/kda.py
++++ b/sglang/kernels/ops/attention/fla/kda.py
+@@ -750,9 +750,3 @@
+ @triton.autotune(
+-    configs=[
+-        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
+-        for BK in [32, 64]
+-        for BV in [64, 128]
+-        for num_warps in [2, 4, 8]
+-        for num_stages in [2, 3, 4]
+-    ],
++    configs=[triton.Config({'BK': 32, 'BV': 64}, num_warps=8, num_stages=2)],
+     key=["BT", "IS_VARLEN"],
+@@ -925,7 +919,3 @@
+ @triton.autotune(
+-    configs=[
+-        triton.Config({"BS": BS}, num_warps=num_warps)
+-        for BS in BS_LIST
+-        for num_warps in [2, 4, 8]
+-    ],
++    configs=[triton.Config({'BS': 16}, num_warps=8, num_stages=3)],
+     key=["H", "S", "BT", "IS_VARLEN"],

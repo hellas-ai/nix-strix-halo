@@ -1,5 +1,7 @@
 {
   lib,
+  mediaRuntime ? false,
+  legacyRuntime ? false,
   provider ? "nixpkgs",
   rocmTarget ? null,
   therockPythonConfig ? import ../pkgs/therock/python-config.nix { inherit lib; },
@@ -47,7 +49,7 @@ let
     else if provider == "therock-wheels" then
       assert lib.assertMsg (rocmTarget != null) "therock-wheels python provider requires rocmTarget";
       import ./therock-python.nix {
-        inherit lib;
+        inherit lib legacyRuntime mediaRuntime;
         target = rocmTarget;
         pythonConfig = therockPythonConfig;
       } final prev

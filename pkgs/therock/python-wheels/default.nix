@@ -1,5 +1,6 @@
 {
   lib,
+  mediaRuntime ? false,
   stdenv,
   fetchurl,
   therockPython,
@@ -14,6 +15,7 @@
   expat,
   libxcrypt,
   libdrm,
+  rdma-core,
   pciutils,
   ocl-icd,
   wheelSources,
@@ -21,6 +23,18 @@
 }:
 
 let
+  legacyRuntime = lib.hasPrefix "7.15" wheelSources.rocmVersion;
+  dropAql =
+    phase:
+    if legacyRuntime || mediaRuntime then
+      lib.replaceStrings
+        [
+          "# HSA dlopens the unversioned AQL profiling extension. The wheel only\n# ships its versioned SONAME, so counter collection otherwise aborts.\naql_lib=\"$site/_rocm_sdk_core/lib\"\nif [ -f \"$aql_lib/libhsa-amd-aqlprofile64.so.1\" ] \\\n  && [ ! -e \"$aql_lib/libhsa-amd-aqlprofile64.so\" ] \\\n  && [ ! -L \"$aql_lib/libhsa-amd-aqlprofile64.so\" ]; then\n  ln -s libhsa-amd-aqlprofile64.so.1 \"$aql_lib/libhsa-amd-aqlprofile64.so\"\nfi\n\n"
+        ]
+        [ "" ]
+        phase
+    else
+      phase;
   runtimeLibraries = [
     stdenv.cc.cc.lib
     zlib
@@ -33,6 +47,9 @@ let
     expat
     libxcrypt
     libdrm
+  ]
+  ++ lib.optional (legacyRuntime || mediaRuntime) rdma-core
+  ++ [
     pciutils
     ocl-icd
   ];
@@ -115,7 +132,7 @@ therockPythonPackages.buildPythonPackage (finalAttrs: {
     typing-extensions
   ];
 
-  installPhase = ''
+  installPhase = dropAql ''
     runHook preInstall
 
     site="$out/${therockPython.sitePackages}"
@@ -134,6 +151,15 @@ therockPythonPackages.buildPythonPackage (finalAttrs: {
       --disable-pip-version-check \
       --target "$site" \
       "$wheelhouse"/*
+
+    # HSA dlopens the unversioned AQL profiling extension. The wheel only
+    # ships its versioned SONAME, so counter collection otherwise aborts.
+    aql_lib="$site/_rocm_sdk_core/lib"
+    if [ -f "$aql_lib/libhsa-amd-aqlprofile64.so.1" ] \
+      && [ ! -e "$aql_lib/libhsa-amd-aqlprofile64.so" ] \
+      && [ ! -L "$aql_lib/libhsa-amd-aqlprofile64.so" ]; then
+      ln -s libhsa-amd-aqlprofile64.so.1 "$aql_lib/libhsa-amd-aqlprofile64.so"
+    fi
 
     if [ -f "$site/torchvision/_meta_registrations.py" ]; then
       sed -i \

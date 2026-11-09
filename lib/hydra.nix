@@ -1,8 +1,6 @@
 {
   lib,
   self,
-  pkgsFor,
-  defaultRocmTarget,
 }:
 
 let
@@ -75,123 +73,58 @@ let
           }) jobs
         );
 
-      mkPkgsForProvider =
-        {
-          rocmProvider,
-          pythonProvider ? "therock-wheels",
-        }:
-        pkgsFor {
-          inherit system rocmProvider pythonProvider;
-        };
-
-      fromSourcePkgs = lib.optionalAttrs isGateSystem (mkPkgsForProvider {
-        rocmProvider = "therock-source";
-      });
-
-      nixpkgsRocmPkgs = lib.optionalAttrs isGateSystem (mkPkgsForProvider {
-        rocmProvider = "nixpkgs";
-      });
-
       checkJobs = lib.optionalAttrs isGateSystem (
         self.checks.x86_64-linux // { vllm-metal-module = self.checks.aarch64-darwin.vllm-metal-module; }
       );
 
-      # Exercise every package affected by the TheRock source pin or source
-      # provider. Keep this as its own aggregate so source updates can run the
-      # complete matrix without pulling in unrelated Linux, CUDA, and Darwin
-      # jobs.
-      sourceProviderJobs = lib.optionalAttrs isGateSystem {
-        inherit (fromSourcePkgs)
-          ds4-rocm
-          llama-cpp-master-rocm
+      buildJobs = lib.optionalAttrs isGateSystem ({
+        inherit (x86Packages)
+          default
+          glm53-serve
+          sglang-glm53-rocm
+          sglang-rocm-h3
+          ec-su-axb35-monitor
+          fastflowlm
+          kerf-multikernel
           llama-cpp-rocm
-          mlx-rocm
-          sglang-rocm
+          llama-cpp-vulkan
+          linux-multikernel
+          multikernel-demo-initrd
           therock-rocm
-          vllm-rocm
+          tokenizers-cpp
+          xrt-amdxdna
+          live-iso
           ;
-      };
 
-      buildJobs = lib.optionalAttrs isGateSystem (
-        {
-          inherit (x86Packages)
-            default
-            jaccl
-            ds4-rocm
-            ec-su-axb35-monitor
-            fastflowlm
-            kerf-multikernel
-            llama-cpp-rocm
-            llama-cpp-vulkan
-            llama-cpp-master
-            linux-multikernel
-            mlx-rocm
-            multikernel-demo-initrd
-            strix-halo-mes-firmware
-            therock-rocm
-            tokenizers-cpp
-            vllm-rocm
-            xrt-amdxdna
-            live-iso
-            ;
+        darwin-default = darwinPackages.default;
+        darwin-jaccl = darwinPackages.jaccl;
+        inherit (darwinPackages)
+          mlx
+          mlx-metal
+          vllm-metal
+          ;
 
-          darwin-default = darwinPackages.default;
-          darwin-jaccl = darwinPackages.jaccl;
-          darwin-llama-cpp-master-rdma = darwinPackages.llama-cpp-master-rdma;
-          ds4-metal = darwinPackages.ds4;
-          inherit (darwinPackages)
-            mlx
-            mlx-metal
-            vllm-metal
-            ;
-
-          llama-cpp-rocm-nixpkgs = nixpkgsRocmPkgs.llama-cpp-rocm;
-
-          # V620 builders consume these binary gfx1030 artifacts. Keep runtime
-          # smoke tests on gfx1151 until the Hydra fleet has V620 hardware.
-          gfx1030-llama-cpp-rocm = gfx1030Packages.llama-cpp-rocm;
-          gfx1030-llama-cpp-master-rocm = gfx1030Packages.llama-cpp-master-rocm;
-          gfx1030-sglang-rocm = gfx1030Packages.sglang-rocm;
-          gfx1030-therock-python = gfx1030Packages.therock-python;
-          gfx1030-therock-python-wheels = gfx1030Packages.therock-python-wheels;
-          gfx1030-therock-rocm = gfx1030Packages.therock-rocm;
-          gfx1030-vllm-rocm = gfx1030Packages.vllm-rocm;
-        }
-        // lib.mapAttrs' (name: value: lib.nameValuePair "${name}-from-source" value) sourceProviderJobs
-      );
-
-      # Keep the PR gate hermetic: full DS4 model and Pi integration benchmarks
-      # remain in hydraBenchmarkJobs. The gate only proves that the ROCm
-      # runtime closure can load without an 81+ GiB external GGUF fixture.
-      ds4RocmRuntimeSmoke =
-        pkgs.runCommand "ds4-rocm-runtime-smoke"
-          {
-            nativeBuildInputs = [ x86Packages.ds4-rocm ];
-            meta = maintainerMeta;
-          }
-          ''
-            ds4-bench --help > "$out"
-            grep -Fq "Measure prefill, decode, context growth" "$out"
-          '';
+        # V620 builders consume these binary gfx1030 artifacts. Keep runtime
+        # smoke tests on gfx1151 until the Hydra fleet has V620 hardware.
+        gfx1030-llama-cpp-rocm = gfx1030Packages.llama-cpp-rocm;
+        gfx1030-sglang-rocm = gfx1030Packages.sglang-rocm;
+        gfx1030-therock-python-wheels = gfx1030Packages.therock-python-wheels;
+        gfx1030-therock-rocm = gfx1030Packages.therock-rocm;
+      });
 
       smokeJobs = lib.optionalAttrs isGateSystem {
-        ds4-rocm = ds4RocmRuntimeSmoke;
         mlx-metal = darwinBenchmarks.bench-mlx-metal-gemm-smoke;
         vllm-metal = darwinPackages.vllm-metal.tests.metal;
         vllm-metal-imports = darwinPackages.vllm-metal.tests.imports;
         vllm-metal-server = darwinPackages.vllm-metal.tests.server;
-        mlx-rocm = x86Benchmarks."bench-mlx-rocm-${defaultRocmTarget.packageSuffix}-gemm-smoke";
         fastflowlm-npu = x86Benchmarks.bench-llama3-2-1b-fastflowlm-short;
-        vllm-rocm =
-          x86Benchmarks."bench-qwen3-0-6b-vllm-rocm-${defaultRocmTarget.packageSuffix}-throughput-smoke";
-        cuda-rtx4090 = x86Benchmarks.bench-cuda-rtx4090-llama-cpp-master-device-smoke;
+
       };
     in
     lib.optionalAttrs isGateSystem {
       ci = {
         checks = mkAggregate "ci-checks" checkJobs;
         build = mkAggregate "ci-build" buildJobs;
-        source = mkAggregate "ci-source" sourceProviderJobs;
         smoke = mkAggregate "ci-smoke" smokeJobs;
       };
     };

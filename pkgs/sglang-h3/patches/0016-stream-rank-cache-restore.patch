@@ -1,0 +1,72 @@
+diff --git a/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+index 29ae7e9..90da266 100644
+--- a/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
++++ b/sglang/multimodal_gen/runtime/loader/minimax_h3_rank_weight_cache.py
+@@ -427,31 +427,45 @@ class MiniMaxH3RankWeightCache:
+ 
+         try:
+             assert cache_path is not None
+-            local_tensors = self._load_local_tensors(cache_path, spec)
+             reconstructed: dict[str, torch.Tensor] = {}
+             ordinary_parameter_names: list[str] = []
+             parameters = dict(model.named_parameters())
+-            for name, template in current_state.items():
+-                local = local_tensors[name]
+-                if isinstance(template, DTensor):
+-                    local = local.to(device=target_device)
+-                    tensor = DTensor.from_local(
+-                        local,
+-                        device_mesh=template.device_mesh,
+-                        placements=template.placements,
+-                        run_check=False,
+-                        shape=template.shape,
+-                        stride=template.stride(),
+-                    )
+-                else:
+-                    tensor = local.to(device=target_device)
+-                actual_param = parameters.get(name)
+-                if actual_param is not None and parameter_factory is not None:
+-                    reconstructed[name] = parameter_factory(actual_param, tensor)
+-                    if not isinstance(template, DTensor):
+-                        ordinary_parameter_names.append(name)
+-                else:
+-                    reconstructed[name] = tensor
++            # Keep only one CPU-backed safetensors view live while rebuilding
++            # device state. Four H3 rank files are about 60 GiB together; a
++            # whole-file CPU dict needlessly exhausts a 128 GiB host before
++            # the already-sharded tensors reach their V620s.
++            with safe_open(cache_path, framework="pt", device="cpu") as checkpoint:
++                for name, template in current_state.items():
++                    expected = spec[name]
++                    local = checkpoint.get_tensor(name)
++                    if list(local.shape) != expected["local_shape"]:
++                        raise ValueError(
++                            f"rank cache shape changed while reading {name!r}"
++                        )
++                    if _dtype_name(local.dtype) != expected["dtype"]:
++                        raise ValueError(
++                            f"rank cache dtype mismatch for {name!r}: "
++                            f"{local.dtype} != {expected['dtype']}"
++                        )
++                    if isinstance(template, DTensor):
++                        local = local.to(device=target_device)
++                        tensor = DTensor.from_local(
++                            local,
++                            device_mesh=template.device_mesh,
++                            placements=template.placements,
++                            run_check=False,
++                            shape=template.shape,
++                            stride=template.stride(),
++                        )
++                    else:
++                        tensor = local.to(device=target_device)
++                    actual_param = parameters.get(name)
++                    if actual_param is not None and parameter_factory is not None:
++                        reconstructed[name] = parameter_factory(actual_param, tensor)
++                        if not isinstance(template, DTensor):
++                            ordinary_parameter_names.append(name)
++                    else:
++                        reconstructed[name] = tensor
+             incompatible = model.load_state_dict(
+                 reconstructed,
+                 strict=True,

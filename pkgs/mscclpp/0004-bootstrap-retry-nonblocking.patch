@@ -1,0 +1,23 @@
+diff --git a/src/core/bootstrap/socket.cc b/src/core/bootstrap/socket.cc
+--- a/src/core/bootstrap/socket.cc
++++ b/src/core/bootstrap/socket.cc
+@@ -694,6 +694,19 @@
+ 
+     ::close(fd_);
+     fd_ = ::socket(addr_.sa.sa_family, SOCK_STREAM, 0);
++    if (fd_ == -1) {
++      throw SysError("socket creation failed", errno);
++    }
++    // Retain the constructor's asynchronous/abortable socket contract on retry.
++    if (asyncFlag_ || abortFlag_) {
++      int flags = fcntl(fd_, F_GETFL);
++      if (flags == -1) {
++        throw SysError("fcntl(F_GETFL) failed", errno);
++      }
++      if (fcntl(fd_, F_SETFL, flags | O_NONBLOCK) == -1) {
++        throw SysError("fcntl(F_SETFL) failed", errno);
++      }
++    }
+     state_ = SocketStateConnecting;
+   } else if (ret != EINPROGRESS) {
+     state_ = SocketStateError;

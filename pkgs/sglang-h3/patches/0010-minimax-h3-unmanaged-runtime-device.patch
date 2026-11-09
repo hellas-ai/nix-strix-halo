@@ -1,0 +1,50 @@
+diff --git a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+index 12fca96..f4d2591 100644
+--- a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
++++ b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+@@ -1229,6 +1229,28 @@ class MiniMaxH3DiTModel(BaseDiT):
+             return psp.get(field)
+         return getattr(psp, field, None)
+-
++    def _ensure_unmanaged_runtime_device(self, device: torch.device) -> None:
++        """Keep non-DTensor root state on the active rank device.
++
++        FSDP owns the sharded DTensors, but H3 also has TP-aware projection
++        parameters at the root.  Rank-cache state-dict restoration can leave
++        FSDP's original references for those unmanaged parameters on CPU.  Do
++        an in-place move after the FSDP pre-forward hook so its references and
++        the module's references continue to name the same Parameter object.
++        """
++
++        with torch.no_grad():
++            for module in self.modules():
++                for parameter in module._parameters.values():
++                    if (
++                        parameter is not None
++                        and not hasattr(parameter, "device_mesh")
++                        and parameter.device != device
++                    ):
++                        parameter.data = parameter.data.to(device=device)
++                for name, buffer in module._buffers.items():
++                    if buffer is not None and buffer.device != device:
++                        module._buffers[name] = buffer.to(device=device)
++
+     def refine_prompt_embeds(
+         self,
+         prompt_embeds: torch.Tensor,
+@@ -1236,6 +1258,7 @@ class MiniMaxH3DiTModel(BaseDiT):
+         *,
+         device: torch.device,
+     ) -> torch.Tensor:
+         """Project and refine request-static text conditioning once."""
++        self._ensure_unmanaged_runtime_device(device)
+         text_len = int(refiner_cu_seqlens[1].item())
+         if text_len <= 0 or text_len > int(prompt_embeds.shape[0]):
+@@ -1525,6 +1548,7 @@ class MiniMaxH3DiTModel(BaseDiT):
+                 f"inverse_indices must be [{seq_len}], got {list(inverse_indices.shape)}"
+             )
+         device = x.device
++        self._ensure_unmanaged_runtime_device(device)
+         self._resolve_attention_backend_once()
+         if _ring_world_size() != 1:
+             raise NotImplementedError(

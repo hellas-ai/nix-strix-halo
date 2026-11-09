@@ -1,0 +1,102 @@
+--- a/sglang/srt/speculative/adaptive_spec_params.py
++++ b/sglang/srt/speculative/adaptive_spec_params.py
+@@ -82,6 +82,22 @@
+     return widths
+ 
+ 
++def glm53_chain_width_metrics_enabled() -> bool:
++    return bool(
++        os.environ.get(GLM53_MTP_VERIFY_WIDTHS_ENV, "").strip()
++        or os.environ.get("SGLANG_GLM53_DFLASH_VERIFY_WIDTHS", "").strip()
++    )
++
++
++def glm53_chain_num_proposed_drafts(
++    verify_count: int, cap_tokens: int, fallback: int
++) -> int:
++    """One bonus token per GLM chain; sum the actual widths, not startup max."""
++    if glm53_chain_width_metrics_enabled() and cap_tokens > 0:
++        return max(0, cap_tokens - verify_count)
++    return fallback
++
++
+ def _glm53_static_width_config(widths: list[int]) -> dict[str, dict]:
+     return {
+         str(batch_size): {
+--- a/sglang/srt/managers/scheduler_components/batch_result_processor.py
++++ b/sglang/srt/managers/scheduler_components/batch_result_processor.py
+@@ -48,6 +48,7 @@
+ from sglang.srt.sampling.sampling_params import (
+     get_request_reasoning_end_token_ids,
+ )
++from sglang.srt.speculative.adaptive_spec_params import glm53_chain_width_metrics_enabled
+ from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
+ from sglang.srt.state_capturer.indexer_topk import get_global_indexer_capturer
+ from sglang.srt.state_capturer.routed_experts import get_global_experts_capturer
+@@ -768,6 +769,10 @@
+             sum(block_accept_lens) if block_accept_lens else 0
+         )
+         cap_lens = result.cap_lens.tolist() if result.cap_lens is not None else None
++        if cap_lens is None and glm53_chain_width_metrics_enabled():
++            # Width is carried with this result, so overlap/adaptive switches
++            # cannot make reporting use the next round's width. No GPU copy.
++            cap_lens = [stride] * len(batch.reqs)
+         result.num_cap_tokens = sum(cap_lens) if cap_lens else 0
+ 
+         # Feed the adaptive controller now that accept_lens is on CPU,
+--- a/sglang/srt/managers/scheduler_components/metrics_reporter.py
++++ b/sglang/srt/managers/scheduler_components/metrics_reporter.py
+@@ -14,6 +14,7 @@
+ from sglang.srt.eplb.expert_distribution import EPLB_BALANCEDNESS_WINDOW_SIZES
+ from sglang.srt.managers.schedule_batch import ScheduleBatch
+ from sglang.srt.managers.utils import GenerationBatchResult
++from sglang.srt.speculative.adaptive_spec_params import glm53_chain_num_proposed_drafts
+ from sglang.srt.observability.metrics_collector import (
+     DPCooperationInfo,
+     QueueCount,
+@@ -900,6 +901,9 @@
+             else:
+                 draft_per_round = get_spec().speculative_num_steps or 0
+             total_draft_tokens = self.spec_num_forward_ct * draft_per_round
++            total_draft_tokens = glm53_chain_num_proposed_drafts(
++                self.spec_num_forward_ct, self.spec_num_cap_tokens, total_draft_tokens
++            )
+             spec_accept_rate = (
+                 num_correct_drafts / total_draft_tokens if total_draft_tokens > 0 else 0
+             )
+--- a/sglang/srt/managers/tokenizer_manager.py
++++ b/sglang/srt/managers/tokenizer_manager.py
+@@ -189,6 +189,10 @@
+ 
+ _REQUEST_STATE_WAIT_TIMEOUT = envs.SGLANG_REQUEST_STATE_WAIT_TIMEOUT.get()
+ 
++from sglang.srt.speculative.adaptive_spec_params import (
++    glm53_chain_num_proposed_drafts, glm53_chain_width_metrics_enabled,
++)
++
+ logger = logging.getLogger(__name__)
+ 
+ 
+@@ -2940,12 +2944,20 @@
+             num_proposed_drafts = recv_obj.spec_verify_ct[i] * (
+                 get_spec().speculative_num_draft_tokens - 1
+             )
++            cap_tokens = getattr(recv_obj, "spec_num_cap_tokens", None)
++            num_proposed_drafts = glm53_chain_num_proposed_drafts(
++                recv_obj.spec_verify_ct[i],
++                cap_tokens[i] if cap_tokens is not None and len(cap_tokens) > i else 0,
++                num_proposed_drafts,
++            )
+             num_correct_drafts = recv_obj.spec_num_correct_drafts[i]
+ 
+             # Calculate per-request acceptance rate and average acceptance length.
+-            if num_proposed_drafts > 0:
++            if num_proposed_drafts > 0 or glm53_chain_width_metrics_enabled():
+                 # accept_rate: num_correct_drafts / num_proposed_drafts (strict count, no bonus).
+-                meta_info["spec_accept_rate"] = num_correct_drafts / num_proposed_drafts
++                meta_info["spec_accept_rate"] = (
++                    num_correct_drafts / num_proposed_drafts if num_proposed_drafts > 0 else 0.0
++                )
+                 # accept_length: completion_tokens / verify_ct (includes bonus token).
+                 meta_info["spec_accept_length"] = (
+                     recv_obj.completion_tokens[i] / recv_obj.spec_verify_ct[i]

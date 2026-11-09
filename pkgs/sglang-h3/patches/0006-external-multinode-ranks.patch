@@ -1,0 +1,189 @@
+diff --git a/sglang/multimodal_gen/runtime/launch_server.py b/sglang/multimodal_gen/runtime/launch_server.py
+--- a/sglang/multimodal_gen/runtime/launch_server.py
++++ b/sglang/multimodal_gen/runtime/launch_server.py
+@@ -164,6 +164,110 @@ def shutdown_scheduler_processes(
+     _kill_alive_processes(alive, _WORKER_KILL_TIMEOUT_S)
+ 
+ 
++def _external_rank_enabled() -> bool:
++    return os.environ.get("SGLANG_DIFFUSION_EXTERNAL_RANK", "0").lower() in {
++        "1",
++        "true",
++    }
++
++
++def _external_rank_values(server_args: ServerArgs) -> tuple[int, int, int]:
++    required = ("RANK", "LOCAL_RANK", "WORLD_SIZE")
++    missing = [name for name in required if name not in os.environ]
++    if missing:
++        raise RuntimeError(
++            "SGLANG_DIFFUSION_EXTERNAL_RANK requires torchrun variables: "
++            + ", ".join(missing)
++        )
++
++    rank = int(os.environ["RANK"])
++    local_rank = int(os.environ["LOCAL_RANK"])
++    world_size = int(os.environ["WORLD_SIZE"])
++    if world_size != server_args.num_gpus:
++        raise RuntimeError(
++            "External WORLD_SIZE must equal --num-gpus "
++            f"({world_size} != {server_args.num_gpus})"
++        )
++
++    expected = {
++        "tp_size": 1,
++        "dp_size": 1,
++        "cfg_parallel_degree": 1,
++        "sp_degree": world_size,
++        "ulysses_degree": world_size,
++        "ring_degree": 1,
++    }
++    mismatches = [
++        f"{name}={getattr(server_args, name)!r} (expected {value})"
++        for name, value in expected.items()
++        if getattr(server_args, name) != value
++    ]
++    if mismatches:
++        raise RuntimeError(
++            "External-rank H3 currently supports only FSDP1/Ulysses-world: "
++            + ", ".join(mismatches)
++        )
++    return rank, local_rank, world_size
++
++
++def _launch_external_rank_server(
++    server_args: ServerArgs, launch_http_server: bool
++):
++    rank, local_rank, world_size = _external_rank_values(server_args)
++    logger.info(
++        "Starting external diffusion rank %d/%d on local GPU %d",
++        rank,
++        world_size,
++        local_rank,
++    )
++
++    reader, writer = mp.Pipe(duplex=False)
++    process = mp.Process(
++        target=run_scheduler_process,
++        args=(
++            local_rank,
++            rank,
++            server_args.master_port,
++            server_args,
++            writer,
++            None,
++            None,
++            [],
++            [],
++        ),
++        name=f"sglang-diffusionExternalWorker-{rank}",
++        daemon=True,
++    )
++    process.start()
++    writer.close()
++    try:
++        data = reader.recv()
++    except EOFError:
++        process.join()
++        raise RuntimeError(
++            f"External rank {rank} scheduler exited with code {process.exitcode}"
++        ) from None
++    finally:
++        reader.close()
++
++    if data.get("status") != "ready":
++        raise RuntimeError(f"External rank {rank} failed to initialize")
++    logger.info("External diffusion rank %d is ready", rank)
++
++    if rank == 0 and launch_http_server:
++        try:
++            launch_http_server_only(server_args)
++        finally:
++            shutdown_scheduler_processes(server_args, [process])
++    else:
++        process.join()
++        if process.exitcode not in (0, None):
++            raise RuntimeError(
++                f"External rank {rank} scheduler exited with code {process.exitcode}"
++            )
++    return [process]
++
++
+ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
+     """
+     Args:
+@@ -175,6 +279,9 @@ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
+     # Start a new server with multiple worker processes
+     logger.info("Starting server...")
+ 
++    if _external_rank_enabled():
++        return _launch_external_rank_server(server_args, launch_http_server)
++
+     num_gpus = server_args.num_gpus
+     processes = []
+ 
+diff --git a/sglang/multimodal_gen/runtime/managers/gpu_worker.py b/sglang/multimodal_gen/runtime/managers/gpu_worker.py
+--- a/sglang/multimodal_gen/runtime/managers/gpu_worker.py
++++ b/sglang/multimodal_gen/runtime/managers/gpu_worker.py
+@@ -215,12 +215,34 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
+         intra_op_threads = _worker_cpu_intra_op_threads(self.server_args.num_gpus)
+         if intra_op_threads is not None:
+             torch.set_num_threads(intra_op_threads)
+-        # Set environment variables for distributed initialization
+-        os.environ["MASTER_ADDR"] = "localhost"
+-        os.environ["MASTER_PORT"] = str(self.master_port)
+-        os.environ["LOCAL_RANK"] = str(self.local_rank)
+-        os.environ["RANK"] = str(self.rank)
+-        os.environ["WORLD_SIZE"] = str(self.server_args.num_gpus)
++        external_rank = os.environ.get(
++            "SGLANG_DIFFUSION_EXTERNAL_RANK", "0"
++        ).lower() in {"1", "true"}
++        if external_rank:
++            inherited = {
++                name: int(os.environ[name])
++                for name in ("LOCAL_RANK", "RANK", "WORLD_SIZE")
++            }
++            expected = {
++                "LOCAL_RANK": self.local_rank,
++                "RANK": self.rank,
++                "WORLD_SIZE": self.server_args.num_gpus,
++            }
++            if inherited != expected:
++                raise RuntimeError(
++                    f"External rank environment mismatch: {inherited} != {expected}"
++                )
++            distributed_init_method = "env://"
++        else:
++            # Preserve the established one-host launcher behavior.
++            os.environ["MASTER_ADDR"] = "localhost"
++            os.environ["MASTER_PORT"] = str(self.master_port)
++            os.environ["LOCAL_RANK"] = str(self.local_rank)
++            os.environ["RANK"] = str(self.rank)
++            os.environ["WORLD_SIZE"] = str(self.server_args.num_gpus)
++            distributed_init_method = NetworkAddress(
++                "127.0.0.1", self.master_port
++            ).to_tcp()
+         self._configure_persistent_torch_compile_cache()
+         # initialize the distributed environment
+         maybe_init_distributed_environment_and_model_parallel(
+@@ -239,8 +261,6 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
+             sp_size=self.server_args.sp_degree,
+             dp_size=self.server_args.dp_size,
+-            distributed_init_method=NetworkAddress(
+-                "127.0.0.1", self.master_port
+-            ).to_tcp(),
++            distributed_init_method=distributed_init_method,
+             dist_timeout=self.server_args.dist_timeout,
+         )
+ 
+@@ -1053,5 +1073,10 @@ def run_scheduler_process(
+             local_rank=local_rank,
+         )
++        if os.environ.get("SGLANG_DIFFUSION_EXTERNAL_RANK", "0").lower() in {
++            "1",
++            "true",
++        }:
++            torch.distributed.barrier()
+         logger.info(f"Worker {rank}: Scheduler loop started.")
+         pipe_writer.send(
+             {

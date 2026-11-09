@@ -20,4 +20,6 @@ stdenv.mkDerivation {
       "$out/bin/amdgpu-smu-exporter"
     runHook postInstall
   '';
+
+  meta.mainProgram = "amdgpu-smu-exporter";
 }

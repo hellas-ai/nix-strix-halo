@@ -4,3 +4,18 @@
 /result-*
 /out-*/
 /gcroots/
+
+# ad-hoc bench scripts and artifacts (kept local only)
+/.bench-artifacts/
+/.npu-probe-build/
+/.npu-probe-artifacts/
+__pycache__/
+/.race/
+/lib/bench/gfx1030-mrope-repro.py
+/lib/bench/gfx1030-qwen-warmup-trace-sitecustomize.py
+/lib/bench/gfx1030_dense_override/
+/lib/bench/gfx1030_dense_row_stream_probe.py
+/lib/bench/strix-fp8-grouped-moe.py
+/lib/bench/strix-int4-grouped-moe.py
+/lib/bench/strix-mxfp4-fused-gemv-moe.py
+/lib/bench/vllm-gfx1030-prefix-prefill.py

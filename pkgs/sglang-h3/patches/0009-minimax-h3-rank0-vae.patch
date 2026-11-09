@@ -1,0 +1,535 @@
+diff --git a/sglang/multimodal_gen/runtime/loader/component_loaders/vae_loader.py b/sglang/multimodal_gen/runtime/loader/component_loaders/vae_loader.py
+index e59c874..4ff2eeb 100644
+--- a/sglang/multimodal_gen/runtime/loader/component_loaders/vae_loader.py
++++ b/sglang/multimodal_gen/runtime/loader/component_loaders/vae_loader.py
+@@ -7,6 +7,9 @@ from safetensors.torch import load_file as safetensors_load_file
+ 
+ from sglang.multimodal_gen.configs.models import ModelConfig
+ from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import LTX2PipelineConfig
++from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
++    MiniMaxH3PipelineConfig,
++)
+ from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
+     QwenImagePipelineConfig,
+ )
+@@ -19,6 +22,10 @@ from sglang.multimodal_gen.runtime.loader.utils import (
+     set_default_torch_dtype,
+     skip_init_modules,
+ )
++from sglang.multimodal_gen.runtime.distributed import (
++    get_world_group,
++    model_parallel_is_initialized,
++)
+ from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
+ from sglang.multimodal_gen.runtime.platforms import current_platform
+ from sglang.multimodal_gen.runtime.server_args import ServerArgs
+@@ -34,6 +41,27 @@ logger = init_logger(__name__)
+ VAE_CHANNELS_LAST_3D_ENV = "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D"
+ 
+ 
++class RankZeroVAEPlaceholder(nn.Module):
++    """Configuration-only stand-in for an H3 VAE owned by world rank zero."""
++
++    parallel_tiling = False
++
++    def __init__(self, component_name: str) -> None:
++        super().__init__()
++        self.component_name = component_name
++
++
++def minimax_h3_uses_rank0_vae(server_args: ServerArgs) -> bool:
++    """Whether this H3 deployment assigns both VAEs to world rank zero."""
++
++    pipeline_config = server_args.pipeline_config
++    return (
++        isinstance(pipeline_config, MiniMaxH3PipelineConfig)
++        and server_args.num_gpus > 1
++        and not pipeline_config.vae_config.use_parallel_decode
++    )
++
++
+ def _backfill_ltx2_audio_vae_latent_stats(
+     loaded: dict[str, torch.Tensor], component_name: str
+ ) -> None:
+@@ -110,9 +138,9 @@ class VAELoader(ComponentLoader):
+         """Load the VAE based on the model path, and inference args."""
+         config = get_diffusers_component_config(component_path=component_model_path)
+         class_name = config.pop("_class_name", None)
+-        assert (
+-            class_name is not None
+-        ), "Model config does not contain a _class_name attribute. Only diffusers format is supported."
++        assert class_name is not None, (
++            "Model config does not contain a _class_name attribute. Only diffusers format is supported."
++        )
+ 
+         server_args.model_paths[component_name] = component_model_path
+ 
+@@ -139,6 +167,22 @@ class VAELoader(ComponentLoader):
+             # NOTE: some post init logics are only available after updated with config
+             vae_config.post_init()
+ 
++        if minimax_h3_uses_rank0_vae(server_args):
++            if not model_parallel_is_initialized():
++                raise RuntimeError(
++                    "MiniMax H3 rank-zero VAE placement requires an initialized "
++                    "distributed world group"
++                )
++            world_rank = get_world_group().rank_in_group
++            if world_rank != 0:
++                logger.info(
++                    "MiniMax H3: skipping %s weights on world rank %d; rank 0 owns "
++                    "VAE encode/decode",
++                    component_name,
++                    world_rank,
++                )
++                return RankZeroVAEPlaceholder(component_name)
++
+         should_offload = self.should_offload(server_args)
+         target_device = self.target_device(should_offload)
+ 
+@@ -186,9 +230,9 @@ class VAELoader(ComponentLoader):
+             vae_precision=vae_precision,
+         )
+ 
+-        assert (
+-            len(safetensors_list) >= 1
+-        ), f"Found no safetensors files in {component_model_path}"
++        assert len(safetensors_list) >= 1, (
++            f"Found no safetensors files in {component_model_path}"
++        )
+         loaded = {}
+         for sf_path in safetensors_list:
+             loaded.update(safetensors_load_file(sf_path))
+diff --git a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/decoding.py b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/decoding.py
+index 77d8e07..27fb879 100644
+--- a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/decoding.py
++++ b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/decoding.py
+@@ -11,6 +11,9 @@ from sglang.multimodal_gen.runtime.distributed import (
+     get_world_group,
+     model_parallel_is_initialized,
+ )
++from sglang.multimodal_gen.runtime.loader.component_loaders.vae_loader import (
++    minimax_h3_uses_rank0_vae,
++)
+ from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
+     ComponentUse,
+ )
+@@ -257,6 +260,12 @@ class MiniMaxH3DecodingStage(DecodingStage):
+         self, batch: OutputBatch, server_args: ServerArgs
+     ) -> VerificationResult:
+         result = VerificationResult()
++        if (
++            minimax_h3_uses_rank0_vae(server_args)
++            and model_parallel_is_initialized()
++            and get_world_group().rank_in_group != 0
++        ):
++            return result
+         result.add_check("output", batch.output, [V.is_tensor, V.with_dims(5)])
+         result.add_check("audio", batch.audio, [V.is_tensor, V.with_dims(3)])
+         result.add_check("audio_sample_rate", batch.audio_sample_rate, V.positive_int)
+@@ -308,18 +317,12 @@ class MiniMaxH3DecodingStage(DecodingStage):
+                 "sample_rate": int(audio_vae.sample_rate),
+             }
+ 
+-    @torch.no_grad()
+-    def forward(self, batch: Req, server_args: ServerArgs) -> OutputBatch:
+-        _minimax_h3_decoder_task(batch)
+-        visual_latent = _required_tensor(batch.latents, "batch.latents")
+-        audio_latent = _required_tensor(batch.audio_latents, "batch.audio_latents")
+-        if visual_latent.ndim != 5:
+-            raise ValueError("batch.latents must be [B, C, T, H, W]")
+-        if audio_latent.ndim != 3:
+-            raise ValueError(
+-                "batch.audio_latents must be [audio_channel, latent_dim, T]"
+-            )
+-
++    def _decode_video(
++        self,
++        batch: Req,
++        visual_latent: torch.Tensor,
++        server_args: ServerArgs,
++    ) -> torch.Tensor:
+         if self.video_vae is None:
+             raise RuntimeError("MiniMax H3 tasks require the video_vae output decoder")
+         with self.use_declared_component(
+@@ -378,39 +381,18 @@ class MiniMaxH3DecodingStage(DecodingStage):
+                     )
+                     canonical_frames.copy_(visual_frames)
+                     visual_frames = canonical_frames
++                return visual_frames
+ 
+-        # DP is currently rejected by ServerArgs validation, so the world group
+-        # is one request replica (TP/CFG/SP ranks), not a collection of
+-        # independent requests. Decode the non-sharded audio VAE once per
+-        # request and distribute its output to the ranks that decoded video.
+-        world_group = get_world_group() if model_parallel_is_initialized() else None
+-        is_audio_owner = world_group is None or world_group.rank_in_group == 0
+-        owner_exception = None
+-        owner_error = None
+-        audio_payload = None
+-        if is_audio_owner:
+-            try:
+-                audio_payload = self._decode_audio(audio_latent, server_args)
+-            except Exception as exc:
+-                owner_exception = exc
+-                owner_error = f"{type(exc).__name__}: {exc}"
+-        if world_group is not None:
+-            owner_error = world_group.broadcast_object(owner_error, src=0)
+-        if owner_error is not None:
+-            if owner_exception is not None:
+-                raise owner_exception
+-            raise RuntimeError(
+-                f"MiniMax H3 audio decode failed on rank 0: {owner_error}"
+-            )
+-        if world_group is not None:
+-            audio_payload = world_group.broadcast_tensor_dict(audio_payload, src=0)
+-        if not isinstance(audio_payload, dict):
+-            raise RuntimeError("MiniMax H3 audio decode produced no output payload")
++    @staticmethod
++    def _output_batch(
++        batch: Req,
++        visual_frames: torch.Tensor,
++        audio_payload: dict,
++        server_args: ServerArgs,
++    ) -> OutputBatch:
+         audio_waveform = _required_tensor(
+             audio_payload.get("waveform"), "audio_vae.decode"
+         )
+-        audio_sample_rate = int(audio_payload["sample_rate"])
+-
+         visual_frames = server_args.pipeline_config.post_decoding(
+             visual_frames, server_args
+         )
+@@ -420,7 +402,7 @@ class MiniMaxH3DecodingStage(DecodingStage):
+         return OutputBatch(
+             output=visual_frames,
+             audio=output_audio_waveform,
+-            audio_sample_rate=audio_sample_rate,
++            audio_sample_rate=int(audio_payload["sample_rate"]),
+             trajectory_timesteps=batch.trajectory_timesteps,
+             trajectory_latents=batch.trajectory_latents,
+             rollout_trajectory_data=batch.rollout_trajectory_data,
+@@ -429,6 +411,96 @@ class MiniMaxH3DecodingStage(DecodingStage):
+             noise_pred=None,
+         )
+ 
++    def _forward_rank_zero_vae(
++        self,
++        batch: Req,
++        visual_latent: torch.Tensor,
++        audio_latent: torch.Tensor,
++        server_args: ServerArgs,
++    ) -> OutputBatch:
++        if not model_parallel_is_initialized():
++            raise RuntimeError(
++                "MiniMax H3 rank-zero VAE decode requires an initialized "
++                "distributed world group"
++            )
++        world_group = get_world_group()
++        is_owner = world_group.rank_in_group == 0
++        owner_exception = None
++        owner_error = None
++        owner_output = None
++        if is_owner:
++            try:
++                visual_frames = self._decode_video(batch, visual_latent, server_args)
++                audio_payload = self._decode_audio(audio_latent, server_args)
++                owner_output = self._output_batch(
++                    batch, visual_frames, audio_payload, server_args
++                )
++            except Exception as exc:
++                owner_exception = exc
++                owner_error = f"{type(exc).__name__}: {exc}"
++
++        # Keep every denoiser rank in this small control collective until the
++        # sole VAE owner completes.  Do not broadcast decoded frames/audio: only
++        # world rank zero materializes and returns the final result.
++        owner_error = world_group.broadcast_object(owner_error, src=0)
++        if owner_error is not None:
++            if owner_exception is not None:
++                raise owner_exception
++            raise RuntimeError(f"MiniMax H3 VAE decode failed on rank 0: {owner_error}")
++        if is_owner:
++            if owner_output is None:
++                raise RuntimeError("MiniMax H3 rank-zero VAE produced no output")
++            return owner_output
++        return OutputBatch(metrics=batch.metrics)
++
++    @torch.no_grad()
++    def forward(self, batch: Req, server_args: ServerArgs) -> OutputBatch:
++        _minimax_h3_decoder_task(batch)
++        visual_latent = _required_tensor(batch.latents, "batch.latents")
++        audio_latent = _required_tensor(batch.audio_latents, "batch.audio_latents")
++        if visual_latent.ndim != 5:
++            raise ValueError("batch.latents must be [B, C, T, H, W]")
++        if audio_latent.ndim != 3:
++            raise ValueError(
++                "batch.audio_latents must be [audio_channel, latent_dim, T]"
++            )
++
++        if minimax_h3_uses_rank0_vae(server_args):
++            return self._forward_rank_zero_vae(
++                batch, visual_latent, audio_latent, server_args
++            )
++
++        visual_frames = self._decode_video(batch, visual_latent, server_args)
++
++        # DP is currently rejected by ServerArgs validation, so the world group
++        # is one request replica (TP/CFG/SP ranks), not a collection of
++        # independent requests. Decode the non-sharded audio VAE once per
++        # request and distribute its output to the ranks that decoded video.
++        world_group = get_world_group() if model_parallel_is_initialized() else None
++        is_audio_owner = world_group is None or world_group.rank_in_group == 0
++        owner_exception = None
++        owner_error = None
++        audio_payload = None
++        if is_audio_owner:
++            try:
++                audio_payload = self._decode_audio(audio_latent, server_args)
++            except Exception as exc:
++                owner_exception = exc
++                owner_error = f"{type(exc).__name__}: {exc}"
++        if world_group is not None:
++            owner_error = world_group.broadcast_object(owner_error, src=0)
++        if owner_error is not None:
++            if owner_exception is not None:
++                raise owner_exception
++            raise RuntimeError(
++                f"MiniMax H3 audio decode failed on rank 0: {owner_error}"
++            )
++        if world_group is not None:
++            audio_payload = world_group.broadcast_tensor_dict(audio_payload, src=0)
++        if not isinstance(audio_payload, dict):
++            raise RuntimeError("MiniMax H3 audio decode produced no output payload")
++        return self._output_batch(batch, visual_frames, audio_payload, server_args)
++
+ 
+ __all__ = [
+     "MiniMaxH3DecodingStage",
+diff --git a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py
+index d94f399..bcefd79 100644
+--- a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py
++++ b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/visual_encoding.py
+@@ -87,7 +87,9 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
+ 
+             output_keys = self._visual_output_keys(plan, routed)
+             replica_world, replica_rank = minimax_h3_replica_ctx()
+-            parallel_encode = replica_world > 1 and bool(self.video_vae.parallel_tiling)
++            parallel_encode = replica_world > 1 and bool(
++                getattr(self.video_vae, "parallel_tiling", False)
++            )
+             owner_exception = None
+             owner_error = None
+             if (parallel_encode or replica_rank == 0) and any(
+diff --git a/sglang/multimodal_gen/test/unit/test_minimax_h3_rank0_vae.py b/sglang/multimodal_gen/test/unit/test_minimax_h3_rank0_vae.py
+new file mode 100644
+index 0000000..a9f98cb
+--- /dev/null
++++ b/sglang/multimodal_gen/test/unit/test_minimax_h3_rank0_vae.py
+@@ -0,0 +1,186 @@
++# SPDX-License-Identifier: Apache-2.0
++"""MiniMax H3 rank-zero-only VAE placement and decode contracts."""
++
++from types import SimpleNamespace
++from unittest import mock
++
++import pytest
++import torch
++
++from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
++    MiniMaxH3PipelineConfig,
++)
++from sglang.multimodal_gen.runtime.loader.component_loaders import vae_loader
++from sglang.multimodal_gen.runtime.loader.component_loaders.vae_loader import (
++    RankZeroVAEPlaceholder,
++    VAELoader,
++    minimax_h3_uses_rank0_vae,
++)
++from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
++from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages import (
++    decoding,
++)
++from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.decoding import (
++    MiniMaxH3DecodingStage,
++)
++
++
++class _FakeWorldGroup:
++    def __init__(self, rank: int, received=None):
++        self.rank_in_group = rank
++        self.received = received
++        self.sent = None
++
++    def broadcast_object(self, obj, src=0):
++        assert src == 0
++        self.sent = obj
++        return obj if self.rank_in_group == src else self.received
++
++
++def _server_args(*, parallel_decode: bool, num_gpus: int = 4):
++    pipeline_config = MiniMaxH3PipelineConfig()
++    pipeline_config.vae_config.use_parallel_decode = parallel_decode
++    return SimpleNamespace(
++        num_gpus=num_gpus,
++        pipeline_config=pipeline_config,
++        model_paths={},
++    )
++
++
++def test_rank_zero_vae_topology_is_explicit_and_multirank_only():
++    assert minimax_h3_uses_rank0_vae(_server_args(parallel_decode=False, num_gpus=4))
++    assert not minimax_h3_uses_rank0_vae(_server_args(parallel_decode=True, num_gpus=4))
++    assert not minimax_h3_uses_rank0_vae(
++        _server_args(parallel_decode=False, num_gpus=1)
++    )
++
++
++@pytest.mark.parametrize(
++    ("component_name", "config_attr"),
++    [("video_vae", "vae_config"), ("audio_vae", "audio_vae_config")],
++)
++def test_nonowner_vae_loader_reads_config_but_skips_weights(
++    monkeypatch, component_name, config_attr
++):
++    server_args = _server_args(parallel_decode=False)
++    component_config = getattr(server_args.pipeline_config, config_attr)
++    update = mock.Mock()
++    post_init = mock.Mock()
++    monkeypatch.setattr(component_config, "update_model_arch", update)
++    monkeypatch.setattr(component_config, "post_init", post_init)
++    monkeypatch.setattr(
++        vae_loader,
++        "get_diffusers_component_config",
++        lambda **_kwargs: {"_class_name": "UnusedVAE", "latent_channels": 24},
++    )
++    monkeypatch.setattr(vae_loader, "resolve_component_precision", lambda *_args: None)
++    monkeypatch.setattr(vae_loader, "model_parallel_is_initialized", lambda: True)
++    monkeypatch.setattr(vae_loader, "get_world_group", lambda: _FakeWorldGroup(rank=2))
++
++    def unexpected_weight_scan(*_args, **_kwargs):
++        pytest.fail("a non-owner rank scanned VAE weight shards")
++
++    monkeypatch.setattr(vae_loader, "_list_safetensors_files", unexpected_weight_scan)
++    component = VAELoader().load_customized(
++        "/models/MiniMax-H3/FL2VA/" + component_name,
++        server_args,
++        component_name,
++    )
++
++    assert isinstance(component, RankZeroVAEPlaceholder)
++    assert component.component_name == component_name
++    assert component.parallel_tiling is False
++    update.assert_called_once_with({"latent_channels": 24})
++    post_init.assert_called_once_with()
++
++
++def _decode_stage():
++    stage = object.__new__(MiniMaxH3DecodingStage)
++    stage.video_vae = RankZeroVAEPlaceholder("video_vae")
++    stage.audio_vae = RankZeroVAEPlaceholder("audio_vae")
++    return stage
++
++
++def _decode_batch():
++    return SimpleNamespace(metrics=SimpleNamespace())
++
++
++def test_decode_peer_waits_for_status_without_touching_vae(monkeypatch):
++    group = _FakeWorldGroup(rank=3, received=None)
++    monkeypatch.setattr(decoding, "model_parallel_is_initialized", lambda: True)
++    monkeypatch.setattr(decoding, "get_world_group", lambda: group)
++    stage = _decode_stage()
++    stage._decode_video = mock.Mock(side_effect=AssertionError("peer decoded video"))
++    stage._decode_audio = mock.Mock(side_effect=AssertionError("peer decoded audio"))
++
++    result = stage._forward_rank_zero_vae(
++        _decode_batch(),
++        torch.zeros(1),
++        torch.zeros(1),
++        _server_args(parallel_decode=False),
++    )
++
++    assert isinstance(result, OutputBatch)
++    assert result.output is None
++    assert result.audio is None
++    stage._decode_video.assert_not_called()
++    stage._decode_audio.assert_not_called()
++    assert group.sent is None
++
++
++def test_decode_owner_failure_is_broadcast_and_reraised(monkeypatch):
++    group = _FakeWorldGroup(rank=0)
++    monkeypatch.setattr(decoding, "model_parallel_is_initialized", lambda: True)
++    monkeypatch.setattr(decoding, "get_world_group", lambda: group)
++    stage = _decode_stage()
++    stage._decode_video = mock.Mock(side_effect=RuntimeError("decoder exploded"))
++    stage._decode_audio = mock.Mock()
++
++    with pytest.raises(RuntimeError, match="decoder exploded"):
++        stage._forward_rank_zero_vae(
++            _decode_batch(),
++            torch.zeros(1),
++            torch.zeros(1),
++            _server_args(parallel_decode=False),
++        )
++
++    assert group.sent == "RuntimeError: decoder exploded"
++    stage._decode_audio.assert_not_called()
++
++
++def test_decode_peer_receives_owner_failure(monkeypatch):
++    group = _FakeWorldGroup(rank=1, received="RuntimeError: decoder exploded")
++    monkeypatch.setattr(decoding, "model_parallel_is_initialized", lambda: True)
++    monkeypatch.setattr(decoding, "get_world_group", lambda: group)
++    stage = _decode_stage()
++
++    with pytest.raises(RuntimeError, match="failed on rank 0.*decoder exploded"):
++        stage._forward_rank_zero_vae(
++            _decode_batch(),
++            torch.zeros(1),
++            torch.zeros(1),
++            _server_args(parallel_decode=False),
++        )
++
++
++def test_decode_owner_returns_output_without_payload_broadcast(monkeypatch):
++    group = _FakeWorldGroup(rank=0)
++    monkeypatch.setattr(decoding, "model_parallel_is_initialized", lambda: True)
++    monkeypatch.setattr(decoding, "get_world_group", lambda: group)
++    stage = _decode_stage()
++    visual = torch.zeros((1, 3, 2, 4, 4))
++    audio = {"waveform": torch.zeros((2, 1, 32)), "sample_rate": 32000}
++    expected = OutputBatch(output=visual, audio=audio["waveform"])
++    stage._decode_video = mock.Mock(return_value=visual)
++    stage._decode_audio = mock.Mock(return_value=audio)
++    stage._output_batch = mock.Mock(return_value=expected)
++
++    result = stage._forward_rank_zero_vae(
++        _decode_batch(),
++        torch.zeros(1),
++        torch.zeros(1),
++        _server_args(parallel_decode=False),
++    )
++
++    assert result is expected
++    assert group.sent is None
+diff --git a/sglang/multimodal_gen/test/unit/test_minimax_h3_vae_parallel_modes.py b/sglang/multimodal_gen/test/unit/test_minimax_h3_vae_parallel_modes.py
+index d25fb83..61e9451 100644
+--- a/sglang/multimodal_gen/test/unit/test_minimax_h3_vae_parallel_modes.py
++++ b/sglang/multimodal_gen/test/unit/test_minimax_h3_vae_parallel_modes.py
+@@ -44,6 +44,15 @@ def test_decode_mode_uses_released_tiled_recipe(mode):
+     assert kwargs["decoder_parallel"] is False
+ 
+ 
++def test_disabled_parallel_decode_keeps_tiling_local():
++    config = MiniMaxH3VideoVAEConfig(use_parallel_decode=False)
++    model, kwargs = _init_kwargs(config)
++
++    assert model.use_parallel_decode is False
++    assert kwargs["decoder_tiling"] is True
++    assert kwargs["parallel_tiling"] is False
++
++
+ @pytest.mark.parametrize("mode", ["spatial", "spatial_shard", "patch"])
+ def test_unvalidated_decode_modes_are_rejected(mode):
+     config = MiniMaxH3VideoVAEConfig(parallel_decode_mode=mode)

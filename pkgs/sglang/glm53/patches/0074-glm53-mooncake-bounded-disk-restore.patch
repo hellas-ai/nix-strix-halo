@@ -1,0 +1,55 @@
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -340,20 +340,42 @@
+                 ]
+                 # The synchronous full-object API supports MEMORY and disk
+                 # replicas, and waits for all submitted transfers before return.
+                 # Require exact byte counts: a nonnegative short read is not a
+                 # valid restore, even if the backend reports it as a success.
+-                result = self.storage._get_batch_zero_copy_impl(keys, pointers, sizes)
+-                if (
+-                    result is None
+-                    or isinstance(result, int)
+-                    or list(result) != expected
+-                ):
+-                    raise RuntimeError(
+-                        f"Mooncake restore failed for pool={transfer.name}: "
+-                        f"transferred={result}, expected={expected}"
+-                    )
++                # All TP ranks share the store's disk restore arena. An entire
++                # long prefix can require many GiB per rank, even though every
++                # object fits. Bound synchronous reads before the rank-wide
++                # publication vote; completed reads release their store buffers.
++                if not (len(keys) == len(pointers) == len(sizes)):
++                    raise ValueError("Mooncake restore metadata cardinality mismatch")
++                budget = 128 * 1024 * 1024
++                start = 0
++                while start < len(keys):
++                    end = start
++                    batch_bytes = 0
++                    while end < len(keys):
++                        size = expected[end]
++                        if size <= 0 or size > budget:
++                            raise ValueError("Mooncake restore object exceeds batch budget")
++                        if batch_bytes + size > budget:
++                            break
++                        batch_bytes += size
++                        end += 1
++                    result = self.storage._get_batch_zero_copy_impl(
++                        keys[start:end], pointers[start:end], sizes[start:end]
++                    )
++                    if (
++                        result is None
++                        or isinstance(result, int)
++                        or list(result) != expected[start:end]
++                    ):
++                        raise RuntimeError(
++                            f"Mooncake restore failed for pool={transfer.name}: "
++                            f"transferred={result}, expected={expected[start:end]}"
++                        )
++                    start = end
+                 self._diagnostic_transfer_bytes("restore_after", transfer)
+         except Exception:
+             logger.warning(
+                 "Mooncake restore failed before publication for rid=%s",
+                 rid,

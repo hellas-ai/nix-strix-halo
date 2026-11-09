@@ -1,0 +1,96 @@
+--- a/sglang/srt/runtime_context.py
++++ b/sglang/srt/runtime_context.py
+@@ -657,6 +657,7 @@
+     """
+ 
+     _DEFAULTS = {
++        "glm53_verify_decode_batch_size": 0,
+         "multi_stream": False,
+         "moe_output_buffer": None,
+         # Attention-TP input-scattering (set per forward by
+@@ -684,6 +685,7 @@
+     # under torch.compile.
+     _GRAPH_VISIBLE = frozenset(
+         {
++            "glm53_verify_decode_batch_size",
+             "attn_input_scattered",
+             "attn_inputs",
+             "is_extend_in_batch",
+--- a/sglang/srt/models/glm5_next.py
++++ b/sglang/srt/models/glm5_next.py
+@@ -1380,7 +1380,9 @@
+         if self.is_mrope_enabled:
+             positions = forward_batch.mrope_positions
+ 
+-        with get_attn_tp_context().maybe_input_scattered(forward_batch):
++        with get_forward().scoped(
++            glm53_verify_decode_batch_size=(forward_batch.batch_size if forward_batch.forward_mode.is_target_verify() else 0)
++        ), get_attn_tp_context().maybe_input_scattered(forward_batch):
+             hidden_states = general_mm_embed_routine(
+                 input_ids=input_ids,
+                 forward_batch=forward_batch,
+--- a/sglang/kernels/ops/quantization/fp8_kernel.py
++++ b/sglang/kernels/ops/quantization/fp8_kernel.py
+@@ -1705,6 +1705,7 @@
+     if (
+         _gfx1151_fp8_widen.value
+         and __import__("os").environ.get("SGLANG_GLM53_ROW_INVARIANT_FP8_GEMV", "0") == "1"
++        and __import__("sglang.srt.runtime_context", fromlist=["get_forward"]).get_forward().glm53_verify_decode_batch_size == 1
+         and 2 <= M <= 16
+         and A.dtype == B.dtype == torch.float8_e4m3fn
+         and output_dtype == torch.bfloat16
+--- a/sglang/kernels/ops/attention/dsa/triton_sparse_mla_decode.py
++++ b/sglang/kernels/ops/attention/dsa/triton_sparse_mla_decode.py
+@@ -586,6 +586,7 @@
+     sm_scale: float,
+     d_v: int = 512,
+     kv_splits: int | None = None,
++    decode_batch_size: int | None = None,
+ ) -> torch.Tensor:
+     """Split-K Triton sparse MLA decode (DSv4 pattern).
+ 
+@@ -624,7 +625,11 @@
+     max_kv_splits = max(1, topk // _PREFERRED_BLOCK_K)
+     if kv_splits is None:
+         num_cu = _cu_count()
+-        base_ctas = max(1, bs * n_head_blocks)
++        # Verification has several physical rows per request. Use the same
++        # split geometry as one ordinary decode step for that request batch.
++        heuristic_bs = bs if decode_batch_size is None else decode_batch_size
++        assert 1 <= heuristic_bs <= bs
++        base_ctas = max(1, heuristic_bs * n_head_blocks)
+         # Very sparse BF16 launches benefit from enough split-K work to queue
+         # two workgroups per CU. Once token/head parallelism is less sparse, keep the
+         # one-wave target to avoid paying extra partial-output reduction cost.
+@@ -633,7 +638,7 @@
+             target_wg_per_cu = 2.0
+         kv_splits = min(
+             _kv_splits_heuristic(
+-                bs,
++                heuristic_bs,
+                 H,
+                 BLOCK_H,
+                 num_cu=num_cu,
+--- a/sglang/srt/layers/attention/dsa_backend.py
++++ b/sglang/srt/layers/attention/dsa_backend.py
+@@ -2016,6 +2016,20 @@
+                 v_head_dim=layer.v_head_dim,
+             )
+         elif dsa_impl == "triton":
++            if (
++                _is_hip
++                and forward_batch.forward_mode.is_target_verify()
++                and __import__("sglang.srt.runtime_context", fromlist=["get_forward"]).get_forward().glm53_verify_decode_batch_size
++                and __import__("os").environ.get("SGLANG_GLM53_VERIFY_DECODE_MATH", "0") == "1"
++            ):
++                from sglang.kernels.ops.attention.dsa.triton_sparse_mla_decode import (
++                    triton_sparse_mla_decode_splitk,
++                )
++                return triton_sparse_mla_decode_splitk(
++                    q_nope=q_nope, q_rope=q_rope, kv=kv_cache,
++                    indices=page_table_1.unsqueeze(1), sm_scale=layer.scaling,
++                    d_v=layer.v_head_dim, decode_batch_size=forward_batch.batch_size,
++                )
+             from sglang.kernels.ops.attention.dsa.triton_sparse_mla import (
+                 triton_sparse_mla_fwd,
+             )

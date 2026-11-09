@@ -1,0 +1,781 @@
+diff --git a/sglang/srt/distributed/device_communicators/dsv41_msar.hip.cpp b/sglang/srt/distributed/device_communicators/dsv41_msar.hip.cpp
+new file mode 100644
+index 0000000..086d16d
+--- /dev/null
++++ b/sglang/srt/distributed/device_communicators/dsv41_msar.hip.cpp
+@@ -0,0 +1,437 @@
++// dsv41_msar: small-message all-reduce for the four-node Strix Halo TP4 deployment.
++//
++// Two-shot (reduce-scatter, then all-gather) over MSCCL++ PortChannels. The staging buffers are hipHostMalloc'd
++// (UMA) so that plain ibv_reg_mr works on them (hipMalloc memory cannot be registered on this stack). One block of 1024
++// threads:
++//   1. copy the three peer slices of the input into the registered staging buffer; thread 0 posts one RDMA write + flag
++//      per peer through the proxy FIFO (the CPU proxy thread turns those into verbs work requests),
++//   2. a wave other than the poster waits for the three peer flags, then every thread reduces its share of the own
++//      slice in fixed rank order in fp32 (identical bits on every rank), writing the result both to the output tensor
++//      and to the registered staging buffer,
++//   3. thread 0 posts the all-gather writes; the same wave waits for the peers' slices; all threads copy them out.
++// The kernel only reads/writes device-visible memory and the FIFO, so it can be captured in a HIP graph. The poster
++// and the waiters are deliberately in different waves: inside one wave the compiler may run the waiters' spin loop
++// before the poster's block and the all-gather then deadlocks (measured on gfx1151).
++//
++// Plain C ABI for ctypes:
++//   void* msar_create(rank, nranks, "ifname:ip:port", device, ib_device_index, gid_index, max_bytes, timeout_s)
++//   int   msar_allreduce(handle, hipStream_t, in, out, bytes, dtype /*0 bf16, 1 f32*/)
++//   void  msar_destroy(handle)
++// bytes must be a multiple of nranks*16 and at most max_bytes. in == out is allowed.
++#include <hip/hip_runtime.h>
++#include <dirent.h>
++#include <unistd.h>
++
++#include <cmath>
++
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <mscclpp/core.hpp>
++#include <mscclpp/gpu_utils.hpp>
++#include <mscclpp/port_channel.hpp>
++#include <mscclpp/port_channel_device.hpp>
++#include <set>
++#include <string>
++#include <vector>
++
++namespace {
++
++constexpr int kMaxPeers = 3;
++constexpr int kThreads = 1024;
++
++__device__ __forceinline__ uint16_t f2bf(float f) {
++  uint32_t u = __float_as_uint(f);
++  u += 0x7FFFu + ((u >> 16) & 1u);
++  return (uint16_t)(u >> 16);
++}
++
++struct Args {
++  mscclpp::PortChannelDeviceHandle* ch;  // one per peer, ascending rank without self
++  const char* in;
++  char* out;
++  char* stageIn;    // registered host memory, source of the reduce-scatter writes
++  char* stageOut;   // registered host memory, source and destination of the all-gather writes
++  const char* scratch;  // registered host memory, destination of the peers' reduce-scatter writes ([nranks][slice])
++  size_t bytes;
++  int rank, nranks, npeers, dtypeF32;
++  mscclpp::MemoryId localIn, localOut;
++  mscclpp::MemoryId remoteScratch[kMaxPeers], remoteOut[kMaxPeers];
++  int peerRank[kMaxPeers];
++};
++
++__global__ void __launch_bounds__(kThreads) msar_kernel(Args a) {
++  const size_t slice = a.bytes / a.nranks;
++  const size_t sliceVec = slice / 16;
++  const size_t nvec = a.bytes / 16;
++  const unsigned tid = threadIdx.x;
++
++  // 1. stage the peers' slices (the own slice is read straight from the input tensor).
++  for (size_t v = tid; v < nvec; v += kThreads) {
++    if (v / sliceVec != (size_t)a.rank) ((uint4*)a.stageIn)[v] = ((const uint4*)a.in)[v];
++  }
++  __syncthreads();
++  if (tid == 0) {
++    __threadfence_system();
++#pragma unroll
++    for (int p = 0; p < kMaxPeers; ++p)
++      if (p < a.npeers)
++        a.ch[p].BasePortChannelDeviceHandle::putWithSignal(a.remoteScratch[p], (uint64_t)a.rank * slice, a.localIn,
++                                                          (uint64_t)a.peerRank[p] * slice, slice);
++  }
++  // 2. wait (wave 1) for the three peer slices, then reduce the own slice.
++  if (tid >= 32 && tid < 32u + (unsigned)a.npeers) a.ch[tid - 32].wait(1LL << 40);
++  __syncthreads();
++  for (size_t v = tid; v < sliceVec; v += kThreads) {
++    float acc[8];
++#pragma unroll
++    for (int k = 0; k < 8; ++k) acc[k] = 0.f;
++    for (int r = 0; r < a.nranks; ++r) {
++      const uint4 w = (r == a.rank) ? ((const uint4*)(a.in + (size_t)a.rank * slice))[v]
++                                    : ((const uint4*)(a.scratch + (size_t)r * slice))[v];
++      if (!a.dtypeF32) {
++        const uint32_t* q = (const uint32_t*)&w;
++#pragma unroll
++        for (int k = 0; k < 4; ++k) {
++          acc[2 * k] += __uint_as_float(q[k] << 16);
++          acc[2 * k + 1] += __uint_as_float(q[k] & 0xFFFF0000u);
++        }
++      } else {
++        const float* q = (const float*)&w;
++#pragma unroll
++        for (int k = 0; k < 4; ++k) acc[k] += q[k];
++      }
++    }
++    uint4 o;
++    if (!a.dtypeF32) {
++      uint32_t* q = (uint32_t*)&o;
++#pragma unroll
++      for (int k = 0; k < 4; ++k) q[k] = (uint32_t)f2bf(acc[2 * k]) | ((uint32_t)f2bf(acc[2 * k + 1]) << 16);
++    } else {
++      float* q = (float*)&o;
++#pragma unroll
++      for (int k = 0; k < 4; ++k) q[k] = acc[k];
++    }
++    ((uint4*)(a.out + (size_t)a.rank * slice))[v] = o;
++    ((uint4*)(a.stageOut + (size_t)a.rank * slice))[v] = o;
++  }
++  __syncthreads();
++  // 3. all-gather.
++  if (tid == 0) {
++    __threadfence_system();
++#pragma unroll
++    for (int p = 0; p < kMaxPeers; ++p)
++      if (p < a.npeers)
++        a.ch[p].BasePortChannelDeviceHandle::putWithSignal(a.remoteOut[p], (uint64_t)a.rank * slice, a.localOut,
++                                                          (uint64_t)a.rank * slice, slice);
++  }
++  if (tid >= 32 && tid < 32u + (unsigned)a.npeers) a.ch[tid - 32].wait(1LL << 40);
++  __syncthreads();
++  for (size_t v = tid; v < nvec; v += kThreads) {
++    if (v / sliceVec != (size_t)a.rank) ((uint4*)a.out)[v] = ((const uint4*)a.stageOut)[v];
++  }
++}
++
++
++// In-situ timing of whatever all-reduce runs between two stamps (SGLANG_DSV41_MSAR_TRACE): a one-thread kernel appends (tag, device clock) to a ring in
++// host memory; the CPU reads the ring and pairs the entries. The same stamps bracket the pynccl path in the control arm, so both are measured alike.
++__global__ void stamp_kernel(unsigned long long* ring, unsigned int* counter, unsigned int mask, unsigned int tag) {
++  const unsigned int i = atomicAdd(counter, 1u) & mask;
++  ring[2 * i] = tag;
++  ring[2 * i + 1] = wall_clock64();
++}
++
++struct Trace {
++  unsigned long long* ring = nullptr;  // host memory, 2 words per entry
++  unsigned int* counter = nullptr;     // device memory
++  unsigned int* counterHost = nullptr;
++  unsigned int mask = 0;
++  hipStream_t reader = nullptr;
++  int wallKHz = 0;
++};
++
++// Thread ids of this process (to identify the proxy thread that startProxy creates).
++static std::set<int> task_ids() {
++  std::set<int> ids;
++  if (DIR* d = opendir("/proc/self/task")) {
++    while (dirent* e = readdir(d))
++      if (e->d_name[0] >= '0' && e->d_name[0] <= '9') ids.insert(atoi(e->d_name));
++    closedir(d);
++  }
++  return ids;
++}
++
++struct Msar {
++  int proxyTid = -1;
++  int rank = 0, nranks = 0, npeers = 0;
++  size_t maxBytes = 0;
++  std::shared_ptr<mscclpp::TcpBootstrap> bootstrap;
++  std::unique_ptr<mscclpp::Communicator> comm;
++  std::unique_ptr<mscclpp::GpuBuffer<char>> stageIn, stageOut, scratch;
++  std::unique_ptr<mscclpp::ProxyService> proxy;
++  std::shared_ptr<mscclpp::PortChannelDeviceHandle> devHandles;
++  // The registrations must outlive create(): dropping one deregisters its ibv_mr and the peers' writes then fail.
++  std::vector<mscclpp::RegisteredMemory> registrations;
++  Args args{};
++};
++
++#define MSAR_CHECK(x)                                                                    \
++  do {                                                                                   \
++    hipError_t e_ = (x);                                                                 \
++    if (e_ != hipSuccess) {                                                              \
++      fprintf(stderr, "dsv41_msar: %s failed: %s\n", #x, hipGetErrorString(e_));         \
++      return nullptr;                                                                    \
++    }                                                                                    \
++  } while (0)
++
++}  // namespace
++
++extern "C" {
++
++void* msar_create(int rank, int nranks, const char* ifIpPort, int device, int ibDeviceIndex, int gidIndex, size_t maxBytes,
++                  int timeoutSec) {
++  try {
++#ifdef MSAR_IBV_SO
++    setenv("MSCCLPP_IBV_SO", MSAR_IBV_SO, 0);  // libibverbs is dlopen'ed by MSCCL++; the build pins the nix path
++#endif
++    if (hipSetDevice(device) != hipSuccess) {
++      fprintf(stderr, "dsv41_msar: hipSetDevice(%d) failed\n", device);
++      return nullptr;
++    }
++    if (nranks < 2 || nranks > kMaxPeers + 1) {
++      fprintf(stderr, "dsv41_msar: nranks %d unsupported\n", nranks);
++      return nullptr;
++    }
++    auto m = std::make_unique<Msar>();
++    m->rank = rank;
++    m->nranks = nranks;
++    m->npeers = nranks - 1;
++    m->maxBytes = (maxBytes + 255) / 256 * 256;
++    m->bootstrap = std::make_shared<mscclpp::TcpBootstrap>(rank, nranks);
++    m->bootstrap->initialize(std::string(ifIpPort), timeoutSec);
++    m->comm = std::make_unique<mscclpp::Communicator>(m->bootstrap);
++
++    mscclpp::EndpointConfig::Ib ib;
++    ib.deviceIndex = ibDeviceIndex;
++    ib.port = mscclpp::EndpointConfig::Ib::DefaultPort;
++    ib.gidIndex = gidIndex;
++    ib.maxCqSize = mscclpp::EndpointConfig::Ib::DefaultMaxCqSize;
++    ib.maxCqPollNum = mscclpp::EndpointConfig::Ib::DefaultMaxCqPollNum;
++    ib.maxSendWr = mscclpp::EndpointConfig::Ib::DefaultMaxSendWr;
++    ib.maxRecvWr = mscclpp::EndpointConfig::Ib::DefaultMaxRecvWr;
++    ib.maxWrPerSend = mscclpp::EndpointConfig::Ib::DefaultMaxWrPerSend;
++    ib.mode = mscclpp::EndpointConfig::Ib::Mode::Default;
++    const mscclpp::Transport tr = (mscclpp::Transport)((int)mscclpp::Transport::IB0 + ibDeviceIndex);
++    mscclpp::EndpointConfig ep(tr, mscclpp::Device{mscclpp::DeviceType::GPU, device}, -1, ib);
++
++    m->stageIn = std::make_unique<mscclpp::GpuBuffer<char>>(m->maxBytes);
++    m->stageOut = std::make_unique<mscclpp::GpuBuffer<char>>(m->maxBytes);
++    m->scratch = std::make_unique<mscclpp::GpuBuffer<char>>(m->maxBytes);  // [nranks][slice] with slice <= maxBytes/nranks
++    auto inReg = m->comm->registerMemory(m->stageIn->data(), m->maxBytes, tr);
++    auto outReg = m->comm->registerMemory(m->stageOut->data(), m->maxBytes, tr);
++    auto scrReg = m->comm->registerMemory(m->scratch->data(), m->maxBytes, tr);
++    m->registrations = {inReg, outReg, scrReg};
++
++    std::vector<int> peers;
++    for (int r = 0; r < nranks; ++r)
++      if (r != rank) peers.push_back(r);
++    std::vector<std::shared_future<mscclpp::Connection>> conns;
++    for (int p : peers) conns.push_back(m->comm->connect(ep, p));
++    std::vector<std::shared_future<mscclpp::RegisteredMemory>> remScr, remOut;
++    for (int p : peers) {
++      m->comm->sendMemory(scrReg, p);
++      remScr.push_back(m->comm->recvMemory(p));
++      m->comm->sendMemory(outReg, p);
++      remOut.push_back(m->comm->recvMemory(p));
++    }
++    m->proxy = std::make_unique<mscclpp::ProxyService>();
++    Args& a = m->args;
++    a.localIn = m->proxy->addMemory(inReg);
++    a.localOut = m->proxy->addMemory(outReg);
++    std::vector<mscclpp::PortChannelDeviceHandle> handles;
++    for (size_t k = 0; k < peers.size(); ++k) {
++      auto conn = conns[k].get();
++      auto sema = m->comm->buildSemaphore(conn, peers[k]).get();
++      auto sid = m->proxy->addSemaphore(sema);
++      a.remoteScratch[k] = m->proxy->addMemory(remScr[k].get());
++      a.remoteOut[k] = m->proxy->addMemory(remOut[k].get());
++      a.peerRank[k] = peers[k];
++      handles.push_back(m->proxy->portChannel(sid, a.remoteScratch[k], a.localIn).deviceHandle());
++    }
++    m->devHandles = mscclpp::detail::gpuCallocShared<mscclpp::PortChannelDeviceHandle>(handles.size());
++    memcpy(m->devHandles.get(), handles.data(), handles.size() * sizeof(handles[0]));
++    m->bootstrap->barrier();
++    const std::set<int> before = task_ids();
++    m->proxy->startProxy(true);
++    for (int t : task_ids())
++      if (!before.count(t)) m->proxyTid = t;  // startProxy(true) returns once the proxy thread runs; it is the only new thread
++    a.ch = m->devHandles.get();
++    a.stageIn = m->stageIn->data();
++    a.stageOut = m->stageOut->data();
++    a.scratch = m->scratch->data();
++    a.rank = rank;
++    a.nranks = nranks;
++    a.npeers = m->npeers;
++    m->bootstrap->barrier();
++    (void)hipGetLastError();  // library init may leave a sticky (benign) error that torch would otherwise report on its next call
++    return m.release();
++  } catch (const std::exception& e) {
++    fprintf(stderr, "dsv41_msar: create failed: %s\n", e.what());
++    return nullptr;
++  }
++}
++
++int msar_allreduce(void* h, void* stream, const void* in, void* out, size_t bytes, int dtype) {
++  Msar* m = (Msar*)h;
++  if (!m || bytes == 0 || bytes > m->maxBytes || bytes % ((size_t)m->nranks * 16) != 0) return -1;
++  Args a = m->args;
++  a.in = (const char*)in;
++  a.out = (char*)out;
++  a.bytes = bytes;
++  a.dtypeF32 = dtype;
++  (void)hipGetLastError();  // clear any sticky error from library init
++  hipLaunchKernelGGL(msar_kernel, dim3(1), dim3(kThreads), 0, (hipStream_t)stream, a);
++  const hipError_t e = hipGetLastError();
++  if (e != hipSuccess) fprintf(stderr, "dsv41_msar: launch failed: %s\n", hipGetErrorString(e));
++  return e == hipSuccess ? 0 : -2;
++}
++
++
++void* msar_trace_create(unsigned int log2Entries) {
++  auto* t = new Trace();
++  const size_t n = (size_t)1 << log2Entries;
++  t->mask = (unsigned int)(n - 1);
++  if (hipHostMalloc((void**)&t->ring, n * 16, hipHostMallocCoherent) != hipSuccess || hipMalloc((void**)&t->counter, 4) != hipSuccess ||
++      hipHostMalloc((void**)&t->counterHost, 4, hipHostMallocDefault) != hipSuccess) {
++    (void)hipGetLastError();
++    delete t;
++    return nullptr;
++  }
++  memset(t->ring, 0, n * 16);
++  (void)hipMemset(t->counter, 0, 4);
++  (void)hipStreamCreateWithFlags(&t->reader, hipStreamNonBlocking);
++  (void)hipDeviceGetAttribute(&t->wallKHz, hipDeviceAttributeWallClockRate, 0);
++  (void)hipGetLastError();
++  return t;
++}
++
++int msar_trace_stamp(void* h, void* stream, unsigned int tag) {
++  Trace* t = (Trace*)h;
++  hipLaunchKernelGGL(stamp_kernel, dim3(1), dim3(1), 0, (hipStream_t)stream, t->ring, t->counter, t->mask, tag);
++  return hipGetLastError() == hipSuccess ? 0 : -1;
++}
++
++unsigned long long msar_trace_count(void* h) {  // called from a helper thread; uses its own non-blocking stream
++  Trace* t = (Trace*)h;
++  if (hipMemcpyAsync(t->counterHost, t->counter, 4, hipMemcpyDeviceToHost, t->reader) != hipSuccess) return 0;
++  (void)hipStreamSynchronize(t->reader);
++  return *t->counterHost;
++}
++
++const unsigned long long* msar_trace_ring(void* h) { return ((Trace*)h)->ring; }
++int msar_trace_clock_khz(void* h) { return ((Trace*)h)->wallKHz; }
++
++int msar_proxy_tid(void* h) { return h ? ((Msar*)h)->proxyTid : -1; }
++
++void msar_destroy(void* h) {
++  Msar* m = (Msar*)h;
++  if (!m) return;
++  try {
++    m->proxy->stopProxy();
++  } catch (...) {
++  }
++  delete m;
++}
++
++}  // extern "C"
++
++#ifdef MSAR_TEST
++// msar_test <rank> <nranks> <ifname:ip:port> <bytes> <iters> <bf16|f32>
++// Correctness against a host reference on device (hipMalloc) tensors, then eager-chained and graph-replayed timing.
++#include <algorithm>
++#include <chrono>
++static double now_us() {
++  return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++int main(int argc, char** argv) {
++  if (argc < 7) return 1;
++  const int rank = atoi(argv[1]), nranks = atoi(argv[2]);
++  const size_t bytes = atoll(argv[4]);
++  const int iters = atoi(argv[5]);
++  const bool bf16 = std::string(argv[6]) == "bf16";
++  hipSetDevice(0);
++  void* h = msar_create(rank, nranks, argv[3], 0, 1, 3, 1 << 20, 120);
++  if (!h) return 2;
++  fprintf(stderr, "rank %d: created\n", rank);
++  const size_t nel = bytes / (bf16 ? 2 : 4);
++  std::vector<char> host(bytes);
++  for (size_t i = 0; i < nel; ++i) {
++    float v = (float)((rank + 1) * ((i % 13) + 1)) * 0.25f;
++    if (bf16) { uint32_t u; memcpy(&u, &v, 4); u += 0x7FFFu + ((u >> 16) & 1u); ((uint16_t*)host.data())[i] = (uint16_t)(u >> 16); }
++    else ((float*)host.data())[i] = v;
++  }
++  void *din, *dout;
++  hipMalloc(&din, bytes);
++  hipMalloc(&dout, bytes);
++  hipMemcpy(din, host.data(), bytes, hipMemcpyHostToDevice);
++  hipStream_t s;
++  hipStreamCreateWithFlags(&s, hipStreamNonBlocking);
++  int bad = 0;
++  for (int w = 0; w < 20; ++w) {
++    hipMemsetAsync(dout, 0, bytes, s);
++    if (msar_allreduce(h, s, din, dout, bytes, bf16 ? 0 : 1)) { fprintf(stderr, "launch failed\n"); return 3; }
++    hipStreamSynchronize(s);
++    if (w == 19) {
++      hipMemcpy(host.data(), dout, bytes, hipMemcpyDeviceToHost);
++      for (size_t i = 0; i < nel; ++i) {
++        float ref = 0.f;
++        for (int r = 0; r < nranks; ++r) ref += (float)((r + 1) * ((i % 13) + 1)) * 0.25f;
++        float got;
++        if (bf16) { uint32_t u = ((uint32_t)((uint16_t*)host.data())[i]) << 16; memcpy(&got, &u, 4); } else got = ((float*)host.data())[i];
++        if (std::fabs(got - ref) > (bf16 ? 0.01f * std::fabs(ref) + 1e-3f : 1e-4f)) { if (bad++ < 3) fprintf(stderr, "rank %d mismatch at %zu: got %f want %f\n", rank, i, got, ref); }
++      }
++    }
++  }
++  // eager chained, host-timed in batches of 100 calls
++  std::vector<double> eager;
++  for (int b = 0; b < iters / 100; ++b) {
++    double t0 = now_us();
++    for (int i = 0; i < 100; ++i) msar_allreduce(h, s, din, dout, bytes, bf16 ? 0 : 1);
++    hipStreamSynchronize(s);
++    eager.push_back((now_us() - t0) / 100);
++  }
++  // eager chained with per-call events (same method as the RCCL baseline)
++  std::vector<double> ev;
++  {
++    std::vector<hipEvent_t> st(iters), en(iters);
++    for (int i = 0; i < iters; ++i) { hipEventCreate(&st[i]); hipEventCreate(&en[i]); }
++    for (int i = 0; i < iters; ++i) { hipEventRecord(st[i], s); msar_allreduce(h, s, din, dout, bytes, bf16 ? 0 : 1); hipEventRecord(en[i], s); }
++    hipStreamSynchronize(s);
++    for (int i = 0; i < iters; ++i) { float ms; hipEventElapsedTime(&ms, st[i], en[i]); ev.push_back(ms * 1000.0); }
++    std::sort(ev.begin(), ev.end());
++  }
++  // graph: capture 100 chained calls, replay
++  hipGraph_t g;
++  hipGraphExec_t ge;
++  hipStreamBeginCapture(s, hipStreamCaptureModeGlobal);
++  for (int i = 0; i < 100; ++i) msar_allreduce(h, s, din, dout, bytes, bf16 ? 0 : 1);
++  hipStreamEndCapture(s, &g);
++  if (hipGraphInstantiate(&ge, g, nullptr, nullptr, 0) != hipSuccess) { fprintf(stderr, "graph instantiate failed\n"); return 4; }
++  std::vector<double> gr;
++  for (int b = 0; b < std::max(20, iters / 100); ++b) {
++    double t0 = now_us();
++    hipGraphLaunch(ge, s);
++    hipStreamSynchronize(s);
++    gr.push_back((now_us() - t0) / 100);
++  }
++  std::sort(eager.begin(), eager.end());
++  std::sort(gr.begin(), gr.end());
++  printf("MSAR rank %d %s %zu B bad %d | event per-call us min %.1f p50 %.1f p90 %.1f p99 %.1f max %.1f | eager(100 chained) per-call us min %.1f p50 %.1f max %.1f | graph(100 chained) per-call us min %.1f p50 %.1f p90 %.1f max %.1f\n",
++         rank, bf16 ? "bf16" : "f32", bytes, bad, ev.front(), ev[ev.size() / 2], ev[ev.size() * 9 / 10], ev[ev.size() * 99 / 100], ev.back(), eager.front(), eager[eager.size() / 2], eager.back(), gr.front(), gr[gr.size() / 2], gr[gr.size() * 9 / 10], gr.back());
++  fflush(stdout);
++  hipStreamSynchronize(s);
++  _exit(bad ? 5 : 0);
++}
++#endif
+diff --git a/sglang/srt/distributed/device_communicators/dsv41_msar.py b/sglang/srt/distributed/device_communicators/dsv41_msar.py
+new file mode 100644
+index 0000000..5515037
+--- /dev/null
++++ b/sglang/srt/distributed/device_communicators/dsv41_msar.py
+@@ -0,0 +1,292 @@
++"""Small-message all-reduce over MSCCL++ port channels for the four-node Strix Halo TP4 deployment (opt-in).
++
++Enabled with SGLANG_DSV41_MSAR=1; default off. A two-shot (reduce-scatter + all-gather) all-reduce for decode-sized tensors
++(a few rows by hidden, bf16 or fp32): every rank RDMA-writes the slices its peers own into their registered host-memory
++staging buffer through a CPU proxy thread (MSCCL++ ProxyService, ConnectX-5 over RoCE), reduces its own slice in fixed rank
++order in fp32 (identical bits on every rank) and gathers the others. The GPU side is one block of 1024 threads without host
++synchronisation, so it is captured by the decode CUDA graphs like any other kernel. The staging memory is hipHostMalloc'ed
++(UMA) because ibv_reg_mr on hipMalloc memory fails on this stack. Larger tensors, other dtypes and non-contiguous tensors fall
++back to the existing path (pynccl).
++
++Environment:
++  SGLANG_DSV41_MSAR            1 to enable (default off)
++  SGLANG_DSV41_MSAR_GROUPS     comma separated coordinator names that use it (default "tp,attention_tp")
++  SGLANG_DSV41_MSAR_MAX_BYTES  largest tensor handled, bytes (default 327680 = 16 rows of fp32 at hidden 5120)
++  SGLANG_DSV41_MSAR_IFNAME     interface whose IPv4 address carries the RoCE traffic and the bootstrap (default cx5fabric0)
++  SGLANG_DSV41_MSAR_IB_DEV     verbs device index; default: derived from the interface
++  SGLANG_DSV41_MSAR_GID        RoCE v2 GID index; default: derived from the interface address (falls back to 3)
++  SGLANG_DSV41_MSAR_LIB        path of libdsv41_msar.so (default: next to this file)
++  SGLANG_DSV41_MSAR_PROXY_CPU  unset (default): leave placement to the kernel. "auto": reserve the highest-numbered physical core (all its SMT siblings)
++                               for the busy-polling CPU proxy thread: the proxy is pinned to the last of them and every other thread of this
++                               process is moved off the reserved CPUs. A list such as "15,31" names the reserved CPUs explicitly (proxy on the last).
++  SGLANG_DSV41_MSAR_MODE       "use" (default) or "trace": build the communicator but leave the all-reduces on the existing path (control arm)
++  SGLANG_DSV41_MSAR_TRACE      1 to bracket every eligible all-reduce (whichever path runs it) with device-clock stamps and log, every 20 s, the
++                               in-situ duration percentiles per size and the summed all-reduce time per decode cycle (default off)
++"""
++
++import ctypes
++import fcntl
++import logging
++import os
++import socket
++import struct
++import threading
++import time
++from typing import Dict, Optional, Tuple
++
++import torch
++import torch.distributed as dist
++
++logger = logging.getLogger(__name__)
++
++_ENABLED = os.environ.get("SGLANG_DSV41_MSAR") == "1"
++_GROUPS = tuple(g for g in os.environ.get("SGLANG_DSV41_MSAR_GROUPS", "tp,attention_tp").split(",") if g)
++_MAX_BYTES = int(os.environ.get("SGLANG_DSV41_MSAR_MAX_BYTES", "327680"))
++_IFNAME = os.environ.get("SGLANG_DSV41_MSAR_IFNAME", "cx5fabric0")
++_PROXY_CPU = os.environ.get("SGLANG_DSV41_MSAR_PROXY_CPU", "")
++_MODE_USE = os.environ.get("SGLANG_DSV41_MSAR_MODE", "use") != "trace"
++_TRACE = os.environ.get("SGLANG_DSV41_MSAR_TRACE") == "1"
++_TRACE_LOG2 = 17
++_END = 1 << 31
++
++_instances: Dict[Tuple[int, ...], Optional["Dsv41Msar"]] = {}
++
++
++def enabled_for(group_name: str) -> bool:
++    return _ENABLED and group_name in _GROUPS
++
++
++def _interface_ipv4(ifname: str) -> str:
++    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++    try:
++        packed = fcntl.ioctl(s.fileno(), 0x8915, struct.pack("256s", ifname.encode()[:15]))  # SIOCGIFADDR
++    finally:
++        s.close()
++    return socket.inet_ntoa(packed[20:24])
++
++
++def _derive_ib(ifname: str, ip: str) -> Tuple[int, int]:
++    """(verbs device index, RoCE v2 GID index) of the function behind `ifname`."""
++    dev_idx, gid_idx = 1, 3
++    try:
++        devs = sorted(os.listdir("/sys/class/infiniband"))
++        behind = os.listdir(f"/sys/class/net/{ifname}/device/infiniband")
++        if behind and behind[0] in devs:
++            dev_idx = devs.index(behind[0])
++            base = f"/sys/class/infiniband/{behind[0]}/ports/1"
++            want = "0000:0000:0000:0000:0000:ffff:%02x%02x:%02x%02x" % tuple(int(x) for x in ip.split("."))
++            for i in range(int(len(os.listdir(f"{base}/gids")))):
++                try:
++                    gid = open(f"{base}/gids/{i}").read().strip()
++                    typ = open(f"{base}/gid_attrs/types/{i}").read().strip()
++                except OSError:
++                    continue
++                if gid == want and "v2" in typ:
++                    gid_idx = i
++                    break
++    except OSError:
++        pass
++    return int(os.environ.get("SGLANG_DSV41_MSAR_IB_DEV", dev_idx)), int(os.environ.get("SGLANG_DSV41_MSAR_GID", gid_idx))
++
++
++class Dsv41Msar:
++    def __init__(self, ranks, cpu_group, device):
++        self.disabled = True
++        self.world = len(ranks)
++        self.group_rank = dist.get_rank(group=cpu_group)
++        self.max_bytes = _MAX_BYTES
++        self.handle = None
++        self._seen = set()
++        lib_path = os.environ.get("SGLANG_DSV41_MSAR_LIB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "libdsv41_msar.so")
++        lib = ctypes.CDLL(lib_path)
++        lib.msar_create.restype = ctypes.c_void_p
++        lib.msar_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_size_t, ctypes.c_int]
++        lib.msar_proxy_tid.restype = ctypes.c_int
++        lib.msar_proxy_tid.argtypes = [ctypes.c_void_p]
++        lib.msar_allreduce.restype = ctypes.c_int
++        lib.msar_allreduce.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
++        lib.msar_trace_create.restype = ctypes.c_void_p
++        lib.msar_trace_create.argtypes = [ctypes.c_uint]
++        lib.msar_trace_stamp.restype = ctypes.c_int
++        lib.msar_trace_stamp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
++        lib.msar_trace_count.restype = ctypes.c_ulonglong
++        lib.msar_trace_count.argtypes = [ctypes.c_void_p]
++        lib.msar_trace_ring.restype = ctypes.POINTER(ctypes.c_ulonglong)
++        lib.msar_trace_ring.argtypes = [ctypes.c_void_p]
++        lib.msar_trace_clock_khz.restype = ctypes.c_int
++        lib.msar_trace_clock_khz.argtypes = [ctypes.c_void_p]
++        self.lib = lib
++        self.use = _MODE_USE
++        self.trace = _TRACE
++        self.trace_h = None
++
++        ip = _interface_ipv4(_IFNAME)
++        ib_dev, gid = _derive_ib(_IFNAME, ip)
++        # rank 0 of the group picks the bootstrap port; the address travels over the CPU (gloo) group
++        addr = [None]
++        if self.group_rank == 0:
++            probe = socket.socket()
++            probe.bind((ip, 0))
++            addr[0] = f"{_IFNAME}:{ip}:{probe.getsockname()[1]}"
++            probe.close()
++        dist.broadcast_object_list(addr, src=ranks[0], group=cpu_group)
++        dist.barrier(group=cpu_group)
++        if self.group_rank > 0:
++            time.sleep(0.4 * self.group_rank)  # the TCP bootstrap root must be listening before the others connect
++        dev = device.index if getattr(device, "index", None) is not None else torch.cuda.current_device()
++        t0 = time.time()
++        self.handle = lib.msar_create(self.group_rank, self.world, addr[0].encode(), dev, ib_dev, gid, self.max_bytes, 180)
++        ok = torch.tensor([1 if self.handle else 0], dtype=torch.int32)
++        dist.all_reduce(ok, op=dist.ReduceOp.MIN, group=cpu_group)
++        if not int(ok.item()):
++            raise RuntimeError("dsv41 msar: communicator setup failed on at least one rank")
++        self.disabled = False
++        if _PROXY_CPU:
++            self._place_proxy()
++        logger.info(
++            "dsv41 msar: group_rank %d/%d ready in %.1fs (bootstrap %s, ib device %d, gid %d, max %d bytes)",
++            self.group_rank, self.world, time.time() - t0, addr[0], ib_dev, gid, self.max_bytes,
++        )
++        # one small eager call on every rank so that the code object is loaded outside any graph capture
++        warm = torch.ones(self.world * 16 // 4, dtype=torch.float32, device=device)
++        self.all_reduce(warm)
++        torch.cuda.synchronize()
++        assert float(warm[0].item()) == float(self.world), "dsv41 msar: warm-up all-reduce returned a wrong sum"
++        if self.trace:
++            self.trace_h = lib.msar_trace_create(_TRACE_LOG2)
++            if not self.trace_h:
++                raise RuntimeError("dsv41 msar: trace buffer allocation failed")
++            threading.Thread(target=self._trace_loop, name="dsv41-msar-trace", daemon=True).start()
++            logger.info("dsv41 msar: tracing on (mode=%s)", "use" if self.use else "trace-only, all-reduces stay on the existing path")
++
++    def _place_proxy(self):
++        """Dedicate CPUs to the proxy: it spins at 100% and a delayed trigger delays the whole all-reduce, so it must not share a CPU or an SMT sibling with
++        the busy scheduler thread or with RCCL's own CPU threads (measured: decode steps of 70 ms vs 97-108 ms when the placement is left to the kernel)."""
++        tid = self.lib.msar_proxy_tid(self.handle)
++        allowed = os.sched_getaffinity(0)
++        if tid <= 0:
++            logger.warning("dsv41 msar: proxy thread id unknown, placement left to the kernel")
++            return
++        if _PROXY_CPU == "auto":
++            top = max(allowed)
++            try:
++                sib = open(f"/sys/devices/system/cpu/cpu{top}/topology/thread_siblings_list").read().strip()
++                reserved = {int(x) for part in sib.split(",") for x in (range(int(part.split("-")[0]), int(part.split("-")[1]) + 1) if "-" in part else [int(part)])}
++            except OSError:
++                reserved = {top}
++            reserved &= allowed
++        else:
++            reserved = {int(x) for x in _PROXY_CPU.split(",") if x.strip()} & allowed
++        if not reserved or len(reserved) >= len(allowed):
++            logger.warning("dsv41 msar: proxy cpu request %r unusable (allowed %s), placement left to the kernel", _PROXY_CPU, sorted(allowed))
++            return
++        proxy_cpu = max(reserved)
++        os.sched_setaffinity(tid, {proxy_cpu})
++        moved = 0
++        for name in os.listdir("/proc/self/task"):
++            other = int(name)
++            if other == tid:
++                continue
++            try:
++                mask = os.sched_getaffinity(other)
++                new = mask - reserved
++                if new and new != mask:
++                    os.sched_setaffinity(other, new)
++                    moved += 1
++            except OSError:
++                pass
++        logger.info("dsv41 msar: proxy tid %d pinned to cpu %d, cpus %s reserved, %d other threads moved off", tid, proxy_cpu, sorted(reserved), moved)
++
++    def should_use(self, x: torch.Tensor) -> bool:
++        if self.disabled or not x.is_cuda or not x.is_contiguous():
++            return False
++        if x.dtype == torch.bfloat16:
++            nbytes = x.numel() * 2
++        elif x.dtype == torch.float32:
++            nbytes = x.numel() * 4
++        else:
++            return False
++        return 0 < nbytes <= self.max_bytes and nbytes % (self.world * 16) == 0
++
++    def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
++        """In place (the kernel allows in == out); returns `x`."""
++        f32 = x.dtype == torch.float32
++        nbytes = x.numel() * (4 if f32 else 2)
++        key = (nbytes, f32)
++        if key not in self._seen:
++            self._seen.add(key)
++            logger.info("dsv41 msar: first all-reduce of %d bytes %s on group rank %d", nbytes, x.dtype, self.group_rank)
++        stream = torch.cuda.current_stream().cuda_stream
++        if self.trace_h:
++            self.stamp(x, False)
++        rc = self.lib.msar_allreduce(self.handle, stream, x.data_ptr(), x.data_ptr(), nbytes, 1 if f32 else 0)
++        if rc != 0:
++            raise RuntimeError(f"dsv41 msar: launch failed ({rc}) for {nbytes} bytes")
++        if self.trace_h:
++            self.stamp(x, True)
++        return x
++
++    def stamp(self, x: torch.Tensor, end: bool):
++        f32 = x.dtype == torch.float32
++        nbytes = x.numel() * (4 if f32 else 2)
++        tag = nbytes | (int(f32) << 24) | (int(self.use) << 25) | (_END if end else 0)
++        self.lib.msar_trace_stamp(self.trace_h, torch.cuda.current_stream().cuda_stream, tag)
++
++    def _trace_loop(self):
++        import numpy as np
++
++        size = 1 << _TRACE_LOG2
++        khz = self.lib.msar_trace_clock_khz(self.trace_h)
++        ring = np.ctypeslib.as_array(self.lib.msar_trace_ring(self.trace_h), shape=(size, 2))
++        last = 0
++        while True:
++            time.sleep(20)
++            try:
++                n = int(self.lib.msar_trace_count(self.trace_h))
++                if n - last < 200:
++                    continue
++                start = max(last, n - size)
++                e = ring[np.arange(start, n) & (size - 1)].copy()
++                last = n
++                tags, us = e[:, 0].astype(np.int64), e[:, 1].astype(np.float64) / (khz / 1000.0)
++                pair = np.nonzero(((tags[:-1] & _END) == 0) & (tags[1:] == (tags[:-1] | _END)))[0]
++                if len(pair) == 0:
++                    continue
++                dur, t0, t1, tag = us[pair + 1] - us[pair], us[pair], us[pair + 1], tags[pair]
++                lines = []
++                for t in np.unique(tag):
++                    d = dur[tag == t]
++                    if len(d) >= 20:
++                        lines.append(
++                            f"{int(t) & 0xFFFFFF}B {'f32' if (int(t) >> 24) & 1 else 'bf16'} n={len(d)} p50={np.percentile(d, 50):.1f} "
++                            f"p90={np.percentile(d, 90):.1f} p99={np.percentile(d, 99):.1f} mean={d.mean():.1f}"
++                        )
++                # decode cycles: a gap over 3 ms between two stamped calls starts a new cycle
++                order = np.argsort(t0)
++                t0o, t1o, do = t0[order], t1[order], dur[order]
++                cut = np.nonzero(t0o[1:] - t1o[:-1] > 3000.0)[0] + 1
++                bounds = np.concatenate(([0], cut, [len(do)]))
++                calls = np.diff(bounds)
++                sums = np.array([do[a:b].sum() for a, b in zip(bounds[:-1], bounds[1:])])
++                full = calls >= 40
++                cyc = (
++                    f"cycles={int(full.sum())} calls/cycle p50={np.percentile(calls[full], 50):.0f} sum_us p50={np.percentile(sums[full], 50):.0f} "
++                    f"p90={np.percentile(sums[full], 90):.0f} p99={np.percentile(sums[full], 99):.0f}"
++                    if full.any()
++                    else "cycles=0"
++                )
++                logger.info("dsv41 msar trace[%s] group_rank %d: %s | %s", "msar" if self.use else "existing", self.group_rank, cyc, "; ".join(lines))
++            except Exception as exc:  # tracing must never disturb serving
++                logger.warning("dsv41 msar trace failed: %s", exc)
++
++
++def get_dsv41_msar(ranks, cpu_group, device) -> Optional[Dsv41Msar]:
++    """One communicator per distinct rank set (the tp and attention_tp coordinators share it)."""
++    key = tuple(ranks)
++    if key not in _instances:
++        try:
++            _instances[key] = Dsv41Msar(ranks, cpu_group, device)
++        except Exception as e:  # every rank agrees on failure through the all-reduce in __init__
++            logger.warning("dsv41 msar disabled for ranks %s: %s", key, e)
++            _instances[key] = None
++    return _instances[key]
+--- a/sglang/srt/distributed/parallel_state.py	2026-10-08 22:28:25.722950885 +0200
++++ b/sglang/srt/distributed/parallel_state.py	2026-10-08 22:28:25.725950873 +0200
+@@ -472,6 +472,15 @@
+                 device=self.device,
+             )
+ 
++        # Opt-in small-message all-reduce (SGLANG_DSV41_MSAR=1): MSCCL++ port channels over the RoCE fabric, one communicator per rank set.
++        self.dsv41_msar_comm: Optional[Any] = None
++        self._dsv41_msar_tracing = False
++        if self.world_size > 1:
++            from sglang.srt.distributed.device_communicators import dsv41_msar
++
++            if dsv41_msar.enabled_for(group_name):
++                self.dsv41_msar_comm = dsv41_msar.get_dsv41_msar(self.ranks, self.cpu_group, self.device)
++
+         self.ca_comm: Optional[Any] = None
+         self.qr_comm: Optional[QuickAllReduce] = None
+         if use_custom_allreduce and self.world_size > 1:
+@@ -727,6 +736,21 @@
+                 outplace_all_reduce_method="auto",
+             )
+ 
++        if self.dsv41_msar_comm is not None and self.dsv41_msar_comm.should_use(input_):
++            if self.dsv41_msar_comm.use:
++                # in place; one block, no host synchronisation, captured by the decode graphs
++                return self.dsv41_msar_comm.all_reduce(input_)
++            if self.dsv41_msar_comm.trace and not self._dsv41_msar_tracing:
++                # control arm: stamp the existing path with the same device-clock stamps
++                self._dsv41_msar_tracing = True
++                try:
++                    self.dsv41_msar_comm.stamp(input_, False)
++                    out = self.all_reduce(input_)
++                    self.dsv41_msar_comm.stamp(input_, True)
++                finally:
++                    self._dsv41_msar_tracing = False
++                return out
++
+         should_use_pymscclpp_allreduce = (
+             self.pymscclpp_comm is not None
+             and self.pymscclpp_comm.should_mscclpp_allreduce(input_)

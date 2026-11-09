@@ -1,0 +1,80 @@
+diff --git a/sglang/multimodal_gen/runtime/loader/weight_utils.py b/sglang/multimodal_gen/runtime/loader/weight_utils.py
+--- a/sglang/multimodal_gen/runtime/loader/weight_utils.py
++++ b/sglang/multimodal_gen/runtime/loader/weight_utils.py
+@@ -28,3 +28,9 @@
+ from sglang.multimodal_gen import envs
+-from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
++from sglang.multimodal_gen.runtime.distributed import (
++    get_local_torch_device,
++    get_world_group,
++)
++from sglang.multimodal_gen.runtime.distributed.parallel_state import (
++    world_group_is_initialized,
++)
+ from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
+@@ -44,6 +44,21 @@ class DisabledTqdm(tqdm):
+         super().__init__(*args, **kwargs)
+
+
++def _prefetch_checkpoint_file(
++    file_path: str, block_size: int = 16 * 1024 * 1024
++) -> None:
++    """Warm one checkpoint shard in the OS page cache.
++
++    H3 workers otherwise fault remote NVMe/RDMA-backed mmap pages in small,
++    model-dependent reads.  A bounded sequential pass immediately before
++    ``safe_open`` gives Linux a predictable readahead stream without copying
++    the complete checkpoint into an additional Python buffer.
++    """
++    with open(file_path, "rb") as stream:
++        while stream.read(block_size):
++            pass
++
++
+ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
+     lock_dir = cache_dir or temp_dir
+     model_name_or_path = str(model_name_or_path)
+@@ -196,5 +211,9 @@ def safetensors_weights_iterator(
+ ) -> Generator[tuple[str, torch.Tensor], None, None]:
+     """Iterate over the weights in the model safetensor files."""
++    bounded_shard_prefetch = os.environ.get(
++        "SGLANG_H3_BOUNDED_SHARD_PREFETCH", "0"
++    ).lower() in {"1", "true"}
++
+     enable_tqdm = (
+         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+     )
+@@ -267,6 +286,12 @@ def safetensors_weights_iterator(
+                 else:
+                     yield name, tensor
+     else:
++        if bounded_shard_prefetch:
++            logger.info(
++                "Using H3 bounded per-shard checkpoint prefetch "
++                "with 16 MiB sequential reads"
++            )
++
+         for st_file in tqdm(
+             hf_weights_files,
+             desc="Loading safetensors checkpoint shards",
+@@ -273,6 +302,19 @@ def safetensors_weights_iterator(
+             disable=not enable_tqdm,
+             bar_format=_BAR_FORMAT,
+         ):
++            if bounded_shard_prefetch:
++                # Exactly one rank per host warms each shard; the CPU/Gloo
++                # barrier keeps peers from racing the backing store through
++                # mmap page faults. Torchrun's local size is distinct from
++                # the global world size for the multi-node H3 profile.
++                world = get_world_group() if world_group_is_initialized() else None
++                rank = int(os.environ.get("LOCAL_RANK", world.local_rank if world is not None else 0))
++                world_size = int(os.environ.get("LOCAL_WORLD_SIZE", world.world_size if world is not None else 1))
++                shard_index = hf_weights_files.index(st_file)
++                if rank == shard_index % world_size:
++                    _prefetch_checkpoint_file(st_file)
++                if world is not None:
++                    world.barrier()
+             with safe_open(st_file, framework="pt", device=device) as f:
+-                for name in f.keys():  # noqa: SIM118
++                for name in sorted(f.keys()):
+                     if key_filter is not None and not key_filter(name):

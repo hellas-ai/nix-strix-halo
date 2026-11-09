@@ -1,0 +1,432 @@
+diff --git a/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py b/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py
+--- a/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py
++++ b/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py
+@@ -15,6 +15,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.
+     MiniMaxH3AudioEncodingStage,
+     MiniMaxH3DecodingStage,
+     MiniMaxH3DenoisingStage,
++    MiniMaxH3LatentCheckpointStage,
+     MiniMaxH3LatentPreparationStage,
+     MiniMaxH3TextEncodingStage,
+     MiniMaxH3TimestepPreparationStage,
+@@ -141,6 +142,9 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
+                 pipeline=self,
+             )
+         )
++        checkpoint_stage = MiniMaxH3LatentCheckpointStage.from_environment()
++        if checkpoint_stage is not None:
++            self.add_stage(checkpoint_stage)
+         self.add_stage(
+             MiniMaxH3DecodingStage(
+                 video_vae=self.get_module("video_vae"),
+diff --git a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/__init__.py b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/__init__.py
+--- a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/__init__.py
++++ b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/__init__.py
+@@ -5,4 +5,5 @@
+ from .stages.audio_encoding import MiniMaxH3AudioEncodingStage
++from .stages.checkpointing import MiniMaxH3LatentCheckpointStage
+ from .stages.decoding import MiniMaxH3DecodingStage
+ from .stages.denoising import MiniMaxH3DenoisingStage
+ from .stages.latent_preparation import MiniMaxH3LatentPreparationStage
+@@ -13,6 +14,7 @@ __all__ = [
+     "MiniMaxH3AudioEncodingStage",
+     "MiniMaxH3DecodingStage",
+     "MiniMaxH3DenoisingStage",
++    "MiniMaxH3LatentCheckpointStage",
+     "MiniMaxH3LatentPreparationStage",
+     "MiniMaxH3TextEncodingStage",
+     "MiniMaxH3TimestepPreparationStage",
+diff --git a/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/checkpointing.py b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/checkpointing.py
+new file mode 100644
+--- /dev/null
++++ b/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/checkpointing.py
+@@ -0,0 +1,221 @@
++# SPDX-License-Identifier: Apache-2.0
++from __future__ import annotations
++
++import os
++import re
++from collections.abc import Mapping
++from pathlib import Path
++from typing import Any
++
++import torch
++from safetensors.torch import save_file
++
++from sglang.multimodal_gen.runtime.distributed import (
++    get_world_group,
++    model_parallel_is_initialized,
++)
++from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
++from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
++    PipelineStage,
++    StageParallelismType,
++)
++from sglang.multimodal_gen.runtime.server_args import ServerArgs
++
++
++MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV = (
++    "SGLANG_MINIMAX_H3_LATENT_CHECKPOINT_DIR"
++)
++MINIMAX_H3_LATENT_CHECKPOINT_SCHEMA = "hellas.minimax_h3.latents.v1"
++_SHARED_CHECKPOINT_ROOT = Path("/mnt/Home")
++_SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
++
++
++def _checkpoint_directory_from_environment() -> Path | None:
++    raw = os.environ.get(MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV)
++    if raw is None or not raw.strip():
++        return None
++    requested = Path(raw.strip()).expanduser()
++    if not requested.is_absolute():
++        raise ValueError(
++            f"{MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV} must be an absolute path "
++            "below /mnt/Home"
++        )
++    checkpoint_dir = requested.resolve(strict=False)
++    shared_root = _SHARED_CHECKPOINT_ROOT.resolve(strict=False)
++    try:
++        relative = checkpoint_dir.relative_to(shared_root)
++    except ValueError as exc:
++        raise ValueError(
++            f"{MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV} must resolve below "
++            f"{shared_root}, got {checkpoint_dir}"
++        ) from exc
++    if not relative.parts:
++        raise ValueError(
++            f"{MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV} must name a directory "
++            "below /mnt/Home, not /mnt/Home itself"
++        )
++    return checkpoint_dir
++
++
++def _validate_checkpoint_tensors(
++    latents: torch.Tensor,
++    audio_latents: torch.Tensor,
++) -> None:
++    if not isinstance(latents, torch.Tensor) or latents.ndim != 5:
++        raise ValueError("MiniMax H3 checkpoint latents must be a rank-5 tensor")
++    if int(latents.shape[1]) != 24:
++        raise ValueError(
++            "MiniMax H3 checkpoint video latent channel count must be 24, "
++            f"got {int(latents.shape[1])}"
++        )
++    if not isinstance(audio_latents, torch.Tensor) or audio_latents.ndim != 3:
++        raise ValueError(
++            "MiniMax H3 checkpoint audio_latents must be a rank-3 tensor"
++        )
++    if tuple(int(dim) for dim in audio_latents.shape[:2]) != (2, 32):
++        raise ValueError(
++            "MiniMax H3 checkpoint audio latent prefix must be [2, 32], "
++            f"got {list(audio_latents.shape[:2])}"
++        )
++    if not latents.is_floating_point() or not audio_latents.is_floating_point():
++        raise ValueError("MiniMax H3 checkpoint latents must be floating-point")
++
++
++def _atomic_write_latent_checkpoint(
++    checkpoint_dir: Path,
++    *,
++    request_id: str,
++    latents: torch.Tensor,
++    audio_latents: torch.Tensor,
++    metadata: Mapping[str, Any] | None = None,
++) -> Path:
++    """Persist normalized post-denoise latents without exposing a partial file."""
++
++    if (
++        not isinstance(request_id, str)
++        or _SAFE_REQUEST_ID.fullmatch(request_id) is None
++    ):
++        raise ValueError(
++            "MiniMax H3 request_id must contain only letters, digits, '.', '_', "
++            "or '-' and be at most 128 characters"
++        )
++    _validate_checkpoint_tensors(latents, audio_latents)
++    checkpoint_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
++    final_path = checkpoint_dir / f"{request_id}.latents.safetensors"
++    partial_path = checkpoint_dir / (
++        f".{request_id}.latents.safetensors.{os.getpid()}.partial"
++    )
++    tensors = {
++        "latents": latents.detach().to(device="cpu").contiguous(),
++        "audio_latents": audio_latents.detach().to(device="cpu").contiguous(),
++    }
++    string_metadata = {
++        str(key): str(value) for key, value in (metadata or {}).items()
++    }
++    string_metadata["schema"] = MINIMAX_H3_LATENT_CHECKPOINT_SCHEMA
++    try:
++        save_file(tensors, str(partial_path), metadata=string_metadata)
++        # Make the file contents durable before making the final path visible.
++        with partial_path.open("rb") as partial_file:
++            os.fsync(partial_file.fileno())
++        os.replace(partial_path, final_path)
++        # Persist the directory entry as well. /mnt/Home is a normal persistent
++        # Linux filesystem in the supported deployment.
++        directory_fd = os.open(checkpoint_dir, os.O_RDONLY | os.O_DIRECTORY)
++        try:
++            os.fsync(directory_fd)
++        finally:
++            os.close(directory_fd)
++    except BaseException:
++        partial_path.unlink(missing_ok=True)
++        raise
++    return final_path
++
++
++def _checkpoint_metadata(batch: Req, server_args: ServerArgs) -> dict[str, str]:
++    canonical = batch.extra.get("minimax_h3_canonical_request")
++    task = canonical.get("task") if isinstance(canonical, Mapping) else None
++    model_path = str(server_args.model_path)
++    variant = server_args.model_variant or server_args.model_subfolder or "unknown"
++    return {
++        "producer": "sglang",
++        "model_revision": Path(model_path.rstrip("/")).name,
++        "model_variant": str(variant),
++        "workflow": str(task or "unknown"),
++        "request_id": str(batch.request_id),
++        "latent_height": str(int(batch.latents.shape[-2])),
++        "latent_width": str(int(batch.latents.shape[-1])),
++    }
++
++
++class MiniMaxH3LatentCheckpointStage(PipelineStage):
++    """Write one complete, normalized checkpoint before destructive VAE decode.
++
++    MiniMax H3's Ulysses model all-gathers its output rows, so every rank owns
++    complete post-denoise video and audio latents. Only world rank zero writes;
++    all ranks participate in the status broadcast so a write failure cannot
++    send peers into the following tiled-decode collectives.
++    """
++
++    def __init__(self, checkpoint_dir: Path) -> None:
++        super().__init__()
++        self.checkpoint_dir = checkpoint_dir
++
++    @classmethod
++    def from_environment(cls) -> MiniMaxH3LatentCheckpointStage | None:
++        checkpoint_dir = _checkpoint_directory_from_environment()
++        return None if checkpoint_dir is None else cls(checkpoint_dir)
++
++    @property
++    def parallelism_type(self) -> StageParallelismType:
++        return StageParallelismType.REPLICATED
++
++    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
++        if batch.is_warmup:
++            return batch
++
++        world_group = get_world_group() if model_parallel_is_initialized() else None
++        is_owner = world_group is None or world_group.rank_in_group == 0
++        owner_exception: Exception | None = None
++        result: dict[str, str | None] | None = None
++        if is_owner:
++            try:
++                checkpoint_path = _atomic_write_latent_checkpoint(
++                    self.checkpoint_dir,
++                    request_id=str(batch.request_id),
++                    latents=batch.latents,
++                    audio_latents=batch.audio_latents,
++                    metadata=_checkpoint_metadata(batch, server_args),
++                )
++                result = {"error": None, "path": str(checkpoint_path)}
++            except Exception as exc:
++                owner_exception = exc
++                result = {
++                    "error": f"{type(exc).__name__}: {exc}",
++                    "path": None,
++                }
++
++        if world_group is not None:
++            result = world_group.broadcast_object(result, src=0)
++        if not isinstance(result, dict):
++            raise RuntimeError("MiniMax H3 checkpoint owner returned no status")
++        error = result.get("error")
++        if error is not None:
++            message = f"MiniMax H3 latent checkpoint failed on rank 0: {error}"
++            if owner_exception is not None:
++                raise RuntimeError(message) from owner_exception
++            raise RuntimeError(message)
++        checkpoint_path = result.get("path")
++        if not isinstance(checkpoint_path, str):
++            raise RuntimeError("MiniMax H3 checkpoint owner returned no path")
++        batch.extra["minimax_h3_latent_checkpoint_path"] = checkpoint_path
++        if is_owner:
++            self.log_info("Saved post-denoise latents to %s", checkpoint_path)
++        return batch
++
++
++__all__ = [
++    "MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV",
++    "MINIMAX_H3_LATENT_CHECKPOINT_SCHEMA",
++    "MiniMaxH3LatentCheckpointStage",
++]
+diff --git a/sglang/multimodal_gen/test/unit/test_minimax_h3_latent_checkpointing.py b/sglang/multimodal_gen/test/unit/test_minimax_h3_latent_checkpointing.py
+new file mode 100644
+--- /dev/null
++++ b/sglang/multimodal_gen/test/unit/test_minimax_h3_latent_checkpointing.py
+@@ -0,0 +1,163 @@
++# SPDX-License-Identifier: Apache-2.0
++"""MiniMax H3 post-denoise checkpoint persistence contract."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++from safetensors import safe_open
++
++from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages import (
++    checkpointing as checkpointing_module,
++)
++from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.checkpointing import (
++    MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV,
++    MINIMAX_H3_LATENT_CHECKPOINT_SCHEMA,
++    MiniMaxH3LatentCheckpointStage,
++    _atomic_write_latent_checkpoint,
++    _checkpoint_directory_from_environment,
++)
++
++
++def _latents(value: float) -> tuple[torch.Tensor, torch.Tensor]:
++    return (
++        torch.full((1, 24, 2, 4, 6), value, dtype=torch.float32),
++        torch.full((2, 32, 5), value, dtype=torch.float32),
++    )
++
++
++class _FakeWorldGroup:
++    def __init__(self, rank: int, received=None):
++        self.rank_in_group = rank
++        self.received = received
++        self.sent = None
++
++    def broadcast_object(self, obj, src=0):
++        assert src == 0
++        self.sent = obj
++        return obj if self.rank_in_group == src else self.received
++
++
++def _checkpoint_stage() -> MiniMaxH3LatentCheckpointStage:
++    stage = object.__new__(MiniMaxH3LatentCheckpointStage)
++    stage.checkpoint_dir = Path("/mnt/Home/checkpoints")
++    return stage
++
++
++def _batch():
++    video, audio = _latents(1.0)
++    return SimpleNamespace(
++        is_warmup=False,
++        request_id="broadcast-test",
++        latents=video,
++        audio_latents=audio,
++        extra={},
++    )
++
++
++def _server_args():
++    return SimpleNamespace(
++        model_path="/mnt/Home/models/MiniMax-H3",
++        model_variant="fl2va",
++        model_subfolder=None,
++    )
++
++
++def test_atomic_checkpoint_round_trip_and_replace(tmp_path: Path):
++    video, audio = _latents(1.0)
++    path = _atomic_write_latent_checkpoint(
++        tmp_path,
++        request_id="video-test_1",
++        latents=video,
++        audio_latents=audio,
++        metadata={"workflow": "fl2va"},
++    )
++    replacement_video, replacement_audio = _latents(2.0)
++    replacement_path = _atomic_write_latent_checkpoint(
++        tmp_path,
++        request_id="video-test_1",
++        latents=replacement_video,
++        audio_latents=replacement_audio,
++        metadata={"workflow": "fl2va"},
++    )
++
++    assert replacement_path == path
++    assert {entry.name for entry in tmp_path.iterdir()} == {path.name}
++    with safe_open(path, framework="pt", device="cpu") as checkpoint:
++        assert checkpoint.metadata()["schema"] == MINIMAX_H3_LATENT_CHECKPOINT_SCHEMA
++        assert checkpoint.metadata()["workflow"] == "fl2va"
++        torch.testing.assert_close(
++            checkpoint.get_tensor("latents"), replacement_video, rtol=0, atol=0
++        )
++        torch.testing.assert_close(
++            checkpoint.get_tensor("audio_latents"),
++            replacement_audio,
++            rtol=0,
++            atol=0,
++        )
++
++
++def test_checkpoint_environment_is_opt_in(monkeypatch):
++    monkeypatch.delenv(MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV, raising=False)
++    assert _checkpoint_directory_from_environment() is None
++
++
++def test_checkpoint_environment_rejects_non_shared_path(monkeypatch):
++    monkeypatch.setenv(MINIMAX_H3_LATENT_CHECKPOINT_DIR_ENV, "/var/empty/h3")
++    with pytest.raises(ValueError, match="below /mnt/Home"):
++        _checkpoint_directory_from_environment()
++
++
++def test_owner_checkpoint_failure_is_published(monkeypatch):
++    group = _FakeWorldGroup(rank=0)
++    monkeypatch.setattr(
++        checkpointing_module, "model_parallel_is_initialized", lambda: True
++    )
++    monkeypatch.setattr(checkpointing_module, "get_world_group", lambda: group)
++
++    def fail_write(*args, **kwargs):
++        raise OSError("disk full")
++
++    monkeypatch.setattr(
++        checkpointing_module, "_atomic_write_latent_checkpoint", fail_write
++    )
++    with pytest.raises(RuntimeError, match="OSError: disk full"):
++        _checkpoint_stage().forward(_batch(), _server_args())
++
++    assert group.sent == {"error": "OSError: disk full", "path": None}
++
++
++def test_peer_receives_owner_checkpoint_failure_without_writing(monkeypatch):
++    group = _FakeWorldGroup(
++        rank=1, received={"error": "OSError: disk full", "path": None}
++    )
++    monkeypatch.setattr(
++        checkpointing_module, "model_parallel_is_initialized", lambda: True
++    )
++    monkeypatch.setattr(checkpointing_module, "get_world_group", lambda: group)
++
++    def unexpected_write(*args, **kwargs):
++        pytest.fail("a non-owner rank tried to write the checkpoint")
++
++    monkeypatch.setattr(
++        checkpointing_module, "_atomic_write_latent_checkpoint", unexpected_write
++    )
++    with pytest.raises(RuntimeError, match="OSError: disk full"):
++        _checkpoint_stage().forward(_batch(), _server_args())
++
++    assert group.sent is None
++
++
++@pytest.mark.parametrize("request_id", ["../escape", "/absolute", "", "a" * 129])
++def test_checkpoint_rejects_unsafe_request_id(tmp_path: Path, request_id: str):
++    video, audio = _latents(1.0)
++    with pytest.raises(ValueError, match="request_id"):
++        _atomic_write_latent_checkpoint(
++            tmp_path,
++            request_id=request_id,
++            latents=video,
++            audio_latents=audio,
++        )

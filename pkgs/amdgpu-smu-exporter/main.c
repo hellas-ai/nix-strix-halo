@@ -60,6 +60,7 @@ static int discover_metrics_path(char *path, size_t path_size)
     glob_t matches = {0};
     int result = glob("/sys/class/drm/card*/device/gpu_metrics", 0, NULL,
                       &matches);
+    size_t index;
 
     if (result != 0 || matches.gl_pathc == 0) {
         globfree(&matches);
@@ -67,15 +68,41 @@ static int discover_metrics_path(char *path, size_t path_size)
         return -1;
     }
 
-    if (snprintf(path, path_size, "%s", matches.gl_pathv[0]) >=
-        (int)path_size) {
+    /*
+     * A node may expose a discrete GPU before the Strix Halo APU. Radeon Pro
+     * V620 uses the 120-byte v1.3 table, while this exporter decodes the APU's
+     * 264-byte v3.0 table. Select by table revision instead of DRM card order.
+     */
+    for (index = 0; index < matches.gl_pathc; ++index) {
+        uint8_t header[4];
+        ssize_t count;
+        int fd = open(matches.gl_pathv[index], O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0)
+            continue;
+        do {
+            count = read(fd, header, sizeof(header));
+        } while (count < 0 && errno == EINTR);
+        close(fd);
+
+        if (count != (ssize_t)sizeof(header) ||
+            header[2] != 3 || header[3] != 0 ||
+            read_le16(header, 0) < 260)
+            continue;
+
+        if (snprintf(path, path_size, "%s", matches.gl_pathv[index]) >=
+            (int)path_size) {
+            globfree(&matches);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
         globfree(&matches);
-        errno = ENAMETOOLONG;
-        return -1;
+        return 0;
     }
 
     globfree(&matches);
-    return 0;
+    errno = EPROTONOSUPPORT;
+    return -1;
 }
 
 static int read_metrics(const char *path, uint8_t *data, size_t capacity,

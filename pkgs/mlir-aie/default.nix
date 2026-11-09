@@ -17,7 +17,7 @@
 }:
 
 let
-  inherit (python312Packages) python;
+  python = python312Packages.python;
 
   llvm-aie = python312Packages.buildPythonPackage rec {
     pname = "llvm-aie";
@@ -126,6 +126,13 @@ let
       platforms = [ "x86_64-linux" ];
     };
   };
+
+  # Keep a runnable interpreter beside the compiler tools.  A symlinkJoin of
+  # Python packages alone does not expose an interpreter (or assemble their
+  # propagated dependencies), which made every IRON probe depend on an
+  # ambient virtualenv.  The NPU probes compile offline and use a C++ XRT host
+  # runner, so this intentionally contains mlir-aie but not PyXRT.
+  runtimePython = python.withPackages (_: [ mlir-aie ]);
 in
 {
   inherit llvm-aie mlir-aie;
@@ -135,16 +142,27 @@ in
     paths = [
       llvm-aie
       mlir-aie
+      runtimePython
     ];
     nativeBuildInputs = [ makeWrapper ];
     postBuild = ''
-            mkdir -p "$out/nix-support"
-            cat > "$out/nix-support/setup-hook" <<EOF
-      export PEANO_INSTALL_DIR=${llvm-aie}/${python.sitePackages}/llvm-aie
-      export MLIR_AIE_INSTALL_DIR=${mlir-aie}/${python.sitePackages}/mlir_aie
-      export XILINX_XRT=${xrt.xdna}
-      export PATH=${llvm-aie}/${python.sitePackages}/llvm-aie/bin:${mlir-aie}/bin:\$PATH
-      EOF
+      # `nix build .#npu-toolchain` is also a directly runnable toolchain, not
+      # only an input to `nix develop`.  The IRON Python API consults these
+      # variables when it invokes Peano/aiecc, so wrap the interpreter that
+      # comes from python.withPackages with the same environment as the hook.
+      wrapProgram "$out/bin/python3.12" \
+        --prefix PATH : "${llvm-aie}/${python.sitePackages}/llvm-aie/bin:${mlir-aie}/bin:${xrt.xdna}/bin" \
+        --set-default PEANO_INSTALL_DIR "${llvm-aie}/${python.sitePackages}/llvm-aie" \
+        --set-default MLIR_AIE_INSTALL_DIR "${mlir-aie}/${python.sitePackages}/mlir_aie" \
+        --set-default XILINX_XRT "${xrt.xdna}"
+
+      mkdir -p "$out/nix-support"
+      cat > "$out/nix-support/setup-hook" <<EOF
+export PEANO_INSTALL_DIR=${llvm-aie}/${python.sitePackages}/llvm-aie
+export MLIR_AIE_INSTALL_DIR=${mlir-aie}/${python.sitePackages}/mlir_aie
+export XILINX_XRT=${xrt.xdna}
+export PATH=${llvm-aie}/${python.sitePackages}/llvm-aie/bin:${mlir-aie}/bin:${xrt.xdna}/bin:\$PATH
+EOF
     '';
     meta = {
       description = "Combined MLIR-AIE and Peano environment for AMD Ryzen AI NPU development";

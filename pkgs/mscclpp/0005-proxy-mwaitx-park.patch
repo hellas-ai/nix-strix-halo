@@ -1,0 +1,70 @@
+MSCCL++ v0.9.0: the proxy parks in MWAITX between collectives instead of spinning.
+
+Applies with -p1 to the pinned v0.9.0 source after 0001-0004 (none of
+them touch proxy.cc). The proxy thread polled the FIFO in a bare for(;;) and held its pinned core at
+100% for the life of the rank. It now polls hot for 50 us after each trigger, then waits in
+MONITORX/MWAITX on the next trigger slot (user mode on AMD; Strix Halo has it). The GPU's trigger
+write wakes the core; a 6000-cycle timer (2 us at the 3 GHz TSC) bounds a missed wake-up.
+
+--- a/src/core/proxy.cc
++++ b/src/core/proxy.cc
+@@ -2,6 +2,7 @@
+ // Licensed under the MIT license.
+ 
+ #include <atomic>
++#include <chrono>
+ #include <mscclpp/core.hpp>
+ #include <mscclpp/gpu_utils.hpp>
+ #include <mscclpp/numa.hpp>
+@@ -17,6 +18,21 @@
+ constexpr int ProxyStopCheckPeriod = 1000;
+ constexpr int ProxyStartWarnPeriod = 1000;
+ 
++// The GPU writes triggers into host memory and the FIFO has no doorbell, so the proxy polls. It polls
++// hot for ProxySpinWindow after the last trigger, which keeps back-to-back collectives on the fast
++// path, and otherwise parks its core in MWAITX on the next trigger's cache line: the GPU's write wakes
++// it, and the timer (TSC cycles, 2 us at 3 GHz) bounds the wait if a wake-up is missed.
++constexpr auto ProxySpinWindow = std::chrono::microseconds(50);
++constexpr uint32_t ProxyParkTscCycles = 6000;
++
++// Inline asm, not <x86intrin.h>: that header's __bfloat16 collides with gpu_data_types.hpp.
++static void parkUntilWritten(uint64_t* fst) {
++  asm volatile("monitorx" : : "a"(fst), "c"(0), "d"(0) : "memory");
++  if (__atomic_load_n(fst, __ATOMIC_RELAXED) == 0) {
++    asm volatile("mwaitx" : : "a"(0), "b"(ProxyParkTscCycles), "c"(0x2 /* timer enable */) : "memory");
++  }
++}
++
+ struct Proxy::Impl {
+   ProxyHandler handler;
+   std::function<void()> threadInit;
+@@ -72,7 +88,9 @@
+ 
+     ProxyHandler handler = this->pimpl_->handler;
+     auto fifo = this->pimpl_->fifo;
++    FifoDeviceHandle slots = fifo->deviceHandle();
+     ProxyTrigger trigger;
++    auto lastTrigger = std::chrono::steady_clock::now();
+ 
+     int runCnt = ProxyStopCheckPeriod;
+     for (;;) {
+@@ -85,7 +103,10 @@
+       // Poll to see if we are ready to send anything
+       trigger = fifo->poll();
+       if (trigger.fst == 0 || trigger.snd == 0) {  // TODO: this check is a potential pitfall for custom triggers
+-        continue;                                  // there is one in progress
++        if (trigger.fst == 0 && std::chrono::steady_clock::now() - lastTrigger > ProxySpinWindow) {
++          parkUntilWritten(&slots.triggers[*slots.tail % slots.size].fst);
++        }
++        continue;  // there is one in progress
+       }
+       trigger.snd ^= (uint64_t{1} << uint64_t{63});  // this is where the last bit of snd is reverted.
+ 
+@@ -93,6 +114,7 @@
+ 
+       // Send completion: reset only the high 64 bits
+       fifo->pop();
++      lastTrigger = std::chrono::steady_clock::now();
+ 
+       if (result == ProxyHandlerResult::Stop) {
+         break;

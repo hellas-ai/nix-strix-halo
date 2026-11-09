@@ -1,0 +1,73 @@
+--- a/sglang/srt/model_executor/cuda_graph_buffer_registry.py
++++ b/sglang/srt/model_executor/cuda_graph_buffer_registry.py
+@@ -518,6 +518,7 @@
+     encoder_len_fill_value: int = 0,
+     encoder_lens_dtype: torch.dtype = torch.int32,
+     enable_num_token_non_padded: bool = False,
++    allow_missing_num_token_non_padded: bool = False,
+     require_gathered_buffer: bool = False,
+     enable_prefill_cp: bool = False,
+     require_mlp_tp_gather: bool = False,
+@@ -646,6 +647,7 @@
+     if enable_num_token_non_padded:
+         from sglang.srt.model_executor.forward_batch_info import (
+             compute_local_num_token_non_padded,
++            compute_local_num_token_non_padded_cpu,
+         )
+ 
+         def _num_token_non_padded_post_fill(buf, fb, ctx):
+@@ -660,6 +662,16 @@
+                 # registry's skip-missing-field behavior for that path.
+                 if fb.num_token_non_padded is not None:
+                     buf.copy_(fb.num_token_non_padded)
++                elif allow_missing_num_token_non_padded:
++                    # EP1 batches omit both optional GPU counts. Derive the
++                    # live count from host shape metadata, using the padded
++                    # bucket's TP slice when the model shards its sequence.
++                    sharded = not enable_prefill_cp and attn_tp_sharded_fn(
++                        ctx.padded_num_tokens
++                    )
++                    buf.fill_(compute_local_num_token_non_padded_cpu(
++                        ctx.raw_num_tokens, ctx.padded_num_tokens, sharded=sharded
++                    ))
+                 return
+             sharded = not enable_prefill_cp and attn_tp_sharded_fn(
+                 ctx.padded_num_tokens
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -134,6 +134,14 @@
+     KTRANSFORMERS_AVAILABLE = False
+ 
+ logger = logging.getLogger(__name__)
++
++
++def _glm53_live_rows_enabled() -> bool:
++    return (
++        torch.version.hip is not None
++        and get_parallel().moe_ep_size == 1
++        and os.environ.get("SGLANG_GLM53_LIVE_ROWS", "0") == "1"
++    )
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.model_executor.model_runner import ModelRunner
+@@ -418,6 +426,10 @@
+         # FB-shared slot registry adopting DecodeInputBuffers storage (same
+         # physical tensors, stable data_ptr for capture vs replay). Provides
+         # the unified fill_from / slot access surface for capture/replay.
++        # The graph always carries this scalar, even at EP1. Without a replay
++        # slot it remains at capture size, routing inactive padding as live.
++        # Ragged layouts do not use a prefix-shaped live-token region.
++        glm53_live_rows = _glm53_live_rows_enabled() and not self.ragged_verify_mode
+         self.buffer_registry: CudaGraphBufferRegistry = build_decode_registry(
+             device=self.device,
+             max_bs=self.max_bs,
+@@ -427,7 +439,8 @@
+             enable_mamba_track=enable_mamba_track,
+             is_encoder_decoder=self.is_encoder_decoder,
+             encoder_len_fill_value=self.encoder_len_fill_value,
+-            enable_num_token_non_padded=enable_num_token_non_padded(),
++            enable_num_token_non_padded=enable_num_token_non_padded() or glm53_live_rows,
++            allow_missing_num_token_non_padded=glm53_live_rows,
+             require_gathered_buffer=self.require_gathered_buffer,
+             enable_prefill_cp=self.enable_prefill_cp,
+             require_mlp_tp_gather=self.require_mlp_tp_gather,

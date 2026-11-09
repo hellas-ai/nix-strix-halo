@@ -1,0 +1,55 @@
+diff --git a/sglang/multimodal_gen/runtime/cache/cache_dit_integration.py b/sglang/multimodal_gen/runtime/cache/cache_dit_integration.py
+index 68c57f41..4c5a314c 100644
+--- a/sglang/multimodal_gen/runtime/cache/cache_dit_integration.py
++++ b/sglang/multimodal_gen/runtime/cache/cache_dit_integration.py
+@@ -24,12 +24,40 @@
+-import cache_dit
+-from cache_dit import (
+-    BlockAdapter,
+-    DBCacheConfig,
+-    ForwardPattern,
+-    ParamsModifier,
+-    TaylorSeerCalibratorConfig,
+-    steps_mask,
+-)
+-from cache_dit.caching.block_adapters import BlockAdapterRegister
+-from cache_dit.parallelism import ParallelismBackend, ParallelismConfig
++try:
++    import cache_dit
++    from cache_dit import (
++        BlockAdapter,
++        DBCacheConfig,
++        ForwardPattern,
++        ParamsModifier,
++        TaylorSeerCalibratorConfig,
++        steps_mask,
++    )
++    from cache_dit.caching.block_adapters import BlockAdapterRegister
++    from cache_dit.parallelism import ParallelismBackend, ParallelismConfig
++except ImportError:
++    # Cache-DiT is an optional accelerator. Keep the normal denoising path
++    # importable when it is absent; these placeholders fail clearly if a
++    # caller explicitly enables caching.
++    cache_dit = None
++
++    class _CacheDitUnavailable:
++        def __init__(self, *args, **kwargs):
++            raise RuntimeError("cache-dit is not installed")
++
++    class ForwardPattern:
++        Pattern_2 = "Pattern_2"
++        Pattern_3 = "Pattern_3"
++
++    class BlockAdapterRegister:
++        @staticmethod
++        def is_supported(_transformer):
++            return False
++
++    class ParallelismBackend:
++        AUTO = "auto"
++
++    BlockAdapter = DBCacheConfig = ParamsModifier = _CacheDitUnavailable
++    TaylorSeerCalibratorConfig = ParallelismConfig = _CacheDitUnavailable
++
++    def steps_mask(*args, **kwargs):
++        raise RuntimeError("cache-dit is not installed")

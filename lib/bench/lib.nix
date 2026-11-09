@@ -186,7 +186,10 @@ let
     done
     if [ "$_hip_idx" -ge 0 ]; then
       echo "hipArchGuard: restricting to HIP device $_hip_idx (gfx_target_version=$_want)"
+      # HIP filters at the HIP runtime layer, ROCR at the thunk/KFD layer;
+      # which one a given runtime generation honors varies, so set both.
       export HIP_VISIBLE_DEVICES=$_hip_idx
+      export ROCR_VISIBLE_DEVICES=$_hip_idx
     fi
     unset _want _hip_idx _gpu_idx _props _ver
   '';

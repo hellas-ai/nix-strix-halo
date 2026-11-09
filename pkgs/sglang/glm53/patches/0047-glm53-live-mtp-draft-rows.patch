@@ -1,0 +1,76 @@
+--- a/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -17,6 +17,7 @@
+     CaptureHiddenMode,
+     ForwardBatch,
+     ForwardMode,
++    compute_local_num_token_non_padded_cpu,
+ )
+ from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+ from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
+@@ -30,6 +31,9 @@
+ )
+ from sglang.srt.model_executor.runner.flashinfer_autotune import (
+     maybe_flashinfer_autotune_speculative_draft,
++)
++from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
++    _glm53_live_rows_enabled,
+ )
+ from sglang.srt.model_executor.runner_backend.utils import resolve_decode_backend
+ from sglang.srt.model_executor.runner_backend_utils import (
+@@ -153,6 +157,14 @@
+         self.capture_bs, _ = get_batch_sizes_to_capture(model_runner)
+         # Static capture width.
+         self.captured_req_width = resolve_num_tokens_per_req(phase="draft_decode")
++        # This specialized runner does not use the decode buffer registry.
++        # Keep a private stable scalar so its padded MTP forwards also route
++        # only live rows (target verify and draft-extend use the registry).
++        self._glm53_num_token_non_padded = (
++            torch.zeros((1,), dtype=torch.int32, device=model_runner.device)
++            if _glm53_live_rows_enabled()
++            else None
++        )
+         self.max_bs = max(self.capture_bs)
+         self.max_num_token = self.max_bs * self.captured_req_width
+ 
+@@ -427,6 +439,7 @@
+             vocab_size=self.model_runner.model_config.vocab_size,
+         )
+ 
++        self._glm53_set_num_token_non_padded(num_tokens, num_tokens)
+         forward_batch = ForwardBatch(
+             forward_mode=ForwardMode.DECODE,
+             batch_size=num_seqs,
+@@ -439,6 +452,8 @@
+             out_cache_loc=out_cache_loc,
+             seq_lens_sum=seq_lens.sum().item(),
+             return_logprob=False,
++            num_token_non_padded=self._glm53_num_token_non_padded,
++            global_num_token_non_padded_cpu=num_tokens,
+             positions=positions,
+             mrope_positions=mrope_positions,
+             global_num_tokens_gpu=global_num_tokens,
+@@ -513,6 +528,15 @@
+     # -----------------------------------------------------------------
+     # Replay
+     # -----------------------------------------------------------------
++    def _glm53_set_num_token_non_padded(self, raw_num_tokens: int, padded_num_tokens: int) -> None:
++        if self._glm53_num_token_non_padded is None:
++            return
++        local = compute_local_num_token_non_padded_cpu(
++            raw_num_tokens, padded_num_tokens,
++            sharded=self.model_runner.attn_tp_sequence_sharded(padded_num_tokens),
++        )
++        self._glm53_num_token_non_padded.fill_(local)
++
+     def execute(self, forward_batch: ForwardBatch):
+         assert forward_batch.out_cache_loc is not None
+         self.deepep_adapter.replay()
+@@ -553,6 +577,7 @@
+             buffers.req_pool_indices.zero_()
+ 
+         num_tokens = bs * self.captured_req_width
++        self._glm53_set_num_token_non_padded(raw_num_token, num_tokens)
+ 
+         maybe_detect_nan(
+             forward_batch.spec_info.topk_p,

@@ -1,0 +1,106 @@
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -1,6 +1,9 @@
+ from __future__ import annotations
+ 
++import hashlib
++import json
+ import logging
++import os
+ import threading
+ from concurrent.futures import Future
+ from queue import Empty, Queue
+@@ -100,6 +103,7 @@
+         components,
+         storage=None,
+     ):
++        self.verify_bytes = os.environ.get("SGLANG_MOONCAKE_VERIFY_BYTES") == "1"
+         self.page_size = params.page_size
+         kvcache = params.token_to_kv_pool_allocator.get_kvcache()
+         self.pool_group = resolve_hybrid_device_pool_group(
+@@ -209,6 +213,55 @@
+             name=f"mooncake-offload-tp{tp_rank}",
+         )
+         self.offload_thread.start()
++
++    def _diagnostic_transfer_bytes(self, phase: str, transfer: PoolTransfer) -> None:
++        """Opt-in content-free hashes of the exact device spans passed to I/O.
++
++        Construct uint8 views into registered Torch storage, never dereference
++        a GPU pointer from Python or copy an entire pool. The worker calls this
++        after its producer event; restore calls it after synchronous I/O returns.
++        """
++        if not getattr(self, "verify_bytes", False):
++            return
++        pool = self.pools[transfer.name]
++        keys, _ = self.storage._get_hybrid_page_component_keys(
++            list(transfer.keys), transfer
++        )
++        keys = self.storage._tag_keys(keys)
++        pointers, sizes = pool.get_page_buffer_meta(transfer.host_indices)
++        if len(pointers) != len(keys):
++            pointers, sizes = self.storage._pack_multi_buffer_meta(keys, pointers, sizes)
++        if not (len(keys) == len(pointers) == len(sizes)):
++            raise ValueError("Diagnostic object metadata cardinality mismatch")
++        allocations = {}
++        for buffer in pool.get_hybrid_pool_buffer():
++            storage = buffer.untyped_storage()
++            base, size = int(storage.data_ptr()), int(storage.nbytes())
++            allocations[(base, size)] = (storage, buffer.device)
++        for ordinal, (key, ptrs, lens) in enumerate(zip(keys, pointers, sizes)):
++            if isinstance(ptrs, int):
++                ptrs, lens = [ptrs], [lens]
++            if len(ptrs) != len(lens):
++                raise ValueError("Diagnostic span metadata cardinality mismatch")
++            digest = hashlib.sha256()
++            for pointer, size in zip(ptrs, lens):
++                matches = [(base, storage, device)
++                           for (base, capacity), (storage, device) in allocations.items()
++                           if base <= pointer and pointer + size <= base + capacity]
++                if len(matches) != 1:
++                    raise ValueError("Diagnostic pointer is outside registered storage")
++                base, storage, device = matches[0]
++                span = torch.empty(0, dtype=torch.uint8, device=device).set_(
++                    storage, pointer - base, (size,), (1,)
++                )
++                digest.update(span.cpu().numpy().tobytes())
++            logger.info("Mooncake direct byte verification: %s", json.dumps({
++                "phase": phase, "pool": str(transfer.name), "object": ordinal,
++                "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
++                "bytes": sum(lens), "segments": len(lens),
++                "sha256": digest.hexdigest(),
++                "indices": int(transfer.host_indices.numel()),
++            }, sort_keys=True, separators=(",", ":")))
+ 
+     def register_buffers(self) -> None:
+         seen = set()
+@@ -299,6 +352,7 @@
+                         f"Mooncake restore failed for pool={transfer.name}: "
+                         f"transferred={result}, expected={expected}"
+                     )
++                self._diagnostic_transfer_bytes("restore_after", transfer)
+         except Exception:
+             logger.warning(
+                 "Mooncake restore failed before publication for rid=%s",
+@@ -436,6 +490,9 @@
+         tokens = len(kv.keys) * self.page_size
+         ready_event = device_module.Event()
+         ready_event.record()
++        if self.verify_bytes:
++            logger.info("Mooncake direct byte verification enqueue: tokens=%d pools=%d",
++                        tokens, len(expanded))
+         self.offload_queue.put((expanded, tokens, ready_event))
+         return True
+ 
+@@ -447,7 +504,11 @@
+                     return
+                 expanded, tokens, ready_event = task
+                 ready_event.synchronize()
++                for transfer in expanded:
++                    self._diagnostic_transfer_bytes("store_before", transfer)
+                 results = self.storage.batch_set_v2(expanded)
++                for transfer in expanded:
++                    self._diagnostic_transfer_bytes("store_after", transfer)
+                 success = all(all(pool_results) for pool_results in results.values())
+                 if success:
+                     self.stats["offload"] += 1

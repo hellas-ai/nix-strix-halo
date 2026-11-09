@@ -11,6 +11,14 @@
 with lib;
 let
   cfg = config.services.strix-halo.npu-exporter;
+
+  # Compile against the running kernel's amdxdna uapi so the 7.x-only queries
+  # (power mode, resource info, hardware-context occupancy) are included; the
+  # package default (pinned linuxHeaders) would only yield the core metrics.
+  kernelHeaders = pkgs.makeLinuxHeaders {
+    inherit (config.boot.kernelPackages.kernel) src version;
+  };
+  exporter = cfg.package.override { linuxHeaders = kernelHeaders; };
 in
 {
   options.services.strix-halo.npu-exporter = {
@@ -46,39 +54,36 @@ in
     };
   };
 
-  config = mkIf cfg.enable (
-    let
-      kernelHeaders = pkgs.makeLinuxHeaders {
-        inherit (config.boot.kernelPackages.kernel) src version;
-      };
-      exporter = cfg.package.override { linuxHeaders = kernelHeaders; };
-    in
-    {
-      systemd.tmpfiles.rules = [
-        "d ${cfg.textfileDirectory} 0750 node-exporter node-exporter - -"
-      ];
+  config = mkIf cfg.enable {
+    systemd.tmpfiles.rules = [
+      "d ${cfg.textfileDirectory} 0750 node-exporter node-exporter - -"
+    ];
 
-      systemd.services.amd-npu-exporter = {
-        description = "Export Strix Halo NPU (amdxdna) metrics for Prometheus";
-        wantedBy = [ "multi-user.target" ];
-        before = [ "prometheus-node-exporter.service" ];
-        serviceConfig = {
-          Type = "simple";
-          User = "node-exporter";
-          Group = "node-exporter";
-          # The accel render node is root:video 0660; join video to open it.
-          SupplementaryGroups = [ "video" ];
-          ExecStart = "${getExe exporter} --device ${cfg.device} --output ${cfg.textfileDirectory}/amd-npu.prom --interval-ms ${toString cfg.intervalMs}";
-          Restart = "on-failure";
-          RestartSec = "1s";
-          ReadWritePaths = [ cfg.textfileDirectory ];
-          NoNewPrivileges = true;
-          ProtectSystem = "strict";
-          ProtectHome = true;
-          PrivateTmp = true;
-          # Not PrivateDevices: the exporter needs the host's /dev/accel node.
-        };
+    systemd.services.amd-npu-exporter = {
+      description = "Export Strix Halo NPU (amdxdna) metrics for Prometheus";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "prometheus-node-exporter.service" ];
+      serviceConfig = {
+        Type = "simple";
+        User = "node-exporter";
+        Group = "node-exporter";
+        # The accel render node is root:video 0660; join video to open it.
+        SupplementaryGroups = [ "video" ];
+        ExecStart = ''
+          ${getExe exporter} \
+            --device ${cfg.device} \
+            --output ${cfg.textfileDirectory}/amd-npu.prom \
+            --interval-ms ${toString cfg.intervalMs}
+        '';
+        Restart = "on-failure";
+        RestartSec = "1s";
+        ReadWritePaths = [ cfg.textfileDirectory ];
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        # Not PrivateDevices: the exporter needs the host's /dev/accel node.
       };
-    }
-  );
+    };
+  };
 }

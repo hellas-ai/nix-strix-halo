@@ -1,0 +1,142 @@
+--- a/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
++++ b/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
+@@ -14,7 +14,7 @@
+     scaled_fp8_quant,
+     sglang_per_token_group_quant_fp8,
+ )
+-from sglang.kernels.ops.quantization.fp8_utils import widen_e4m3fn_to_fp16
++from sglang.kernels.ops.quantization.fp8_utils import widen_e4m3fn_to_fp16, widen_e4m3fn_to_fp32
+ from sglang.kernels.ops.quantization.int8_kernel import (
+     per_token_group_quant_int8,
+     per_token_quant_int8,
+@@ -788,6 +788,61 @@
+     return desc
+ 
+ 
++@triton.jit
++def _gfx1151_fp8_moe_gemv(
++    A,
++    B,
++    C,
++    As,
++    Bs,
++    Ids,
++    Route,
++    N: tl.constexpr,
++    K: tl.constexpr,
++    AS_M: tl.constexpr,
++    AS_K: tl.constexpr,
++    TOP_K: tl.constexpr,
++    MUL_ROUTE: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    KG: tl.constexpr,
++):
++    route = tl.program_id(1)
++    expert = tl.load(Ids + route)
++    rows = tl.program_id(0) * BLOCK_N + tl.arange(0, BLOCK_N)
++    if expert < 0:
++        tl.store(C + route * N + rows, 0.0)
++        return
++    offsets = tl.arange(0, KG * 128)
++    groups = tl.arange(0, KG)
++    a_row = route // TOP_K
++    acc = tl.zeros((BLOCK_N,), tl.float32)
++    for start in range(0, K // 128, KG):
++        k = start * 128 + offsets
++        a = widen_e4m3fn_to_fp32(tl.load(A + a_row * K + k)).reshape(KG, 128)
++        b = widen_e4m3fn_to_fp32(
++            tl.load(B + expert * N * K + rows[:, None] * K + k[None, :])
++        ).reshape(BLOCK_N, KG, 128)
++        dots = tl.sum(a[None, :, :] * b, axis=2)
++        scales_a = tl.load(As + a_row * AS_M + (start + groups) * AS_K)
++        scales_b = tl.load(
++            Bs
++            + expert * (N // 128) * (K // 128)
++            + (rows // 128)[:, None] * (K // 128)
++            + start
++            + groups[None, :]
++        )
++        for g in tl.static_range(KG):
++            dot = tl.gather(dots, tl.full((BLOCK_N, 1), g, tl.int32), axis=1).reshape(
++                BLOCK_N
++            )
++            scale_a = tl.sum(tl.where(groups == g, scales_a, 0), axis=0)
++            scale_b = tl.gather(
++                scales_b, tl.full((BLOCK_N, 1), g, tl.int32), axis=1
++            ).reshape(BLOCK_N)
++            acc += dot * (scale_a * scale_b)
++    if MUL_ROUTE:
++        acc *= tl.load(Route + route)
++    tl.store(C + route * N + rows, acc.to(C.dtype.element_ty))
+ def invoke_fused_moe_kernel(
+     A: torch.Tensor,
+     B: torch.Tensor,
+@@ -896,6 +951,68 @@
+     else:
+         assert A_scale is None
+         assert B_scale is None
++
++    if (
++        _gfx1151_fp8_widen.value
++        and use_fp8_w8a8
++        and A.dtype == B.dtype == torch.float8_e4m3fn
++        and block_shape == [128, 128]
++        and B.shape[0] == 288
++        and tuple(B.shape[1:]) in {(1024, 4096), (4096, 512)}
++        and tuple(topk_ids.shape) == (1, 8)
++        and top_k in (1, 8)
++        and A.shape[0] * top_k == 8
++        and C.numel() == 8 * B.shape[1]
++        and C.dtype == torch.bfloat16
++        and compute_type == tl.bfloat16
++        and A.is_contiguous()
++        and B.is_contiguous()
++        and C.is_contiguous()
++        and B_scale.is_contiguous()
++        and B_scale.dtype == torch.float32
++        and A_scale.dtype == torch.float32
++        and topk_ids.is_contiguous()
++        and topk_weights.is_contiguous()
++        and bias is None
++        and B_zp is None
++        and not any(
++            (
++                no_combine,
++                a_use_tma,
++                b_use_tma,
++                c_sorted,
++                fuse_sum_all_reduce,
++                fuse_add_to_output,
++                mask_output,
++                lora_preserve_base,
++                fuse_swiglu,
++                swap_ab,
++            )
++        )
++    ):
++        n, k = B.shape[1:]
++        groups = k // 128
++        kg = min(16, groups & -groups)
++        _gfx1151_fp8_moe_gemv[(n // 2, 8)](
++            A,
++            B,
++            C,
++            A_scale,
++            B_scale,
++            topk_ids,
++            topk_weights,
++            n,
++            k,
++            A_scale.stride(0),
++            A_scale.stride(1),
++            top_k,
++            mul_routed_weight,
++            2,
++            kg,
++            num_warps=4,
++            num_stages=1,
++        )
++        return
+ 
+     grid = lambda META: (
+         triton.cdiv(sorted_token_ids.shape[0], META["BLOCK_SIZE_M"])

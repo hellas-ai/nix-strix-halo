@@ -1,0 +1,34 @@
+diff --git a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+index 6f9bdf324..344a86348 100644
+--- a/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
++++ b/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py
+@@ -10,2 +10,3 @@
+ import math
++import os
+ from typing import Any
+@@ -1687,7 +1688,22 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
++            sp_group = get_sp_group()
+             video_width = video_logits.shape[-1]
+-            logits = get_sp_group().all_gather(
+-                torch.cat((video_logits, audio_logits), dim=-1), dim=0
+-            )
++            local_logits = torch.cat((video_logits, audio_logits), dim=-1)
++            if os.environ.get("SGLANG_MINIMAX_H3_CPU_SP_LOGITS_GATHER") == "1":
++                # RCCL on the four local gfx1030 cards can complete every
++                # Ulysses all-to-all in the block stack and then wedge on this
++                # final, much smaller all-gather.  Move only the output logits
++                # through the already-created Gloo control group.  The DiT,
++                # attention and intermediate activations remain on the GPUs.
++                cpu_local = local_logits.detach().to("cpu").contiguous()
++                cpu_shape = list(cpu_local.shape)
++                cpu_shape[0] *= sp_group.world_size
++                cpu_logits = torch.empty(cpu_shape, dtype=cpu_local.dtype)
++                torch.distributed.all_gather_into_tensor(
++                    cpu_logits, cpu_local, group=sp_group.cpu_group
++                )
++                logits = cpu_logits.to(device=local_logits.device)
++            else:
++                logits = sp_group.all_gather(local_logits, dim=0)
+             video_logits, audio_logits = logits.split(
+                 (video_width, logits.shape[-1] - video_width), dim=-1
+             )

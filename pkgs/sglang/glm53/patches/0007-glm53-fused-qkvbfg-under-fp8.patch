@@ -1,0 +1,34 @@
+--- a/sglang/srt/models/glm5_next.py
++++ b/sglang/srt/models/glm5_next.py
+@@ -1,3 +1,4 @@
++import os
+ import logging
+ from contextlib import nullcontext
+ from functools import partial
+@@ -337,7 +338,25 @@
+         projection_size = self.head_dim * self.num_heads
+         self.conv_size = config.linear_attn_config["short_conv_kernel_size"]
+ 
+-        self.do_fuse_qkvbfg = quant_config is None and head_shard_size == self.tp_size
++        # The official FP8 checkpoint keeps these projections in BF16 and lists the fused module names in
++        # modules_to_not_convert, so the fused path is valid under its quant config too; opt-in for A/B
++        # (SGLANG_GLM53_FUSED_QKVBFG=1): one GEMM for q/k/v/beta/f_a/g_a and one batched GEMM for f_b/g_b per layer.
++        fused_unquantized = quant_config is None
++        if not fused_unquantized and os.environ.get("SGLANG_GLM53_FUSED_QKVBFG", "0") == "1":
++            from sglang.srt.layers.quantization.utils import is_layer_skipped
++
++            ignored = getattr(quant_config, "ignored_layers", None)
++            if ignored:
++                fused_unquantized = is_layer_skipped(
++                    f"{prefix}.fused_qkvbfg_a_proj",
++                    ignored,
++                    fused_mapping=getattr(quant_config, "packed_modules_mapping", None) or {},
++                ) and is_layer_skipped(
++                    f"{prefix}.fused_fg_b_proj",
++                    ignored,
++                    fused_mapping=getattr(quant_config, "packed_modules_mapping", None) or {},
++                )
++        self.do_fuse_qkvbfg = fused_unquantized and head_shard_size == self.tp_size
+         if self.do_fuse_qkvbfg:
+             self.qkvb_sizes = [
+                 projection_size,

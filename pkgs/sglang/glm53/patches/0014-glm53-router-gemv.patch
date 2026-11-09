@@ -1,0 +1,102 @@
+--- /dev/null
++++ b/sglang/kernels/ops/gemm/glm53_router_gemv.py
+@@ -0,0 +1,63 @@
++"""Deterministic one-pass Triton GEMV for the GLM-5.3-Flash MoE router on gfx1151 (sglang-glm53-rocm patch 0014).
++
++GLM-5.3 runs its router in FP32: SGLang upcasts the checkpoint's BF16 [288, 4096] gate weight at load and calls
++F.linear(x.float(), W_fp32) per MoE layer, ~57-67 us per call through hipBLASLt (MT16x8x256, a handful of
++workgroups for N=288). With SGLANG_GLM53_ROUTER_GEMV=1 the gate reads a BF16 copy of the weight (exact: the
++checkpoint is BF16) and returns FP32 logits from this kernel: ~27 us with the weight out of cache, as in decode
++(lib/bench/glm53-router-gemv-check.py), for 1-8 rows. FP32 accumulation, no split-K atomics, bitwise reproducible.
++"""
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++MAX_ROWS = 8
++# (N, K) -> (BLOCK_N, BLOCK_K, num_warps): best with the weight out of cache on gfx1151 at 1, 2 and 4 rows.
++CONFIGS = {(288, 4096): (1, 2048, 8)}
++DEFAULT_CONFIG = (1, 2048, 8)
++
++
++def router_enabled() -> bool:
++    return os.environ.get("SGLANG_GLM53_ROUTER_GEMV", "0") == "1"
++
++
++@triton.jit
++def _skinny_gemv_kernel(X, W, Y, M, N, K, stride_xm, stride_wn, stride_ym,
++                        BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, M_PAD: tl.constexpr):
++    pid = tl.program_id(0)
++    offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
++    n_mask = offs_n < N
++    rows = tl.arange(0, M_PAD)
++    acc = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++    for k0 in range(0, K, BLOCK_K):
++        offs_k = k0 + tl.arange(0, BLOCK_K)
++        k_mask = offs_k < K
++        w = tl.load(W + offs_n[:, None] * stride_wn + offs_k[None, :], mask=n_mask[:, None] & k_mask[None, :],
++                    other=0.0).to(tl.float32)
++        x = tl.load(X + rows[:, None] * stride_xm + offs_k[None, :], mask=(rows[:, None] < M) & k_mask[None, :],
++                    other=0.0).to(tl.float32)
++        if M_PAD == 1:
++            acc += tl.sum(w * x, axis=1)[None, :]
++        else:
++            # The weight tile is loaded once and reused for every row; rows are picked out by mask.
++            for m in tl.static_range(M_PAD):
++                xm = tl.sum(tl.where(rows[:, None] == m, x, 0.0), axis=0)
++                part = tl.sum(w * xm[None, :], axis=1)
++                acc += tl.where(rows[:, None] == m, part[None, :], 0.0)
++    tl.store(Y + rows[:, None] * stride_ym + offs_n[None, :], acc.to(Y.dtype.element_ty),
++             mask=(rows[:, None] < M) & n_mask[None, :])
++
++
++def skinny_gemv(x: torch.Tensor, weight: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
++    m, k = x.shape
++    n = weight.shape[0]
++    if x.stride(1) != 1:
++        x = x.contiguous()
++    y = torch.empty((m, n), device=x.device, dtype=out_dtype)
++    block_n, block_k, num_warps = CONFIGS.get((n, k), DEFAULT_CONFIG)
++    m_pad = 1 if m == 1 else (2 if m == 2 else (4 if m <= 4 else 8))
++    _skinny_gemv_kernel[(triton.cdiv(n, block_n),)](
++        x, weight, y, m, n, k, x.stride(0), weight.stride(0), y.stride(0),
++        BLOCK_N=block_n, BLOCK_K=block_k, M_PAD=m_pad, num_warps=num_warps)
++    return y
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -460,6 +460,12 @@
+         return x
+ 
+ 
++# GLM-5.3 campaign (0014): FP32 router logits from a BF16 weight copy with a one-pass Triton GEMV at 1-8 rows.
++_GLM53_ROUTER_GEMV = None
++if __import__("os").environ.get("SGLANG_GLM53_ROUTER_GEMV", "0") == "1":
++    from sglang.kernels.ops.gemm import glm53_router_gemv as _GLM53_ROUTER_GEMV
++
++
+ class MoEGate(nn.Module):
+     def __init__(
+         self,
+@@ -518,6 +524,20 @@
+         forward_batch: ForwardBatch = None,
+     ):
+         if self.weight.dtype == torch.float32:
++            if (
++                _GLM53_ROUTER_GEMV is not None
++                and hidden_states.dim() == 2
++                and hidden_states.dtype == torch.bfloat16
++                and 1 <= hidden_states.shape[0] <= _GLM53_ROUTER_GEMV.MAX_ROWS
++            ):
++                # GLM-5.3 campaign (0014): the checkpoint stores the router in BF16, so a BF16 copy of the FP32
++                # parameter is exact and halves the bytes; made outside graph capture (warm-up), never inside it.
++                w16 = getattr(self, "_glm53_router_w16", None)
++                if w16 is None and not torch.cuda.is_current_stream_capturing():
++                    w16 = self.weight.detach().to(torch.bfloat16).contiguous()
++                    self._glm53_router_w16 = w16
++                if w16 is not None:
++                    return _GLM53_ROUTER_GEMV.skinny_gemv(hidden_states, w16, torch.float32)
+             return F.linear(hidden_states.float(), self.weight)
+ 
+         if use_intel_amx_backend(self):
