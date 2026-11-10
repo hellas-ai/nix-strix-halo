@@ -1,0 +1,83 @@
+--- a/sglang/srt/models/deepseek_v41_vit.py
++++ b/sglang/srt/models/deepseek_v41_vit.py
+@@ -9,6 +9,7 @@
+ from sglang.srt.layers.attention.vision import (
+     VisionAttention,
+     VisionAttentionMetadata,
++    VisionSdpaAttention,
+     prepare_vision_attention_metadata,
+ )
+ from sglang.srt.layers.layernorm import RMSNorm
+@@ -20,10 +21,12 @@
+ 
+ 
+ @lru_cache(8)
+-def get_vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float):
+-    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+-    hpos = torch.arange(n_h).unsqueeze(1).expand(n_h, n_w)
+-    wpos = torch.arange(n_w).unsqueeze(0).expand(n_h, n_w)
++def get_vision_cos_sin(
++    n_h: int, n_w: int, dim: int, theta: float, device: torch.device | None = None
++):
++    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
++    hpos = torch.arange(n_h, device=device).unsqueeze(1).expand(n_h, n_w)
++    wpos = torch.arange(n_w, device=device).unsqueeze(0).expand(n_h, n_w)
+     freqs = torch.stack([hpos, wpos], dim=-1).reshape(-1, 2, 1).float() * inv_freq
+     freqs = freqs.flatten(1)
+     return freqs.cos().unsqueeze(1), freqs.sin().unsqueeze(1)
+@@ -59,6 +62,15 @@
+             use_qkv_parallel=True,
+             use_data_parallel=True,
+             customized_position_embedding_applier=apply_vision_rotary,
++            qkv_backend="sdpa",
++        )
++        # The reference calls SDPA on [heads, patches, head_dim]. SGLang's
++        # generic SDPA backend adds a batch axis, selecting a different ROCm
++        # reduction/rounding path. This ViT encodes one image per forward.
++        self.qkv_backend = ReferenceSingleImageSdpa(
++            head_dim=args.vision_dim // args.vision_n_heads,
++            num_heads=args.vision_n_heads,
++            num_kv_heads=args.vision_n_heads,
+         )
+ 
+     def forward(
+@@ -77,6 +89,27 @@
+             )
+             .squeeze(0)
+         )
++
++
++class ReferenceSingleImageSdpa(VisionSdpaAttention):
++    def forward(
++        self,
++        q: torch.Tensor,
++        k: torch.Tensor,
++        v: torch.Tensor,
++        bsz: int,
++        **kwargs,
++    ) -> torch.Tensor:
++        if bsz != 1 or kwargs.get("attention_mask") is not None:
++            raise ValueError("DeepSeek V4.1 ViT expects one unmasked image")
++        output = F.scaled_dot_product_attention(
++            q.transpose(0, 1),
++            k.transpose(0, 1),
++            v.transpose(0, 1),
++            dropout_p=0.0,
++            is_causal=False,
++        )
++        return output.transpose(0, 1)
+ 
+ 
+ class MLP(nn.Module):
+@@ -122,8 +155,9 @@
+ 
+     def forward(self, patches: torch.Tensor, n_h: int, n_w: int) -> torch.Tensor:
+         x = self.patch_embed(patches)
+-        cos, sin = get_vision_cos_sin(n_h, n_w, self.rope_dim, self.rope_theta)
+-        cos, sin = cos.to(x.device), sin.to(x.device)
++        cos, sin = get_vision_cos_sin(
++            n_h, n_w, self.rope_dim, self.rope_theta, x.device
++        )
+         # Passing the known length avoids device-to-host length discovery per layer.
+         metadata = prepare_vision_attention_metadata(
+             torch.tensor([0, x.shape[0]], dtype=torch.int32),

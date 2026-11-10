@@ -1,0 +1,496 @@
+--- /dev/null
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -0,0 +1,167 @@
++"""Native V4.1 FP8 GEMV for one or two tokens on gfx1151.
++
++The existing activation quantizer supplies E4M3FN values and decoded E8M0
++scales. Native 32x32 weight blocks are reduced in FP32 and stored as BF16.
++Model-specific dispatch guards select the supported projection shapes.
++"""
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _native_fp8_gemv_c1(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
++                    ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
++    first = tl.program_id(0) * ROWS
++    rows = first + tl.arange(0, ROWS)
++    cols = tl.arange(0, BLOCK_K)
++    groups = tl.arange(0, BLOCK_K // 32)
++    accumulator = tl.zeros((ROWS,), tl.float32)
++    for start in range(0, K, BLOCK_K):
++        q = tl.load(Q + start + cols).to(tl.float32)
++        w = tl.load(W + rows[:, None] * K + start + cols[None, :]).to(tl.float32)
++        products = w * q[None, :]
++        dots = tl.sum(tl.reshape(products, (ROWS, BLOCK_K // 32, 32)), axis=2)
++        a_scale = tl.load(QS + start // 32 + groups)
++        # ROWS=4 divides the native 32-output-row scale block. One scale vector
++        # is shared by all four output rows in this program.
++        w_scale = tl.load(WS + (first // 32) * (K // 32) + start // 32 + groups)
++        scaled = (dots * a_scale[None, :]) * w_scale[None, :]
++        accumulator = accumulator + tl.sum(scaled, axis=1)
++    tl.store(Y + rows, accumulator.to(tl.bfloat16))
++
++
++@triton.jit
++def _native_c2_gemv(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
++                    ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
++    first = tl.program_id(0) * ROWS
++    rows = first + tl.arange(0, ROWS)
++    cols = tl.arange(0, BLOCK_K)
++    groups = tl.arange(0, BLOCK_K // 32)
++    accumulator0 = tl.zeros((ROWS,), tl.float32)
++    accumulator1 = tl.zeros((ROWS,), tl.float32)
++    for start in range(0, K, BLOCK_K):
++        # One native weight tile and one weight-scale vector feed both rows.
++        w = tl.load(W + rows[:, None] * K + start + cols[None, :]).to(tl.float32)
++        w_scale = tl.load(WS + (first // 32) * (K // 32) + start // 32 + groups)
++        q0 = tl.load(Q + start + cols).to(tl.float32)
++        dots0 = tl.sum(tl.reshape(w * q0[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++        a_scale0 = tl.load(QS + start // 32 + groups)
++        scaled0 = (dots0 * a_scale0[None, :]) * w_scale[None, :]
++        accumulator0 = accumulator0 + tl.sum(scaled0, axis=1)
++        q1 = tl.load(Q + K + start + cols).to(tl.float32)
++        dots1 = tl.sum(tl.reshape(w * q1[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
++        a_scale1 = tl.load(QS + K // 32 + start // 32 + groups)
++        scaled1 = (dots1 * a_scale1[None, :]) * w_scale[None, :]
++        accumulator1 = accumulator1 + tl.sum(scaled1, axis=1)
++    tl.store(Y + rows, accumulator0.to(tl.bfloat16))
++    tl.store(Y + N + rows, accumulator1.to(tl.bfloat16))
++
++
++def engram_gemv(q, qs, w, ws):
++    """Exact-shape Engram entry point, output [1,25600] BF16.
++
++No content validation/readback or new requantization is performed. Scales must
++come from the existing native loader and unchanged activation quantizer.
++"""
++    expected = ((q, (1, 6144), torch.float8_e4m3fn),
++                (qs, (1, 192), torch.float32),
++                (w, (25600, 6144), torch.float8_e4m3fn),
++                (ws, (800, 192), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError('Engram C1 GEMV requires exact native contiguous operands')
++        if tensor.device != q.device or tensor.device.type != 'cuda':
++            raise ValueError('Engram C1 GEMV requires one HIP device')
++    if not torch.version.hip or not torch.cuda.get_device_properties(q.device).gcnArchName.startswith('gfx1151'):
++        raise ValueError('Engram C1 GEMV is gfx1151-only')
++    output = torch.empty((1, 25600), dtype=torch.bfloat16, device=q.device)
++    _native_fp8_gemv_c1[(25600 // 4,)](q, qs, w, ws, output, 25600, 6144, 4, 512,
++                                  num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
++
++
++def native_wob_gemv(q, qs, w, ws):
++    """Native E4M3FN/E8M0 operands only; output [1,5120] BF16."""
++    expected = ((q, (1, 2048), torch.float8_e4m3fn),
++                (qs, (1, 64), torch.float32),
++                (w, (5120, 2048), torch.float8_e4m3fn),
++                (ws, (160, 64), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError('wo_b C1 GEMV requires exact native contiguous operands')
++        if tensor.device != q.device or tensor.device.type != 'cuda':
++            raise ValueError('wo_b C1 GEMV requires one HIP device')
++    if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
++        raise ValueError('wo_b C1 GEMV is gfx1151-only')
++    output = torch.empty((1, 5120), dtype=torch.bfloat16, device=q.device)
++    _native_fp8_gemv_c1[(5120 // 4,)](q, qs, w, ws, output, 5120, 2048, 4, 512,
++                                     num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
++
++
++def native_wqkv_a_gemv(q, qs, w, ws):
++    """Only native E4M3FN/E8M0 `[1,5120] x [1792,5120]` operands."""
++    expected = ((q, (1, 5120), torch.float8_e4m3fn),
++                (qs, (1, 160), torch.float32),
++                (w, (1792, 5120), torch.float8_e4m3fn),
++                (ws, (56, 160), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError('fused wqkv_a C1 GEMV requires exact native contiguous operands')
++        if tensor.device != q.device or tensor.device.type != 'cuda':
++            raise ValueError('fused wqkv_a C1 GEMV requires one HIP device')
++    if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
++        raise ValueError('fused wqkv_a C1 GEMV is gfx1151-only')
++    output = torch.empty((1, 1792), dtype=torch.bfloat16, device=q.device)
++    _native_fp8_gemv_c1[(1792 // 4,)](q, qs, w, ws, output, 1792, 5120, 4, 512,
++                                        num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
++
++
++def native_wqb_gemv(q, qs, w, ws):
++    """Only native E4M3FN/E8M0 `[1,1280] x [8192,1280]` operands."""
++    expected = ((q, (1, 1280), torch.float8_e4m3fn),
++                (qs, (1, 40), torch.float32),
++                (w, (8192, 1280), torch.float8_e4m3fn),
++                (ws, (256, 40), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError('wq_b C1 GEMV requires exact native contiguous operands')
++        if tensor.device != q.device or tensor.device.type != 'cuda':
++            raise ValueError('wq_b C1 GEMV requires one HIP device')
++    if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
++        raise ValueError('wq_b C1 GEMV is gfx1151-only')
++    output = torch.empty((1, 8192), dtype=torch.bfloat16, device=q.device)
++    _native_fp8_gemv_c1[(8192 // 4,)](q, qs, w, ws, output, 8192, 1280, 4, 256,
++                                      num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
++
++
++def native_c2_gemv(q, qs, w, ws):
++    """Call only on the existing four flagged native V4.1 shapes."""
++    shapes = {
++        (25600, 6144): (800, 192, 512),
++        (5120, 2048): (160, 64, 512),
++        (1792, 5120): (56, 160, 512),
++        (8192, 1280): (256, 40, 256),
++    }
++    if w.shape not in shapes:
++        raise ValueError('C2 native GEMV requires one exact V4.1 weight shape')
++    n, k = w.shape
++    scale_n, scale_k, block_k = shapes[(n, k)]
++    expected = ((q, (2, k), torch.float8_e4m3fn),
++                (qs, (2, scale_k), torch.float32),
++                (w, (n, k), torch.float8_e4m3fn),
++                (ws, (scale_n, scale_k), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError('C2 native GEMV requires exact contiguous native operands')
++        if tensor.device != q.device or tensor.device.type != 'cuda':
++            raise ValueError('C2 native GEMV requires one HIP device')
++    if not torch.version.hip or torch.cuda.get_device_properties(q.device).gcnArchName.split(':')[0] != 'gfx1151':
++        raise ValueError('C2 native GEMV is gfx1151-only')
++    output = torch.empty((2, n), dtype=torch.bfloat16, device=q.device)
++    _native_c2_gemv[(n // 4,)](q, qs, w, ws, output, n, k, 4, block_k,
++                               num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
+--- a/sglang/srt/layers/engram.py
++++ b/sglang/srt/layers/engram.py
+@@ -14,6 +14,7 @@
+ import os
+ import re
+ import time
++from functools import partial
+ from typing import Optional
+ 
+ import msgspec
+@@ -50,6 +51,7 @@
+     dequantize_packed_rows,
+ )
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
++from sglang.srt.layers.quantization.fp8_utils import triton_w8a8_block_fp8_linear
+ from sglang.srt.managers.schedule_batch import MM_PAD_SHIFT_VALUE
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+ from sglang.srt.runtime_context import get_model, get_parallel, get_serving
+@@ -986,6 +988,26 @@
+             quant_config=quant_config,
+             prefix=add_prefix("wkv", prefix),
+         )
++        # Opt in only this native V4.1 Engram projection. Ordinary linears,
++        # other formats and models retain their existing callable/dispatch.
++        block_linear = getattr(self.wkv.quant_method, "w8a8_block_fp8_linear", None)
++        if (
++            getattr(config, "model_type", None) == "deepseek_v41"
++            and self.wkv.input_size == 6144
++            and self.wkv.output_size == 25600
++            and quant_config is not None
++            and quant_config.get_name() == "fp8"
++            and getattr(quant_config, "is_checkpoint_fp8_serialized", False)
++            and quant_config.activation_scheme == "dynamic"
++            and quant_config.weight_block_size == [32, 32]
++            and getattr(quant_config, "scale_fmt", None) == "ue8m0"
++            and isinstance(block_linear, partial)
++            and block_linear.func is triton_w8a8_block_fp8_linear
++            and block_linear.keywords.get("act_scale_ue8m0") is True
++        ):
++            self.wkv.quant_method.w8a8_block_fp8_linear = partial(
++                block_linear, engram_wkv_c1=True
++            )
+         self.q_weight = nn.Parameter(torch.ones(hc_mult, dim), requires_grad=False)
+         self.k_weight = nn.Parameter(torch.ones(hc_mult, dim), requires_grad=False)
+ 
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1459,6 +1459,11 @@
+     input_scale: Optional[torch.Tensor] = None,
+     bias: Optional[torch.Tensor] = None,
+     act_scale_ue8m0: bool = False,
++    # Projection opt-ins select the guarded C1 and C2 implementations below.
++    engram_wkv_c1: bool = False,
++    native_wob_c1: bool = False,
++    native_wqkv_a_c1: bool = False,
++    native_wqb_c1: bool = False,
+ ) -> torch.Tensor:
+     if input_scale is not None:
+         # Pre-quantized input: ``input`` is already fp8 and ``input_scale`` is
+@@ -1483,9 +1488,142 @@
+                 input_2d, block_size[1], column_major_scales=False
+             )
+ 
+-    output = w8a8_block_fp8_matmul_triton(
+-        q_input, weight, x_scale, weight_scale, block_size, output_dtype=output_dtype
+-    )
++    if (
++        engram_wkv_c1
++        and _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape == (1, 6144)
++        and weight.shape == (25600, 6144)
++        and x_scale.shape == (1, 192)
++        and weight_scale.shape == (800, 192)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    ):
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import engram_gemv
++
++        output = engram_gemv(q_input, x_scale, weight, weight_scale)
++    elif (
++        native_wob_c1
++        and _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape == (1, 2048)
++        and weight.shape == (5120, 2048)
++        and x_scale.shape == (1, 64)
++        and weight_scale.shape == (160, 64)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    ):
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_wob_gemv
++
++        output = native_wob_gemv(q_input, x_scale, weight, weight_scale)
++    elif (
++        native_wqkv_a_c1
++        and _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape == (1, 5120)
++        and weight.shape == (1792, 5120)
++        and x_scale.shape == (1, 160)
++        and weight_scale.shape == (56, 160)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    ):
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_wqkv_a_gemv
++
++        output = native_wqkv_a_gemv(q_input, x_scale, weight, weight_scale)
++    elif (
++        native_wqb_c1
++        and _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape == (1, 1280)
++        and weight.shape == (8192, 1280)
++        and x_scale.shape == (1, 40)
++        and weight_scale.shape == (256, 40)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    ):
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_wqb_gemv
++
++        output = native_wqb_gemv(q_input, x_scale, weight, weight_scale)
++    elif (
++        _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape[0] == 2
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++        and sum(bool(flag) for flag in (
++            engram_wkv_c1, native_wob_c1, native_wqkv_a_c1, native_wqb_c1
++        )) == 1
++        and (
++            (engram_wkv_c1 and q_input.shape == (2, 6144)
++             and x_scale.shape == (2, 192)
++             and weight.shape == (25600, 6144)
++             and weight_scale.shape == (800, 192))
++            or (native_wob_c1 and q_input.shape == (2, 2048)
++                and x_scale.shape == (2, 64)
++                and weight.shape == (5120, 2048)
++                and weight_scale.shape == (160, 64))
++            or (native_wqkv_a_c1 and q_input.shape == (2, 5120)
++                and x_scale.shape == (2, 160)
++                and weight.shape == (1792, 5120)
++                and weight_scale.shape == (56, 160))
++            or (native_wqb_c1 and q_input.shape == (2, 1280)
++                and x_scale.shape == (2, 40)
++                and weight.shape == (8192, 1280)
++                and weight_scale.shape == (256, 40))
++        )
++    ):
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_c2_gemv
++
++        output = native_c2_gemv(q_input, x_scale, weight, weight_scale)
++    else:
++        output = w8a8_block_fp8_matmul_triton(
++            q_input, weight, x_scale, weight_scale, block_size, output_dtype=output_dtype
++        )
+     if bias is not None:
+         output += bias
+     return output.to(dtype=output_dtype).view(*output_shape)
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -117,6 +117,7 @@
+ from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
+ from sglang.srt.layers.quantization.fp8_utils import (
+     Mxfp8DenseGemmBackend,
++    triton_w8a8_block_fp8_linear,
+     view_aiter_fused_rms_transposed_fp8_scale,
+ )
+ from sglang.srt.layers.quantization.mxfp8_input import Mxfp8SwizzledInput
+@@ -896,6 +897,35 @@
+                 quant_config=quant_config,
+                 prefix=add_prefix("wkv", prefix),
+             )
++        # Native V4.1 TP4 fused Q_a+KV C1 opt-in. Preserve the
++        # per-32 activation quantizer and all other linears' methods.
++        if self.fuse_wqa_wkv:
++            method = self.wqkv_a.quant_method
++            block_linear = getattr(method, "w8a8_block_fp8_linear", None)
++            if (
++                getattr(config, "model_type", None) == "deepseek_v41"
++                and isinstance(quant_config, Fp8Config)
++                and isinstance(method, Fp8LinearMethod)
++                and quant_config.is_checkpoint_fp8_serialized
++                and quant_config.activation_scheme == "dynamic"
++                and quant_config.weight_block_size == [32, 32]
++                and quant_config.scale_fmt == "ue8m0"
++                and not method.use_mxfp8
++                and not method.block_fp8_as_mxfp8
++                and self.attn_tp_size == get_parallel().tp_size == 4
++                and 0 <= self.attn_tp_rank < 4
++                and isinstance(self.wqkv_a, ReplicatedLinear)
++                and self.wqkv_a.input_size == 5120
++                and self.wqkv_a.output_size == 1792
++                and self.wqkv_a.bias is None
++                and isinstance(block_linear, functools.partial)
++                and block_linear.func is triton_w8a8_block_fp8_linear
++                and block_linear.keywords == {"act_scale_ue8m0": True}
++            ):
++                method.w8a8_block_fp8_linear = functools.partial(
++                    block_linear, native_wqkv_a_c1=True
++                )
++
+         self.q_norm = RMSNorm(self.q_lora_rank, eps=self.eps)
+         self.wq_b = ColumnParallelLinear(
+             self.q_lora_rank,
+@@ -906,6 +936,38 @@
+             tp_rank=self.attn_tp_rank,
+             tp_size=self.attn_tp_size,
+         )
++        # Native V4.1 TP4 Q_b C1 opt-in. Only the existing
++        # ColumnParallel projection, after its original Q norm, is marked.
++        method = self.wq_b.quant_method
++        block_linear = getattr(method, "w8a8_block_fp8_linear", None)
++        if (
++            getattr(config, "model_type", None) == "deepseek_v41"
++            and isinstance(quant_config, Fp8Config)
++            and isinstance(method, Fp8LinearMethod)
++            and quant_config.is_checkpoint_fp8_serialized
++            and quant_config.activation_scheme == "dynamic"
++            and quant_config.weight_block_size == [32, 32]
++            and quant_config.scale_fmt == "ue8m0"
++            and not method.use_mxfp8
++            and not method.block_fp8_as_mxfp8
++            and self.attn_tp_size == get_parallel().tp_size == 4
++            and 0 <= self.attn_tp_rank < 4
++            and isinstance(self.wq_b, ColumnParallelLinear)
++            and self.wq_b.tp_size == 4
++            and self.wq_b.tp_rank == self.attn_tp_rank
++            and self.wq_b.input_size == 1280
++            and self.wq_b.output_size == 32768
++            and self.wq_b.output_size_per_partition == 8192
++            and not self.wq_b.gather_output
++            and self.wq_b.bias is None
++            and isinstance(block_linear, functools.partial)
++            and block_linear.func is triton_w8a8_block_fp8_linear
++            and block_linear.keywords == {"act_scale_ue8m0": True}
++        ):
++            method.w8a8_block_fp8_linear = functools.partial(
++                block_linear, native_wqb_c1=True
++            )
++
+         self.kv_norm = RMSNorm(self.head_dim, eps=self.eps)
+         self.wo_a = ColumnParallelLinear(
+             self.n_heads * self.head_dim // self.n_groups,
+@@ -949,6 +1011,35 @@
+             tp_rank=self.attn_tp_rank,
+             tp_size=self.attn_tp_size,
+         )
++
++        # Native V4.1 TP4 opt-in: only this local RowParallel wo_b.
++        # Its original FP8 activation quantizer and TP reduction stay unchanged.
++        method = self.wo_b.quant_method
++        block_linear = getattr(method, "w8a8_block_fp8_linear", None)
++        if (
++            getattr(config, "model_type", None) == "deepseek_v41"
++            and isinstance(quant_config, Fp8Config)
++            and isinstance(method, Fp8LinearMethod)
++            and quant_config.is_checkpoint_fp8_serialized
++            and quant_config.activation_scheme == "dynamic"
++            and quant_config.weight_block_size == [32, 32]
++            and quant_config.scale_fmt == "ue8m0"
++            and not method.use_mxfp8
++            and not method.block_fp8_as_mxfp8
++            and self.attn_tp_size == 4
++            and 0 <= self.attn_tp_rank < 4
++            and self.wo_b.tp_size == 4
++            and self.wo_b.input_size == 8192
++            and self.wo_b.input_size_per_partition == 2048
++            and self.wo_b.output_size == 5120
++            and self.wo_b.bias is None
++            and isinstance(block_linear, functools.partial)
++            and block_linear.func is triton_w8a8_block_fp8_linear
++            and block_linear.keywords == {"act_scale_ue8m0": True}
++        ):
++            method.w8a8_block_fp8_linear = functools.partial(
++                block_linear, native_wob_c1=True
++            )
+ 
+         from sglang.kernels.ops.attention.deepseek_v4_rope import precompute_freqs_cis
+ 

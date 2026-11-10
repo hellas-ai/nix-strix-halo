@@ -1,0 +1,154 @@
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -818,6 +818,58 @@
+                 self.shared_experts._enable_nvfp4_gemm_swiglu_fusion = True
+                 self.shared_experts.down_proj._accepts_prequantized_fp4 = True
+             self._shared_expert_tp1 = _shared_expert_use_tp1
++            # Only the native V4.1 TP4 shared expert takes the guarded GEMV.
++            # Mark the two existing linear methods; their quantizers, activation,
++            # BF16 outputs and TP reduction remain owned by the original MLP.
++            from sglang.srt.layers.quantization.fp8 import Fp8LinearMethod
++            from sglang.srt.layers.quantization.fp8_utils import triton_w8a8_block_fp8_linear
++            from functools import partial
++
++            gate = self.shared_experts.gate_up_proj
++            down = self.shared_experts.down_proj
++            if (
++                is_deepseek_v4
++                and not is_nextn
++                and getattr(config, "model_type", None) == "deepseek_v41"
++                and _is_hip
++                and self.tp_size == 4
++                and self.moe_ep_size == 1
++                and not _shared_expert_use_tp1
++                and config.hidden_size == 5120
++                and config.moe_intermediate_size == 2304
++                and config.n_shared_experts == 1
++                and getattr(config, "swiglu_limit", None) == 10.0
++                and isinstance(quant_config, Fp8Config)
++                and quant_config.is_checkpoint_fp8_serialized
++                and quant_config.activation_scheme == "dynamic"
++                and quant_config.weight_block_size == [32, 32]
++                and quant_config.scale_fmt == "ue8m0"
++                and isinstance(gate, MergedColumnParallelLinear)
++                and isinstance(down, RowParallelLinear)
++                and gate.tp_size == down.tp_size == 4
++                and gate.input_size == 5120
++                and gate.output_sizes == [2304, 2304]
++                and gate.output_size_per_partition == 1152
++                and gate.bias is None
++                and down.input_size == 2304
++                and down.input_size_per_partition == 576
++                and down.output_size == 5120
++                and down.bias is None
++            ):
++                for linear, kind in ((gate, "gate_up"), (down, "down")):
++                    method = linear.quant_method
++                    block_linear = getattr(method, "w8a8_block_fp8_linear", None)
++                    if (
++                        isinstance(method, Fp8LinearMethod)
++                        and not method.use_mxfp8
++                        and not method.block_fp8_as_mxfp8
++                        and isinstance(block_linear, partial)
++                        and block_linear.func is triton_w8a8_block_fp8_linear
++                        and block_linear.keywords == {"act_scale_ue8m0": True}
++                    ):
++                        method.w8a8_block_fp8_linear = partial(
++                            block_linear, native_v41_shared=kind
++                        )
+             is_packed_weight = (
+                 hasattr(self.shared_experts.gate_up_proj.quant_method, "quant_config")
+                 and self.shared_experts.gate_up_proj.quant_method.quant_config.get_name()
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1464,6 +1464,7 @@
+     native_wob_c1: bool = False,
+     native_wqkv_a_c1: bool = False,
+     native_wqb_c1: bool = False,
++    native_v41_shared: str | None = None,
+ ) -> torch.Tensor:
+     if input_scale is not None:
+         # Pre-quantized input: ``input`` is already fp8 and ``input_scale`` is
+@@ -1620,6 +1621,40 @@
+         from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_c2_gemv
+ 
+         output = native_c2_gemv(q_input, x_scale, weight, weight_scale)
++    elif (
++        native_v41_shared in ("gate_up", "down")
++        and _is_hip
++        and act_scale_ue8m0
++        and block_size == [32, 32]
++        and input.ndim == 2
++        and q_input.shape[0] in (1, 2)
++        and output_dtype == torch.bfloat16
++        and bias is None
++        and q_input.dtype == weight.dtype == torch.float8_e4m3fn
++        and x_scale.dtype == weight_scale.dtype == torch.float32
++        and q_input.is_cuda
++        and q_input.device == weight.device == x_scale.device == weight_scale.device
++        and all(t.is_contiguous() for t in (q_input, weight, x_scale, weight_scale))
++        and torch.cuda.get_device_properties(q_input.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++        and (
++            (native_v41_shared == "gate_up"
++             and q_input.shape[1] == 5120
++             and x_scale.shape == (q_input.shape[0], 160)
++             and weight.shape == (1152, 5120)
++             and weight_scale.shape == (36, 160))
++            or (native_v41_shared == "down"
++                and q_input.shape[1] == 576
++                and x_scale.shape == (q_input.shape[0], 18)
++                and weight.shape == (5120, 576)
++                and weight_scale.shape == (160, 18))
++        )
++    ):
++        from sglang.kernels.ops.gemm.deepseek_v41_gemv import native_shared_expert_gemv
++
++        output = native_shared_expert_gemv(
++            q_input, x_scale, weight, weight_scale, native_v41_shared
++        )
+     else:
+         output = w8a8_block_fp8_matmul_triton(
+             q_input, weight, x_scale, weight_scale, block_size, output_dtype=output_dtype
+--- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -165,3 +165,39 @@
+     _native_c2_gemv[(n // 4,)](q, qs, w, ws, output, n, k, 4, block_k,
+                                num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
++
++
++def native_shared_expert_gemv(q, qs, w, ws, kind: str):
++    """Only native V4.1 TP4 shared gate/up or down, one or two BF16 rows."""
++    shapes = {
++        "gate_up": (1152, 5120, 36, 160, 512),
++        "down": (5120, 576, 160, 18, 64),
++    }
++    if kind not in shapes:
++        raise ValueError("shared expert GEMV requires an exact projection kind")
++    n, k, scale_n, scale_k, block_k = shapes[kind]
++    if q.ndim != 2 or q.shape[0] not in (1, 2):
++        raise ValueError("shared expert GEMV requires one or two token rows")
++    m = q.shape[0]
++    expected = ((q, (m, k), torch.float8_e4m3fn),
++                (qs, (m, scale_k), torch.float32),
++                (w, (n, k), torch.float8_e4m3fn),
++                (ws, (scale_n, scale_k), torch.float32))
++    for tensor, shape, dtype in expected:
++        if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
++            raise ValueError("shared expert GEMV requires exact native contiguous operands")
++        if tensor.device != q.device or tensor.device.type != "cuda":
++            raise ValueError("shared expert GEMV requires one HIP device")
++    if (not torch.version.hip or
++        torch.cuda.get_device_properties(q.device).gcnArchName.split(":")[0] != "gfx1151"):
++        raise ValueError("shared expert GEMV is gfx1151-only")
++    output = torch.empty((m, n), dtype=torch.bfloat16, device=q.device)
++    if m == 1:
++        _native_fp8_gemv_c1[(n // 4,)](
++            q, qs, w, ws, output, n, k, 4, block_k,
++            num_warps=4, num_stages=1, enable_fp_fusion=False)
++    else:
++        _native_c2_gemv[(n // 4,)](
++            q, qs, w, ws, output, n, k, 4, block_k,
++            num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output

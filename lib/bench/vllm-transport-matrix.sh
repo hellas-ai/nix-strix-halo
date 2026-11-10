@@ -305,60 +305,21 @@ resolve_usb4_hca() {
 }
 
 make_plan() {
-  "$VLLM_ENV/bin/python" - "$PLAN_FILE" "$SAMPLE_CASES" "$RANDOM_SEED" \
-    "$MODELS" "$TRANSPORTS" "$CONCURRENCIES" "$MAX_TOKENS" "$RESUME" "$OUTPUT_CSV" <<'PY'
-import csv
-import itertools
-import random
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-sample_cases = int(sys.argv[2])
-seed = int(sys.argv[3])
-models = sys.argv[4].split()
-transports = sys.argv[5].split()
-concs = [int(x) for x in sys.argv[6].split()]
-max_tokens = int(sys.argv[7])
-resume = sys.argv[8] == "1"
-csv_path = Path(sys.argv[9])
-
-done = set()
-if resume and csv_path.exists():
-    raw = csv_path.read_bytes().replace(b"\0", b"")
-    text = raw.decode("utf-8", "replace")
-    rows = csv.DictReader(line for line in text.splitlines() if line.strip())
-    for row in rows:
-        if row.get("status") not in {"ok", "skipped"}:
-            continue
-        try:
-            done.add((
-                row["transport"],
-                row["model"],
-                int(row["concurrency"]),
-                int(row["max_tokens"]),
-            ))
-        except (KeyError, TypeError, ValueError):
-            pass
-
-cases = [
-    (transport, model, conc, max_tokens)
-    for transport, model, conc in itertools.product(transports, models, concs)
-]
-if done:
-    cases = [case for case in cases if case not in done]
-if sample_cases > 0 and sample_cases < len(cases):
-    rnd = random.Random(seed)
-    cases = rnd.sample(cases, sample_cases)
-
-transport_order = {name: i for i, name in enumerate(transports)}
-model_order = {name: i for i, name in enumerate(models)}
-cases.sort(key=lambda c: (transport_order[c[0]], model_order[c[1]], c[2]))
-
-with path.open("w") as fh:
-    for case in cases:
-        fh.write("\t".join(map(str, case)) + "\n")
-PY
+  local args=(
+    "$SCRIPT_DIR/vllm-transport-matrix.py"
+    --plan "$PLAN_FILE"
+    --sample-cases "$SAMPLE_CASES"
+    --seed "$RANDOM_SEED"
+    --models "$MODELS"
+    --transports "$TRANSPORTS"
+    --concurrencies "$CONCURRENCIES"
+    --max-tokens "$MAX_TOKENS"
+    --csv "$OUTPUT_CSV"
+  )
+  if [[ "$RESUME" == "1" ]]; then
+    args+=(--resume)
+  fi
+  "$VLLM_ENV/bin/python" "${args[@]}"
 }
 
 append_skip() {
