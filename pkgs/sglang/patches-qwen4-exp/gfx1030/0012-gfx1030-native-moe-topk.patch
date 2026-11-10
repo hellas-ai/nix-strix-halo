@@ -1,0 +1,32 @@
+The default HIP softmax router resolves the AOT moe.topk_softmax registration
+from sgl_kernel at first forward.  The gfx1030 closure deliberately has no
+compatible sgl-kernel wheel.  Route this plain softmax case through SGLang's
+existing torch-native implementation; it computes routing scores in FP32 and
+preserves the requested renormalization.
+
+--- a/sglang/srt/layers/moe/topk.py
++++ b/sglang/srt/layers/moe/topk.py
+@@ -896,7 +896,16 @@ def fused_topk(
++        elif _is_hip:
++            topk_weights, topk_ids = fused_topk_torch_native(
++                hidden_states=hidden_states,
++                gating_output=gating_output,
++                topk=topk,
++                renormalize=renormalize,
++                correction_bias=correction_bias,
++                scoring_func=scoring_func,
++            )
+-        else:
+-            topk_softmax(
+-                topk_weights,
+-                topk_ids,
+-                gating_output,
+-                renormalize,
+-            )
++        else:
++            topk_softmax(
++                topk_weights,
++                topk_ids,
++                gating_output,
++                renormalize,
++            )

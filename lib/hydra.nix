@@ -106,6 +106,7 @@ let
           llama-cpp-master-rocm
           llama-cpp-rocm
           mlx-rocm
+          sglang-qwen38-flash-next-rocm
           sglang-rocm
           therock-rocm
           vllm-rocm
@@ -152,6 +153,7 @@ let
           gfx1030-llama-cpp-rocm = gfx1030Packages.llama-cpp-rocm;
           gfx1030-llama-cpp-master-rocm = gfx1030Packages.llama-cpp-master-rocm;
           gfx1030-sglang-rocm = gfx1030Packages.sglang-rocm;
+          gfx1030-sglang-qwen38-flash-next-rocm = gfx1030Packages.sglang-qwen38-flash-next-rocm;
           gfx1030-therock-python = gfx1030Packages.therock-python;
           gfx1030-therock-python-wheels = gfx1030Packages.therock-python-wheels;
           gfx1030-therock-rocm = gfx1030Packages.therock-rocm;
