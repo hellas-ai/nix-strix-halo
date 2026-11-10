@@ -1,0 +1,146 @@
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -21,6 +21,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import os
+ from contextlib import contextmanager, nullcontext
+ from functools import cached_property
+ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+@@ -145,7 +146,7 @@
+     Phase,
+     check_cuda_graph_backend,
+ )
+-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
++from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode, PPProxyTensors
+ from sglang.srt.model_executor.forward_context import get_attn_backend
+ from sglang.srt.model_executor.runner import get_is_capture_mode
+ from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context import (
+@@ -255,6 +256,9 @@
+ )
+ 
+ logger = logging.getLogger(__name__)
++_dsv41_shared_overlap_enabled = (
++    os.environ.get("SGLANG_DSV41_OVERLAP_SHARED_EXPERT") == "1"
++)
+ 
+ # One-time SGLANG_OPT_MOE_QUANT_ONCE engagement log (see _moe_quant_once_enabled).
+ _moe_quant_once_logged = False
+@@ -631,6 +635,10 @@
+         self.config = config
+         self.layer_id = layer_id
+         self.alt_stream = alt_stream
++        # Default-off V4.1 prefill proof. Keep this separate from alt_stream:
++        # setting alt_stream would also enable the decode graph dual-stream arm.
++        self._dsv41_shared_overlap_stream = None
++        self._dsv41_shared_overlap_logged = False
+         self.routed_quant_stream = routed_quant_stream
+         self.is_nextn = is_nextn
+         self.is_deepseek_v4 = is_deepseek_v4
+@@ -1039,6 +1047,32 @@
+                     use_vision_topk=use_vision_topk,
+                 )
+             else:
++                dsv41_overlap_shared = (
++                    _dsv41_shared_overlap_enabled
++                    and _is_hip
++                    and self.is_deepseek_v4
++                    and not self.is_nextn
++                    and getattr(self.config, "model_type", None) == "deepseek_v41"
++                    and self.tp_size == 4
++                    and self.moe_ep_size == 1
++                    and self.num_fused_shared_experts == 0
++                    and hasattr(self, "shared_experts")
++                    and not self._shared_expert_tp1
++                    and not self._fuse_shared_experts_inside_sbo
++                    and not self.is_hash
++                    and not skip_shared_experts
++                    and not use_vision_topk
++                    and gemm_output_zero_allocator is None
++                    and getattr(self.experts, "_dsv41_official_routed_policy", False)
++                    and not self.experts.moe_runner_config.inplace
++                    and forward_batch is not None
++                    and forward_batch.forward_mode == ForwardMode.EXTEND
++                    and hidden_states.shape[0] >= 64
++                    and hidden_states.shape[-1] == 5120
++                    and hidden_states.is_cuda
++                    and not get_is_capture_mode()
++                    and not torch.cuda.is_current_stream_capturing()
++                )
+                 return self.forward_normal(
+                     hidden_states,
+                     gemm_output_zero_allocator,
+@@ -1047,6 +1081,7 @@
+                     skip_shared_experts=skip_shared_experts,
+                     num_token_non_padded=num_token_non_padded,
+                     use_vision_topk=use_vision_topk,
++                    dsv41_overlap_shared=dsv41_overlap_shared,
+                 )
+         else:
+             return self.forward_deepep(
+@@ -1355,6 +1390,7 @@
+         skip_shared_experts: bool = False,
+         num_token_non_padded: Optional[torch.Tensor] = None,
+         use_vision_topk: bool = False,
++        dsv41_overlap_shared: bool = False,
+     ) -> torch.Tensor:
+         if hasattr(self, "shared_experts") and use_intel_amx_backend(
+             self.shared_experts.gate_up_proj
+@@ -1370,6 +1406,7 @@
+         # hidden in the decoder layer (before the dp gather) and added after the
+         # reduce_scatterv. When set, never compute/add it here (on the global buffer).
+         shared_output = None
++        dsv41_shared_event = None
+         if hidden_states.shape[0] > 0:
+             # Quantize-once (SGLANG_OPT_MOE_QUANT_ONCE): only worthwhile when
+             # the shared expert also runs here on the same tensor.
+@@ -1378,6 +1415,27 @@
+                 if skip_shared_experts
+                 else self._maybe_quant_moe_input_once(hidden_states)
+             )
++            if dsv41_overlap_shared and defer_shared and pre_quant_input is None:
++                if self._dsv41_shared_overlap_stream is None:
++                    self._dsv41_shared_overlap_stream = torch.cuda.Stream(
++                        device=hidden_states.device
++                    )
++                shared_stream = self._dsv41_shared_overlap_stream
++                shared_stream.wait_stream(torch.cuda.current_stream())
++                hidden_states.record_stream(shared_stream)
++                with torch.cuda.stream(shared_stream):
++                    shared_output = self._forward_shared_experts(
++                        hidden_states,
++                        gemm_output_zero_allocator,
++                        pre_quant_input=None,
++                    )
++                    dsv41_shared_event = shared_stream.record_event()
++                if not self._dsv41_shared_overlap_logged:
++                    logger.info(
++                        "DSV41 shared/routed prefill overlap active: layer=%s rows=%s",
++                        self.layer_id, hidden_states.shape[0],
++                    )
++                    self._dsv41_shared_overlap_logged = True
+             if (
+                 not defer_shared
+                 and not self._fuse_shared_experts_inside_sbo
+@@ -1478,6 +1536,7 @@
+             and hidden_states.shape[0] > 0
+             and not self._fuse_shared_experts_inside_sbo
+             and not skip_shared_experts
++            and dsv41_shared_event is None
+         ):
+             shared_output = self._forward_shared_experts(
+                 hidden_states,
+@@ -1485,6 +1544,12 @@
+                 pre_quant_input=pre_quant_input,
+             )
+ 
++        if dsv41_shared_event is not None:
++            torch.cuda.current_stream().wait_event(dsv41_shared_event)
++            # The shared output was allocated on the side stream and is read by
++            # the main stream's unchanged FP32 add before the TP reduction.
++            shared_output.record_stream(torch.cuda.current_stream())
++
+         final_hidden_states = maybe_fuse_routed_scale_and_shared_add(
+             self.experts,
+             final_hidden_states,

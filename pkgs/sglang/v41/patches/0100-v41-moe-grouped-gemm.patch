@@ -1,0 +1,966 @@
+diff --git a/sglang/kernels/ops/moe/dsv41_moe_grouped.hip.cpp b/sglang/kernels/ops/moe/dsv41_moe_grouped.hip.cpp
+new file mode 100644
+index 0000000..0df0c98
+--- /dev/null
++++ b/sglang/kernels/ops/moe/dsv41_moe_grouped.hip.cpp
+@@ -0,0 +1,584 @@
++// DSv4.1 routed experts (MXFP4 weights, bf16 activations) on gfx1151: expert-sorted grouped GEMM on the WMMA matrix units.
++//
++// out[slot][n] = bf16( sum_k A[row(slot)][k] * W[e(slot)][n][k] ),  slot = token * top_k + k, e(slot) = the expert the router chose for it,
++// W[e][n][k] = E2M1 code * 2^(scale byte - 127) (one E8M0 byte per 32 K), accumulated in fp32 in ascending-K 16-wide WMMA steps.
++//
++// This is the arithmetic of the installed AITER Triton kernel (`tl.dot_scaled(bf16, e2m1)` over 16-wide WMMA K steps, fp32 accumulator
++// chain, one bf16 rounding at the end), so each output element is the same value whatever the tile shape, the rows sharing an expert or
++// the order of the slots; the unit test checks it bit for bit against the installed kernel on the real routing. The matrix unit's sum depends
++// on the order of the 16 K slots of a step (tests/moe-grouped/wmma_probe.hip.cpp on gfx1151: only a swap inside a K pair keeps the bits), so
++// both operands keep the natural K order. A negative-zero product leaks into the sum as well (same probe, wmma_quirk), so zero weights are +0 as in Triton's decode.
++//
++// What differs is the cost. The installed kernel runs a 16- or 32-row tile per expert and dequantises (E2M1 -> bf16 with the group scale)
++// every weight for every tile, ~10 VALU lane-ops per weight, so the dequantisation is the limit once the weights stream at DRAM speed. Here
++//   * the router's choices are counting-sorted into per-expert tiles of up to 64 slots (`moe_route_kernel`), in expert order or biggest tiles first;
++//   * a workgroup owns one tile x BN output columns; each wave owns 16*TN columns and keeps TM (1..4) 16-row accumulator tiles, so a weight
++//     is dequantised once per tile and reused by every row of the tile;
++//   * the dequantisation is two byte-permute lookups per four weights (a per-group table built from the scale byte), no multiply;
++//   * the activation rows are gathered by slot into LDS as bf16, one K stage at a time, and the next stage's weight and activation loads
++//     are in flight while the current stage runs on the matrix units.
++// Weights are read straight from global memory into registers (every lane streams whole 16-byte pieces of its own column; lanes l and l+16
++// hold the same column: the matrix unit reads the upper half-wave's operands for the odd output rows, so they cannot carry other data).
++//
++// Contract with the caller (checked in dsv41_moe_grouped.py): E8M0 scale bytes in [1, 252] (exact bf16 results, no subnormal weights),
++// K a multiple of 64 and of the stage, N a multiple of BN, bf16 activations, at most 64 slots per expert per tile.
++#include <hip/hip_runtime.h>
++#include <stdint.h>
++#include <type_traits>
++
++typedef unsigned int u32x4 __attribute__((ext_vector_type(4)));
++typedef unsigned int u32x2 __attribute__((ext_vector_type(2)));
++typedef unsigned int u32x8 __attribute__((ext_vector_type(8)));
++typedef float f32x8 __attribute__((ext_vector_type(8)));
++typedef __bf16 bf16x16 __attribute__((ext_vector_type(16)));
++
++
++namespace dsv41moe {
++
++constexpr int MAX_TILE_ROWS = 64;
++constexpr int TILE_INTS = 3;   // expert (or -1 for slots without a valid expert), first sorted slot, rows
++
++__device__ __forceinline__ unsigned perm(unsigned s0, unsigned s1, unsigned sel) { return __builtin_amdgcn_perm(s0, s1, sel); }
++
++// ---------------------------------------------------------------------------------------------------------------------------------------
++// WMMA: D[2i + (lane >> 4)][lane & 15] = C + sum_k A[lane & 15][k] * B[k][lane & 15]; lanes l and l + 16 hold the same A and B vectors.
++// DSV41_MOE_EMU builds a (slow) shuffle-based stand-in for tests on GPUs without the instruction; its sums are plain sequential fp32 FMAs.
++// ---------------------------------------------------------------------------------------------------------------------------------------
++#ifdef DSV41_MOE_EMU
++__device__ __forceinline__ float bf16_lo(unsigned d) { return __builtin_bit_cast(float, d << 16); }
++__device__ __forceinline__ float bf16_hi(unsigned d) { return __builtin_bit_cast(float, d & 0xFFFF0000u); }
++#ifdef DSV41_MOE_EMU_FAST
++// timing stand-in only (wrong numbers): one cheap ALU op per accumulator so the memory pipeline can be measured on a GPU without WMMA
++__device__ __forceinline__ f32x8 wmma(const u32x8& a, const u32x8& b, f32x8 c) {
++  f32x8 d;
++#pragma unroll
++  for (int i = 0; i < 8; ++i) d[i] = c[i] + __builtin_bit_cast(float, (a[i] ^ b[i]) & 0x3F800000u);
++  return d;
++}
++#else
++__device__ __forceinline__ f32x8 wmma(const u32x8& a, const u32x8& b, f32x8 c) {
++  const int lane = threadIdx.x & 31, h = lane >> 4;
++  f32x8 d;
++#pragma unroll
++  for (int i = 0; i < 8; ++i) {
++    const int src = 2 * i + h;
++    float acc = c[i];
++#pragma unroll
++    for (int kk = 0; kk < 8; ++kk) {
++      const unsigned ad = __shfl((int)a[kk], src, 32);
++      const unsigned bd = __shfl((int)b[kk], lane & 15, 32);   // only lanes 0..15 hold operands
++      acc = fmaf(bf16_lo(ad), bf16_lo(bd), acc);
++      acc = fmaf(bf16_hi(ad), bf16_hi(bd), acc);
++    }
++    d[i] = acc;
++  }
++  return d;
++}
++#endif
++#elif defined(DSV41_MOE_NOMMA)   // timing experiment only (wrong numbers): a cheap ALU op instead of the matrix instruction
++__device__ __forceinline__ f32x8 wmma(const u32x8& a, const u32x8& b, f32x8 c) {
++  f32x8 d;
++#pragma unroll
++  for (int i = 0; i < 8; ++i) d[i] = c[i] + __builtin_bit_cast(float, (a[i] ^ b[i]) & 0x3F800000u);
++  return d;
++}
++#else
++__device__ __forceinline__ f32x8 wmma(const u32x8& a, const u32x8& b, f32x8 c) {
++  return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(__builtin_bit_cast(bf16x16, a), __builtin_bit_cast(bf16x16, b), c);
++}
++#endif
++
++// Workgroup barrier for LDS traffic only: __syncthreads() also carries a workgroup-scope fence, which on gfx11 waits for every outstanding global load
++// and would stop the next stage's weight and activation loads from overlapping the barrier.
++__device__ __forceinline__ void lds_barrier() {
++#if defined(DSV41_MOE_EMU) && !defined(DSV41_MOE_EMU_FAST)
++  __syncthreads();
++#else
++  asm volatile("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory");
++#endif
++}
++
++__device__ __forceinline__ unsigned f32_to_bf16(float f) {   // round to nearest even, NaN stays NaN
++  unsigned u = __builtin_bit_cast(unsigned, f);
++  if ((u & 0x7F800000u) == 0x7F800000u) return (u >> 16) | ((u & 0x007FFFFFu) ? 0x0040u : 0u);
++  u += 0x7FFFu + ((u >> 16) & 1u);
++  return u >> 16;
++}
++
++// ---------------------------------------------------------------------------------------------------------------------------------------
++// E2M1 x E8M0 -> bf16, exactly. For a scale byte s in [1, 252] and magnitude code m = code & 7 the bf16 bits are
++//     m == 0: 0;   m == 1: (s - 1) << 7;   m >= 2: ((s - 1) << 7) + 64 m;     | sign << 15 for m != 0 (a zero weight is +0 whatever its sign bit)
++// (s = 1, m = 1 is the subnormal 2^-127 and flushes to zero, like the installed kernel's bf16 multiply). A byte table of the high and the
++// low byte of those eight values, built once per scale byte, turns four weights into two v_perm_b32 lookups.
++// ---------------------------------------------------------------------------------------------------------------------------------------
++struct DqTable { unsigned hi03, hi47, lo03, lo47; };
++
++__device__ __forceinline__ DqTable dq_table(unsigned s) {
++  const unsigned sk = s * 0x00800080u;               // 128 s in both halves
++  const unsigned p01 = (s - 1u) << 23;               // entries 0 (zero) and 1 ((s - 1) << 7)
++  const unsigned p23 = sk + 0x00400000u;             // 128 s, 128 s + 64
++  const unsigned p45 = sk + 0x00C00080u;             // 128 s + 128, 128 s + 192
++  const unsigned p67 = sk + 0x01400100u;             // 128 s + 256, 128 s + 320
++  DqTable t;
++  t.hi03 = perm(p23, p01, 0x07050301u);
++  t.hi47 = perm(p67, p45, 0x07050301u);
++  t.lo03 = perm(p23, p01, 0x06040200u);
++  t.lo47 = perm(p67, p45, 0x06040200u);
++  return t;
++}
++
++// 8 packed E2M1 codes (byte j = codes 2j, 2j+1 of this dword: low nibble first) -> 4 bf16 pairs.
++//   o = { pair of byte 0, byte 1, byte 2, byte 3 } in natural K order: the matrix unit's sum depends on the K slot order (wmma_probe: any permutation except a swap inside a
++//   pair changes the result bits), so the weight and activation fragments keep the order in which the installed Triton kernel feeds it
++__device__ __forceinline__ void dq_dword(unsigned w, const DqTable& t, unsigned (&o)[4]) {
++#ifdef DSV41_MOE_NODQ   // timing experiment only (wrong numbers): no dequantisation, the packed bytes go to the matrix unit as they are
++  o[0] = w; o[1] = w ^ t.hi03; o[2] = w ^ t.lo03; o[3] = w ^ t.hi47;
++  return;
++#endif
++  const unsigned me = w & 0x07070707u, mo = (w >> 4) & 0x07070707u;
++  unsigned he = perm(t.hi47, t.hi03, me), le = perm(t.lo47, t.lo03, me);
++  unsigned ho = perm(t.hi47, t.hi03, mo), lo = perm(t.lo47, t.lo03, mo);
++  // The sign is applied to non-zero magnitudes only: E2M1 -0 becomes +0, as in Triton's table decode. The sign of a zero weight matters to the matrix unit: a
++  // product that is a negative zero leaks one unit of its fixed-point sum (wmma_quirk.hip.cpp), which would change the rounding of exact ties.
++  he |= (w << 4) & ((me + 0x07070707u) << 4) & 0x80808080u;
++  ho |= w & ((mo + 0x07070707u) << 4) & 0x80808080u;
++  const unsigned xa = perm(he, le, 0x05010400u), xb = perm(he, le, 0x07030602u);    // even codes of bytes 0,1 / 2,3: [lo hi lo hi]
++  const unsigned ya = perm(ho, lo, 0x05010400u), yb = perm(ho, lo, 0x07030602u);
++  o[0] = perm(ya, xa, 0x05040100u);
++  o[1] = perm(ya, xa, 0x07060302u);
++  o[2] = perm(yb, xb, 0x05040100u);
++  o[3] = perm(yb, xb, 0x07060302u);
++}
++
++// 16 K of one column (two packed dwords w0 = K 0..7, w1 = K 8..15) -> the 8 dwords of the B operand
++__device__ __forceinline__ u32x8 dq_frag(unsigned w0, unsigned w1, const DqTable& t) {
++  unsigned a[4], b[4];
++  dq_dword(w0, t, a);
++  dq_dword(w1, t, b);
++  return (u32x8){a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]};
++}
++
++// ---------------------------------------------------------------------------------------------------------------------------------------
++// Routing: counting sort of the S = rows * top_k expert choices into per-expert tiles. One workgroup of 1024 threads.
++//   slots[]  slot ids grouped by expert (the order inside an expert is arbitrary: every output row depends on its own input row only)
++//   tiles[]  (expert or -1, first index into slots, rows <= 64) triples, *ntiles of them: order 0 = by expert, order 1 = tiles with more rows first
++// Ids outside [0, E) (padding rows of a graph replay) go to a pseudo expert E whose tiles are written as zeros.
++// ---------------------------------------------------------------------------------------------------------------------------------------
++constexpr int ROUTE_THREADS = 1024;
++
++__device__ __forceinline__ int block_excl_scan(int v, int* buf, int* total) {   // Hillis-Steele over ROUTE_THREADS values
++  const int t = threadIdx.x;
++  buf[t] = v;
++  __syncthreads();
++  for (int off = 1; off < ROUTE_THREADS; off <<= 1) {
++    const int add = t >= off ? buf[t - off] : 0;
++    __syncthreads();
++    buf[t] += add;
++    __syncthreads();
++  }
++  const int incl = buf[t];
++  *total = buf[ROUTE_THREADS - 1];
++  __syncthreads();
++  return incl - v;
++}
++
++__global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const int* __restrict__ ids, int S, int E, int* __restrict__ slots,
++                                                                  int* __restrict__ tiles, int* __restrict__ ntiles, int order) {
++  __shared__ int cnt[ROUTE_THREADS], cursor[ROUTE_THREADS], buf[ROUTE_THREADS], tcur[8];
++  const int t = threadIdx.x;
++  cnt[t] = 0;
++  __syncthreads();
++  for (int s = t; s < S; s += ROUTE_THREADS) {
++    const int id = ids[s];
++    atomicAdd(&cnt[(id >= 0 && id < E) ? id : E], 1);
++  }
++  __syncthreads();
++  const int count = t <= E ? cnt[t] : 0;
++  int total_slots;
++  const int start = block_excl_scan(count, buf, &total_slots);
++  const int full = count / MAX_TILE_ROWS, rem = count % MAX_TILE_ROWS;
++  const int expert = t == E ? -1 : t;
++  if (order == 0) {
++    // expert order: hot and cold experts interleave the way the router scattered them
++    const int mine = full + (rem ? 1 : 0);
++    int total;
++    const int base = block_excl_scan(mine, buf, &total);
++    if (t == 0) *ntiles = total;
++    if (t <= E) {
++      for (int i = 0; i < mine; ++i) {
++        int* tp = tiles + TILE_INTS * (base + i);
++        tp[0] = expert; tp[1] = start + i * MAX_TILE_ROWS; tp[2] = i < full ? MAX_TILE_ROWS : rem;
++      }
++    }
++  } else {
++    // size order: classes 0 = 49..64 rows (and every full 64-row tile), 1 = 33..48, 2 = 17..32, 3 = 1..16; an expert contributes its full tiles to
++    // class 0 and its remainder to the class of the remainder; biggest first
++    const int rem_cls = rem == 0 ? -1 : (rem > 48 ? 0 : (rem > 32 ? 1 : (rem > 16 ? 2 : 3)));
++    int base_cls[4], tot_cls[4];
++#pragma unroll
++    for (int c = 0; c < 4; ++c) {
++      const int mine = (c == 0 ? full : 0) + (rem_cls == c ? 1 : 0);
++      base_cls[c] = block_excl_scan(mine, buf, &tot_cls[c]);
++    }
++    if (t == 0) {
++      tcur[0] = 0;
++      tcur[1] = tot_cls[0];
++      tcur[2] = tot_cls[0] + tot_cls[1];
++      tcur[3] = tot_cls[0] + tot_cls[1] + tot_cls[2];
++      *ntiles = tot_cls[0] + tot_cls[1] + tot_cls[2] + tot_cls[3];
++    }
++    __syncthreads();
++    if (t <= E) {
++      for (int i = 0; i < full; ++i) {
++        int* tp = tiles + TILE_INTS * (base_cls[0] + i);
++        tp[0] = expert; tp[1] = start + i * MAX_TILE_ROWS; tp[2] = MAX_TILE_ROWS;
++      }
++      if (rem_cls >= 0) {
++        int* tp = tiles + TILE_INTS * (tcur[rem_cls] + base_cls[rem_cls] + (rem_cls == 0 ? full : 0));
++        tp[0] = expert; tp[1] = start + full * MAX_TILE_ROWS; tp[2] = rem;
++      }
++    }
++  }
++  if (t <= E) cursor[t] = start;
++  __syncthreads();
++  for (int s = t; s < S; s += ROUTE_THREADS) {
++    const int id = ids[s];
++    slots[atomicAdd(&cursor[(id >= 0 && id < E) ? id : E], 1)] = s;
++  }
++}
++
++// ---------------------------------------------------------------------------------------------------------------------------------------
++// Grouped GEMM. Workgroup = WAVES waves; tile = up to 64 slots of one expert; BN = 16 * TN * WAVES output columns. K is walked in stages of
++// KST; per stage each lane loads KST/2 bytes of its own column (KST/32 uint4) plus the KST/32 scale bytes, the workgroup loads the tile's
++// A rows [rows x KST] and writes them to LDS, then every wave runs TM x TN WMMAs per 16 K.
++// ---------------------------------------------------------------------------------------------------------------------------------------
++template <int WAVES, int TN, int KST, bool SC32, int TM>
++__device__ __forceinline__ void tile_body(const uint16_t* __restrict__ A, long a_stride, const uint8_t* __restrict__ W,
++                                          const uint8_t* __restrict__ S, uint16_t* __restrict__ out, int N, int K, int expert, int n0,
++                                          int rows, uint16_t* sA, const int* rowA, const int* rowO) {
++  constexpr int NT = WAVES * 32, GRP = KST / 32, PITCH = KST + 8, CPR = KST / 8;   // 16-byte A chunks per row and stage
++  constexpr int CH = (TM * 16 * CPR + NT - 1) / NT;
++  const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, col = lane & 15, h = lane >> 4;
++  const int nst = K / KST;
++
++  // ---- A gather plan of this thread (fixed for the whole K walk)
++  unsigned a_off[CH];       // byte offset of the chunk in A (row start + chunk), kept in the row's range
++  int a_dst[CH];            // element offset into sA
++  bool a_ok[CH];
++#pragma unroll
++  for (int j = 0; j < CH; ++j) {
++    const int c = tid + j * NT;
++    const int r = c / CPR, cc = c % CPR;
++    a_ok[j] = (c < TM * 16 * CPR) && (r < rows);
++    a_off[j] = a_ok[j] ? (unsigned)((long)rowA[r] * a_stride * 2 + cc * 16) : 0u;      // rows without a slot read row 0 (valid memory) and are zeroed below
++    a_dst[j] = r * PITCH + cc * 8;
++  }
++  u32x4 areg[CH];
++
++  // ---- B plan: one column per (tn, lane & 15)
++  const uint8_t* wp[TN];
++  const uint8_t* sp[TN];
++#pragma unroll
++  for (int tn = 0; tn < TN; ++tn) {
++    const long nn = n0 + (wave * TN + tn) * 16 + col;
++    wp[tn] = W + ((long)expert * N + nn) * (K / 2);
++    sp[tn] = S + ((long)expert * N + nn) * (K / 32);
++  }
++  u32x4 braw[2][TN][GRP];
++  unsigned sraw[2][TN][GRP];     // one scale byte per register; (the u32 path unpacks)
++
++  f32x8 acc[TM][TN];
++#pragma unroll
++  for (int m = 0; m < TM; ++m)
++#pragma unroll
++    for (int tn = 0; tn < TN; ++tn) acc[m][tn] = (f32x8){0, 0, 0, 0, 0, 0, 0, 0};
++
++  auto load_a = [&](int s) {
++    const uint8_t* ab = (const uint8_t*)A + (long)s * KST * 2;
++#pragma unroll
++    for (int j = 0; j < CH; ++j) {   // unconditional loads (no divergent branch around them), padding rows zeroed afterwards
++      const u32x4 v = *(const u32x4*)(ab + a_off[j]);
++      areg[j] = a_ok[j] ? v : (u32x4){0, 0, 0, 0};
++    }
++  };
++  auto load_b = [&](auto bufc, int s) {
++    constexpr int buf = decltype(bufc)::value;
++#pragma unroll
++    for (int tn = 0; tn < TN; ++tn) {
++      const uint8_t* q = wp[tn] + (long)s * (KST / 2);
++#pragma unroll
++      for (int g = 0; g < GRP; ++g) braw[buf][tn][g] = *(const u32x4*)(q + 16 * g);
++      const uint8_t* sc = sp[tn] + (long)s * GRP;
++      if constexpr (SC32 && GRP % 4 == 0) {
++#pragma unroll
++        for (int g = 0; g < GRP; g += 4) {
++          const unsigned v = *(const unsigned*)(sc + g);
++          sraw[buf][tn][g] = v & 0xFFu; sraw[buf][tn][g + 1] = (v >> 8) & 0xFFu;
++          sraw[buf][tn][g + 2] = (v >> 16) & 0xFFu; sraw[buf][tn][g + 3] = v >> 24;
++        }
++      } else {
++#pragma unroll
++        for (int g = 0; g < GRP; ++g) sraw[buf][tn][g] = sc[g];
++      }
++    }
++  };
++  auto store_a = [&]() {
++#pragma unroll
++    for (int j = 0; j < CH; ++j) {
++      const int c = tid + j * NT;
++      if (c < TM * 16 * CPR) {
++        const u32x4 v = areg[j];
++        *(u32x4*)(sA + a_dst[j]) = v;
++      }
++    }
++  };
++  auto compute = [&](auto bufc) {
++    constexpr int buf = decltype(bufc)::value;
++    constexpr int NSTEP = GRP * 2 * TM;       // (scale group, 16-K half, m tile) in K order; the A fragment of the next step is loaded before the current WMMAs
++    auto load_af = [&](int idx) -> u32x8 {
++      const int m = idx % TM, ks = idx / TM;
++      const uint16_t* ap = sA + (m * 16 + col) * PITCH + ks * 16;
++      const u32x4 lo = *(const u32x4*)ap, hi = *(const u32x4*)(ap + 8);
++      return __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7);
++    };
++    DqTable tb[TN];
++    u32x8 bf[TN];
++    u32x8 af = load_af(0);
++#pragma unroll
++    for (int idx = 0; idx < NSTEP; ++idx) {
++      const int m = idx % TM, ks = idx / TM, g = ks >> 1, half = ks & 1;
++      const u32x8 af_next = idx + 1 < NSTEP ? load_af(idx + 1) : af;
++#if !defined(DSV41_MOE_EMU) || defined(DSV41_MOE_EMU_FAST)
++      __builtin_amdgcn_sched_barrier(0);   // keep the lookahead LDS reads ahead of this step's matrix work (the scheduler sinks them next to their use otherwise)
++#endif
++      if (m == 0) {
++        if (half == 0) {
++#pragma unroll
++          for (int tn = 0; tn < TN; ++tn) tb[tn] = dq_table(sraw[buf][tn][g]);
++        }
++#pragma unroll
++        for (int tn = 0; tn < TN; ++tn) {
++          const u32x4 raw = braw[buf][tn][g];
++          bf[tn] = half ? dq_frag(raw[2], raw[3], tb[tn]) : dq_frag(raw[0], raw[1], tb[tn]);
++        }
++      }
++#pragma unroll
++      for (int tn = 0; tn < TN; ++tn) acc[m][tn] = wmma(af, bf[tn], acc[m][tn]);
++      af = af_next;
++    }
++  };
++
++  auto stage = [&](auto bufc, int s) {
++    constexpr int buf = decltype(bufc)::value;
++    store_a();
++    if (s + 1 < nst) {          // the registers of this stage's A rows are free again, and the other weight buffer was consumed one stage ago
++      load_a(s + 1);
++      load_b(std::integral_constant<int, buf ^ 1>{}, s + 1);
++    }
++    lds_barrier();
++    compute(bufc);
++    lds_barrier();
++  };
++
++  load_a(0);
++  load_b(std::integral_constant<int, 0>{}, 0);
++  int s = 0;
++  for (; s + 1 < nst; s += 2) {
++    stage(std::integral_constant<int, 0>{}, s);
++    stage(std::integral_constant<int, 1>{}, s + 1);
++  }
++  if (s < nst) stage(std::integral_constant<int, 0>{}, s);
++
++  // ---- epilogue: D[row 2i + h][col]; one bf16 rounding
++#pragma unroll
++  for (int m = 0; m < TM; ++m)
++#pragma unroll
++    for (int tn = 0; tn < TN; ++tn) {
++#pragma unroll
++      for (int i = 0; i < 8; ++i) {
++        const int r = m * 16 + 2 * i + h, c = n0 + (wave * TN + tn) * 16 + col;
++#ifdef DSV41_MOE_DBG_LOW16   // debug: the low 16 bits of the fp32 accumulator instead of the rounded bf16
++        if (r < rows) out[(long)rowO[r] * N + c] = (uint16_t)(__builtin_bit_cast(unsigned, acc[m][tn][i]) & 0xFFFFu);
++#else
++        if (r < rows) out[(long)rowO[r] * N + c] = (uint16_t)f32_to_bf16(acc[m][tn][i]);
++#endif
++      }
++    }
++}
++
++template <int WAVES, int TN, int KST, bool SC32>
++__global__ void __launch_bounds__(WAVES * 32)
++moe_gemm_kernel(const uint16_t* __restrict__ A, long a_stride, int a_div, const uint8_t* __restrict__ W, const uint8_t* __restrict__ S,
++                const int* __restrict__ slots, const int* __restrict__ tiles, const int* __restrict__ ntiles, uint16_t* __restrict__ out,
++                int N, int K) {
++  constexpr int NT = WAVES * 32, BN = WAVES * TN * 16;
++  __shared__ __attribute__((aligned(16))) uint16_t sA[MAX_TILE_ROWS * (KST + 8)];
++  __shared__ int rowA[MAX_TILE_ROWS], rowO[MAX_TILE_ROWS];
++  const int t = blockIdx.y;
++  if (t >= *ntiles) return;
++  const int expert = tiles[TILE_INTS * t], start = tiles[TILE_INTS * t + 1], rows = tiles[TILE_INTS * t + 2];
++  const int n0 = blockIdx.x * BN;
++  if ((int)threadIdx.x < rows) {
++    const int slot = slots[start + threadIdx.x];
++    rowO[threadIdx.x] = slot;
++    rowA[threadIdx.x] = slot / a_div;
++  }
++  __syncthreads();
++  if (expert < 0) {   // slots without a valid expert: zero rows
++    for (int i = threadIdx.x; i < rows * BN; i += NT) out[(long)rowO[i / BN] * N + n0 + i % BN] = 0;
++    return;
++  }
++  const int tm = (rows + 15) >> 4;
++  switch (tm) {
++    case 1: tile_body<WAVES, TN, KST, SC32, 1>(A, a_stride, W, S, out, N, K, expert, n0, rows, sA, rowA, rowO); break;
++    case 2: tile_body<WAVES, TN, KST, SC32, 2>(A, a_stride, W, S, out, N, K, expert, n0, rows, sA, rowA, rowO); break;
++    case 3: tile_body<WAVES, TN, KST, SC32, 3>(A, a_stride, W, S, out, N, K, expert, n0, rows, sA, rowA, rowO); break;
++    default: tile_body<WAVES, TN, KST, SC32, 4>(A, a_stride, W, S, out, N, K, expert, n0, rows, sA, rowA, rowO); break;
++  }
++}
++
++// Decode and verify rows (1..16 tokens, no sorting pass): block (n block, slot r) owns the expert of slot r when r is the lowest slot holding it,
++// gathers every slot of that expert (ascending) and runs the same tile body with one 16-row accumulator tile per pass (more than 16 slots of one
++// expert, which the router never produces for <= 16 tokens, are handled in passes that re-stream the weights). Slots whose id is outside
++// [0, E) (rows of a padded graph replay are routed to -1) are written as zeros. Only the grid is static: no host sync, graph-capturable.
++template <int WAVES, int TN, int KST, bool SC32>
++__global__ void __launch_bounds__(WAVES * 32)
++moe_gemm_decode_kernel(const uint16_t* __restrict__ A, long a_stride, int a_div, const uint8_t* __restrict__ W, const uint8_t* __restrict__ S,
++                       const int* __restrict__ ids, int nslots, int E, uint16_t* __restrict__ out, int N, int K) {
++  constexpr int NT = WAVES * 32, BN = WAVES * TN * 16;
++  __shared__ __attribute__((aligned(16))) uint16_t sA[16 * (KST + 8)];
++  __shared__ int rowA[MAX_TILE_ROWS], rowO[MAX_TILE_ROWS];
++  __shared__ int count, owner;
++  __shared__ unsigned wmask[8];
++  const int r = blockIdx.y, n0 = blockIdx.x * BN;
++  const int e = ids[r];
++  if (e < 0 || e >= E) {
++    for (int i = threadIdx.x; i < BN; i += NT) out[(long)r * N + n0 + i] = 0;
++    return;
++  }
++  // every slot of this expert, ascending: one ballot per wave over the (<= 128) ids, a prefix over the waves' masks
++  const int t = threadIdx.x, lane_ = t & 31, wave_ = t >> 5;
++  const bool m = t < nslots && ids[t] == e;
++  const unsigned bal = (unsigned)__ballot(m);
++  if (lane_ == 0) wmask[wave_] = bal;
++  __syncthreads();
++  int before = 0, total = 0;
++#pragma unroll
++  for (int w = 0; w < NT / 32; ++w) {
++    if (w < wave_) before += __popc(wmask[w]);
++    total += __popc(wmask[w]);
++  }
++  const int rank = before + __popc(bal & ((1u << lane_) - 1u));
++  if (m && rank < MAX_TILE_ROWS) { rowO[rank] = t; rowA[rank] = t / a_div; }
++  if (t == r) owner = rank == 0;      // slot r holds the expert, so it owns it iff no lower slot does
++  if (t == 0) count = total < MAX_TILE_ROWS ? total : MAX_TILE_ROWS;
++  __syncthreads();
++  if (!owner) return;
++  for (int p = 0; p * 16 < count; ++p) {
++    const int rows = min(16, count - 16 * p);
++    tile_body<WAVES, TN, KST, SC32, 1>(A, a_stride, W, S, out, N, K, e, n0, rows, sA, rowA + 16 * p, rowO + 16 * p);
++  }
++}
++
++}  // namespace dsv41moe
++
++// ---------------------------------------------------------------------------------------------------------------------------------------
++// C entry points (ctypes). All pointers are device pointers; return 0 or a hip error.
++// ---------------------------------------------------------------------------------------------------------------------------------------
++extern "C" int dsv41_moe_tiles_capacity(int slots, int experts) { return slots / dsv41moe::MAX_TILE_ROWS + experts + 2; }
++
++extern "C" int dsv41_moe_route(const int* ids, int slots_n, int experts, int* slots, int* tiles, int* ntiles, int order, void* stream) {
++  if (experts + 1 > dsv41moe::ROUTE_THREADS) return hipErrorInvalidValue;
++  hipLaunchKernelGGL(dsv41moe::moe_route_kernel, dim3(1), dim3(dsv41moe::ROUTE_THREADS), 0, (hipStream_t)stream, ids, slots_n, experts, slots,
++                     tiles, ntiles, order);
++  return (int)hipGetLastError();
++}
++
++// cfg (waves x n-tiles per wave, K stage): 0 = 4x2 128; 1 = 8x1 128; 2 = 4x2 64; 3 = 8x1 64; 4 = 4x2 256; 8 = 4x2 160 (gate/up, K = 5120);
++//      9 = 4x1 128; 10 = 4x1 64; 11 = 4x1 256; 16 = 8x1 256 (gate/up, BN 64 or 128 with one n-tile per wave: longer contiguous weight runs per row, fewer registers);
++//      17 = 4x1 512; 18 = 8x1 512 (decode kernel only);
++//      12 = 4x2 64; 13 = 8x1 64; 5 = 4x2 192; 6 = 8x1 96; 7 = 4x2 96; 14 = 4x1 64; 15 = 4x1 96 (down, K = 576)
++extern "C" int dsv41_moe_gemm(const void* A, long a_stride, int a_div, const void* W, const void* S, const int* slots, const int* tiles,
++                              const int* ntiles, int max_tiles, void* out, int N, int K, int cfg, void* stream) {
++  using namespace dsv41moe;
++  const hipStream_t st = (hipStream_t)stream;
++  const uint16_t* a = (const uint16_t*)A;
++  const uint8_t* w = (const uint8_t*)W;
++  const uint8_t* s = (const uint8_t*)S;
++  uint16_t* o = (uint16_t*)out;
++  const bool sc32 = (K / 32) % 4 == 0;
++#define DSV41_MOE_LAUNCH(WAVES_, TN_, KST_, SC_)                                                                                        \
++  do {                                                                                                                                  \
++    constexpr int bn = (WAVES_) * (TN_) * 16;                                                                                            \
++    if (N % bn || K % (KST_) || sc32 != (SC_)) return hipErrorInvalidValue;                                                              \
++    const dim3 grid(N / bn, max_tiles), block((WAVES_) * 32);                                                                            \
++    hipLaunchKernelGGL((moe_gemm_kernel<WAVES_, TN_, KST_, SC_>), grid, block, 0, st, a, a_stride, a_div, w, s, slots, tiles, ntiles, o, N, K); \
++  } while (0)
++  // K / 32 a multiple of 4 (the 5120-wide gate/up GEMM) loads the scale bytes four at a time; the 576-wide down GEMM (18 scale bytes per row) one by one
++  switch (cfg) {
++    case 0: DSV41_MOE_LAUNCH(4, 2, 128, true); break;
++    case 1: DSV41_MOE_LAUNCH(8, 1, 128, true); break;
++    case 2: DSV41_MOE_LAUNCH(4, 2, 64, true); break;
++    case 3: DSV41_MOE_LAUNCH(8, 1, 64, true); break;
++    case 4: DSV41_MOE_LAUNCH(4, 2, 256, true); break;
++    case 8: DSV41_MOE_LAUNCH(4, 2, 160, true); break;
++    case 9: DSV41_MOE_LAUNCH(4, 1, 128, true); break;
++    case 10: DSV41_MOE_LAUNCH(4, 1, 64, true); break;
++    case 11: DSV41_MOE_LAUNCH(4, 1, 256, true); break;
++    case 16: DSV41_MOE_LAUNCH(8, 1, 256, true); break;
++    case 12: DSV41_MOE_LAUNCH(4, 2, 64, false); break;
++    case 13: DSV41_MOE_LAUNCH(8, 1, 64, false); break;
++    case 5: DSV41_MOE_LAUNCH(4, 2, 192, false); break;
++    case 6: DSV41_MOE_LAUNCH(8, 1, 96, false); break;
++    case 7: DSV41_MOE_LAUNCH(4, 2, 96, false); break;
++    case 14: DSV41_MOE_LAUNCH(4, 1, 64, false); break;
++    case 15: DSV41_MOE_LAUNCH(4, 1, 96, false); break;
++    default: return hipErrorInvalidValue;
++  }
++#undef DSV41_MOE_LAUNCH
++  return (int)hipGetLastError();
++}
++
++// Decode / verify rows: no routing pass. ids = [rows * top_k] expert ids (-1 for dead rows); A, W, S, out as in dsv41_moe_gemm. cfg as above, but
++// only the variants with TM = 1 register footprints matter here (0, 1, 2, 3 for K = 5120; 12, 13, 5, 6, 7 for K = 576).
++extern "C" int dsv41_moe_gemm_decode(const void* A, long a_stride, int a_div, const void* W, const void* S, const int* ids, int nslots,
++                                     int num_experts, void* out, int N, int K, int cfg, void* stream) {
++  using namespace dsv41moe;
++  const hipStream_t st = (hipStream_t)stream;
++  const uint16_t* a = (const uint16_t*)A;
++  const uint8_t* w = (const uint8_t*)W;
++  const uint8_t* s = (const uint8_t*)S;
++  uint16_t* o = (uint16_t*)out;
++  const bool sc32 = (K / 32) % 4 == 0;
++#define DSV41_MOE_DLAUNCH(WAVES_, TN_, KST_, SC_)                                                                                       \
++  do {                                                                                                                                  \
++    constexpr int bn = (WAVES_) * (TN_) * 16;                                                                                            \
++    if (N % bn || K % (KST_) || sc32 != (SC_) || nslots > (WAVES_) * 32) return hipErrorInvalidValue;                                    \
++    const dim3 grid(N / bn, nslots), block((WAVES_) * 32);                                                                               \
++    hipLaunchKernelGGL((moe_gemm_decode_kernel<WAVES_, TN_, KST_, SC_>), grid, block, 0, st, a, a_stride, a_div, w, s, ids, nslots, num_experts, o, N, K); \
++  } while (0)
++  switch (cfg) {
++    case 0: DSV41_MOE_DLAUNCH(4, 2, 128, true); break;
++    case 1: DSV41_MOE_DLAUNCH(8, 1, 128, true); break;
++    case 2: DSV41_MOE_DLAUNCH(4, 2, 64, true); break;
++    case 3: DSV41_MOE_DLAUNCH(8, 1, 64, true); break;
++    case 4: DSV41_MOE_DLAUNCH(4, 2, 256, true); break;
++    case 8: DSV41_MOE_DLAUNCH(4, 2, 160, true); break;
++    case 9: DSV41_MOE_DLAUNCH(4, 1, 128, true); break;
++    case 10: DSV41_MOE_DLAUNCH(4, 1, 64, true); break;
++    case 11: DSV41_MOE_DLAUNCH(4, 1, 256, true); break;
++    case 16: DSV41_MOE_DLAUNCH(8, 1, 256, true); break;
++    case 17: DSV41_MOE_DLAUNCH(4, 1, 512, true); break;
++    case 18: DSV41_MOE_DLAUNCH(8, 1, 512, true); break;
++    case 12: DSV41_MOE_DLAUNCH(4, 2, 64, false); break;
++    case 13: DSV41_MOE_DLAUNCH(8, 1, 64, false); break;
++    case 5: DSV41_MOE_DLAUNCH(4, 2, 192, false); break;
++    case 6: DSV41_MOE_DLAUNCH(8, 1, 96, false); break;
++    case 7: DSV41_MOE_DLAUNCH(4, 2, 96, false); break;
++    case 14: DSV41_MOE_DLAUNCH(4, 1, 64, false); break;
++    case 15: DSV41_MOE_DLAUNCH(4, 1, 96, false); break;
++    default: return hipErrorInvalidValue;
++  }
++#undef DSV41_MOE_DLAUNCH
++  return (int)hipGetLastError();
++}
+diff --git a/sglang/kernels/ops/moe/dsv41_moe_grouped.py b/sglang/kernels/ops/moe/dsv41_moe_grouped.py
+new file mode 100644
+index 0000000..e8e7e43
+--- /dev/null
++++ b/sglang/kernels/ops/moe/dsv41_moe_grouped.py
+@@ -0,0 +1,244 @@
++"""Expert-sorted grouped WMMA GEMM for the DeepSeek-V4.1 TP4 MXFP4 routed experts on gfx1151 (hand-written HIP, `dsv41_moe_grouped.hip.cpp`).
++
++The installed prefill path runs AITER's Triton `_fused_moe_kernel_mxfp4` on 16/32-row tiles; its FP4 dequantisation (about 10 VALU lane-ops per
++weight, repeated for every tile of an expert) is the limit once the weights stream at DRAM speed. This module replaces the two GEMMs of the
++routed experts (gate/up and down) by a kernel that sorts the router's choices into per-expert tiles of up to 64 slots and dequantises each weight
++once per tile with two byte-permute lookups per four weights (see the .hip.cpp header).
++
++Same arithmetic as the installed kernel (bf16 WMMA steps of 16 K in ascending order, fp32 accumulator chain, E2M1 x E8M0 weights converted to bf16
++exactly, one bf16 rounding), so the outputs are bit-identical: `tests/moe-grouped-gpu.py` compares them with the installed kernels on
++the dumped real routing (gfx1151: every stage and the fp32 output of `fused_experts_mxfp4`, 1536-, 1792-, 2047- and 128-row calls). Two matrix-unit facts had to be
++matched to get there: the sum depends on the order of the 16 K slots of a step, and a negative-zero product leaks into it, so zero weights are +0. That holds for E8M0 scale bytes in [1, 252]; the real checkpoint's are in [117, 127]. Tensors with any other byte take
++the installed path (checked once per tensor, outside CUDA graph capture).
++
++Default off: SGLANG_DSV41_MOE_GROUPED=1 serves the prefill calls (more than 16 rows). SGLANG_DSV41_MOE_GROUPED_DECODE=1 serves the decode and verify
++calls (1..16 rows, inside `dsv41_mxfp4_decode`) with the routing-free decode kernel, `=exact` all row counts whose installed gate/up is a WMMA kernel too.
++SGLANG_DSV41_MOE_GROUPED_CFG="gate_up,down" and SGLANG_DSV41_MOE_GROUPED_DCFG pick the launch variants by number (see the cfg list in the .hip.cpp);
++SGLANG_DSV41_MOE_GROUPED_ORDER=0|1 the tile order, SGLANG_DSV41_MOE_GROUPED_MIN_ROWS the smallest prefill row count served (default 17).
++"""
++from __future__ import annotations
++
++import ctypes
++import logging
++import os
++from functools import lru_cache
++from pathlib import Path
++from typing import Optional
++
++import torch
++
++_ENABLED = os.environ.get("SGLANG_DSV41_MOE_GROUPED") == "1"
++# "1": every decode row count; "exact": row counts 1, 3, 5.. 7, 9..16 (the installed gate/up of 2, 4 and 8 rows is a different, FMA kernel, whose values the WMMA kernel
++# does not reproduce bit for bit); anything else: off
++_DECODE_MODE = os.environ.get("SGLANG_DSV41_MOE_GROUPED_DECODE", "")
++_DECODE = _DECODE_MODE in ("1", "exact")
++
++NUM_EXPERTS, HIDDEN, INTER, TOPK = 384, 5120, 576, 6
++N_GATE_UP, N_DOWN = 2 * INTER, HIDDEN
++MAX_TILE_ROWS = 64
++
++# Launch variant per GEMM: (waves x n-tiles per wave, K stage) numbered as in `dsv41_moe_gemm`; overridden by SGLANG_DSV41_MOE_GROUPED_CFG.
++# Defaults from the first gfx1151 sweeps (strix-4, real routing): longer contiguous weight runs per row (K stage 256) and one n-tile per wave win for gate/up.
++_DEFAULT_CFG = {"gate_up": 16, "down": 13}
++_DEFAULT_DCFG = {"gate_up": 16, "down": 15}
++_GATE_UP_CFGS = (0, 1, 2, 3, 4, 8, 9, 10, 11, 16)
++_DECODE_GATE_UP_CFGS = _GATE_UP_CFGS + (17, 18)
++_DOWN_CFGS = (12, 13, 5, 6, 7, 14, 15)
++
++# Smallest prefill row count served by the grouped kernels (the late layers of a 1536-row chunk carry 128 rows, where the installed BM16 tiles already run at ~85% of the DRAM floor).
++_MIN_ROWS = int(os.environ.get("SGLANG_DSV41_MOE_GROUPED_MIN_ROWS", "17"))
++# Order of the tiles in the grid: 0 = by expert (hot and cold experts interleave), 1 = biggest tiles first (2-3% faster at 1536 rows on strix-4).
++_ORDER = int(os.environ.get("SGLANG_DSV41_MOE_GROUPED_ORDER", "1"))
++_lib = None
++_scale_ok: dict = {}
++_seen = set()
++
++
++def enabled() -> bool:
++    return _ENABLED or _DECODE
++
++
++@lru_cache(maxsize=None)
++def _is_gfx1151(device: torch.device) -> bool:
++    return (
++        device.type == "cuda"
++        and bool(torch.version.hip)
++        and torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] == "gfx1151"
++    )
++
++
++def _load():
++    global _lib
++    if _lib is None:
++        path = os.environ.get("SGLANG_DSV41_MOE_GROUPED_SO") or str(Path(__file__).with_name("libdsv41_moe_grouped.so"))
++        lib = ctypes.CDLL(path)
++        lib.dsv41_moe_route.restype = ctypes.c_int
++        lib.dsv41_moe_gemm.restype = ctypes.c_int
++        lib.dsv41_moe_tiles_capacity.restype = ctypes.c_int
++        _lib = lib
++    return _lib
++
++
++@lru_cache(maxsize=None)
++def _lib_ok() -> bool:
++    """The prebuilt library loads (a missing or mismatched .so disables the grouped path instead of failing inside a layer)."""
++    try:
++        _load()
++        return True
++    except OSError as e:
++        logging.getLogger(__name__).warning("DSV41 grouped MoE disabled: cannot load libdsv41_moe_grouped.so: %s", e)
++        return False
++
++
++def cfg_for(kind: str) -> int:
++    """Launch variant of the 'gate_up' or 'down' GEMM."""
++    spec = os.environ.get("SGLANG_DSV41_MOE_GROUPED_CFG", "")
++    if spec:
++        gate_up, down = (int(v) for v in spec.split(","))
++        value = gate_up if kind == "gate_up" else down
++        if value not in (_GATE_UP_CFGS if kind == "gate_up" else _DOWN_CFGS):
++            raise ValueError(f"SGLANG_DSV41_MOE_GROUPED_CFG: {value} is not a {kind} variant")
++        return value
++    return _DEFAULT_CFG[kind]
++
++
++def decode_cfg_for(kind: str) -> int:
++    spec = os.environ.get("SGLANG_DSV41_MOE_GROUPED_DCFG", "")
++    if spec:
++        gate_up, down = (int(v) for v in spec.split(","))
++        value = gate_up if kind == "gate_up" else down
++        if value not in (_DECODE_GATE_UP_CFGS if kind == "gate_up" else _DOWN_CFGS):
++            raise ValueError(f"SGLANG_DSV41_MOE_GROUPED_DCFG: {value} is not a {kind} variant")
++        return value
++    return _DEFAULT_DCFG[kind]
++
++
++def scales_ok(scale: torch.Tensor) -> bool:
++    """True when every E8M0 byte of `scale` is in [1, 252] (exact bf16 weights). Computed once per tensor; while a CUDA graph is being captured an
++    unseen tensor is refused rather than synchronised on."""
++    key = (scale.data_ptr(), tuple(scale.shape))
++    ok = _scale_ok.get(key)
++    if ok is None:
++        if torch.cuda.is_current_stream_capturing():
++            return False
++        s8 = scale.view(torch.uint8)
++        ok = int(s8.min()) >= 1 and int(s8.max()) <= 252
++        _scale_ok[key] = ok
++    return ok
++
++
++def _shape_ok(x, shape, dtypes) -> bool:
++    return tuple(x.shape) == shape and x.dtype in dtypes and x.is_contiguous()
++
++
++def supported(hidden_states, w13, w2, s13, s2, topk_ids, rows_min: Optional[int] = None) -> bool:
++    """Whether the grouped kernels take this routed-expert call (exact TP4 geometry, bf16 activations, gfx1151, flags)."""
++    x = hidden_states
++    if x.ndim != 2 or x.dtype != torch.bfloat16 or x.shape[1] != HIDDEN or not x.is_contiguous():
++        return False
++    m = x.shape[0]
++    if not ((m > 16 and _ENABLED and m >= _MIN_ROWS) or (1 <= m <= 16 and _DECODE)):
++        return False
++    if rows_min is not None and m < rows_min:
++        return False
++    i8 = (torch.int8, torch.uint8)
++    e8 = (torch.uint8, torch.float8_e8m0fnu)
++    if not (
++        _shape_ok(w13, (NUM_EXPERTS, N_GATE_UP, HIDDEN // 2), i8)
++        and _shape_ok(w2, (NUM_EXPERTS, N_DOWN, INTER // 2), i8)
++        and _shape_ok(s13, (NUM_EXPERTS, N_GATE_UP, HIDDEN // 32), e8)
++        and _shape_ok(s2, (NUM_EXPERTS, N_DOWN, INTER // 32), e8)
++        and _shape_ok(topk_ids, (m, TOPK), (torch.int32,))
++    ):
++        return False
++    if not (x.device == w13.device == w2.device == s13.device == s2.device == topk_ids.device):
++        return False
++    if not _is_gfx1151(x.device) or not _lib_ok():
++        return False
++    return scales_ok(s13) and scales_ok(s2)
++
++
++class Routes:
++    """The router's choices sorted into per-expert tiles (device tensors); build once per layer call, use for both GEMMs."""
++
++    __slots__ = ("slots", "tiles", "ntiles", "capacity")
++
++    def __init__(self, topk_ids: torch.Tensor):
++        n_slots = topk_ids.numel()
++        lib = _load()
++        self.capacity = int(lib.dsv41_moe_tiles_capacity(n_slots, NUM_EXPERTS))
++        dev = topk_ids.device
++        self.slots = torch.empty(n_slots, dtype=torch.int32, device=dev)
++        self.tiles = torch.empty(self.capacity * 3, dtype=torch.int32, device=dev)
++        self.ntiles = torch.empty(1, dtype=torch.int32, device=dev)
++        rc = lib.dsv41_moe_route(
++            ctypes.c_void_p(topk_ids.data_ptr()), ctypes.c_int(n_slots), ctypes.c_int(NUM_EXPERTS), ctypes.c_void_p(self.slots.data_ptr()),
++            ctypes.c_void_p(self.tiles.data_ptr()), ctypes.c_void_p(self.ntiles.data_ptr()), ctypes.c_int(_ORDER),
++            ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
++        )
++        if rc != 0:
++            raise RuntimeError(f"dsv41_moe_route failed: hip error {rc}")
++
++
++def _gemm(a, a_div, w, s, routes: Routes, out, n, k, cfg):
++    key = (n, k, cfg, a.shape[0] if a.shape[0] <= 16 else 17)
++    if key not in _seen:
++        _seen.add(key)
++        logging.getLogger(__name__).info("DSV41 grouped MoE GEMM active: N=%s K=%s cfg=%s rows=%s", n, k, cfg, key[3])
++    rc = _load().dsv41_moe_gemm(
++        ctypes.c_void_p(a.data_ptr()), ctypes.c_long(a.shape[1]), ctypes.c_int(a_div), ctypes.c_void_p(w.data_ptr()),
++        ctypes.c_void_p(s.data_ptr()), ctypes.c_void_p(routes.slots.data_ptr()), ctypes.c_void_p(routes.tiles.data_ptr()),
++        ctypes.c_void_p(routes.ntiles.data_ptr()), ctypes.c_int(routes.capacity), ctypes.c_void_p(out.data_ptr()), ctypes.c_int(n),
++        ctypes.c_int(k), ctypes.c_int(cfg), ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
++    )
++    if rc != 0:
++        raise RuntimeError(f"dsv41_moe_gemm failed: hip error {rc} (N={n} K={k} cfg={cfg})")
++    return out
++
++
++def gate_up(a1: torch.Tensor, w13: torch.Tensor, s13: torch.Tensor, routes: Routes, out: torch.Tensor) -> torch.Tensor:
++    """a1 bf16 [M, 5120] -> out bf16 [M, 6, 1152] (the gate and up halves, as the installed kernel writes them)."""
++    return _gemm(a1, TOPK, w13, s13, routes, out, N_GATE_UP, HIDDEN, cfg_for("gate_up"))
++
++
++def down(a2: torch.Tensor, w2: torch.Tensor, s2: torch.Tensor, routes: Routes, out: torch.Tensor) -> torch.Tensor:
++    """a2 bf16 [M * 6, 576] (one activated row per slot) -> out bf16 [M, 6, 5120]."""
++    return _gemm(a2, 1, w2, s2, routes, out, N_DOWN, INTER, cfg_for("down"))
++
++
++# ---- decode / verify rows (1..16 tokens): no routing pass, the GEMM kernels find each expert's slots themselves
++def decode_serves(rows: int, gate_up_gemm: bool) -> bool:
++    """Whether the decode kernels take a `rows`-token call. `exact` leaves the gate/up of 2, 4 and 8 rows (an FMA kernel) alone."""
++    if not _DECODE or not 1 <= rows <= 16:
++        return False
++    return not (_DECODE_MODE == "exact" and gate_up_gemm and rows in (2, 4, 8))
++
++
++def decode_weights_ok(s13: torch.Tensor, s2: torch.Tensor) -> bool:
++    return _lib_ok() and scales_ok(s13) and scales_ok(s2)
++
++
++def _decode_gemm(a, a_div, w, s, ids, out, n, k, cfg):
++    key = ("decode", n, k, cfg, a.shape[0] if a_div == 6 else a.shape[0] // 6)
++    if key not in _seen:
++        _seen.add(key)
++        logging.getLogger(__name__).info("DSV41 grouped MoE decode GEMM active: N=%s K=%s cfg=%s rows=%s", n, k, cfg, key[4])
++    rc = _load().dsv41_moe_gemm_decode(
++        ctypes.c_void_p(a.data_ptr()), ctypes.c_long(a.shape[1]), ctypes.c_int(a_div), ctypes.c_void_p(w.data_ptr()),
++        ctypes.c_void_p(s.data_ptr()), ctypes.c_void_p(ids.data_ptr()), ctypes.c_int(ids.numel()), ctypes.c_int(NUM_EXPERTS),
++        ctypes.c_void_p(out.data_ptr()), ctypes.c_int(n), ctypes.c_int(k), ctypes.c_int(cfg),
++        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
++    )
++    if rc != 0:
++        raise RuntimeError(f"dsv41_moe_gemm_decode failed: hip error {rc} (N={n} K={k} cfg={cfg})")
++    return out
++
++
++def decode_gate_up(a1: torch.Tensor, w13: torch.Tensor, s13: torch.Tensor, ids: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
++    """a1 bf16 [M, 5120], ids int32 [M, 6] (-1 for dead rows) -> out bf16 [M, 6, 1152]; slots with id -1 are written as zeros."""
++    return _decode_gemm(a1, TOPK, w13, s13, ids, out, N_GATE_UP, HIDDEN, decode_cfg_for("gate_up"))
++
++
++def decode_down(a2: torch.Tensor, w2: torch.Tensor, s2: torch.Tensor, ids: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
++    """a2 bf16 [M * 6, 576] -> out bf16 [M, 6, 5120]."""
++    return _decode_gemm(a2, 1, w2, s2, ids, out, N_DOWN, INTER, decode_cfg_for("down"))
+diff --git a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+index bb8230e..1ee65de 100644
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+@@ -257,6 +257,7 @@ def fused_experts_mxfp4(
+     )
+ 
+     prefill_glue = False
++    use_grouped = False
+     if hidden_states.shape[0] == 0:
+         if no_combine:
+             return hidden_states.new_empty(
+@@ -306,6 +307,14 @@ def fused_experts_mxfp4(
+             hidden_states, w13_weight, w2_weight, topk_weights, topk_ids,
+             routed_scaling_factor, swiglu_limit,
+         )
++        # Opt-in expert-sorted grouped WMMA GEMMs (SGLANG_DSV41_MOE_GROUPED=1): same arithmetic, the FP4 dequantisation once per tile.
++        from sglang.kernels.ops.moe import dsv41_moe_grouped as grouped
++
++        use_grouped = (
++            grouped.enabled()
++            and swiglu_limit == 10
++            and grouped.supported(hidden_states, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale, topk_ids)
++        )
+ 
+     if not official_routed_policy and not no_combine and not apply_router_weight_on_input:
+         # DSpark draft stages (128 experts, top-3, 1..16 rows): four owner-routed launches instead of ~50, same
+@@ -337,9 +346,12 @@ def fused_experts_mxfp4(
+         hidden_states.shape[1],
+         intermediate_size,
+     )
+-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+-        topk_ids, config["BLOCK_SIZE_M"], num_experts
+-    )
++    if use_grouped:
++        sorted_token_ids = expert_ids = num_tokens_post_padded = None
++    else:
++        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
++            topk_ids, config["BLOCK_SIZE_M"], num_experts
++        )
+ 
+     gate_up = torch.empty(
+         (num_tokens, top_k, 2 * intermediate_size),
+@@ -356,20 +368,24 @@ def fused_experts_mxfp4(
+         (prefill_operand(hidden_states) if prefill_glue else _official_routed_operand(hidden_states))
+         if official_routed_policy else hidden_states
+     )
+-    _run_mxfp4_gemm(
+-        gate_up_input,
+-        w13_weight,
+-        gate_up,
+-        w13_weight_scale,
+-        topk_weights,
+-        topk_ids,
+-        sorted_token_ids,
+-        expert_ids,
+-        num_tokens_post_padded,
+-        config=gate_up_config,
+-        top_k=top_k,
+-        mul_routed_weight=apply_router_weight_on_input,
+-    )
++    if use_grouped:
++        routes = grouped.Routes(topk_ids)
++        grouped.gate_up(gate_up_input, w13_weight, w13_weight_scale, routes, gate_up)
++    else:
++        _run_mxfp4_gemm(
++            gate_up_input,
++            w13_weight,
++            gate_up,
++            w13_weight_scale,
++            topk_weights,
++            topk_ids,
++            sorted_token_ids,
++            expert_ids,
++            num_tokens_post_padded,
++            config=gate_up_config,
++            top_k=top_k,
++            mul_routed_weight=apply_router_weight_on_input,
++        )
+ 
+     if prefill_glue:
+         # One kernel for clamp, silu*up, route scale, bf16 rounding and the group-32 quantise-dequantise (bitwise the chain below).
+@@ -401,23 +417,26 @@ def fused_experts_mxfp4(
+     )
+     # sorted_token_ids addresses flattened token/expert assignments here.
+     # top_k=1 is therefore required for the already-expanded activation.
+-    _run_mxfp4_gemm(
+-        activated,
+-        w2_weight,
+-        routed_output,
+-        w2_weight_scale,
+-        topk_weights,
+-        topk_ids,
+-        sorted_token_ids,
+-        expert_ids,
+-        num_tokens_post_padded,
+-        config=down_moe_config(
+-            config, get_arch(), num_tokens, top_k, num_experts,
+-            hidden_states.shape[1], intermediate_size,
+-        ),
+-        top_k=1,
+-        mul_routed_weight=not apply_router_weight_on_input and not official_routed_policy,
+-    )
++    if use_grouped:
++        grouped.down(activated, w2_weight, w2_weight_scale, routes, routed_output)
++    else:
++        _run_mxfp4_gemm(
++            activated,
++            w2_weight,
++            routed_output,
++            w2_weight_scale,
++            topk_weights,
++            topk_ids,
++            sorted_token_ids,
++            expert_ids,
++            num_tokens_post_padded,
++            config=down_moe_config(
++                config, get_arch(), num_tokens, top_k, num_experts,
++                hidden_states.shape[1], intermediate_size,
++            ),
++            top_k=1,
++            mul_routed_weight=not apply_router_weight_on_input and not official_routed_policy,
++        )
+     if official_routed_policy:
+         from sglang.kernels.ops.moe.dsv41_prefill_combine import (
+             current_combine_state, try_combine_routes_shared,

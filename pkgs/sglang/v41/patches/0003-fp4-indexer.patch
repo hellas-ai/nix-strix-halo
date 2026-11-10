@@ -1,0 +1,175 @@
+--- a/sglang/kernels/ops/attention/dsv4/candidate_blocks_hip.py
++++ b/sglang/kernels/ops/attention/dsv4/candidate_blocks_hip.py
+@@ -11,6 +11,7 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.ops.attention.dsv4 import topk_transform_paged
++from sglang.kernels.ops.attention.dsv4.fp4_indexer_gfx1151 import use_gfx1151_indexer
+ 
+ # the k the AOT fast_topk op (topk_hip.hip) is instantiated for; any other k takes torch.topk
+ _AOT_FAST_TOPK_K = 2048
+@@ -280,7 +281,9 @@
+     rows, width = logits.shape
+     device = logits.device
+     num_blocks = triton.cdiv(width, block_size)
+-    use_aot = topk_blocks == _AOT_FAST_TOPK_K
++    # The native cooperative top-k hardcodes 64-lane waves (gfx942/gfx950).
++    # On gfx1151 it can omit the mandatory newest (+inf) candidate block.
++    use_aot = topk_blocks == _AOT_FAST_TOPK_K and not use_gfx1151_indexer(device)
+     scores = candidate_block_scores(
+         logits, seq_lens, block_size=block_size, fill_tail=not use_aot
+     )
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
+@@ -0,0 +1,92 @@
++"""Wave32 FP4 paged indexer, preserving the split FlyDSL byte layout.
++
++The fallback keeps Q/K packed in memory. Each program unpacks only 16 keys,
++reduces a head in FP32, applies ReLU, then sums scaled head scores. It requires
++neither matrix instructions nor persistent FlyDSL scheduling scratch.
++"""
++
++import torch
++import triton
++import triton.language as tl
++
++
++def use_gfx1151_indexer(device: torch.device) -> bool:
++    return bool(torch.version.hip) and (
++        torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    )
++
++
++@triton.jit
++def _e2m1(code):
++    mag = code & 7
++    value = tl.where(mag < 2, mag * 0.5,
++                    tl.where(mag < 4, (mag - 2) * 0.5 + 1.0,
++                             tl.where(mag < 6, mag - 2.0, (mag - 6) * 2.0 + 4.0)))
++    return tl.where((code & 8) != 0, -value, value)
++
++
++@triton.jit
++def _paged_logits(
++    Q, QS, K, KS, W, PT, LENS, OUT,
++    q_stride, qs_stride, w_stride, pt_stride,
++    WIDTH: tl.constexpr, PAGE_COLS: tl.constexpr, PAGES: tl.constexpr,
++    HEADS: tl.constexpr, WEIGHT_SCALE: tl.constexpr, BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    pos = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    dim = tl.arange(0, 128)
++    length = tl.load(LENS + row)
++    live = (pos < length) & (pos < WIDTH) & (pos // 64 < PAGE_COLS)
++    page = tl.load(PT + row * pt_stride + pos // 64, mask=live, other=0)
++    live = live & (page >= 0) & (page < PAGES)
++    off = pos % 64
++    kb = tl.load(
++        K + page[:, None].to(tl.int64) * 4096 + (dim[None, :] // 32) * 1024
++        + off[:, None] * 16 + (dim[None, :] % 32) // 2,
++        mask=live[:, None], other=0,
++    ).to(tl.int32)
++    ke = tl.load(
++        KS + page[:, None].to(tl.int64) * 256 + (dim[None, :] // 32) * 64
++        + (off[:, None] % 16) * 4 + off[:, None] // 16,
++        mask=live[:, None], other=127,
++    ).to(tl.int32)
++    kval = _e2m1((kb >> ((dim[None, :] % 2) * 4)) & 15)
++    kval *= (ke << 23).to(tl.float32, bitcast=True)
++    score = tl.full((BLOCK,), 0, tl.float32)
++    for head in range(HEADS):
++        qb = tl.load(Q + row * q_stride + head * 64 + dim // 2).to(tl.int32)
++        qe = tl.load(QS + row * qs_stride + (dim // 32) * 64
++                     + (head % 16) * 4 + head // 16).to(tl.int32)
++        qval = _e2m1((qb >> ((dim % 2) * 4)) & 15)
++        qval *= (qe << 23).to(tl.float32, bitcast=True)
++        dot = tl.sum(kval * qval[None, :], axis=1)
++        weight = tl.load(W + row * w_stride + head).to(tl.float32)
++        score += tl.maximum(dot, 0.0) * weight
++    tl.store(OUT + row * WIDTH + pos,
++             tl.where(live, score * WEIGHT_SCALE, float("-inf")), mask=pos < WIDTH)
++
++
++def paged_fp4_logits(q, q_scale, k, k_scale, weights, page_table, lengths,
++                     weight_scale, out):
++    """Fill every score, including -inf for padded or unreachable positions."""
++    rows, heads, packed_dim = q.shape
++    assert packed_dim == 64 and 0 < heads <= 64 and heads % 16 == 0
++    assert q.stride(-1) == 1 and q.stride(-2) == 64
++    assert q_scale.shape[1:] == (1, 4, 16, 4)
++    assert q_scale.is_contiguous()
++    assert k.shape[1:] == (1, 4, 64, 16) and k.is_contiguous()
++    assert k_scale.shape == k.shape[:3] + (64,) and k_scale.is_contiguous()
++    assert weights.shape == (rows, heads) and weights.stride(1) == 1
++    assert page_table.shape[0] == rows and page_table.stride(1) == 1
++    assert lengths.numel() == rows and lengths.is_contiguous()
++    if rows == 0:
++        return out
++    _paged_logits[(rows, triton.cdiv(out.shape[1], 16))](
++        q.view(torch.uint8), q_scale, k.view(torch.uint8), k_scale, weights,
++        page_table, lengths, out, q.stride(0), q_scale.stride(0),
++        weights.stride(0), page_table.stride(0), WIDTH=out.shape[1],
++        PAGE_COLS=page_table.shape[1], PAGES=k.shape[0], HEADS=heads,
++        WEIGHT_SCALE=weight_scale, BLOCK=16, num_warps=4, enable_fp_fusion=False,
++    )
++    return out
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_hip.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_hip.py
+@@ -12,6 +12,10 @@
+ from sglang.kernels.ops.attention.dsv4.fp4_indexer import (
+     quantize_fp4_indexer_row,
+     quantize_fp4_indexer_tensor,
++)
++from sglang.kernels.ops.attention.dsv4.fp4_indexer_gfx1151 import (
++    paged_fp4_logits,
++    use_gfx1151_indexer,
+ )
+ from sglang.kernels.ops.attention.dsv4.fp4_rope_fake_quant import (
+     FP4_AMAX_FLOOR,
+@@ -228,6 +232,9 @@
+     )
+     c4_seq_lens = _as_int32_1d(c4_seq_lens)
+     num_queries = guarded.shape[0]
++    if use_gfx1151_indexer(page_table.device):
++        empty = torch.empty(0, dtype=torch.int32, device=page_table.device)
++        return FP4DecodeWorkspace(guarded, c4_seq_lens, empty, 0, max_seq_len, empty)
+     cta_count = _decode_cta_count(num_queries, max_seq_len)
+     cta_info = torch.empty(
+         (cta_count, _DECODE_CTA_INFO_WIDTH),
+@@ -257,6 +264,15 @@
+     the graph read only the pinned ``cta_info`` / ``logits`` / page-table
+     buffers.
+     """
++    if use_gfx1151_indexer(page_table.device):
++        c4_seq_lens = _as_int32_1d(c4_seq_lens)
++        guarded, max_seq_len = _guard_page_table(
++            page_table,
++            out=None if workspace is None else workspace.guarded_page_table,
++            page_table_bucket=page_table_bucket,
++        )
++        empty = torch.empty(0, dtype=torch.int32, device=page_table.device)
++        return FP4PrefillWorkspace(guarded, empty, empty, empty, 0, max_seq_len)
+     from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
+         CTA_INFO_WIDTH,
+     )
+@@ -323,6 +339,19 @@
+     page_table_bucket: int = 4,
+ ) -> torch.Tensor:
+     """Compute FP4 Q/K indexer logits with the decode or prefill FlyDSL kernel."""
++    if use_gfx1151_indexer(q_fp4.device):
++        workspace = decode_workspace if is_decode else prefill_workspace
++        if workspace is not None and workspace.guarded_page_table.shape[0] == q_fp4.shape[0]:
++            pages, max_seq_len = workspace.guarded_page_table, workspace.max_seq_len
++        else:
++            pages, max_seq_len = _guard_page_table(
++                page_table, page_table_bucket=page_table_bucket
++            )
++        logits = _alloc_logits(q_fp4.shape[0], max_seq_len, q_fp4.device, is_decode)
++        return paged_fp4_logits(
++            q_fp4, q_scale, k_payload, k_scale, weights, pages,
++            _as_int32_1d(c4_seq_lens), weight_scale, logits,
++        )
+     from aiter.ops.flydsl import (
+         flydsl_pa_mqa_logits_fp4,
+         flydsl_pa_mqa_logits_fp4_prefill,

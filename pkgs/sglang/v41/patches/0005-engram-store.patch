@@ -1,0 +1,492 @@
+--- /dev/null
++++ b/sglang/srt/layers/engram_store.py
+@@ -0,0 +1,390 @@
++"""Bounded, byte-preserving Engram I/O. No full-table mapping or allocation.
++
++The caller supplies CPU IDs before model execution. GPU graph replay must consume
++an explicitly refreshed staging buffer; Python file I/O cannot be captured.
++Native files remain immutable for the lifetime of the store.
++"""
++
++from __future__ import annotations
++
++from concurrent.futures import ThreadPoolExecutor
++from dataclasses import dataclass
++import json
++import os
++from pathlib import Path
++import re
++import struct
++import threading
++
++import numpy as np
++import torch
++
++
++ROW_BYTES = 264
++WEIGHT_BYTES = 256
++SCALE_BYTES = 8
++_HEADER_BYTES = 4096
++_MAGIC = b"SGENR001"
++_MAX_HEADER_BYTES = 16 << 20
++_ENGRAM_KEY = re.compile(r"(?:model\.)?layers\.\d+\.engram\.embed\.(?:weight|scale)$")
++
++
++def file_backed_engram_enabled() -> bool:
++    from sglang.srt.environ import envs
++
++    return (envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.get()
++            and envs.SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT.get() == "file")
++
++
++def weights_without_engram(hf_weights_files):
++    """Skip Engram before get_tensor; no shard prefetch or whole-file read.
++
++    Pure Engram shards are not even mmap'ed. Mixed shards expose only other
++    tensors through safetensors' ordinary demand-paged CPU views.
++    """
++    import safetensors
++
++    for path in hf_weights_files:
++        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
++        try:
++            header = _native_header(fd)[0]
++        finally:
++            os.close(fd)
++        names = [name for name in header
++                 if name != "__metadata__" and not _ENGRAM_KEY.fullmatch(name)]
++        if names:
++            with safetensors.safe_open(path, framework="pt", device="cpu") as source:
++                for name in names:
++                    yield name, source.get_tensor(name)
++
++
++def _read_exact(fd: int, length: int, offset: int) -> bytes:
++    # pread neither changes a shared file position nor maps unrequested pages.
++    result = bytearray()
++    while len(result) < length:
++        chunk = os.pread(fd, length - len(result), offset + len(result))
++        if not chunk:
++            raise OSError(f"short Engram read at byte {offset + len(result)}")
++        result.extend(chunk)
++    return bytes(result)
++
++
++def _integer(value, label: str) -> int:
++    if type(value) is not int or value < 0:
++        raise ValueError(f"invalid {label}: {value!r}")
++    return value
++
++
++def _native_header(fd: int):
++    size = os.fstat(fd).st_size
++    length = struct.unpack("<Q", _read_exact(fd, 8, 0))[0]
++    if not 2 <= length <= min(_MAX_HEADER_BYTES, size - 8):
++        raise ValueError("invalid or excessive safetensors header length")
++    header = json.loads(_read_exact(fd, length, 8))
++    return header, length, size
++
++
++def _native_tensor(fd: int, key: str, width: int, dtype: str):
++    header, length, size = _native_header(fd)
++    entry = header[key]
++    shape = entry["shape"]
++    if len(shape) != 2 or shape[1] != width or entry["dtype"] != dtype:
++        raise ValueError(f"invalid native Engram tensor {key}: {entry}")
++    rows = _integer(shape[0], "tensor row count")
++    begin, end = [_integer(v, "tensor offset") for v in entry["data_offsets"]]
++    if end - begin != rows * width or 8 + length + end > size:
++        raise ValueError(f"invalid native Engram byte range: {key}")
++    return rows, 8 + length + begin
++
++
++@dataclass(frozen=True)
++class RowBatch:
++    """Owned rows in request order; unowned/masked rows contain zero bytes."""
++
++    packed: np.ndarray
++    owned: np.ndarray
++    unique_rows: int
++    read_operations: int
++    bytes_read: int
++
++    def dequantize(self, device="cpu") -> torch.Tensor:
++        """Native FP8 x E8M0, FP32 multiply, then one BF16 rounding."""
++        raw = torch.from_numpy(self.packed).to(device=device)
++        return dequantize_packed_rows(raw)
++
++
++def dequantize_packed_rows(raw: torch.Tensor) -> torch.Tensor:
++    """Graph-capturable decoding of a caller-owned, explicitly refreshed buffer.
++
++    File I/O and staging readiness belong outside graph capture. The caller must
++    finish CPU reads, keep H2D source storage alive, and order staging copies before
++    graph replay on the same stream (or with explicit stream events).
++    """
++    if raw.dtype != torch.uint8 or raw.ndim < 1 or raw.shape[-1] != ROW_BYTES:
++        raise ValueError("packed Engram rows must be uint8 [..., 264]")
++    weights = raw[..., :WEIGHT_BYTES].contiguous().view(torch.float8_e4m3fn)
++    scales = raw[..., WEIGHT_BYTES:].contiguous().view(torch.float8_e8m0fnu)
++    values = weights.float().unflatten(-1, (SCALE_BYTES, 32))
++    values = (values * scales.float().unsqueeze(-1)).flatten(-2)
++    return values.to(torch.bfloat16)
++
++
++class EngramRowStore:
++    """Immutable native/packed backing with bounded concurrent positional reads.
++
++    Limits count all requested IDs, including duplicates and masked IDs. Each
++    lookup owns its result; subsequent lookups cannot overwrite it. No row cache
++    or resident scale array is allocated. Kernel page cache is OS-managed.
++    """
++
++    def __init__(self, *, max_batch_rows=4096, io_workers=8, max_read_bytes=1 << 20):
++        if type(max_batch_rows) is not int or not 1 <= max_batch_rows <= 65536:
++            raise ValueError("max_batch_rows must be in [1, 65536]")
++        if type(io_workers) is not int or not 1 <= io_workers <= 32:
++            raise ValueError("io_workers must be in [1, 32]")
++        if type(max_read_bytes) is not int or not ROW_BYTES <= max_read_bytes <= 16 << 20:
++            raise ValueError("max_read_bytes must be in [264, 16 MiB]")
++        self.max_batch_rows = max_batch_rows
++        self.max_read_bytes = max_read_bytes
++        self._fds = []
++        self._pool = ThreadPoolExecutor(max_workers=io_workers, thread_name_prefix="engram-io")
++        self._lock = threading.Lock()
++        self._closed = False
++        self._packed = False
++
++    def _open(self, path):
++        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
++        self._fds.append(fd)
++        return fd
++
++    def _range(self, total, start, end):
++        self.num_embeddings = _integer(total, "total row count")
++        self.row_start = _integer(start, "row_start")
++        self.row_end = total if end is None else _integer(end, "row_end")
++        if not self.row_start <= self.row_end <= total:
++            raise ValueError("owned row range exceeds the table")
++
++    @classmethod
++    def from_checkpoint(cls, directory, layer_id, num_embeddings, **limits):
++        root = Path(directory).resolve()
++        index = root / "model.safetensors.index.json"
++        if index.stat().st_size > _MAX_HEADER_BYTES:
++            raise ValueError("excessive safetensors index size")
++        mapping = json.loads(index.read_bytes())["weight_map"]
++        prefix = f"layers.{layer_id}.engram.embed."
++        if prefix + "weight" not in mapping:
++            prefix = "model." + prefix
++        keys = [prefix + "weight", prefix + "scale"]
++        paths = [(root / mapping[key]).resolve() for key in keys]
++        if any(not path.is_relative_to(root) for path in paths):
++            raise ValueError("Engram shard is outside the checkpoint directory")
++        store = cls.from_safetensors(paths[0], keys[0], paths[1], keys[1], **limits)
++        if store.num_embeddings != num_embeddings:
++            store.close()
++            raise ValueError("Engram checkpoint row count differs from model config")
++        return store
++
++    @classmethod
++    def from_safetensors(cls, weight_path, weight_key, scale_path, scale_key,
++                         *, row_start=0, row_end=None, **limits):
++        store = cls(**limits)
++        try:
++            store._wfd = store._open(weight_path)
++            store._sfd = (store._wfd if Path(weight_path) == Path(scale_path)
++                           else store._open(scale_path))
++            rows, store._woff = _native_tensor(store._wfd, weight_key, WEIGHT_BYTES, "F8_E4M3")
++            scale_rows, store._soff = _native_tensor(store._sfd, scale_key, SCALE_BYTES, "F8_E8M0")
++            if scale_rows != rows:
++                raise ValueError("weight and scale row counts differ")
++            if store._wfd == store._sfd and max(store._woff, store._soff) < min(
++                    store._woff + rows * WEIGHT_BYTES, store._soff + rows * SCALE_BYTES):
++                raise ValueError("weight and scale byte ranges overlap")
++            store._range(rows, row_start, row_end)
++            return store
++        except BaseException:
++            store.close()
++            raise
++
++    @classmethod
++    def from_packed(cls, path, **limits):
++        store = cls(**limits)
++        try:
++            store._wfd = store._open(path)
++            header = _read_exact(store._wfd, _HEADER_BYTES, 0)
++            if header[:8] != _MAGIC:
++                raise ValueError("invalid packed Engram magic/version")
++            length = struct.unpack("<Q", header[8:16])[0]
++            if not 2 <= length <= _HEADER_BYTES - 16:
++                raise ValueError("invalid packed Engram header length")
++            meta = json.loads(header[16:16 + length])
++            if meta["row_bytes"] != ROW_BYTES or meta["dtypes"] != ["F8_E4M3", "F8_E8M0"]:
++                raise ValueError("incompatible packed Engram row format")
++            store._range(meta["num_embeddings"], meta["row_start"], meta["row_end"])
++            expected = _HEADER_BYTES + (store.row_end - store.row_start) * ROW_BYTES
++            if os.fstat(store._wfd).st_size != expected:
++                raise ValueError("packed Engram file size mismatch")
++            store._packed = True
++            return store
++        except BaseException:
++            store.close()
++            raise
++
++    def close(self):
++        with self._lock:
++            if not self._closed:
++                self._closed = True
++                self._pool.shutdown(wait=True)
++                for fd in self._fds:
++                    os.close(fd)
++                self._fds.clear()
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *exc):
++        self.close()
++
++    def _read_run(self, run):
++        first, count = run
++        if self._packed:
++            raw = _read_exact(self._wfd, count * ROW_BYTES,
++                              _HEADER_BYTES + (first - self.row_start) * ROW_BYTES)
++            return np.frombuffer(raw, dtype=np.uint8).reshape(count, ROW_BYTES), 1
++        weights = _read_exact(self._wfd, count * WEIGHT_BYTES, self._woff + first * WEIGHT_BYTES)
++        scales = _read_exact(self._sfd, count * SCALE_BYTES, self._soff + first * SCALE_BYTES)
++        result = np.empty((count, ROW_BYTES), dtype=np.uint8)
++        result[:, :WEIGHT_BYTES] = np.frombuffer(weights, dtype=np.uint8).reshape(count, WEIGHT_BYTES)
++        result[:, WEIGHT_BYTES:] = np.frombuffer(scales, dtype=np.uint8).reshape(count, SCALE_BYTES)
++        return result, 2
++
++    def lookup(self, ids, *, mask=None) -> RowBatch:
++        """Read active IDs; active global OOB IDs fail, unowned IDs are zero.
++
++        False mask entries may contain arbitrary integer sentinel IDs. Inputs
++        must be CPU integers: this method performs no implicit GPU synchronization.
++        """
++        ids = self._ids(ids)
++        active = np.ones(ids.shape, dtype=bool) if mask is None else np.asarray(mask)
++        if active.dtype != np.bool_ or active.shape != ids.shape:
++            raise ValueError("mask must be boolean with the same shape as IDs")
++        if np.any(active & ((ids < 0) | (ids >= self.num_embeddings))):
++            raise IndexError("active Engram ID outside the table")
++        owned = active & (ids >= self.row_start) & (ids < self.row_end)
++        unique, inverse = np.unique(ids[owned], return_inverse=True)
++        runs = []
++        cap = self.max_read_bytes // ROW_BYTES
++        for row in unique:
++            row = int(row)
++            if runs and row == sum(runs[-1]) and runs[-1][1] < cap:
++                runs[-1][1] += 1
++            else:
++                runs.append([row, 1])
++        with self._lock:
++            if self._closed:
++                raise RuntimeError("Engram row store is closed")
++            # Drain every submitted read before releasing the lock, including on
++            # error: close must never invalidate a worker's fd during pread.
++            futures = [self._pool.submit(self._read_run, run) for run in runs]
++            try:
++                results = [future.result() for future in futures]
++            finally:
++                for future in futures:
++                    try:
++                        future.result()
++                    except BaseException:
++                        pass
++        output = np.zeros((*ids.shape, ROW_BYTES), dtype=np.uint8)
++        if results:
++            output[owned] = np.concatenate([r[0] for r in results])[inverse]
++        return RowBatch(output, owned, len(unique), sum(r[1] for r in results),
++                        len(unique) * ROW_BYTES)
++
++    def _ids(self, ids):
++        if isinstance(ids, torch.Tensor):
++            if ids.device.type != "cpu":
++                raise ValueError("Engram file lookup requires CPU IDs")
++            ids = ids.numpy()
++        # Require sized array inputs, so validation precedes any unbounded list
++        # conversion/allocation. Scheduler IDs already live in arrays/tensors.
++        if not isinstance(ids, np.ndarray):
++            raise TypeError("Engram IDs must be a NumPy array or CPU tensor")
++        if ids.size > self.max_batch_rows:
++            raise ValueError("Engram batch exceeds max_batch_rows")
++        if ids.dtype.kind not in "iu":
++            raise TypeError("Engram IDs must have an integer dtype")
++        return ids
++
++    def pack_range(self, path, start: int, count: int, *, max_output_bytes=1 << 30):
++        """Explicit bounded fixture export; never called implicitly at startup.
++
++        Refuses more than 1 GiB per call. The reader works directly from native
++        checkpoint ranges, so serving does not require a full-table packed copy.
++        """
++        start, count = _integer(start, "start"), _integer(count, "count")
++        if not self.row_start <= start <= start + count <= self.row_end:
++            raise ValueError("packed range is not owned")
++        if not 0 < max_output_bytes <= 1 << 30:
++            raise ValueError("max_output_bytes must be in (0, 1 GiB]")
++        size = _HEADER_BYTES + count * ROW_BYTES
++        if size > max_output_bytes:
++            raise ValueError("packed fixture exceeds output budget")
++        meta = json.dumps(dict(num_embeddings=self.num_embeddings, row_start=start,
++                               row_end=start + count, row_bytes=ROW_BYTES,
++                               dtypes=["F8_E4M3", "F8_E8M0"])).encode()
++        header = _MAGIC + struct.pack("<Q", len(meta)) + meta
++        created = False
++        try:
++            with open(path, "xb") as output:
++                created = True
++                output.write(header.ljust(_HEADER_BYTES, b"\0"))
++                for first in range(start, start + count, self.max_batch_rows):
++                    ids = np.arange(first, min(start + count, first + self.max_batch_rows), dtype=np.int64)
++                    output.write(self.lookup(ids).packed.tobytes())
++        except BaseException:
++            if created:
++                os.unlink(path)
++            raise
++
++
++class EngramPrefetcher:
++    """Bounded CPU readiness futures; errors/cancellation never publish old rows.
++
++    One coordinator feeds the store's concurrent I/O workers. The caller owns the
++    store lifetime and must close the prefetcher before closing its store. Results
++    are separate RowBatch objects, so a completed request never aliases the next.
++    This does not schedule GPU work or execute a host callback inside a graph.
++    """
++
++    def __init__(self, store: EngramRowStore, *, max_pending=2):
++        if type(max_pending) is not int or not 1 <= max_pending <= 8:
++            raise ValueError("max_pending must be in [1, 8]")
++        self.store = store
++        self._slots = threading.BoundedSemaphore(max_pending)
++        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="engram-prefetch")
++
++    def submit(self, ids, *, mask=None):
++        ids = self.store._ids(ids)
++        if mask is not None:
++            mask = np.asarray(mask)
++            if mask.dtype != np.bool_ or mask.shape != ids.shape:
++                raise ValueError("mask must be boolean with the same shape as IDs")
++        if not self._slots.acquire(blocking=False):
++            raise RuntimeError("Engram prefetch queue is full")
++        try:
++            # A scheduler may reuse/change its ID and mask arrays immediately.
++            future = self._pool.submit(self.store.lookup, ids.copy(),
++                                       mask=None if mask is None else mask.copy())
++        except BaseException:
++            self._slots.release()
++            raise
++        future.add_done_callback(lambda _: self._slots.release())
++        return future
++
++    def close(self):
++        self._pool.shutdown(wait=True, cancel_futures=True)
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *exc):
++        self.close()
+--- a/sglang/srt/layers/engram.py
++++ b/sglang/srt/layers/engram.py
+@@ -44,6 +44,7 @@
+     is_dp_gatherv_active,
+ )
+ from sglang.srt.layers.linear import ReplicatedLinear
++from sglang.srt.layers.engram_store import EngramRowStore
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ from sglang.srt.managers.schedule_batch import MM_PAD_SHIFT_VALUE
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+@@ -686,8 +687,12 @@
+         row_end = num_embeddings * (tp_rank + 1) // self.tp_size
+         self.rows = row_end - self.row_start
+         self.host_table: Optional[_HostTable] = None
++        self.file_store: Optional[EngramRowStore] = None
+         if envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.get():
+-            self._init_host_table(num_embeddings, dim, layer_id)
++            if envs.SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT.get() == "file":
++                self._init_file_table(num_embeddings, dim, layer_id)
++            else:
++                self._init_host_table(num_embeddings, dim, layer_id)
+         else:
+             self.weight = nn.Parameter(
+                 torch.empty(self.rows, dim, dtype=torch.float8_e4m3fn),
+@@ -701,6 +706,26 @@
+             )
+         self.weight.weight_loader = self._load_rows
+         self.scale.weight_loader = self._load_rows
++
++    def _init_file_table(self, num_embeddings: int, dim: int, layer_id: int):
++        if dim != 256:
++            raise ValueError("file-backed Engram currently requires 256-byte rows")
++        self.file_store = EngramRowStore.from_checkpoint(
++            get_model().model_path, layer_id, num_embeddings,
++            row_start=self.row_start, row_end=self.row_start + self.rows,
++        )
++        # Keep parameter names/dtypes for strict checkpoint accounting without
++        # allocating, copying, prefaulting or pinning a resident table.
++        self.weight = nn.Parameter(
++            torch.empty(0, dtype=torch.float8_e4m3fn), requires_grad=False
++        )
++        self.scale = nn.Parameter(
++            torch.empty(0, dtype=torch.float8_e8m0fnu), requires_grad=False
++        )
++
++    def close_file_store(self):
++        if self.file_store is not None:
++            self.file_store.close()
+ 
+     def _init_host_table(self, num_embeddings: int, dim: int, layer_id: int):
+         layout = envs.SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT.get()
+@@ -724,6 +749,11 @@
+         return self.host_table is not None and self.host_table.layout == "shared"
+ 
+     def _load_rows(self, param: nn.Parameter, loaded_weight: torch.Tensor):
++        if self.file_store is not None:
++            raise RuntimeError(
++                "file-backed Engram tensors must be excluded before materialization "
++                "by the file-backed DefaultModelLoader path"
++            )
+         rows = slice(self.row_start, self.row_start + self.rows)
+         if self._shared:
+             param.data[rows].copy_(loaded_weight[rows])
+@@ -798,6 +828,8 @@
+ 
+     def _owned_rows(self, indices: torch.Tensor) -> torch.Tensor:
+         """Rows of `indices` this rank's shard holds, zero for the rest."""
++        if self.file_store is not None:
++            return self._file_owned_rows(indices)
+         if self.rows == 0:
+             return self._empty(indices).zero_()
+         if self.host_table is None and not _cuda_kernels(indices):
+@@ -819,6 +851,26 @@
+             row_hi=self.row_start + self.rows,
+         )
+         return out
++
++    def _file_owned_rows(self, indices: torch.Tensor) -> torch.Tensor:
++        # All CP/DP/TP collectives remain in the existing caller. This eager
++        # bridge deliberately synchronizes bounded ID chunks before CPU reads.
++        # A captured graph needs external readiness/staging integration; raising
++        # here prevents a graph from silently replaying one stale lookup.
++        if indices.is_cuda and torch.cuda.is_current_stream_capturing():
++            raise RuntimeError(
++                "file-backed EngramEmbedding requires eager execution; "
++                "graph replay needs scheduler-managed row refresh"
++            )
++        if indices.numel() == 0:
++            return self._empty(indices)
++        flat = indices.reshape(-1)
++        values = []
++        for first in range(0, flat.numel(), self.file_store.max_batch_rows):
++            ids = flat[first:first + self.file_store.max_batch_rows].to(device="cpu")
++            rows = self.file_store.lookup(ids)
++            values.append(rows.dequantize(indices.device))
++        return torch.cat(values).reshape(*indices.shape, self.dim)
+ 
+     def _dp_sharded_lookup(
+         self, indices: torch.Tensor, forward_batch: Optional[ForwardBatch]

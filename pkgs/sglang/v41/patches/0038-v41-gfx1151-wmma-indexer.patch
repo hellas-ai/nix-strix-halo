@@ -1,0 +1,396 @@
+--- a/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
++++ b/sglang/kernels/ops/attention/dsv4/fp4_indexer_gfx1151.py
+@@ -1,8 +1,11 @@
+-"""Wave32 FP4 paged indexer, preserving the split FlyDSL byte layout.
+-
+-The fallback keeps Q/K packed in memory. Each program unpacks only 16 keys,
+-reduces a head in FP32, applies ReLU, then sums scaled head scores. It requires
+-neither matrix instructions nor persistent FlyDSL scheduling scratch.
++"""gfx1151 FP4 paged indexer preserving the split FlyDSL cache ABI.
++
++The 32-head path multiplies unscaled E2M1 values with BF16 WMMA, restores
++its exact quarter-integer dot-product lattice, and applies scales in FP32.
++A conservative device-side exponent guard retains scalar arithmetic for
++unusual scale ranges. Other supported head counts use the scalar kernel.
++A bounded grid scores live positions and fills the disjoint padded tail;
++all lengths and page mappings remain device inputs during graph replay.
+ """
+ 
+ import torch
+@@ -12,63 +15,310 @@
+ 
+ def use_gfx1151_indexer(device: torch.device) -> bool:
+     return bool(torch.version.hip) and (
+-        torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
+-        == "gfx1151"
++        torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] == "gfx1151"
+     )
+ 
+ 
+ @triton.jit
+ def _e2m1(code):
+     mag = code & 7
+-    value = tl.where(mag < 2, mag * 0.5,
+-                    tl.where(mag < 4, (mag - 2) * 0.5 + 1.0,
+-                             tl.where(mag < 6, mag - 2.0, (mag - 6) * 2.0 + 4.0)))
++    value = tl.where(
++        mag < 2,
++        mag * 0.5,
++        tl.where(
++            mag < 4,
++            (mag - 2) * 0.5 + 1.0,
++            tl.where(mag < 6, mag - 2.0, (mag - 6) * 2.0 + 4.0),
++        ),
++    )
+     return tl.where((code & 8) != 0, -value, value)
+ 
+ 
+ @triton.jit
+ def _paged_logits(
+-    Q, QS, K, KS, W, PT, LENS, OUT,
+-    q_stride, qs_stride, w_stride, pt_stride,
+-    WIDTH: tl.constexpr, PAGE_COLS: tl.constexpr, PAGES: tl.constexpr,
+-    HEADS: tl.constexpr, WEIGHT_SCALE: tl.constexpr, BLOCK: tl.constexpr,
++    Q,
++    QS,
++    K,
++    KS,
++    W,
++    PT,
++    LENS,
++    OUT,
++    q_stride,
++    qs_stride,
++    w_stride,
++    pt_stride,
++    WIDTH: tl.constexpr,
++    PAGE_COLS: tl.constexpr,
++    PAGES: tl.constexpr,
++    HEADS: tl.constexpr,
++    WEIGHT_SCALE: tl.constexpr,
++    BLOCK: tl.constexpr,
+ ):
+     row = tl.program_id(0)
+     pos = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    length = tl.load(LENS + row)
++    # Graph workspaces cover the context limit. Fully padded tiles still need
++    # -inf outputs, but no query/key unpacking or head reductions.
++    if tl.program_id(1) * BLOCK < length:
++        live = (pos < length) & (pos < WIDTH) & (pos // 64 < PAGE_COLS)
++        page = tl.load(PT + row * pt_stride + pos // 64, mask=live, other=0)
++        live = live & (page >= 0) & (page < PAGES)
++        off = pos % 64
++        score = _scalar_tile(
++            Q,
++            QS,
++            K,
++            KS,
++            W,
++            row,
++            page,
++            off,
++            live,
++            q_stride,
++            qs_stride,
++            w_stride,
++            HEADS,
++            BLOCK,
++        )
++        tl.store(
++            OUT + row * WIDTH + pos,
++            tl.where(live, score * WEIGHT_SCALE, float("-inf")),
++            mask=pos < WIDTH,
++        )
++    else:
++        tl.store(OUT + row * WIDTH + pos, float("-inf"), mask=pos < WIDTH)
++
++
++@triton.jit
++def _scalar_tile(
++    Q,
++    QS,
++    K,
++    KS,
++    W,
++    row,
++    page,
++    off,
++    live,
++    q_stride,
++    qs_stride,
++    w_stride,
++    HEADS: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
+     dim = tl.arange(0, 128)
+-    length = tl.load(LENS + row)
+-    live = (pos < length) & (pos < WIDTH) & (pos // 64 < PAGE_COLS)
+-    page = tl.load(PT + row * pt_stride + pos // 64, mask=live, other=0)
+-    live = live & (page >= 0) & (page < PAGES)
+-    off = pos % 64
+     kb = tl.load(
+-        K + page[:, None].to(tl.int64) * 4096 + (dim[None, :] // 32) * 1024
+-        + off[:, None] * 16 + (dim[None, :] % 32) // 2,
+-        mask=live[:, None], other=0,
++        K
++        + page[:, None].to(tl.int64) * 4096
++        + (dim[None, :] // 32) * 1024
++        + off[:, None] * 16
++        + (dim[None, :] % 32) // 2,
++        mask=live[:, None],
++        other=0,
+     ).to(tl.int32)
+     ke = tl.load(
+-        KS + page[:, None].to(tl.int64) * 256 + (dim[None, :] // 32) * 64
+-        + (off[:, None] % 16) * 4 + off[:, None] // 16,
+-        mask=live[:, None], other=127,
++        KS
++        + page[:, None].to(tl.int64) * 256
++        + (dim[None, :] // 32) * 64
++        + (off[:, None] % 16) * 4
++        + off[:, None] // 16,
++        mask=live[:, None],
++        other=127,
+     ).to(tl.int32)
+     kval = _e2m1((kb >> ((dim[None, :] % 2) * 4)) & 15)
+     kval *= (ke << 23).to(tl.float32, bitcast=True)
+     score = tl.full((BLOCK,), 0, tl.float32)
+     for head in range(HEADS):
+         qb = tl.load(Q + row * q_stride + head * 64 + dim // 2).to(tl.int32)
+-        qe = tl.load(QS + row * qs_stride + (dim // 32) * 64
+-                     + (head % 16) * 4 + head // 16).to(tl.int32)
++        qe = tl.load(
++            QS + row * qs_stride + (dim // 32) * 64 + (head % 16) * 4 + head // 16
++        ).to(tl.int32)
+         qval = _e2m1((qb >> ((dim % 2) * 4)) & 15)
+         qval *= (qe << 23).to(tl.float32, bitcast=True)
+         dot = tl.sum(kval * qval[None, :], axis=1)
+         weight = tl.load(W + row * w_stride + head).to(tl.float32)
+         score += tl.maximum(dot, 0.0) * weight
+-    tl.store(OUT + row * WIDTH + pos,
+-             tl.where(live, score * WEIGHT_SCALE, float("-inf")), mask=pos < WIDTH)
+-
+-
+-def paged_fp4_logits(q, q_scale, k, k_scale, weights, page_table, lengths,
+-                     weight_scale, out):
++    return score
++
++
++@triton.jit
++def _e2m1_bf16(code):
++    mag = code & 7
++    bits = tl.where(mag >= 2, (mag << 6) + 0x3F00, tl.where(mag == 1, 0x3F00, 0))
++    # E2M1 magnitudes 1..7 map to .5, 1, 1.5, 2, 3, 4, 6 exactly.
++    return (bits | ((code & 8) << 12)).to(tl.uint16).to(tl.bfloat16, bitcast=True)
++
++
++@triton.jit
++def _group_dot(
++    Q,
++    QS,
++    K,
++    KS,
++    row,
++    page,
++    off,
++    live,
++    q_stride,
++    qs_stride,
++    GROUP: tl.constexpr,
++    HEADS: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    head = tl.arange(0, HEADS)
++    dim = tl.arange(0, 32)
++    qb = tl.load(
++        Q + row * q_stride + head[:, None] * 64 + GROUP * 16 + dim[None, :] // 2
++    ).to(tl.int32)
++    q = _e2m1_bf16((qb >> ((dim[None, :] % 2) * 4)) & 15)
++    kb = tl.load(
++        K
++        + page[None, :].to(tl.int64) * 4096
++        + GROUP * 1024
++        + off[None, :] * 16
++        + dim[:, None] // 2,
++        mask=live[None, :],
++        other=0,
++    ).to(tl.int32)
++    k = _e2m1_bf16((kb >> ((dim[:, None] % 2) * 4)) & 15)
++    # WMMA can leave a few FP32 ulps on exact E2M1 dot products. Every
++    # unscaled result is a quarter integer in [-1152, 1152]; restore that
++    # lattice before rescaling so equal mathematical scores retain ties.
++    dot = tl.floor(tl.dot(q, k) * 4.0 + 0.5) * 0.25
++    qe = tl.load(QS + row * qs_stride + GROUP * 64 + (head % 16) * 4 + head // 16).to(
++        tl.int32
++    )
++    ke = tl.load(
++        KS + page.to(tl.int64) * 256 + GROUP * 64 + (off % 16) * 4 + off // 16,
++        mask=live,
++        other=127,
++    ).to(tl.int32)
++    qscale = (qe << 23).to(tl.float32, bitcast=True)
++    kscale = (ke << 23).to(tl.float32, bitcast=True)
++    return dot * (qscale[:, None] * kscale[None, :])
++
++
++@triton.jit
++def _paged_logits_wmma(
++    Q,
++    QS,
++    K,
++    KS,
++    W,
++    PT,
++    LENS,
++    OUT,
++    q_stride,
++    qs_stride,
++    w_stride,
++    pt_stride,
++    WIDTH: tl.constexpr,
++    PAGE_COLS: tl.constexpr,
++    PAGES: tl.constexpr,
++    HEADS: tl.constexpr,
++    WEIGHT_SCALE: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    length = tl.load(LENS + row)
++    # Tail stores and live stores are disjoint, so CTAs need no global barrier.
++    for start in range(tl.program_id(1) * 1024, WIDTH, tl.num_programs(1) * 1024):
++        tail = start + tl.arange(0, 1024)
++        tl.store(
++            OUT + row * WIDTH + tail,
++            float("-inf"),
++            mask=(tail < WIDTH) & (tail >= length),
++        )
++    for start in range(
++        tl.program_id(1) * BLOCK, tl.minimum(length, WIDTH), tl.num_programs(1) * BLOCK
++    ):
++        pos = start + tl.arange(0, BLOCK)
++        live = (pos < length) & (pos < WIDTH) & (pos // 64 < PAGE_COLS)
++        page = tl.load(PT + row * pt_stride + pos // 64, mask=live, other=0)
++        live &= (page >= 0) & (page < PAGES)
++        off = pos % 64
++        groups = tl.arange(0, 4)
++        h = tl.arange(0, HEADS)
++        qe = tl.load(
++            QS
++            + row * qs_stride
++            + groups[None, :] * 64
++            + (h[:, None] % 16) * 4
++            + h[:, None] // 16
++        ).to(tl.int32)
++        ke = tl.load(
++            KS
++            + page[:, None].to(tl.int64) * 256
++            + groups[None, :] * 64
++            + (off[:, None] % 16) * 4
++            + off[:, None] // 16,
++            mask=live[:, None],
++            other=127,
++        ).to(tl.int32)
++        qlo, qhi = tl.min(tl.min(qe, 0), 0), tl.max(tl.max(qe, 0), 0)
++        klo = tl.min(tl.min(tl.where(live[:, None], ke, 255), 0), 0)
++        khi = tl.max(tl.max(tl.where(live[:, None], ke, 0), 0), 0)
++        # Raw E2M1 products are quarter integers. With at most eight bits of
++        # exponent spread, all 128-term sums fit exactly in FP32. Guard normal
++        # products and finite operands; unusual scales retain scalar behavior.
++        safe = (
++            (qlo >= 2)
++            & (qhi <= 252)
++            & (klo >= 2)
++            & (khi <= 252)
++            & (qlo + klo >= 130)
++            & (qhi + khi <= 368)
++            & ((qhi - qlo) + (khi - klo) <= 8)
++        )
++        if safe:
++            d0 = _group_dot(
++                Q, QS, K, KS, row, page, off, live, q_stride, qs_stride, 0, HEADS, BLOCK
++            )
++            d1 = _group_dot(
++                Q, QS, K, KS, row, page, off, live, q_stride, qs_stride, 1, HEADS, BLOCK
++            )
++            d2 = _group_dot(
++                Q, QS, K, KS, row, page, off, live, q_stride, qs_stride, 2, HEADS, BLOCK
++            )
++            d3 = _group_dot(
++                Q, QS, K, KS, row, page, off, live, q_stride, qs_stride, 3, HEADS, BLOCK
++            )
++            dots = (d0 + d1) + (d2 + d3)
++            score = tl.full((BLOCK,), 0, tl.float32)
++            for head in range(HEADS):
++                dot = tl.gather(
++                    dots, tl.full((1, BLOCK), head, tl.int32), axis=0
++                ).reshape((BLOCK,))
++                weight = tl.load(W + row * w_stride + head).to(tl.float32)
++                score += tl.maximum(dot, 0.0) * weight
++        else:
++            score = _scalar_tile(
++                Q,
++                QS,
++                K,
++                KS,
++                W,
++                row,
++                page,
++                off,
++                live,
++                q_stride,
++                qs_stride,
++                w_stride,
++                HEADS,
++                BLOCK,
++            )
++        tl.store(
++            OUT + row * WIDTH + pos,
++            tl.where(live, score * WEIGHT_SCALE, float("-inf")),
++            mask=(pos < WIDTH) & (pos < length),
++        )
++
++
++def paged_fp4_logits(
++    q, q_scale, k, k_scale, weights, page_table, lengths, weight_scale, out
++):
+     """Fill every score, including -inf for padded or unreachable positions."""
+     rows, heads, packed_dim = q.shape
+     assert packed_dim == 64 and 0 < heads <= 64 and heads % 16 == 0
+@@ -82,11 +332,31 @@
+     assert lengths.numel() == rows and lengths.is_contiguous()
+     if rows == 0:
+         return out
+-    _paged_logits[(rows, triton.cdiv(out.shape[1], 16))](
+-        q.view(torch.uint8), q_scale, k.view(torch.uint8), k_scale, weights,
+-        page_table, lengths, out, q.stride(0), q_scale.stride(0),
+-        weights.stride(0), page_table.stride(0), WIDTH=out.shape[1],
+-        PAGE_COLS=page_table.shape[1], PAGES=k.shape[0], HEADS=heads,
+-        WEIGHT_SCALE=weight_scale, BLOCK=16, num_warps=4, enable_fp_fusion=False,
++    kernel = _paged_logits_wmma if heads == 32 else _paged_logits
++    block = 32 if heads == 32 else 16
++    programs = triton.cdiv(out.shape[1], block)
++    if heads == 32:
++        programs = min(programs, max(1, 320 // rows))
++    kernel[(rows, programs)](
++        q.view(torch.uint8),
++        q_scale,
++        k.view(torch.uint8),
++        k_scale,
++        weights,
++        page_table,
++        lengths,
++        out,
++        q.stride(0),
++        q_scale.stride(0),
++        weights.stride(0),
++        page_table.stride(0),
++        WIDTH=out.shape[1],
++        PAGE_COLS=page_table.shape[1],
++        PAGES=k.shape[0],
++        HEADS=heads,
++        WEIGHT_SCALE=weight_scale,
++        BLOCK=block,
++        num_warps=4,
++        enable_fp_fusion=False,
+     )
+     return out

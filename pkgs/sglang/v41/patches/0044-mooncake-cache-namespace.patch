@@ -1,0 +1,157 @@
+--- a/sglang/srt/environ.py
++++ b/sglang/srt/environ.py
+@@ -750,6 +750,8 @@
+     # ===================================================================
+     # HiCache storage backends and mmap allocation
+     # ===================================================================
++    # Immutable runtime/kernel build identity for persistent direct-cache objects.
++    SGLANG_CACHE_NUMERICS_ID = EnvStr("")
+     # Per-call cudaHostRegister limit in GB.
+     SGLANG_HICACHE_HOST_REGISTER_CHUNK_GB = EnvInt(256)
+     # HiCache host<->device transfers use the TMA staging kernel when the GPU
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -8,6 +8,7 @@
+ 
+ import torch
+ 
++from sglang.srt.environ import envs
+ from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+ from sglang.srt.mem_cache.hicache_storage import (
+     HiCacheStorageConfig,
+@@ -128,6 +129,23 @@
+         extra_config, *_ = HybridCacheController.parse_storage_backend_extra_config(
+             get_memory().hicache_storage_backend_extra_config
+         )
++        from sglang.srt.mem_cache.storage.mooncake_store.cache_namespace import (
++            direct_cache_namespace,
++        )
++
++        extra_config = dict(extra_config or {})
++        namespace = direct_cache_namespace(
++            self.pool_group,
++            numerics_id=extra_config.pop(
++                "cache_numerics_id", envs.SGLANG_CACHE_NUMERICS_ID.get()
++            ),
++            server_args=server_args,
++        )
++        tenant_tag = extra_config.get("extra_backend_tag")
++        extra_config["extra_backend_tag"] = (
++            f"{tenant_tag}_{namespace}" if tenant_tag else namespace
++        )
++        logger.info("Mooncake direct cache compatibility namespace: %s", namespace)
+         storage_config = HiCacheStorageConfig(
+             tp_rank=tp_rank,
+             tp_size=tp_size,
+--- /dev/null
++++ b/sglang/srt/mem_cache/storage/mooncake_store/cache_namespace.py
+@@ -0,0 +1,109 @@
++"""Compatibility identity for serialized direct-linker objects.
++
++Device addresses and allocation capacity are intentionally excluded: objects
++describe one logical page, not the lifetime or size of a worker's allocation.
++The numerics identity must change when model/operator semantics change without
++a layout change (for example, different quantization or patched kernels).
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++
++
++def direct_cache_namespace(pool_group, *, numerics_id: str, server_args) -> str:
++    if not isinstance(numerics_id, str) or not numerics_id.strip():
++        raise ValueError(
++            "Mooncake direct caching requires cache_numerics_id in the storage "
++            "extra config or SGLANG_CACHE_NUMERICS_ID. Use a pinned runtime/kernel "
++            "build identity and change it when cache-producing numerics change."
++        )
++
++    # These options can change cache-producing arithmetic without changing bytes
++    # per page. The deployment's numerics_id covers its patched code/dependencies.
++    options = (
++        "revision",
++        "speculative_draft_model_path",
++        "speculative_draft_model_revision",
++        "dtype",
++        "quantization",
++        "kv_cache_dtype",
++        "model_impl",
++        "attention_backend",
++        "decode_attention_backend",
++        "prefill_attention_backend",
++        "dsv4_attn_backend",
++        "fp8_gemm_runner_backend",
++        "fp4_gemm_runner_backend",
++        "bf16_gemm_backend",
++        "moe_runner_backend",
++        "enable_tf32_matmul",
++        "triton_attention_reduce_in_fp32",
++        "enable_deterministic_inference",
++        "speculative_algorithm",
++        "speculative_num_draft_tokens",
++        "tp_size",
++        "pp_size",
++        "attn_cp_size",
++        "dcp_size",
++        "moe_ep_size",
++    )
++    kernel_env = {
++        key: value
++        for key, value in os.environ.items()
++        if key.startswith(
++            ("SGLANG_DSV4_", "SGLANG_DSV41_", "SGLANG_OPT_", "SGLANG_ENABLE_DSV41_")
++        )
++        or key
++        in (
++            "SGLANG_HACK_FLASHMLA_BACKEND",
++            "SGLANG_USE_AITER",
++            "SGLANG_ROCM_USE_MULTI_STREAM",
++            "NCCL_ALGO",
++            "NCCL_PROTO",
++        )
++    }
++    pools = []
++    for pool in sorted(pool_group.entries, key=lambda item: str(item.name)):
++        pools.append(
++            {
++                "name": str(pool.name),
++                "source": str(pool.indices_from_pool),
++                "page_size": pool.page_size,
++                "row_span": pool._row_span,
++                "packed": pool.packed,
++                "layers": sorted(
++                    (layer, indices) for layer, indices in pool.layer_mapping.items()
++                ),
++                "components": [
++                    [
++                        {
++                            "dtype": str(buffer.dtype),
++                            "shape": list(buffer.shape[1:]),
++                            "stride": list(buffer.stride()[1:]),
++                            "row_stride_bytes": meta[1],
++                            "serialized_bytes": meta[2],
++                            "object_offset": offset,
++                        }
++                        for buffer, meta, offset in zip(component, metadata, offsets)
++                    ]
++                    for component, metadata, offsets in zip(
++                        pool.components, pool.buffer_meta, pool._component_offsets
++                    )
++                ],
++            }
++        )
++    manifest = {
++        "schema": 2,
++        "numerics": numerics_id,
++        "options": {name: getattr(server_args, name, None) for name in options},
++        "kernel_env": kernel_env,
++        "page_size": pool_group.page_size,
++        "num_layers": pool_group.num_layers,
++        "rank_replicated": pool_group.rank_replicated,
++        "pools": pools,
++    }
++    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
++    return "direct-v2-" + hashlib.sha256(payload.encode()).hexdigest()

@@ -1,0 +1,81 @@
+--- a/sglang/srt/models/deepseek_v4_dspark.py
++++ b/sglang/srt/models/deepseek_v4_dspark.py
+@@ -107,6 +107,48 @@
+     return y
+ 
+ 
++
++_DRAFT_NATIVE_ROWS = 8
++
++
++def _draft_row_chunks(block_linear):
++    """Block-FP8 linear that serves 9..16 rows as chunks of at most eight rows (see _enable_native_projections)."""
++
++    def linear(input, weight, block_size, weight_scale, input_scale=None, bias=None):
++        rows = input.shape[0]
++        if (
++            input.ndim != 2
++            or bias is not None
++            or not _DRAFT_NATIVE_ROWS < rows <= 2 * _DRAFT_NATIVE_ROWS
++        ):
++            return block_linear(
++                input=input,
++                weight=weight,
++                block_size=block_size,
++                weight_scale=weight_scale,
++                input_scale=input_scale,
++                bias=bias,
++            )
++        return torch.cat(
++            [
++                block_linear(
++                    input=input[start : start + _DRAFT_NATIVE_ROWS],
++                    weight=weight,
++                    block_size=block_size,
++                    weight_scale=weight_scale,
++                    input_scale=(
++                        None
++                        if input_scale is None
++                        else input_scale[start : start + _DRAFT_NATIVE_ROWS]
++                    ),
++                    bias=None,
++                )
++                for start in range(0, rows, _DRAFT_NATIVE_ROWS)
++            ]
++        )
++
++    return linear
++
+ class DSparkAttention(MqaAttentionBase):
+     def __init__(
+         self,
+@@ -777,6 +819,29 @@
+                             block_linear, native_v41_shared=kind
+                         )
+ 
++        # At three or four running requests a draft block has 9..12 rows (three per request), which no native GEMV
++        # serves: every stage projection fell to the generic 64-row-tile matmul at 400-630 us a call for 2-8 MB
++        # weights (~7.5 ms of a 115 ms C4 DSpark cycle). The native kernels are row generic, so serving those rows in
++        # chunks of at most eight gives each row the result it gets in any native call. Draft only: the target's
++        # verification decides the output. main_proj stays generic: its 79 MB weight would be read once per chunk.
++        if os.environ.get("SGLANG_DSV41_DSPARK_DRAFT_ROW_CHUNKS", "0") == "1":
++            linears = [getattr(attn, name, None) for name in ("wq_a", "wkv", "wq_b", "wo_b")]
++            if shared is not None:
++                linears += [
++                    getattr(shared, "gate_up_proj", None),
++                    getattr(shared, "down_proj", None),
++                ]
++            for linear in linears:
++                method = getattr(linear, "quant_method", None)
++                block_linear = getattr(method, "w8a8_block_fp8_linear", None)
++                if (
++                    isinstance(method, Fp8LinearMethod)
++                    and isinstance(block_linear, functools.partial)
++                    and block_linear.func is triton_w8a8_block_fp8_linear
++                    and set(block_linear.keywords) - {"act_scale_ue8m0"}
++                ):
++                    method.w8a8_block_fp8_linear = _draft_row_chunks(block_linear)
++
+     def _build_self_attn(
+         self,
+         *,

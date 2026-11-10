@@ -1,0 +1,340 @@
+--- a/sglang/srt/layers/moe/utils.py
++++ b/sglang/srt/layers/moe/utils.py
+@@ -808,6 +808,98 @@
+     )
+ 
+ 
++_DSV41_COMPRESSED_MOE_AR_MIN_ROWS = int(
++    os.environ.get("SGLANG_DSV41_COMPRESSED_MOE_AR_MIN_ROWS", "0")
++)
++_DSV41_COMPRESSED_MOE_AR_BLOCK = 256
++_DSV41_COMPRESSED_MOE_AR_MODE = os.environ.get(
++    "SGLANG_DSV41_COMPRESSED_MOE_AR_MODE", "shard"
++)
++if _DSV41_COMPRESSED_MOE_AR_MODE not in ("shard", "input"):
++    raise ValueError("SGLANG_DSV41_COMPRESSED_MOE_AR_MODE must be shard or input")
++
++
++def _dsv41_compressed_moe_all_reduce(
++    hidden_states: torch.Tensor, group
++) -> torch.Tensor:
++    """FP32 TP sum, then block-scaled int8 transfer of each reduced shard.
++
++    Only the all-gather leg is lossy. The FP32 reduce-scatter preserves the
++    model's policy of summing expert outputs before the final BF16 cast.
++    """
++    world = group.world_size
++    flat = hidden_states.contiguous().view(-1)
++    shard = torch.empty(flat.numel() // world, dtype=torch.float32, device=flat.device)
++    group.reduce_scatter_tensor(shard, flat)
++
++    blocks = shard.view(-1, _DSV41_COMPRESSED_MOE_AR_BLOCK)
++    scales = blocks.abs().amax(dim=1).clamp_min(1.0e-12) / 127.0
++    encoded = torch.round(blocks / scales[:, None]).clamp_(-127, 127).to(torch.int8)
++    encoded = encoded.contiguous().view(-1)
++
++    gathered = torch.empty_like(flat, dtype=torch.int8)
++    gathered_scales = torch.empty(
++        scales.numel() * world, dtype=torch.float32, device=flat.device
++    )
++    group.all_gather_into_tensor(gathered, encoded)
++    group.all_gather_into_tensor(gathered_scales, scales)
++    return (
++        gathered.view(-1, _DSV41_COMPRESSED_MOE_AR_BLOCK).float()
++        * gathered_scales[:, None]
++    ).view_as(hidden_states)
++
++
++def _dsv41_compressed_input_all_reduce(
++    hidden_states: torch.Tensor, group
++) -> torch.Tensor:
++    """Quantize each rank's contribution before all-gather, then sum locally.
++
++    This compresses the entire network path and performs the TP sum in FP32.
++    The per-rank quantization precedes the sum, so this is a separate numerical
++    policy from the default exact collective and the shard-compressed variant.
++    """
++    world = group.world_size
++    blocks = hidden_states.contiguous().view(-1, _DSV41_COMPRESSED_MOE_AR_BLOCK)
++    scales = blocks.abs().amax(dim=1).clamp_min(1.0e-12) / 127.0
++    encoded = torch.round(blocks / scales[:, None]).clamp_(-127, 127).to(torch.int8)
++    encoded = encoded.contiguous().view(-1)
++
++    gathered = torch.empty(
++        encoded.numel() * world, dtype=torch.int8, device=encoded.device
++    )
++    gathered_scales = torch.empty(
++        scales.numel() * world, dtype=torch.float32, device=encoded.device
++    )
++    group.all_gather_into_tensor(gathered, encoded)
++    group.all_gather_into_tensor(gathered_scales, scales)
++    decoded = gathered.view(world, -1, _DSV41_COMPRESSED_MOE_AR_BLOCK).float()
++    decoded = decoded * gathered_scales.view(world, -1, 1)
++    return decoded.sum(dim=0).view_as(hidden_states)
++
++
++def _use_dsv41_compressed_moe_all_reduce(hidden_states: torch.Tensor, parallel) -> bool:
++    """Keep decode, other models, and complex EP layouts on their exact path."""
++    from sglang.srt.distributed.dsv41_compressed_ring import (
++        is_dsv41_compressed_prefill,
++    )
++
++    return (
++        _DSV41_COMPRESSED_MOE_AR_MIN_ROWS > 0
++        and is_dsv41_compressed_prefill()
++        and hidden_states.device.type == "cuda"
++        and torch.version.hip is not None
++        and hidden_states.dtype == torch.float32
++        and hidden_states.ndim == 2
++        and hidden_states.is_contiguous()
++        and hidden_states.shape[1] == 5120
++        and hidden_states.shape[0] >= max(64, _DSV41_COMPRESSED_MOE_AR_MIN_ROWS)
++        and parallel.moe_ep_size == 1
++        and parallel.moe_tp_size == 4
++        and hidden_states.numel() % (4 * _DSV41_COMPRESSED_MOE_AR_BLOCK) == 0
++        and not torch.cuda.is_current_stream_capturing()
++    )
++
++
+ def post_experts_all_reduce(hidden_states: torch.Tensor) -> torch.Tensor:
+     """Reduce the post-experts MoE output across the EP and MoE-TP groups.
+ 
+@@ -828,6 +920,33 @@
+     reduce_tp = parallel.moe_tp_size > 1 and not should_skip_post_experts_all_reduce(
+         is_tp_path=True
+     )
++
++    if (
++        reduce_tp
++        and not reduce_ep
++        and parallel.moe_ep_size == 1
++        and parallel.moe_tp_size == 4
++    ):
++        from sglang.srt.distributed.dsv41_compressed_ring import (
++            can_use_compressed_ring,
++            compressed_ring_all_reduce,
++        )
++
++        if can_use_compressed_ring(
++            hidden_states, parallel.moe_tp_group, torch.float32
++        ):
++            return compressed_ring_all_reduce(
++                hidden_states, parallel.moe_tp_group
++            )
++
++    if reduce_tp and not reduce_ep and _use_dsv41_compressed_moe_all_reduce(
++        hidden_states, parallel
++    ):
++        if _DSV41_COMPRESSED_MOE_AR_MODE == "input":
++            return _dsv41_compressed_input_all_reduce(
++                hidden_states, parallel.moe_tp_group
++            )
++        return _dsv41_compressed_moe_all_reduce(hidden_states, parallel.moe_tp_group)
+ 
+     if reduce_ep and reduce_tp and can_merge_post_experts_all_reduce():
+         return tensor_model_parallel_all_reduce(hidden_states)
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -137,6 +137,7 @@
+ )
+ from sglang.srt.model_executor.forward_batch_info import (
+     CaptureHiddenMode,
++    ForwardMode,
+     PPProxyTensors,
+ )
+ from sglang.srt.model_executor.forward_context import (
+@@ -2710,16 +2711,45 @@
+                         self.o_lora_rank,
+                     )
+ 
+-        return self._project_wo_b(o)
+-
+-    def _project_wo_b(self, o):
++        return self._project_wo_b(o, forward_batch)
++
++    def _project_wo_b(self, o, forward_batch):
+         from sglang.srt.layers.moe.mhc_post_fusion import current_mhc_post_fusion
++        from sglang.srt.layers.moe.utils import should_skip_mlp_all_reduce
++        from sglang.srt.distributed.dsv41_compressed_ring import (
++            can_use_compressed_ring,
++            compressed_ring_all_reduce,
++            compressed_ring_enabled_for_rows,
++        )
+ 
+         mhc = current_mhc_post_fusion()
++        parallel = get_parallel()
++        compressed_attn = (
++            mhc is None
++            and forward_batch.forward_mode == ForwardMode.EXTEND
++            and self.is_dsv41
++            and _is_hip
++            and self.wo_b.reduce_results
++            and not should_skip_mlp_all_reduce()
++            and self.attn_tp_size == parallel.tp_size == 4
++            and parallel.attn_dp_size == 1
++            and parallel.dp_size == 1
++            and not get_forward().sp_active
++            and isinstance(o, torch.Tensor)
++            and compressed_ring_enabled_for_rows(o.shape[0])
++            and not torch.cuda.is_current_stream_capturing()
++        )
+         o, _ = self.wo_b(
+             o.flatten(1) if isinstance(o, torch.Tensor) else o,
+-            skip_all_reduce=mhc is not None,
+-        )
++            skip_all_reduce=mhc is not None or compressed_attn,
++        )
++        if compressed_attn:
++            if can_use_compressed_ring(o, parallel.attn_tp_group, torch.bfloat16):
++                o = compressed_ring_all_reduce(o, parallel.attn_tp_group)
++            else:
++                # A quantization backend may change output dtype; keep the
++                # original reduction for anything outside the BF16 envelope.
++                o = attn_tp_all_reduce(o)
+         if mhc is not None and mhc.overlap_only:
+             mhc.start_stats_before_all_reduce()
+             o = attn_tp_all_reduce(o)
+@@ -5056,6 +5086,26 @@
+ 
+     @torch.no_grad()
+     def forward(
++        self,
++        input_ids: torch.Tensor,
++        positions: torch.Tensor,
++        forward_batch: ForwardBatch,
++        input_embeds: Optional[torch.Tensor],
++        pp_proxy_tensors: Optional[PPProxyTensors] = None,
++    ) -> Union[torch.Tensor, PPProxyTensors]:
++        from sglang.srt.distributed.dsv41_compressed_ring import (
++            dsv41_compressed_prefill_scope,
++        )
++
++        with dsv41_compressed_prefill_scope(
++            getattr(self.config, "model_type", None) == "deepseek_v41"
++            and forward_batch.forward_mode == ForwardMode.EXTEND
++        ):
++            return self._forward_body(
++                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
++            )
++
++    def _forward_body(
+         self,
+         input_ids: torch.Tensor,
+         positions: torch.Tensor,
+--- /dev/null
++++ b/sglang/srt/distributed/dsv41_compressed_ring.py
+@@ -0,0 +1,114 @@
++"""Opt-in prefill-only TP4 compressed ring for DeepSeek V4.1.
++
++The two callers gate model, parallel layout, dtype and rows. This module also
++fails closed on non-TP4/global-four, graph capture and unsupported layouts.
++Decode takes the unchanged exact collective path.
++"""
++
++import os
++from contextlib import contextmanager
++from contextvars import ContextVar
++
++import torch
++import torch.distributed as dist
++
++_BLOCK = 256
++_MIN_ROWS = int(os.environ.get("SGLANG_DSV41_COMPRESSED_RING_MIN_ROWS", "0"))
++_PREFILL = ContextVar("dsv41_compressed_prefill", default=False)
++
++
++@contextmanager
++def dsv41_compressed_prefill_scope(enabled: bool):
++    token = _PREFILL.set(bool(enabled))
++    try:
++        yield
++    finally:
++        _PREFILL.reset(token)
++
++
++def is_dsv41_compressed_prefill() -> bool:
++    return _PREFILL.get()
++
++
++def compressed_ring_enabled_for_rows(rows: int) -> bool:
++    return _MIN_ROWS > 0 and rows >= max(64, _MIN_ROWS)
++
++
++def can_use_compressed_ring(x: torch.Tensor, group, dtype: torch.dtype) -> bool:
++    return (
++        x.ndim == 2
++        and is_dsv41_compressed_prefill()
++        and compressed_ring_enabled_for_rows(x.shape[0])
++        and x.device.type == "cuda"
++        and torch.version.hip is not None
++        and x.dtype == dtype
++        and x.shape[1] == 5120
++        and x.is_contiguous()
++        and x.numel() % (4 * _BLOCK) == 0
++        and group.world_size == 4
++        and dist.is_initialized()
++        and dist.get_world_size() == 4
++        and group.rank_in_group == dist.get_rank()
++        and not torch.cuda.is_current_stream_capturing()
++    )
++
++
++def _pack(values: torch.Tensor) -> torch.Tensor:
++    blocks = values.float().reshape(-1, _BLOCK)
++    scales = blocks.abs().amax(dim=1).clamp_min(1.0e-12) / 127.0
++    encoded = torch.round(blocks / scales[:, None]).clamp_(-127, 127).to(torch.int8)
++    return torch.cat(
++        (encoded.reshape(-1).view(torch.uint8), scales.contiguous().view(torch.uint8))
++    )
++
++
++def _unpack(packet: torch.Tensor, count: int) -> torch.Tensor:
++    encoded = packet[:count].view(torch.int8).float().reshape(-1, _BLOCK)
++    scales = packet[count:].view(torch.float32).reshape(-1, 1)
++    return (encoded * scales).reshape(-1)
++
++
++def compressed_ring_all_reduce(x: torch.Tensor, group) -> torch.Tensor:
++    """Reduce-scatter and gather with six 1-byte-plus-scale TP4 ring hops.
++
++    Every reduce-scatter hop decodes into FP32, adds that rank's local
++    contribution, then requantizes. The completed owner's shard is packaged
++    once more and circulated unchanged through the all-gather ring.
++    """
++    world, rank = group.world_size, group.rank_in_group
++    assert world == 4 and x.numel() % (world * _BLOCK) == 0
++    chunks = x.contiguous().view(-1).chunk(world)
++    count = chunks[0].numel()
++    partials = {rank: chunks[rank]}
++    prev_rank, next_rank = (rank - 1) % world, (rank + 1) % world
++
++    for step in range(world - 1):
++        send_idx = (rank - step) % world
++        recv_idx = (rank - step - 1) % world
++        send = _pack(partials[send_idx])
++        recv = torch.empty_like(send)
++        ops = [
++            dist.P2POp(dist.isend, send, next_rank, group.device_group),
++            dist.P2POp(dist.irecv, recv, prev_rank, group.device_group),
++        ]
++        for work in dist.batch_isend_irecv(ops):
++            work.wait()
++        partials[recv_idx] = _unpack(recv, count) + chunks[recv_idx].float()
++
++    owned_idx = (rank + 1) % world
++    packets = {owned_idx: _pack(partials[owned_idx])}
++    for step in range(world - 1):
++        send_idx = (rank - step + 1) % world
++        recv_idx = (rank - step) % world
++        send = packets[send_idx]
++        recv = torch.empty_like(send)
++        ops = [
++            dist.P2POp(dist.isend, send, next_rank, group.device_group),
++            dist.P2POp(dist.irecv, recv, prev_rank, group.device_group),
++        ]
++        for work in dist.batch_isend_irecv(ops):
++            work.wait()
++        packets[recv_idx] = recv
++
++    result = torch.cat([_unpack(packets[i], count) for i in range(world)])
++    return result.view_as(x).to(x.dtype)

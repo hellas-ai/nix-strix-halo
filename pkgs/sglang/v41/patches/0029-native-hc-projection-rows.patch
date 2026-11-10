@@ -1,0 +1,127 @@
+--- a/sglang/kernels/ops/layernorm/native_hc_projection.py
++++ b/sglang/kernels/ops/layernorm/native_hc_projection.py
+@@ -88,3 +88,90 @@
+     _hc_finish_c2[(24,)](partial, output, 4,
+                          num_warps=4, num_stages=1, enable_fp_fusion=False)
+     return output
++
++
++@triton.jit
++def _hc_partial_rows(X, W, P, K: tl.constexpr, BLOCK: tl.constexpr,
++                     PARTS: tl.constexpr, ROWS: tl.constexpr):
++    row = tl.program_id(0)
++    part = tl.program_id(1)
++    cols = tl.arange(0, BLOCK)
++    acc0 = tl.full((BLOCK,), 0, tl.float32)
++    acc1 = tl.full((BLOCK,), 0, tl.float32)
++    acc2 = tl.full((BLOCK,), 0, tl.float32)
++    if ROWS > 3:
++        acc3 = tl.full((BLOCK,), 0, tl.float32)
++    if ROWS > 4:
++        acc4 = tl.full((BLOCK,), 0, tl.float32)
++    if ROWS > 5:
++        acc5 = tl.full((BLOCK,), 0, tl.float32)
++    if ROWS > 6:
++        acc6 = tl.full((BLOCK,), 0, tl.float32)
++    if ROWS > 7:
++        acc7 = tl.full((BLOCK,), 0, tl.float32)
++    for block in range(0, K // (PARTS * BLOCK)):
++        offset = part * (K // PARTS) + block * BLOCK + cols
++        w = tl.load(W + row * K + offset)
++        x0 = tl.load(X + 0 * K + offset)
++        acc0 = acc0 + x0 * w
++        x1 = tl.load(X + 1 * K + offset)
++        acc1 = acc1 + x1 * w
++        x2 = tl.load(X + 2 * K + offset)
++        acc2 = acc2 + x2 * w
++        if ROWS > 3:
++            x3 = tl.load(X + 3 * K + offset)
++            acc3 = acc3 + x3 * w
++        if ROWS > 4:
++            x4 = tl.load(X + 4 * K + offset)
++            acc4 = acc4 + x4 * w
++        if ROWS > 5:
++            x5 = tl.load(X + 5 * K + offset)
++            acc5 = acc5 + x5 * w
++        if ROWS > 6:
++            x6 = tl.load(X + 6 * K + offset)
++            acc6 = acc6 + x6 * w
++        if ROWS > 7:
++            x7 = tl.load(X + 7 * K + offset)
++            acc7 = acc7 + x7 * w
++    tl.store(P + row * (ROWS * PARTS) + 0 * PARTS + part, tl.sum(acc0, 0))
++    tl.store(P + row * (ROWS * PARTS) + 1 * PARTS + part, tl.sum(acc1, 0))
++    tl.store(P + row * (ROWS * PARTS) + 2 * PARTS + part, tl.sum(acc2, 0))
++    if ROWS > 3:
++        tl.store(P + row * (ROWS * PARTS) + 3 * PARTS + part, tl.sum(acc3, 0))
++    if ROWS > 4:
++        tl.store(P + row * (ROWS * PARTS) + 4 * PARTS + part, tl.sum(acc4, 0))
++    if ROWS > 5:
++        tl.store(P + row * (ROWS * PARTS) + 5 * PARTS + part, tl.sum(acc5, 0))
++    if ROWS > 6:
++        tl.store(P + row * (ROWS * PARTS) + 6 * PARTS + part, tl.sum(acc6, 0))
++    if ROWS > 7:
++        tl.store(P + row * (ROWS * PARTS) + 7 * PARTS + part, tl.sum(acc7, 0))
++
++
++@triton.jit
++def _hc_finish_rows(P, Y, PARTS: tl.constexpr, ROWS: tl.constexpr):
++    row = tl.program_id(0)
++    parts = tl.arange(0, PARTS)
++    for token in tl.static_range(ROWS):
++        values = tl.load(P + row * (ROWS * PARTS) + token * PARTS + parts)
++        tl.store(Y + token * 24 + row, tl.sum(values, 0))
++
++
++def native_hc_projection_rows(x: torch.Tensor, fn: torch.Tensor) -> torch.Tensor:
++    """Exact gfx1151 C3–C8 FP32 projection with independent row reductions."""
++    if (x.ndim != 2 or not 3 <= x.shape[0] <= 8 or x.shape[1] != 20480
++        or fn.shape != (24, 20480)
++        or x.dtype != torch.float32 or fn.dtype != torch.float32
++        or not x.is_contiguous() or not fn.is_contiguous()
++        or x.device != fn.device or x.device.type != 'cuda'
++        or not torch.version.hip
++        or torch.cuda.get_device_properties(x.device).gcnArchName.split(':')[0] != 'gfx1151'):
++        raise ValueError('native HC projection requires exact gfx1151 C3–C8 FP32 operands')
++    rows = x.shape[0]
++    partial = torch.empty((24, rows, 4), dtype=torch.float32, device=x.device)
++    output = torch.empty((rows, 24), dtype=torch.float32, device=x.device)
++    _hc_partial_rows[(24, 4)](x, fn, partial, 20480, 512, 4, rows,
++                             num_warps=4, num_stages=1, enable_fp_fusion=False)
++    _hc_finish_rows[(24,)](partial, output, 4, rows,
++                          num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return output
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -3657,12 +3657,13 @@
+             rsqrt = torch.rsqrt(
+                 x_flat.square().mean(-1, keepdim=True) + self.rms_norm_eps
+             )
+-            # Native V4.1 C1/C2 gfx1151 projection; RMS, scaling and the
++            # Native V4.1 C1–C8 gfx1151 projection; RMS, scaling and the
+             # downstream hc_split_sinkhorn remain on their original paths.
+             if (
+                 getattr(self.config, "model_type", None) == "deepseek_v41"
+                 and self.hc_mult == 4 and self.hidden_size == 5120
+-                and x_flat.shape in ((1, 20480), (2, 20480)) and hc_fn.shape == (24, 20480)
++                and x_flat.ndim == 2 and 1 <= x_flat.shape[0] <= 8
++                and x_flat.shape[1] == 20480 and hc_fn.shape == (24, 20480)
+                 and x_flat.is_contiguous() and hc_fn.is_contiguous()
+                 and x_flat.dtype == torch.float32 and hc_fn.dtype == torch.float32
+                 and x_flat.is_cuda and hc_fn.is_cuda and x_flat.device == hc_fn.device
+@@ -3676,8 +3677,12 @@
+                     projected = native_hc_projection(x_flat, hc_fn)
++                elif x_flat.shape[0] == 2:
++                    from sglang.kernels.ops.layernorm.native_hc_projection import native_hc_projection_c2
++
++                    projected = native_hc_projection_c2(x_flat, hc_fn)
+                 else:
+-                    from sglang.kernels.ops.layernorm.native_hc_projection import native_hc_projection_c2
+-
+-                    projected = native_hc_projection_c2(x_flat, hc_fn)
++                    from sglang.kernels.ops.layernorm.native_hc_projection import native_hc_projection_rows
++
++                    projected = native_hc_projection_rows(x_flat, hc_fn)
+             else:
+                 projected = F.linear(x_flat, hc_fn)
+             mixes = (projected * rsqrt).unsqueeze(1)
