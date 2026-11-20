@@ -1,0 +1,108 @@
+Qwen4-Exp reaches the Triton MoE runner during model import.  On HIP that
+runner and the shared activation layer import sgl_kernel unconditionally,
+even though their actual gated activation operations are also provided by
+SGLang's in-tree JIT kernels.  The sgl-kernel wheels do not target gfx1030,
+so the unconditional import prevents the model from loading on V620.
+
+The Qwen module also imports the generic runner package, whose prefill graph
+module imports EAGLE helpers even when speculation is disabled.  Route the two
+HIP tree operations through their existing Triton implementations so that this
+otherwise-unused import does not reintroduce sgl_kernel.
+
+Use the portable JIT activation implementation on HIP.  Keep QuickGELU's
+existing mathematical reference as a local fallback because the JIT module
+does not expose a unary QuickGELU kernel.  Qwen4-Exp uses SiLU, but keeping
+the module's complete HIP symbol contract prevents unrelated model imports
+from failing.
+
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
+@@ -65,7 +65,7 @@
+ elif _is_cpu and _is_cpu_amx_available:
+     pass
+ elif _is_hip:
+-    from sgl_kernel import gelu_and_mul, silu_and_mul
++    from sglang.kernels.ops.activation.activation import gelu_and_mul, silu_and_mul
+
+     if _use_aiter:
+         try:
+--- a/sglang/srt/layers/moe/fused_moe_triton/triton_kernels_moe.py
++++ b/sglang/srt/layers/moe/fused_moe_triton/triton_kernels_moe.py
+@@ -18,7 +18,7 @@
+ from triton_kernels.swiglu import swiglu_fn
+ from triton_kernels.tensor import FP4
+
+-from sglang.srt.utils import is_cuda
++from sglang.srt.utils import is_cuda, is_hip
+ from sglang.srt.utils.common import is_sm120_supported
+
+ if is_sm120_supported():
+@@ -26,7 +26,7 @@
+     # use the regular gather/scatter implementation for unsupported devices.
+     update_opt_flags_constraints({"is_persistent": False})
+
+-if is_cuda():
++if is_cuda() or is_hip():
+     from sglang.kernels.ops.activation.activation import gelu_and_mul, silu_and_mul
+ else:
+     from sgl_kernel import gelu_and_mul, silu_and_mul
+--- a/sglang/srt/layers/activation.py
++++ b/sglang/srt/layers/activation.py
+@@ -103,7 +103,18 @@
+ elif _is_xpu:
+     from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+ elif _is_hip:
+-    from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
++    from sglang.kernels.ops.activation.activation import (
++        gelu_and_mul,
++        gelu_tanh_and_mul,
++        silu_and_mul,
++    )
++
++    def gelu_quick(input: torch.Tensor, out=None) -> torch.Tensor:
++        result = input * torch.sigmoid(1.702 * input)
++        if out is None:
++            return result
++        out.copy_(result)
++        return out
+ elif _is_musa:
+     from sglang.srt.utils.patch_torch import register_fake_if_exists
+
+--- a/sglang/srt/speculative/eagle_utils.py
++++ b/sglang/srt/speculative/eagle_utils.py
+@@ -46,7 +46,7 @@
+
+ logger = logging.getLogger(__name__)
+
+-if _is_cuda or _is_hip or _is_musa:
++if _is_cuda or _is_musa:
+     from sgl_kernel import (
+         build_tree_kernel_efficient as sgl_build_tree_kernel_efficient,
+     )
+@@ -234,7 +234,7 @@
+             num_verify_tokens,
+             tree_mask_mode,
+         )
+-    elif _is_xpu:
++    elif _is_xpu or _is_hip:
+         sgl_build_tree_kernel_triton(
+             parent_list,
+             top_scores_index,
+@@ -382,7 +382,7 @@
+     target_predict: torch.Tensor,
+     topk: int = -1,
+ ):
+-    if _is_cuda or _is_hip or _is_musa:
++    if _is_cuda or _is_musa:
+         from sgl_kernel import verify_tree_greedy
+
+         verify_tree_greedy(
+@@ -425,7 +425,7 @@
+             retrieve_next_sibling=retrieve_next_sibling,
+             target_predict=target_predict,
+         )
+-    elif _is_xpu:
++    elif _is_xpu or _is_hip:
+         verify_tree_greedy_triton(
+             predicts=predicts,
+             accept_index=accept_index,
