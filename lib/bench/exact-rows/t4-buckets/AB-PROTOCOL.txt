@@ -1,0 +1,70 @@
+Exact vs padded decode graph buckets: full-model A/B protocol (needs the TP4 cluster lease, not the single-GPU sentinel).
+Nothing here has been run.  Thresholds marked (proposal) are not preregistered; set them before the first arm-E request.
+
+WHY A FULL-MODEL A/B
+ The only quantity that decides the option is the step time at raw batch 3 (and 5/6/7 at C8, 3 at DSpark gamma 1 = 6 verify rows)
+ on the real graph: kernel time at the exact row count (T2/T3 microbenches give it per kernel) minus the padded-row kernel time,
+ on top of collectives that do not depend on rows.  Per-kernel microbenches cannot show graph-level effects (capture memory,
+ residency of more graphs, CPU replay prep), so the A/B measures those directly; the single-GPU probe in scripts/ bounds only the
+ per-graph kernel-node bookkeeping.
+
+BUILD UNDER TEST
+ One ds41-node build that contains 0049 (and 0046..0048 when merged).  Both arms use the SAME worker store path; they differ only in
+ Environment=DS41_GRAPH_BUCKETS (padded = default, exact).  Templates: dropins/P-padded.conf.in, dropins/E-exact.conf.in.
+ The launcher exports SGLANG_DSV41_EXACT_GRAPH_BUCKETS=1 itself in the exact arm; a runtime without 0049 refuses to start
+ (ValueError "file-backed Engram graphs require ... prefix ... request buckets") rather than falling back to eager.
+ Preview an arm without touching anything:  DS41_PRINT_PROFILE=1 DS41_NODE_RANK=0 DS41_BINARY=<abs exe> DS41_GRAPH_BUCKETS=exact ds41-node.sh
+
+CELLS (arm pairs; all four ranks restart together for every arm switch, ~6-10 min warm, up to ~14 min on a cold Triton cache)
+ C0   plain decode,  max-running 4:  padded [1,2,4]      vs exact [1,2,3,4]      rows/step 1..4
+ C1g  DSpark gamma 1, max-running 4: padded [1,2,4]      vs exact [1,2,3,4]      verify rows 2,4,(3: 6 exact | 8 padded)
+ C8   plain decode,  DS41_MAX_RUNNING_REQUESTS=8:  padded [1,2,4,8] vs exact [1..8]   (capacity: see "memory gate")
+ G3   DSpark gamma 3: exact == padded ([1,2]); run one exact startup only to confirm identical capture lines and no new variants.
+ Use a warm shared Triton cache for the timing runs (Q-shapes-precompile/precompile/PLAN.md: P0).  The first exact startup compiles the
+ new row-count variants; report that startup separately and never time it.
+
+ORDER PER CELL: P, E, P (A,B,A).  Each arm: install drop-in -> restart -> wait ready -> startup evidence -> structural proof ->
+ correctness gates -> performance cells -> next arm.  Rollback: remove the drop-in on all four nodes, daemon-reload, restart,
+ verify ExecStart is the baseline (L-batch3-qual/tools/cluster.py install|remove|restart|wait does exactly this for its own drop-in name;
+ reuse it with this lease holder's drop-in path).
+
+1. STARTUP EVIDENCE (every arm, all ranks)
+   journal slice -> scripts/graph_logs.py capture <journal files>
+   record per rank: target decode / target verify / draft verify bs list, rows per request, elapsed s, mem usage GB, avail mem GB.
+   Compare avail mem after the last capture (P vs E): that difference is the memory cost of the extra graphs on the real model.
+   Memory gate (proposal): stop and report if any rank's avail mem after all captures < 12 GB, or draft capture logs the
+   "only %.2f GB GPU memory is available" fallback (dspark_worker_v2.py init_cuda_graphs).  Baseline free after capture is 22.5-24.7 GB (K3 B).
+   Also keep:  rocm-smi --showmeminfo vram  before/after startup on each node.
+
+2. STRUCTURAL PROOF (needs SGLANG_LOG_DECODE_GRAPH_KEY=1 in the drop-in; correctness phase only)
+   drive C1..C4 requests with L-batch3-qual/tools/c3_qualify.py (graphkeys mode), then
+   scripts/graph_logs.py replay --require-exact <journal>   -> arm E must exit 0 (every replay key_size == raw_bs);
+   arm P must show raw_bs=3 -> key_size=4 (the known padded C3).  Also: decode_cuda_graph counter rises, decode_none stays flat (no eager
+   fallback at any raw_bs 1..max).  For gamma 1: raw_bs 3 must key 3 in E.  A run where raw_bs 3 never occurs is "not exercised": repeat once.
+
+3. CORRECTNESS (reuse L-batch3-qual gates G0-G7 and its preregistered floors, K3 numcap for per-row logits)
+   - E vs P at classes C1, C2, C4 (rows 1,2,4 use the same kernels in both arms): must match within the A/A floor; if the build has no
+     other difference the expected result is bit-identical tokens and logprobs for C1.
+   - E vs P at C3: rows differ BY DESIGN in arithmetic only where kernels are row-count dependent (K2 gate/up: WMMA at M=3 vs FMA live-row pairs at M=4;
+     FP8 GEMV after T2: expected bitwise row-invariant; RMSNorm tree: block width per row count, K1 `match`).  Judge with the L-batch3 drift floor,
+     not equality (the plan's own rule for batch-size-dependent classes).
+   - G4 batch decay/growth 4->3->2->1 and 1->2->3->4, G5 graph switching C3/C4/C2/C3, G6 cancellation + slot reuse, G7 long context (18K, 61,462-token).
+   - Engram: every replay installs exactly bs*width rows (tests/exact-graph-buckets.py covers the stager on CPU; the GPU run adds hash/lookup
+     timing per row count: look for any step where prestage time grows with rows).
+
+4. PERFORMANCE (graph-key logging env removed; L-batch3-qual/tools/bench.py cells or K3-dspark/qualification/performance.py for DSpark)
+   cells: short C1..C4 x3, C3-distinct x3, long C1/C3 x3, 18K cold/warm; for C8: C5..C8 pinned.  gamma 1: B1..B4.
+   metric: per-request decode tok/s = (completion_tokens-1)/(duration-ttft); also aggregate wall tok/s, median inter-token gap;
+   DSpark: accepted tokens per pass (worker counters, per width).
+   rules (proposal, mirrors PREREGISTERED.md): S = max-min of the P runs (before+after) per cell.
+     controls C1/C2/C4: E_mean >= P_mean - S   (the extra resident graphs must cost nothing);
+     C3 (and C5-C7 at C8, gamma-1 B3): E beats P if E_mean > max(P) + S and aggregate improves by more than the spread;
+     adopt exact only if all correctness gates pass, controls unchanged, and the targeted cells improve.
+   expected size (est.): against UNMASKED padding the K2 chain per layer is M=3 492 us vs M=4 648 us (K2 report, 40 layers) = ~6 ms/step on the MoE alone.
+   Against MASKED padding (Task 1: padded rows route to expert -1, no weight reads) the MoE part is expected to mostly vanish, so the E-P gap
+   at C3 shrinks to row-dependent ALU/launch effects of the dense kernels, HC and norms: size n/d without this A/B.  Arms must therefore be
+   run against the build that carries the masking patch, or the comparison answers an obsolete question.
+
+5. MEMORY / CAPTURE-TIME SUMMARY TO REPORT
+   per arm: sum of 'mem usage' for decode/verify/draft capture, avail mem at 'fired up', startup minutes warm and cold, number of new Triton variants
+   compiled in the first exact startup (compile count lines / cache-dir file count delta).

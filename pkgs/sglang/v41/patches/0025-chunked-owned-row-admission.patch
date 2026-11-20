@@ -1,0 +1,46 @@
+--- a/sglang/srt/managers/scheduler.py
++++ b/sglang/srt/managers/scheduler.py
+@@ -3923,6 +3923,7 @@
+             prefill_tile_block_m=prefill_tile_block_m,
+         )
+
++        continuing_chunk = self.chunked_req
+         if self.chunked_req is not None:
+             self.chunked_req.init_next_round_input()
+             adder.chunked_req_limit = self.policy.shortest_prefill_chunk_limit(
+@@ -3968,11 +3969,34 @@
+             candidate_beam_width = (
+                 req.beam_group.beam_width if req.beam_group is not None else None
+             )
+-            if len(adder.can_run_list) >= self.get_num_allocatable_reqs(
++            num_allocatable_reqs = self.get_num_allocatable_reqs(
+                 running_bs,
+                 candidate_beam_width,
+                 running_batch=running_batch,
++            )
++            if (
++                continuing_chunk is not None
++                and continuing_chunk.kv.holds_kv
++                and continuing_chunk.beam_group is None
++                and continuing_chunk in adder.can_run_list
++                and candidate_beam_width is None
++                and all(x.beam_group is None for x in adder.can_run_list)
++                and self.disaggregation_mode != DisaggregationMode.PREFILL
+             ):
++                # The continuing chunk is already in can_run_list, but its
++                # req_to_token row is already allocated and therefore absent
++                # from available_size(). Credit that row only to the pool
++                # limit. It still occupies a PP microbatch position.
++                available_new_rows = max(
++                    self.req_to_token_pool.available_size()
++                    - self.beam_coordinator.pending_member_rows(running_batch),
++                    0,
++                )
++                num_allocatable_reqs = min(
++                    get_parallel().pp_max_micro_batch_size - running_bs,
++                    available_new_rows + 1,
++                )
++            if len(adder.can_run_list) >= num_allocatable_reqs:
+                 running_batch.batch_is_full = True
+             if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                 # In prefill mode, prealloc queue and transfer queue can also take memory,

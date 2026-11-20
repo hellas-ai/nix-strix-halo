@@ -1,0 +1,29 @@
+Use safetensors 0.8 pread for non-mmap loading, including native E8M0.
+
+--- a/sglang/srt/model_loader/weight_utils.py
++++ b/sglang/srt/model_loader/weight_utils.py
+@@ -1204,15 +1204,16 @@
+         bar_format=BAR_FORMAT,
+         position=tqdm._get_free_pos(),
+     ):
+-        if disable_mmap:
+-            with open(st_file, "rb") as f:
+-                result = safetensors.torch.load(f.read())
+-                for name in sorted(result.keys()):
+-                    yield name, result[name]
+-        else:
+-            with safetensors.safe_open(st_file, framework="pt", device="cpu") as f:
+-                for name in f.keys():
+-                    yield name, f.get_tensor(name)
++        # safetensors >= 0.8 supports owned, per-tensor pread buffers. Its
++        # bytes-to-torch loader omits E8M0 and also copies the entire shard.
++        with safetensors.safe_open(
++            st_file,
++            framework="pt",
++            device="cpu",
++            backend="pread" if disable_mmap else "mmap",
++        ) as f:
++            for name in f.keys():
++                yield name, f.get_tensor(name)
+         if drop_cache_after_load:
+             _drop_file_cache_after_load(st_file)

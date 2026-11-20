@@ -1,0 +1,53 @@
+Task 4 evidence: exact decode graph buckets.  "measured" = read from a journal/source; "est." = derived, derivation given.
+
+A. WHERE BUCKETS ARE RESTRICTED OR DERIVED (installed source = upstream fdf14605 + patches 0001..0045)
+ 1. model_executor/runner/base_cuda_graph_runner.py get_batch_sizes_to_capture: cuda_graph_config.decode.bs, filtered by
+    alignment (1 for TP4 without DP-attention: require_gathered_buffer() is False) and clipped to req_to_token_pool.size (adds the pool size
+    when the list exceeds it).  No power-of-two logic.  _pad_to_bucket = bisect_left: exact bucket whenever one exists.
+ 2. decode_cuda_graph_runner.py __init__ Engram guard (file-backed Engram): capture_bs must be one of [1],[1,2],[1,2,4],[1,2,4,8],
+    max_bs*req_width <= 8, width 1 decode or static DSpark verify width 2/4, TP4/PP1/DP1/CP1.   RELAXED by 0049 (exact [1..n] ladders, opt-in).
+ 3. layers/attention/graph_variants.py create_dsv41_candidate_graph_variants: the same four lists gate the gfx1151 native candidate variants
+    (decode: 4 labels per bucket; verify: 2 per bucket).  Without them the factory returns None.   RELAXED by 0049 (same predicate).
+ 4. layers/engram_graph_prestage.py NativeEngramGraphPrestage: max_bs in (1,2,4,8), capture_bs derived as (1,2,4,8) up to max_bs, frames sized
+    max_bs*req_width rows; prepare() needs graph_bs == smallest bucket >= bs.   0049: explicit capture_bs argument (validated), legacy derivation
+    unchanged when absent.
+ 5. Not restrictions (checked generic): can_run_graph (1 <= bs <= capture_bs[-1] via can_stage), the 0039 pad-to-bucket prepare/install, DsparkVerifyEpilogue
+    (max_bs from decode.bs, stride = verify width), draft sampler / draft runner (same decode.bs; no Engram stager, no variants: draft is TARGET_VERIFY
+    capture of a draft worker), attention backend graph metadata (dict keyed by bs), logits/shared-output buffers (max(capture_bs)*width rows),
+    attention autotune keys (power-of-two bucket of total tokens: 3->4, 5..7->8, no new autotune), Engram in-graph gather (per row).
+ 6. Per-bs constexpr variants (new Triton compile for a new row count): native HC projection rows kernels (ROWS constexpr, rows 3..8), native FP8 GEMV
+    (after Task 2: ROWS), sharded_greedy_finish (BS constexpr = batch) in the DSpark draft, K2 WMMA (RP constexpr 32 for M<=5 else 128; down cfg 32x64 for M<=4,
+    else 64x64).  K1 RMSNorm: block width by (rows,width) -> rows 3,5,6,7 reuse widths of rows 2/4 (computed below): no new variant.
+
+B. KERNEL FAMILY BY ROW COUNT AT EXACT ROWS (current code | after Task 2 / Task 3)
+ family                         rows 3                 rows 5,6,7             row 8                  after T2/T3
+ FP8 GEMV wqkv_a,wq_b,wo_b,engram wkv   generic Triton matmul   generic             native C8              native ROWS=1..8 (T2)
+ FP8 shared expert gate_up/down generic                 generic                native C8 (flagged)    native (T2)
+ indexer wq_b (long ctx)        native c4 on padded copy generic               native C8              native (T2)
+ HC projection                  native _hc_partial_rows (one variant per row count; covered 1..8)
+ HC post                        torch fallback (5 ATen kernels x 80/step)  same   same                  native (T2; kernel has no row constexpr)
+ K1 RMSNorm + routed add        native (rows<=16; BW by rows below)
+ K2 MXFP4 routed chain          WMMA gate/up 32x256 w2, down 32x64 w2 (rows 5: down 64x64 w4); rows 6,7 RP=128;  rows 8 live_row_pairs
+ router, wo_a (bf16), lm_head   row-generic torch/Triton
+ attention (decode split-K, 1..16 tokens)  autotune bucket 4 / 8 -> same variants as padded buckets
+ DSpark draft rows 3 (bs1) / 6 (bs2, gamma 3): FP8 generic, AITER BM16 MoE 128e/top-3, HC post torch -> T2 GEMV + T3 K2 TOPK=3/128e + T2 HC post
+ K1 RMSNorm block width (computed from native_rmsnorm_decode.torch_mean_block_width), rows 1..8:
+   width 128:  32 x8 | 512: 128 x7, 64 at 8 | 1280: 256 (rows 1-3), 128 (4-7), 64 (8) | 5120: 512, 256, 256, 128 (4-7), 64 (8)
+ HAZARD: exact rows 3/5/6/7 on CURRENT code run every FP8 projection through the generic matmul (~16 GB/s, K1 report).  est.: 1881 MB of FP8 weights
+   per step (Q report G2 table) / 16 GB/s = ~118 ms/step vs ~15 ms native: exact buckets are a regression until Task 2 lands.  Do not A/B without it.
+
+C. GRAPH MEMORY AND CAPTURE TIME
+ measured (journal 'Capture ... graph end', 4 ranks, K3/L runs; totals only, NO per-bucket or per-graph figures exist anywhere in the artifacts):
+   target decode  [1,2,4] x 4 attention variants = 12 graphs:  warm Triton cache 0.87-1.25 GB, 14.5-17.0 s;  cold cache 1.71-2.10 GB, 260.7-261.6 s
+   target verify  width 4, [1,2] x 2 variants = 4 graphs:     1.63-1.88 GB, 156.3-157.1 s (cold)
+   draft verify   rows 3,    [1,2] x 1 = 2 graphs:            0.50-0.76 GB, 109.3-111.1 s (cold)
+   free after all captures (profile B): 22.5-24.7 GB.   [1,2,4,8], width-2 verify and [1..n] sets: never captured -> n/d.
+ est. (linear-in-graph-count UPPER bound; the runner captures largest first and reuses one pool, so true marginal cost is lower):
+   per graph: decode 0.07-0.10 GB warm / 0.14-0.18 cold (/12); verify 0.41-0.47 (/4); draft 0.25-0.38 (/2)
+   decode [1,2,3,4] vs [1,2,4]: +4 graphs = +0.29-0.42 GB warm (+0.57-0.70 cold), +4 x ~1.3 s capture warm (+5 s)
+   DSpark gamma 1 verify [1,2,3,4] vs [1,2,4] (width 2, 2 variants): +2 graphs = +0.8-0.9 GB;  draft +1 graph: +0.25-0.38 GB (if rows scale like gamma 3)
+   decode C8 [1..8] vs [1,2,4,8]: 32 vs 16 graphs = +1.1-2.9 GB (+~20 s warm), plus an unknown growth of the shared pool for bigger row counts (n/d)
+   all within ~22 GB free: <= ~3 GB worst case here (<= ~14%), typically a few percent.
+ est. cold compile for new row-count variants (rate 2.5 s/variant = 246 s / 99 variants from Q: cold 260.8 s vs warm 14.7 s): decode exact [1,2,3,4]
+   ~8-10 new variants (~20-25 s); C8 exact ~40 (~100 s); zero with a warm shared cache.
+ a graph probe for the model-independent part (kernel-node bookkeeping per graph) is scripts/graph_overhead_probe.py (needs the sentinel).

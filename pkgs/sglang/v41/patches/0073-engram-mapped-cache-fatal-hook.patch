@@ -1,0 +1,678 @@
+--- a/sglang/srt/layers/engram_native_preflight.py
++++ b/sglang/srt/layers/engram_native_preflight.py
+@@ -40,6 +40,21 @@
+         self.stores = (layers[0], layers[1])
+         self.device = device
+         self.result_gate = result_gate
++        self.mapped_cache_enabled = os.environ.get("SGLANG_ENGRAM_MAPPED_CACHE") == "1"
++        if self.mapped_cache_enabled and not result_gate:
++            raise ValueError("Engram mapped cache requires the fatal result gate")
++        self.mapped_caches = [None, None]
++        self.mapped_capacity = int(
++            os.environ.get("SGLANG_ENGRAM_MAPPED_CAPACITY", "1000000")
++        )
++        self.mapped_workers = int(os.environ.get("SGLANG_ENGRAM_MAPPED_WORKERS", "8"))
++        self.mapped_wait_ms = int(os.environ.get("SGLANG_ENGRAM_MAPPED_WAIT_MS", "30000"))
++        if self.mapped_cache_enabled and not (
++            1 <= self.mapped_capacity <= 1_000_000
++            and 1 <= self.mapped_workers <= 16
++            and 1 <= self.mapped_wait_ms <= 60_000
++        ):
++            raise ValueError("bounded Engram mapped cache configuration invalid")
+         self.status = EngramPreflightStatus(
+             device=device, tp_rank=tp_rank, tp_size=tp_size, group_name=group_name
+         )
+@@ -63,6 +78,8 @@
+         rows = int(forward_batch.input_ids.numel())
+         if rows <= 0:
+             raise ValueError("Engram preflight requires at least one live token")
++        if self.mapped_cache_enabled:
++            return self._prepare_mapped(forward_batch, rows)
+         generation = self.status.begin()
+         packed = None
+         target = None
+@@ -142,3 +159,90 @@
+         )
+         forward_batch.engram_packed_rows = device_rows
+         return (self.status, generation) if self.result_gate else None
++
++    def _prepare_mapped(self, forward_batch, rows: int):
++        """GPU hash IDs to pinned row bytes, with no caller-side ID D2H.
++
++        Cold misses wait for a background CPU pread on immutable remote-backed
++        files. Both cold errors and cache exhaustion are fatal status, not a
++        zero-row success or request retry. Every rank reaches the fixed status
++        collective after routine local failures.
++        """
++        if rows * 24 > 65_536:
++            logger.critical("Engram mapped forward exceeds bounded 65,536-ID launch")
++            os._exit(71)
++        try:
++            # One final allocation before the generation starts. A device OOM
++            # here cannot be turned into a routine rank-local miss, because
++            # there is no writable output/status guarantee; terminate this
++            # worker so the fleet supervisor fail-stops the other TP ranks.
++            device_rows = torch.zeros(
++                (rows, 2, 24, ROW_BYTES), dtype=torch.uint8, device=self.device
++            )
++        except Exception:
++            logger.critical("Engram mapped output allocation failed; exiting TP rank", exc_info=True)
++            os._exit(71)
++        generation = self.status.begin()
++        mapped_cache_type = None
++        try:
++            from sglang.srt.layers.engram_mapped_cache import EngramMappedCache
++            mapped_cache_type = EngramMappedCache
++        except Exception:
++            logger.exception("Engram mapped cache library unavailable on TP rank %d", self.status.tp_rank)
++            self.status.set_local_failure(0, 6)
++            self.status.set_local_failure(1, 6)
++        ids = pending = None
++        try:
++            ids, pending = self.hasher(
++                forward_batch.input_ids, forward_batch, defer_commit=True
++            )
++            if ids.shape != (rows, 2, 24) or ids.dtype != torch.int64:
++                raise ValueError("canonical Engram GPU hash ABI changed")
++        except Exception:
++            logger.exception("Engram mapped hash failed on TP rank %d", self.status.tp_rank)
++            self.status.set_local_failure(0, 7)
++            self.status.set_local_failure(1, 7)
++            ids = pending = None
++
++        for layer_index, store in enumerate(self.stores):
++            if ids is not None and mapped_cache_type is not None:
++                try:
++                    cache = self.mapped_caches[layer_index]
++                    if cache is None:
++                        cache = mapped_cache_type(
++                            store,
++                            capacity=self.mapped_capacity,
++                            workers=self.mapped_workers,
++                        )
++                        self.mapped_caches[layer_index] = cache
++                    cache.gather_into(
++                        ids[:, layer_index, :].contiguous(),
++                        device_rows[:, layer_index],
++                        self.status.local_layer_word(layer_index),
++                        wait_ms=self.mapped_wait_ms,
++                    )
++                except Exception:
++                    logger.exception(
++                        "Engram mapped gather failed on TP rank %d layer %d",
++                        self.status.tp_rank, layer_index,
++                    )
++                    self.status.set_local_failure(layer_index, 6)
++
++        # The deterministic fault hook must cover the mapped early-return
++        # branch as well as the blocking comparator. Queue its local status
++        # write after both gathers and before the fixed TP collective.
++        if self.fault is not None:
++            fault_rank, fault_layer, fault_generation = self.fault
++            if (fault_rank, fault_generation) == (self.status.tp_rank, generation):
++                self.status.set_local_failure(fault_layer, 5)
++
++        # Final rows and history mask use the same forward stream as both HIP
++        # gathers. The all-rank status reduction follows those enqueued reads;
++        # the processor checks the copied result before any token/cache output.
++        self.status.finish(generation)
++        if pending is not None:
++            self.hasher.commit_preflight(
++                pending, status_device=self.status.device_status
++            )
++        forward_batch.engram_packed_rows = device_rows
++        return self.status, generation
+--- /dev/null
++++ b/sglang/srt/layers/engram_mapped_cache.py
+@@ -0,0 +1,110 @@
++"""Bounded GPU-ID Engram row cache backed by pinned, immutable file rows.
++
++This module is only used by the opt-in fatal-result-gate arm. A cache error is
++reported through the per-generation TP status and terminates the serving group;
++there is no row eviction or request-level recovery. The row store owns the
++original checkpoint FD; the native cache duplicates it for its entire life.
++"""
++
++from __future__ import annotations
++
++import ctypes
++from pathlib import Path
++
++import torch
++
++
++_HEADER_BYTES = 4096
++_ROW_BYTES = 264
++_ERROR_BYTES = 512
++
++
++class EngramMappedCache:
++    def __init__(self, store, *, capacity: int, workers: int):
++        if not (1 <= capacity <= 1_000_000 and 1 <= workers <= 16):
++            raise ValueError("bounded Engram mapped cache capacity/workers invalid")
++        if getattr(store, "_closed", True):
++            raise ValueError("Engram mapped cache requires an open immutable store")
++        if not (0 <= store.row_start < store.row_end <= store.num_embeddings):
++            raise ValueError("Engram mapped cache store partition invalid")
++
++        lib = ctypes.CDLL(str(Path(__file__).with_name("libengram_mapped_cache.so")))
++        lib.engram_mapped_create.argtypes = [
++            ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_uint64,
++            ctypes.c_int64, ctypes.c_int64, ctypes.c_int64,
++            ctypes.c_int, ctypes.c_int, ctypes.c_int,
++            ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p, ctypes.c_size_t,
++        ]
++        lib.engram_mapped_create.restype = ctypes.c_int
++        lib.engram_mapped_launch.argtypes = [
++            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
++            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
++            ctypes.c_char_p, ctypes.c_size_t,
++        ]
++        lib.engram_mapped_launch.restype = ctypes.c_int
++        lib.engram_mapped_destroy.argtypes = [ctypes.c_void_p]
++        lib.engram_mapped_destroy.restype = None
++
++        packed = bool(store._packed)
++        handle = ctypes.c_void_p()
++        error = ctypes.create_string_buffer(_ERROR_BYTES)
++        code = lib.engram_mapped_create(
++            int(store._wfd), int(-1 if packed else store._sfd),
++            int(_HEADER_BYTES if packed else store._woff),
++            int(0 if packed else store._soff),
++            int(store.num_embeddings), int(store.row_start), int(store.row_end),
++            int(capacity), int(workers), int(packed),
++            ctypes.byref(handle), error, len(error),
++        )
++        if code or not handle.value:
++            raise RuntimeError(f"Engram mapped cache create: {error.value.decode(errors='replace')}")
++        self._lib = lib
++        self._handle = handle
++        self.device = torch.device("cuda", torch.cuda.current_device())
++
++    def close(self) -> None:
++        handle = getattr(self, "_handle", None)
++        if handle is not None and handle.value:
++            self._handle = ctypes.c_void_p()
++            self._lib.engram_mapped_destroy(handle)
++
++    def __del__(self):
++        self.close()
++
++    def gather(
++        self, ids: torch.Tensor, status_word: torch.Tensor, *, wait_ms: int
++    ) -> torch.Tensor:
++        rows = torch.empty((*ids.shape, _ROW_BYTES), dtype=torch.uint8, device=ids.device)
++        self.gather_into(ids, rows, status_word, wait_ms=wait_ms)
++        return rows
++
++    def gather_into(
++        self, ids: torch.Tensor, rows: torch.Tensor,
++        status_word: torch.Tensor, *, wait_ms: int
++    ) -> None:
++        if (
++            ids.device != self.device or ids.dtype != torch.int64
++            or ids.ndim != 2 or ids.shape[1] != 24
++            or not ids.is_contiguous()
++            or rows.device != self.device or rows.dtype != torch.uint8
++            or rows.shape != (*ids.shape, _ROW_BYTES)
++            or rows.stride(1) != _ROW_BYTES or rows.stride(2) != 1
++            or rows.stride(0) % _ROW_BYTES != 0
++            or not 24 <= rows.stride(0) // _ROW_BYTES <= 1024
++            or status_word.device != self.device
++            or status_word.dtype != torch.int32
++            or status_word.numel() != 1
++            or not status_word.is_contiguous()
++            or not 1 <= wait_ms <= 60_000
++        ):
++            raise ValueError("Engram mapped gather ABI mismatch")
++        error = ctypes.create_string_buffer(_ERROR_BYTES)
++        code = self._lib.engram_mapped_launch(
++            self._handle, ctypes.c_void_p(ids.data_ptr()), int(ids.numel()),
++            ctypes.c_void_p(rows.data_ptr()), int(rows.stride(0) // _ROW_BYTES),
++            ctypes.c_void_p(status_word.data_ptr()),
++            ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
++            int(wait_ms), error, len(error),
++        )
++        if code:
++            raise RuntimeError(f"Engram mapped gather launch: {error.value.decode(errors='replace')}")
+--- /dev/null
++++ b/sglang/srt/layers/engram_mapped_cache.hip.cpp
+@@ -0,0 +1,438 @@
++// Bounded, no-eviction Engram mapped-row cache for gfx1151.
++// This library is not enabled by default. A caller must reduce its device
++// status across TP and fail-stop before output/cache publication on error.
++#include <hip/hip_runtime.h>
++#include <sys/mman.h>
++#include <sys/resource.h>
++#include <fcntl.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <cstdio>
++#include <cstring>
++#include <memory>
++#include <stdexcept>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace {
++constexpr int kRowBytes = 264;
++constexpr int kWeightBytes = 256;
++constexpr int kScaleBytes = 8;
++constexpr int kMaxCapacity = 1000000;
++std::atomic<size_t> g_reserved_pinned_bytes{0};
++
++void check(hipError_t code, const char* where) {
++  if (code != hipSuccess)
++    throw std::runtime_error(std::string(where) + ": " + hipGetErrorString(code));
++}
++
++void error_text(char* out, size_t bytes, const char* value) noexcept {
++  if (out == nullptr || bytes == 0) return;
++  std::snprintf(out, bytes, "%s", value);
++}
++
++struct Registered {
++  void* host = nullptr;
++  void* device = nullptr;
++  size_t bytes = 0;
++
++  explicit Registered(size_t requested) {
++    const long page_query = sysconf(_SC_PAGESIZE);
++    if (page_query <= 0) throw std::runtime_error("Engram page size unavailable");
++    const size_t page = static_cast<size_t>(page_query);
++    bytes = (requested + page - 1) / page * page;
++    host = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
++                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (host == MAP_FAILED) {
++      host = nullptr;
++      throw std::runtime_error("Engram mmap failed");
++    }
++    try {
++      std::memset(host, 0, bytes);
++      check(hipHostRegister(host, bytes, hipHostRegisterMapped | hipExtHostRegisterUncached),
++            "Engram hipHostRegisterMapped|Uncached");
++      try {
++        check(hipHostGetDevicePointer(&device, host, 0),
++              "Engram hipHostGetDevicePointer");
++      } catch (...) {
++        (void)hipHostUnregister(host);
++        throw;
++      }
++    } catch (...) {
++      munmap(host, bytes);
++      host = nullptr;
++      throw;
++    }
++  }
++
++  ~Registered() {
++    if (host != nullptr) {
++      (void)hipHostUnregister(host);
++      munmap(host, bytes);
++    }
++  }
++  Registered(const Registered&) = delete;
++  Registered& operator=(const Registered&) = delete;
++};
++
++struct alignas(64) Ticket {
++  int state;  // 0 unused, 1 published, 3 I/O, 2 ready, -1 I/O error, -2 canceled
++  int64_t id;
++  uint8_t pad[48];
++};
++static_assert(sizeof(Ticket) == 64);
++
++struct alignas(64) Counter {
++  int next_slot;
++  uint8_t pad[60];
++};
++static_assert(sizeof(Counter) == 64);
++
++void read_exact(int fd, void* dst, size_t len, uint64_t offset) {
++  size_t done = 0;
++  while (done < len) {
++    const ssize_t n = pread(fd, static_cast<uint8_t*>(dst) + done,
++                            len - done, static_cast<off_t>(offset + done));
++    if (n <= 0) throw std::runtime_error("Engram pread failed or short");
++    done += static_cast<size_t>(n);
++  }
++}
++
++// Phase one must not spin on a dense entry or ticket: a losing lane can share
++// a wave with the winning lane, and a waiting CTA can occupy resources needed
++// by an unscheduled producer CTA. Completion of this kernel on the same stream
++// is the publication barrier for every winning GPU ticket producer.
++__global__ void publish_kernel(
++    const int64_t* ids, int count, int64_t global_rows,
++    int64_t row_start, int64_t row_end, int* dense, Counter* counter,
++    Ticket* tickets, int* status_cell, int capacity) {
++  const int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i >= count) return;
++  const int64_t id = ids[i];
++  if (id < 0 || id >= global_rows) {
++    atomicCAS(status_cell, 0, 1);  // global OOB
++    return;
++  }
++  if (id < row_start || id >= row_end) return;
++  int* entry = dense + (id - row_start);
++  if (__hip_atomic_load(entry, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT) == 0 &&
++      atomicCAS(entry, 0, -1) == 0) {
++    const int slot = atomicAdd_system(&counter->next_slot, 1);
++    if (slot >= capacity) {
++      __hip_atomic_store(entry, -2, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
++      atomicCAS(status_cell, 0, 2);  // bounded cache exhausted
++    } else {
++      tickets[slot].id = id;
++      __hip_atomic_store(&tickets[slot].state, 1,
++                         __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
++      __hip_atomic_store(entry, slot + 1,
++                         __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
++    }
++  }
++}
++
++// Phase two runs only after every phase-one lane has retired on this stream.
++// It may wait for host pread, never for an unscheduled GPU ticket producer.
++// 0 is unowned bytes, not success for invalid global IDs.
++__global__ void gather_kernel(
++    const int64_t* ids, int count, int64_t global_rows,
++    int64_t row_start, int64_t row_end, const int* dense,
++    Ticket* tickets, const uint8_t* mapped_rows, uint8_t* output,
++    int output_token_stride_rows, int* status_cell,
++    unsigned long long timeout_ticks) {
++  const int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i >= count) return;
++  uint8_t* out = output +
++      (static_cast<size_t>(i / 24) * output_token_stride_rows + i % 24) * kRowBytes;
++  const int64_t id = ids[i];
++  int error = 0;
++  if (id < 0 || id >= global_rows) {
++    error = 1;
++  } else if (id >= row_start && id < row_end) {
++    const int encoded = __hip_atomic_load(dense + (id - row_start),
++                                           __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
++    if (encoded == -2) error = 2;
++    else if (encoded <= 0) error = 3;  // producer failed to publish
++    else {
++      const int slot = encoded - 1;
++      const auto deadline = static_cast<unsigned long long>(wall_clock64()) + timeout_ticks;
++      int state = 0;
++      do {
++        state = __hip_atomic_load(&tickets[slot].state,
++                                  __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
++        if (state == 2 || state == -1 || state == -2) break;
++      } while (static_cast<unsigned long long>(wall_clock64()) < deadline);
++      if (state == -1) error = 4;
++      else if (state != 2) {
++        // A late worker cannot turn a timed-out slot valid.
++        while (state == 1 || state == 3) {
++          const int prior = atomicCAS_system(&tickets[slot].state, state, -2);
++          if (prior == state) { state = -2; break; }
++          state = prior;
++        }
++        if (state == -1) error = 4;
++        else if (state != 2) error = 5;
++      }
++      if (!error) {
++        const uint8_t* row = mapped_rows + static_cast<size_t>(slot) * kRowBytes;
++        for (int j = 0; j < kRowBytes; ++j) out[j] = row[j];
++      }
++    }
++  }
++  if (error || id < row_start || id >= row_end) {
++    for (int j = 0; j < kRowBytes; ++j) out[j] = 0;
++  }
++  if (error) atomicCAS(status_cell, 0, error);
++}
++
++class Cache {
++ public:
++  const int64_t global_rows;
++  const int64_t row_start;
++  const int64_t row_end;
++  const int capacity;
++  const bool packed;
++  const uint64_t weight_offset;
++  const uint64_t scale_offset;
++  int wfd = -1;
++  int sfd = -1;
++  std::unique_ptr<Registered> rows;
++  std::unique_ptr<Registered> controls;
++  std::unique_ptr<Registered> counter_mem;
++  Ticket* tickets = nullptr;
++  Counter* counter = nullptr;
++  int* dense = nullptr;
++  int wall_clock_khz = 0;
++  size_t pinned_reserved = 0;
++  std::atomic<int> claimed{0};
++  std::atomic<bool> stop{false};
++  std::vector<std::thread> workers;
++
++  Cache(int weight_fd, int scale_fd, uint64_t weight_off,
++        uint64_t scale_off, int64_t total, int64_t start, int64_t end,
++        int cap, int worker_count, bool is_packed)
++      : global_rows(total), row_start(start), row_end(end), capacity(cap),
++        packed(is_packed), weight_offset(weight_off), scale_offset(scale_off) {
++    if (total <= 0 || start < 0 || end <= start || end > total ||
++        end - start > 100000000 || cap < 1 || cap > kMaxCapacity ||
++        worker_count < 1 || worker_count > 16)
++      throw std::runtime_error("invalid bounded Engram cache geometry");
++    try {
++    wfd = fcntl(weight_fd, F_DUPFD_CLOEXEC, 0);
++    if (wfd < 0) throw std::runtime_error("Engram weight fd dup failed");
++    if (!packed) {
++      sfd = fcntl(scale_fd, F_DUPFD_CLOEXEC, 0);
++      if (sfd < 0) throw std::runtime_error("Engram scale fd dup failed");
++    }
++    const size_t row_bytes = static_cast<size_t>(cap) * kRowBytes;
++    const size_t ticket_bytes = static_cast<size_t>(cap) * sizeof(Ticket);
++    struct rlimit limit;
++    if (getrlimit(RLIMIT_MEMLOCK, &limit) != 0)
++      throw std::runtime_error("Engram getrlimit MEMLOCK failed");
++    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
++    const auto rounded = [page](size_t n) { return (n + page - 1) / page * page; };
++    const size_t needed = rounded(row_bytes) + rounded(ticket_bytes) +
++                          rounded(sizeof(Counter));
++    size_t reserved = g_reserved_pinned_bytes.load(std::memory_order_acquire);
++    for (;;) {
++      if (needed > SIZE_MAX - reserved)
++        throw std::runtime_error("Engram cumulative pin accounting overflow");
++      if (limit.rlim_cur != RLIM_INFINITY &&
++          (reserved > limit.rlim_cur || needed > limit.rlim_cur - reserved))
++        throw std::runtime_error("Engram caches exceed cumulative MEMLOCK limit");
++      if (g_reserved_pinned_bytes.compare_exchange_weak(
++              reserved, reserved + needed, std::memory_order_acq_rel))
++        break;
++    }
++    pinned_reserved = needed;
++    rows = std::make_unique<Registered>(row_bytes);
++    controls = std::make_unique<Registered>(ticket_bytes);
++    counter_mem = std::make_unique<Registered>(sizeof(Counter));
++    tickets = static_cast<Ticket*>(controls->host);
++    counter = static_cast<Counter*>(counter_mem->host);
++    check(hipMalloc(reinterpret_cast<void**>(&dense),
++                    static_cast<size_t>(end - start) * sizeof(int)),
++          "Engram dense map allocation");
++    check(hipMemset(dense, 0, static_cast<size_t>(end - start) * sizeof(int)),
++          "Engram dense map zero");
++    int device = -1;
++    check(hipGetDevice(&device), "Engram current device");
++    check(hipDeviceGetAttribute(&wall_clock_khz,
++                                hipDeviceAttributeWallClockRate, device),
++          "Engram device wall-clock rate");
++    if (wall_clock_khz <= 0)
++      throw std::runtime_error("Engram device wall-clock rate unavailable");
++    for (int i = 0; i < worker_count; ++i)
++      workers.emplace_back([this] { worker_loop(); });
++    } catch (...) {
++      stop.store(true, std::memory_order_release);
++      for (auto& worker : workers) if (worker.joinable()) worker.join();
++      if (dense != nullptr) (void)hipFree(dense);
++      if (sfd >= 0) close(sfd);
++      if (wfd >= 0) close(wfd);
++      counter_mem.reset();
++      controls.reset();
++      rows.reset();
++      if (pinned_reserved) g_reserved_pinned_bytes.fetch_sub(
++          pinned_reserved, std::memory_order_acq_rel);
++      throw;
++    }
++  }
++
++  ~Cache() {
++    // HIP readers, registered pages and duplicated FDs must outlive every
++    // graph/kernel and CPU pread. Shutdown may wait for remote I/O; abnormal
++    // TP failure is handled by supervisor process termination.
++    if (hipDeviceSynchronize() != hipSuccess) std::abort();
++    stop.store(true, std::memory_order_release);
++    for (auto& worker : workers) if (worker.joinable()) worker.join();
++    if (dense != nullptr) (void)hipFree(dense);
++    if (sfd >= 0) close(sfd);
++    if (wfd >= 0) close(wfd);
++    counter_mem.reset();
++    controls.reset();
++    rows.reset();
++    if (pinned_reserved) g_reserved_pinned_bytes.fetch_sub(
++        pinned_reserved, std::memory_order_acq_rel);
++  }
++
++  void worker_loop() noexcept {
++    while (!stop.load(std::memory_order_acquire)) {
++      const int bound = std::min(
++          std::atomic_ref<int>(counter->next_slot).load(std::memory_order_acquire),
++          capacity);
++      int index = claimed.load(std::memory_order_relaxed);
++      if (index >= bound) {
++        std::this_thread::sleep_for(std::chrono::microseconds(50));
++        continue;
++      }
++      if (!claimed.compare_exchange_weak(index, index + 1,
++                                         std::memory_order_acq_rel))
++        continue;
++      Ticket& ticket = tickets[index];
++      const auto publish_deadline = std::chrono::steady_clock::now() +
++                                    std::chrono::seconds(30);
++      int state = 0;
++      while ((state = std::atomic_ref<int>(ticket.state).load(
++                  std::memory_order_acquire)) == 0 &&
++             std::chrono::steady_clock::now() < publish_deadline &&
++             !stop.load(std::memory_order_acquire)) {
++        std::this_thread::sleep_for(std::chrono::microseconds(50));
++      }
++      if (state != 1) continue;
++      int expected = 1;
++      if (!std::atomic_ref<int>(ticket.state).compare_exchange_strong(
++              expected, 3, std::memory_order_acq_rel))
++        continue;
++      try {
++        const int64_t id = ticket.id;
++        if (id < row_start || id >= row_end)
++          throw std::runtime_error("Engram worker received invalid owned ID");
++        uint8_t* dst = static_cast<uint8_t*>(rows->host) +
++                       static_cast<size_t>(index) * kRowBytes;
++        if (packed) {
++          read_exact(wfd, dst, kRowBytes,
++                     weight_offset + static_cast<uint64_t>(id - row_start) * kRowBytes);
++        } else {
++          read_exact(wfd, dst, kWeightBytes,
++                     weight_offset + static_cast<uint64_t>(id) * kWeightBytes);
++          read_exact(sfd, dst + kWeightBytes, kScaleBytes,
++                     scale_offset + static_cast<uint64_t>(id) * kScaleBytes);
++        }
++        expected = 3;
++        (void)std::atomic_ref<int>(ticket.state).compare_exchange_strong(
++            expected, 2, std::memory_order_release);
++      } catch (...) {
++        expected = 3;
++        (void)std::atomic_ref<int>(ticket.state).compare_exchange_strong(
++            expected, -1, std::memory_order_release);
++      }
++    }
++  }
++
++  void launch(const int64_t* ids, int count, uint8_t* output,
++              int output_token_stride_rows,
++              int* status_cell, hipStream_t stream, int wait_ms) {
++    if (ids == nullptr || output == nullptr || status_cell == nullptr ||
++        count < 0 || count > 65536 || count % 24 != 0 ||
++        output_token_stride_rows < 24 || output_token_stride_rows > 1024 ||
++        wait_ms < 1 || wait_ms > 60000)
++      throw std::runtime_error("invalid bounded Engram gather launch");
++    if (count == 0) return;
++    const auto timeout_ticks = static_cast<unsigned long long>(
++        static_cast<double>(wall_clock_khz) * static_cast<double>(wait_ms));
++    hipLaunchKernelGGL(publish_kernel, dim3((count + 127) / 128), dim3(128), 0,
++                       stream, ids, count, global_rows, row_start, row_end,
++                       dense, static_cast<Counter*>(counter_mem->device),
++                       static_cast<Ticket*>(controls->device), status_cell,
++                       capacity);
++    check(hipPeekAtLastError(), "Engram mapped publish launch");
++    hipLaunchKernelGGL(gather_kernel, dim3((count + 127) / 128), dim3(128), 0,
++                       stream, ids, count, global_rows, row_start, row_end,
++                       dense, static_cast<Ticket*>(controls->device),
++                       static_cast<const uint8_t*>(rows->device), output,
++                       output_token_stride_rows, status_cell,
++                       timeout_ticks);
++    check(hipPeekAtLastError(), "Engram mapped gather launch");
++  }
++};
++}  // namespace
++
++extern "C" int engram_mapped_create(
++    int weight_fd, int scale_fd, uint64_t weight_offset,
++    uint64_t scale_offset, int64_t global_rows, int64_t row_start,
++    int64_t row_end, int capacity, int workers, int packed,
++    void** out, char* error, size_t error_bytes) noexcept {
++  if (out == nullptr) return 1;
++  *out = nullptr;
++  try {
++    *out = new Cache(weight_fd, scale_fd, weight_offset, scale_offset,
++                     global_rows, row_start, row_end, capacity, workers,
++                     packed != 0);
++    error_text(error, error_bytes, "");
++    return 0;
++  } catch (const std::exception& exc) {
++    error_text(error, error_bytes, exc.what());
++    return 1;
++  }
++}
++
++extern "C" int engram_mapped_launch(
++    void* handle, const void* ids, int count, void* output,
++    int output_token_stride_rows, void* status_cell, void* stream, int wait_ms,
++    char* error, size_t error_bytes) noexcept {
++  if (handle == nullptr) {
++    error_text(error, error_bytes, "Engram mapped cache is unavailable");
++    return 1;
++  }
++  try {
++    static_cast<Cache*>(handle)->launch(
++        static_cast<const int64_t*>(ids), count,
++        static_cast<uint8_t*>(output), output_token_stride_rows,
++        static_cast<int*>(status_cell),
++        reinterpret_cast<hipStream_t>(stream), wait_ms);
++    error_text(error, error_bytes, "");
++    return 0;
++  } catch (const std::exception& exc) {
++    error_text(error, error_bytes, exc.what());
++    return 1;
++  }
++}
++
++extern "C" void engram_mapped_destroy(void* handle) noexcept {
++  delete static_cast<Cache*>(handle);
++}
++
++// Diagnostic-only; never called by serving's per-forward hot path.
++extern "C" int engram_mapped_slots_used(void* handle) noexcept {
++  if (handle == nullptr) return -1;
++  auto* cache = static_cast<Cache*>(handle);
++  return std::atomic_ref<int>(cache->counter->next_slot).load(
++      std::memory_order_acquire);
++}

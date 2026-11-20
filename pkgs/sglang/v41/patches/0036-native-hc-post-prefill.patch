@@ -1,0 +1,22 @@
+--- a/sglang/kernels/ops/layernorm/native_hc_post.py
++++ b/sglang/kernels/ops/layernorm/native_hc_post.py
+@@ -34,7 +34,7 @@
+ def native_hc_post_c2(x, residual, post, comb):
+     """Preserve FP32 product/add boundaries and one final BF16 rounding."""
+     if (
+-        x.ndim != 2 or x.shape[0] not in (1, 2, 4) or x.shape[1] != 5120
++        x.ndim != 2 or x.shape[0] not in (1, 2, 4, 512, 1306, 1536) or x.shape[1] != 5120
+         or residual.shape != (x.shape[0], 4, 5120)
+         or post.shape != (x.shape[0], 4)
+         or comb.shape != (x.shape[0], 4, 4)
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -3294,7 +3294,7 @@
+                 getattr(self.config, "model_type", None) == "deepseek_v41"
+                 and self.hc_pre_from_prev_sublayer
+                 and self.hc_mult == 4 and self.hidden_size == 5120
+-                and x.ndim == 2 and x.shape[0] in (1, 2, 4) and x.shape[1] == 5120
++                and x.ndim == 2 and x.shape[0] in (1, 2, 4, 512, 1306, 1536) and x.shape[1] == 5120
+                 and residual.shape == (x.shape[0], 4, 5120)
+                 and post.shape == (x.shape[0], 4)
+                 and comb.shape == (x.shape[0], 4, 4)

@@ -1,0 +1,88 @@
+--- a/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
+@@ -11,6 +11,7 @@
+ - All configs: with/without topk_length, with/without attn_sink
+ """
+ 
++from functools import lru_cache
+ from typing import Optional, Tuple
+ 
+ import torch
+@@ -85,12 +86,44 @@
+ # ============================================================================
+ 
+ 
+-def _decide_splitk_dual_scope(total_tokens: int, h_q: int, total_topk: int) -> int:
++@lru_cache(maxsize=None)
++def _is_gfx1151_attention_device(device: torch.device) -> bool:
++    return (
++        device.type == "cuda"
++        and bool(torch.version.hip)
++        and torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] == "gfx1151"
++    )
++
++
++def _use_gfx1151_v41_splitk(q, kv_v41, topk_main, topk_extra, page_main, page_extra, s_q):
++    # Both public wrappers preserve their existing canonical BF16 conversion.
++    return (
++        kv_v41
++        and q.dtype == torch.bfloat16
++        and s_q == 1
++        and topk_main == 128
++        and topk_extra == 512
++        and page_main == 256
++        and page_extra in (128, 256)
++        and _is_gfx1151_attention_device(q.device)
++    )
++
++
++def _decide_splitk_dual_scope(
++    total_tokens: int, h_q: int, total_topk: int, *, gfx1151_v41_bf16: bool = False
++) -> int:
+     """Decide the split_k value for dual-scope attention.
+ 
+     Returns:
+         split_k value (0 means no split-K, use non-splitk kernel).
+     """
++    # The V41 TP4 decode shape otherwise launches only one workgroup per token.
++    # Four splits improve both resident and scattered-cache latency on gfx1151.
++    # Four is a conservative choice across the measured small-batch range;
++    # the speedup and best split count vary with autotuning and cache residency.
++    if gfx1151_v41_bf16 and h_q == 16 and total_topk == 640 and 1 <= total_tokens <= 16:
++        return 4
++
+     # Conditions under which split-K is beneficial:
+     use_splitk_for_small_bs = total_tokens <= SMALL_BATCH_TOKEN_THRESHOLD and (
+         h_q >= 128 or total_topk >= 1024
+@@ -1783,7 +1816,14 @@
+     split_k = (
+         0
+         if force_no_splitk
+-        else _decide_splitk_dual_scope(total_tokens, h_q, total_topk)
++        else _decide_splitk_dual_scope(
++            total_tokens,
++            h_q,
++            total_topk,
++            gfx1151_v41_bf16=_use_gfx1151_v41_splitk(
++                q, kv_v41, topk_main, topk_extra, block_size_main, block_size_extra, s_q
++            ),
++        )
+     )
+     if split_k > 0:
+         topk_per_split = (total_topk + split_k - 1) // split_k
+@@ -2918,7 +2958,14 @@
+         indices_extra = indices_extra.contiguous()
+ 
+     # Determine split_k
+-    split_k = _decide_splitk_dual_scope(total_tokens, h_q, total_topk)
++    split_k = _decide_splitk_dual_scope(
++        total_tokens,
++        h_q,
++        total_topk,
++        gfx1151_v41_bf16=_use_gfx1151_v41_splitk(
++            q, kv_v41, topk_main, topk_extra, block_size_main, block_size_extra, s_q
++        ),
++    )
+ 
+     if split_k == 0:
+         # Fall back to non-splitk version

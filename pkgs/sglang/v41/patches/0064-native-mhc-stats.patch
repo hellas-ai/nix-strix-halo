@@ -1,0 +1,206 @@
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -3724,10 +3724,19 @@
+             # keeps the mixing and RMS reductions batch-invariant.
+             mixes = hc_mix_stats(x_flat, hc_fn, self.rms_norm_eps).unsqueeze(1)
+         else:
+-            x_flat = x_flat.float()
+-            rsqrt = torch.rsqrt(
+-                x_flat.square().mean(-1, keepdim=True) + self.rms_norm_eps
+-            )
++            native_stats = None
++            if (getattr(self.config, "model_type", None) == "deepseek_v41"
++                    and __import__("os").environ.get("SGLANG_DSV41_NATIVE_MHC_STATS") == "1"):
++                from sglang.kernels.ops.layernorm.native_mhc_stats import native_mhc_cast_stats
++
++                native_stats = native_mhc_cast_stats(x_flat, self.rms_norm_eps)
++            if native_stats is None:
++                x_flat = x_flat.float()
++                rsqrt = torch.rsqrt(
++                    x_flat.square().mean(-1, keepdim=True) + self.rms_norm_eps
++                )
++            else:
++                x_flat, rsqrt = native_stats
+             # Native V4.1 C1–C8 gfx1151 projection; RMS, scaling and the
+             # downstream hc_split_sinkhorn remain on their original paths.
+             if (
+--- /dev/null
++++ b/sglang/kernels/ops/layernorm/native_mhc_stats.py
+@@ -0,0 +1,177 @@
++"""gfx1151 mHC cast + RMS statistics, matching ATen 2.13 block-x then block-y.
++
++K=20480 uses 512 input threads, with row-count-dependent block.x geometry.
++This prototype explicitly preserves both stages of the ATen reduction.
++"""
++import functools
++import logging
++import os
++import torch
++import triton
++import triton.language as tl
++logger=logging.getLogger(__name__)
++
++def _last_pow2(n: int) -> int:
++    return 1 << (n.bit_length() - 1)
++
++def torch_mean_block_width(rows: int, width: int) -> "int | None":
++    """ATen 2.13 block.x for the sole supported K=20480 contiguous reduction.
++
++    512 threads split input across block.x then block.y. After this split each
++    thread owns 40 values, so no global CTA reduction applies. Rows >=16 have
++    identical block geometry. This is pinned-runtime arithmetic, guarded by a
++    128-trial exact canary before either eager execution or graph capture.
++    """
++    if width != 20480 or rows < 1:
++        return None
++    return 512 // min(_last_pow2(rows), 16)
++
++@triton.jit
++def _fold(v, OFFSET: tl.constexpr):
++    # v[t] + v[t + OFFSET]: ATen's shared-memory stage of block_x_reduce.
++    return tl.sum(tl.reshape(v, (2, OFFSET)), axis=0)
++
++@triton.jit
++def _adjacent(v, HALF: tl.constexpr):
++    # v[2i] + v[2i + 1]: one shfl_down round (offsets 1, 2, 4, ...) for lane 0.
++    return tl.sum(tl.reshape(v, (HALF, 2)), axis=1)
++
++@functools.lru_cache(maxsize=None)
++def _mean_factor(width: int) -> float:
++    # ATen's MeanOps multiplies the sum by float(1) / float(width), computed in FP32.
++    one = torch.tensor(1.0, dtype=torch.float32)
++    return float(one / torch.tensor(float(width), dtype=torch.float32))
++
++@triton.jit
++def _mhc_cast_stats_kernel(
++    X,
++    INV,
++    Y,
++    SR,
++    N: tl.constexpr,
++    BW: tl.constexpr,
++    XW: tl.constexpr,
++    ITERS: tl.constexpr,
++    TILE: tl.constexpr,
++    FACTOR: tl.constexpr,
++    EPS: tl.constexpr,
++):
++    row = tl.program_id(0)
++    lane = tl.arange(0, BW)
++    vectors: tl.constexpr = N // 4
++    a0 = tl.zeros((BW,), dtype=tl.float32)
++    a1 = tl.zeros((BW,), dtype=tl.float32)
++    a2 = tl.zeros((BW,), dtype=tl.float32)
++    a3 = tl.zeros((BW,), dtype=tl.float32)
++    # Thread t accumulates 4-element vectors t, t + BW, ... into four separate
++    # accumulators (ATen input_vectorized_thread_reduce_impl).
++    for j in tl.range(0, ITERS, loop_unroll_factor=1):
++        v = lane + j * BW
++        ok = v < vectors
++        base = X + row * SR + v * 4
++        x0 = tl.load(base, mask=ok, other=0.0).to(tl.float32)
++        x1 = tl.load(base + 1, mask=ok, other=0.0).to(tl.float32)
++        x2 = tl.load(base + 2, mask=ok, other=0.0).to(tl.float32)
++        x3 = tl.load(base + 3, mask=ok, other=0.0).to(tl.float32)
++        # Materialize the FP32 projection operand as each vector is read.
++        # No second full-row read or large live output tile is required.
++        dst = Y + row * N + v * 4
++        tl.store(dst, x0, mask=ok)
++        tl.store(dst + 1, x1, mask=ok)
++        tl.store(dst + 2, x2, mask=ok)
++        tl.store(dst + 3, x3, mask=ok)
++        a0 = a0 + x0 * x0
++        a1 = a1 + x1 * x1
++        a2 = a2 + x2 * x2
++        a3 = a3 + x3 * x3
++    # ATen 2.13 reduces block.x first, then block.y. The older
++    # force_splitting_output optimization is absent in this runtime.
++    BH: tl.constexpr = BW // XW
++    s = tl.reshape(((a0 + a1) + a2) + a3, (BH, XW))
++    if XW >= 512:
++        s = tl.sum(tl.reshape(s, (BH, 2, 256)), axis=1)
++    if XW >= 256:
++        s = tl.sum(tl.reshape(s, (BH, 2, 128)), axis=1)
++    if XW >= 128:
++        s = tl.sum(tl.reshape(s, (BH, 2, 64)), axis=1)
++    if XW >= 64:
++        s = tl.sum(tl.reshape(s, (BH, 2, 32)), axis=1)
++    s = tl.sum(tl.reshape(s, (BH, 16, 2)), axis=2)
++    s = tl.sum(tl.reshape(s, (BH, 8, 2)), axis=2)
++    s = tl.sum(tl.reshape(s, (BH, 4, 2)), axis=2)
++    s = tl.sum(tl.reshape(s, (BH, 2, 2)), axis=2)
++    s = tl.sum(tl.reshape(s, (BH, 1, 2)), axis=2)
++    s = tl.reshape(s, (BH,))
++    if BH >= 16:
++        s = _fold(s, 8)
++    if BH >= 8:
++        s = _fold(s, 4)
++    if BH >= 4:
++        s = _fold(s, 2)
++    if BH >= 2:
++        s = _fold(s, 1)
++    total = tl.sum(s, axis=0)
++    # torch.rsqrt(float) on this HIP build is (float)rsqrt((double)x): v_rsq_f64 plus the
++    # OCML refinement, not v_rsq_f32.  Triton's FP64 rsqrt expands to the same sequence.
++    inv = tl.rsqrt((total * FACTOR + EPS).to(tl.float64)).to(tl.float32)
++
++    tl.store(INV + row, inv)
++
++
++def _launch(x, eps):
++    rows=x.shape[0]
++    width=x.shape[1]
++    block=torch_mean_block_width(rows,width)
++    if block is None:
++        return None
++    out=torch.empty_like(x,dtype=torch.float32)
++    inv=torch.empty((rows,1),device=x.device,dtype=torch.float32)
++    _mhc_cast_stats_kernel[(rows,)](
++        x,inv,out,width,width,512,block,-(-(width//4)//512),
++        triton.next_power_of_2(width),_mean_factor(width),eps,
++        num_warps=8,num_stages=1,enable_fp_fusion=False,
++    )
++    return out,inv
++
++_CANARY={}
++_GFX1151={}
++
++def native_mhc_cast_stats(x, eps):
++    if (os.environ.get('SGLANG_DSV41_NATIVE_MHC_STATS')!='1'
++        or not x.is_cuda or x.dtype!=torch.bfloat16 or x.ndim!=2
++        or x.shape[1]!=20480 or not 1<=x.shape[0]<=65536
++        or not x.is_contiguous() or not torch.version.hip):
++        return None
++    device=x.device.index
++    if device not in _GFX1151:
++        prop=torch.cuda.get_device_properties(x.device)
++        _GFX1151[device]=(prop.gcnArchName.split(':')[0]=='gfx1151'
++                          and prop.multi_processor_count<100)
++    if not _GFX1151[device]:
++        return None
++    rows=x.shape[0]
++    probe_rows=32 if rows>16 else rows
++    if torch_mean_block_width(rows,20480)!=torch_mean_block_width(probe_rows,20480):
++        return None
++    key=(device,probe_rows,eps)
++    if key not in _CANARY:
++        if torch.cuda.is_current_stream_capturing():
++            return None
++        ok=True
++        try:
++            gen=torch.Generator(device=x.device).manual_seed(0x62004+probe_rows)
++            for _ in range(128):
++                probe=(torch.randn(probe_rows,20480,device=x.device,generator=gen)*3).bfloat16()
++                got,inv=_launch(probe,eps)
++                want=probe.float()
++                expected=torch.rsqrt(want.square().mean(-1,keepdim=True)+eps)
++                if not torch.equal(got,want) or not torch.equal(inv.view(torch.int32),expected.view(torch.int32)):
++                    ok=False
++                    break
++        except Exception:
++            logger.exception('native mHC statistics canary raised; keeping torch')
++            ok=False
++        _CANARY[key]=ok
++        if not ok:
++            logger.error('native mHC statistics canary rejected rows=%d',probe_rows)
++    return _launch(x,eps) if _CANARY[key] else None

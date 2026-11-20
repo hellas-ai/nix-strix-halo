@@ -1,0 +1,96 @@
+--- a/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
++++ b/sglang/srt/mem_cache/storage/mooncake_store/mooncake_direct_linker.py
+@@ -2,8 +2,11 @@
+ 
+ import hashlib
+ import logging
++import os
+ import threading
++import time
+ from concurrent.futures import Future
++from dataclasses import replace
+ from queue import Empty, Queue
+ 
+ import torch
+@@ -36,6 +39,59 @@
+ device_module = get_device_module()
+ 
+ 
++def _stage_offload_host_indices(transfers, ready_event, copy_stream):
++    """Copy each distinct GPU index tensor once after its producer event.
++
++    Pool expansion gives several physical pools the same index tensor. The
++    Mooncake metadata path otherwise makes a synchronous D2H copy for each
++    physical pool. Keep device_indices untouched and let the existing host
++    pool validate the copied CPU indices before it constructs row pointers.
++    """
++    gpu_indices = [
++        transfer.host_indices
++        for transfer in transfers
++        if transfer.host_indices is not None
++        and transfer.host_indices.device.type != "cpu"
++    ]
++    if not gpu_indices:
++        ready_event.synchronize()
++        return transfers, copy_stream
++
++    device = gpu_indices[0].device
++    if any(index.device != device for index in gpu_indices):
++        raise ValueError("Mooncake offload indices span multiple GPU devices")
++    if copy_stream is None:
++        copy_stream = device_module.Stream(device=device)
++
++    # Retain both GPU sources and pinned destinations until the completion
++    # event proves the asynchronous copies have finished.
++    host_by_identity = {}
++    copy_done = device_module.Event()
++    with device_module.stream(copy_stream):
++        copy_stream.wait_event(ready_event)
++        for index in gpu_indices:
++            key = id(index)
++            if key in host_by_identity:
++                continue
++            host = torch.empty(index.shape, dtype=index.dtype, pin_memory=True)
++            host.copy_(index, non_blocking=True)
++            host_by_identity[key] = host
++        copy_done.record(copy_stream)
++
++    # HIP's blocking signal wait burns a CPU core; parking here allows the
++    # scheduler and other host work to progress while the stream catches up.
++    while not copy_done.query():
++        time.sleep(0.0001)
++    staged = [
++        replace(transfer, host_indices=host_by_identity[id(transfer.host_indices)])
++        if transfer.host_indices is not None
++        and transfer.host_indices.device.type != "cpu"
++        else transfer
++        for transfer in transfers
++    ]
++    return staged, copy_stream
++
++
+ def _storage_suffix(
+     *, rank_replicated: bool, tp_rank: int, attn_cp_rank: int, pp_rank: int
+ ) -> str:
+@@ -522,13 +578,20 @@
+         return True
+ 
+     def offload_thread_func(self) -> None:
++        async_indices = os.environ.get("SGLANG_MOONCAKE_ASYNC_HOST_INDICES") == "1"
++        copy_stream = None
+         while True:
+             task = self.offload_queue.get()
+             try:
+                 if task is None:
+                     return
+                 expanded, tokens, ready_event = task
+-                ready_event.synchronize()
++                if async_indices:
++                    expanded, copy_stream = _stage_offload_host_indices(
++                        expanded, ready_event, copy_stream
++                    )
++                else:
++                    ready_event.synchronize()
+                 results = self.storage.batch_set_v2(expanded)
+                 success = all(all(pool_results) for pool_results in results.values())
+                 if success:

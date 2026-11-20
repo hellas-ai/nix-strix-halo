@@ -1,0 +1,604 @@
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+@@ -222,6 +222,16 @@
+         assert hidden_states.dtype == torch.bfloat16
+         assert (w13_weight.shape[0], hidden_states.shape[1], w13_weight.shape[1],
+                 w2_weight.shape[1], topk_ids.shape[1]) == (384, 5120, 1152, 5120, 6)
++        # Native TP4 decode (1..16 rows): five owner-routed kernels instead of ~50 launches, same
++        # values. SGLANG_DSV41_MXFP4_DECODE=0 restores the sequence below.
++        from sglang.kernels.ops.moe.dsv41_mxfp4_decode import try_decode_routed
++
++        routed = try_decode_routed(
++            hidden_states, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale,
++            topk_weights, topk_ids, routed_scaling_factor, swiglu_limit,
++        )
++        if routed is not None:
++            return routed
+ 
+     num_tokens = hidden_states.shape[0]
+     top_k = topk_ids.shape[1]
+--- /dev/null
++++ b/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
+@@ -0,0 +1,582 @@
++"""Owner-routed decode path for the DeepSeek-V4.1 TP4 MXFP4 routed experts on gfx1151.
++
++Scope: 1..16 decode tokens, the official routed-operand policy, the exact native TP4 geometry
++(384 experts, top-6, hidden 5120, per-rank intermediate 576).  Everything else keeps using
++`fused_experts_mxfp4` unchanged.  `SGLANG_DSV41_MXFP4_DECODE=0` disables this module at run time.
++
++The installed policy sequence is ~50 launches per layer (moe_align x2, group-32 quant, three
++conversion kernels, four `torch.ones`, AITER gate/up, ~15 elementwise kernels, quant again, AITER
++down, argsort + 6x gather/convert/add).  This module computes the same values with five kernels:
++
++  P  `_prep_operand`    group-32 E4M3/E8M0 quant->dequant of the hidden states            -> bf16 [M,5120]
++  G  `_gate_up_wmma`    owner-routed WMMA gate/up (AITER dot_scaled arithmetic)           -> bf16 [M,6,1152]
++  E  `_swiglu_operand`  clamp, silu*up, route scale, bf16, group-32 quant->dequant         -> bf16 [M*6,576]
++  D  `_down_wmma`       owner-routed WMMA down                                            -> bf16 [M,6,5120]
++  C  `_ordered_combine` fp32 sum of the six routes in ascending logical expert id          -> fp32 [M,5120]
++
++Numerics: P, E and C reproduce the torch/Triton expressions of the installed sequence operation for
++operation (no FP contraction); G and D use `tl.dot_scaled(bf16, e2m1, e8m0, fast_math=True)` with one
++fp32 accumulator chain over K in WMMA K=16 steps, i.e. the AITER kernel's arithmetic, so per-row
++results do not depend on the tile shape, on the batch size or on which route owns an expert.  The
++installed gate/up of 2/4/8-row batches is a different (FMA) kernel; by default that kernel is kept
++(SGLANG_DSV41_MXFP4_GATE_UP_ROWS=live) so the whole chain is bitwise the installed sequence at every
++row count.  SGLANG_DSV41_MXFP4_GATE_UP_ROWS=wmma runs the WMMA gate/up at every row count instead.
++"""
++import functools
++import os
++
++import torch
++import triton
++import triton.language as tl
++from triton.language.extra.hip import libdevice
++
++# Native TP4 geometry served by this module.
++NUM_EXPERTS, HIDDEN, INTER, TOPK = 384, 5120, 576, 6
++N_GATE_UP, N_DOWN = 2 * INTER, HIDDEN
++MAX_M = 16
++
++FP8_MAX = 448.0   # torch.finfo(float8_e4m3fn).max; gfx1151 is not e4m3fnuz
++EPS = 1e-4        # `eps` of the installed `_official_routed_operand`
++GROUP = 32
++
++# Per-row-count launch geometry (key 0 = rows without an entry), from the strix-2 sweeps (K2-moe/results/gemm*.json: random routing,
++# 6/12/18/23 distinct experts at 1/2/3/4 rows, outputs bitwise-checked against the installed kernels): gate/up 1 row 64x256 (111 us vs 190 installed),
++# 3+ rows 32x256; down 32x64 up to 4 rows, 64x64 beyond (RP=128 route-pad programs). Override per node with
++# SGLANG_DSV41_MXFP4_{GATE_UP,DOWN}_CFG="BLOCK_N,BLOCK_K,num_warps,num_stages" (applies to every row count).
++GATE_UP_CFG = {0: dict(BLOCK_N=32, BLOCK_K=256, num_warps=2, num_stages=2),
++               1: dict(BLOCK_N=64, BLOCK_K=256, num_warps=4, num_stages=2)}
++DOWN_CFG = {0: dict(BLOCK_N=64, BLOCK_K=64, num_warps=4, num_stages=2)}
++DOWN_CFG.update({m: dict(BLOCK_N=32, BLOCK_K=64, num_warps=2, num_stages=2) for m in (1, 2, 3, 4)})
++SILU_MODE = 0     # 0: ocml exp + IEEE division; 9: torch supplies silu (fallback)
++
++
++# ----------------------------------------------------------------------------------------------
++# helpers shared by P and E (expression-for-expression the installed quantiser)
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _e4m3fn_to_fp32(value):
++    """Exact decode of every native E4M3FN code."""
++    code = value.to(tl.uint8, bitcast=True).to(tl.uint32)
++    magnitude = code & 0x7F
++    normal_bits = (magnitude << 20) + 0x3C000000
++    subnormal_bits = (magnitude.to(tl.float32) * 0.001953125).to(tl.uint32, bitcast=True)
++    magnitude_bits = tl.where(magnitude < 8, subnormal_bits, normal_bits)
++    magnitude_bits = tl.where(magnitude == 0x7F, 0x7FC00000, magnitude_bits)
++    return (magnitude_bits | ((code & 0x80) << 24)).to(tl.float32, bitcast=True)
++
++
++@triton.jit
++def _quant_dequant(x, eps: tl.constexpr, fp8_max: tl.constexpr):
++    """x fp32 [G, 32] -> bf16 [G, 32] == bf16(float(e4m3(clamp(x/scale))) * scale), scale per row.
++
++    Same expressions as `_per_token_group_quant_8bit_ue8m0_rowmajor` followed by torch's
++    `q.float() * scales.unsqueeze(-1)` (exact: q has <= 4 significant bits, scale is a power of two)."""
++    amax = tl.maximum(tl.max(tl.abs(x), 1), eps)
++    scale = tl.exp2(tl.ceil(tl.log2(amax / fp8_max)))
++    q = tl.clamp(x / scale[:, None], -fp8_max, fp8_max).to(tl.float8e4nv)
++    return (_e4m3fn_to_fp32(q) * scale[:, None]).to(tl.bfloat16)
++
++
++@triton.jit
++def _silu(x, MODE: tl.constexpr):
++    return x / (1.0 + libdevice.exp(-x))
++
++
++# ----------------------------------------------------------------------------------------------
++# P: group-32 quant -> dequant to bf16
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _prep_operand(X, Y, n_groups, G: tl.constexpr, eps: tl.constexpr, fp8_max: tl.constexpr):
++    pid = tl.program_id(0)
++    g = pid * G + tl.arange(0, G)
++    cols = tl.arange(0, 32)
++    offs = g[:, None].to(tl.int64) * 32 + cols[None, :]
++    m = (g < n_groups)[:, None]
++    x = tl.load(X + offs, mask=m, other=0).to(tl.float32)
++    tl.store(Y + offs, _quant_dequant(x, eps, fp8_max), mask=m)
++
++
++# ----------------------------------------------------------------------------------------------
++# E: SwiGLU + route scale + bf16 + group-32 quant->dequant; one program per (route row, G groups)
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _swiglu_operand(GU, TW, SIL, Y, factor,
++                    H: tl.constexpr, G: tl.constexpr, LIMIT: tl.constexpr, SILU_MODE: tl.constexpr,
++                    eps: tl.constexpr, fp8_max: tl.constexpr):
++    r = tl.program_id(0).to(tl.int64)
++    g = tl.program_id(1) * G + tl.arange(0, G)
++    cols = tl.arange(0, 32)
++    j = g[:, None] * 32 + cols[None, :]
++    m = (g < H // 32)[:, None]
++    row = GU + r * (2 * H)
++    gate = tl.load(row + j, mask=m, other=0).to(tl.float32)
++    up = tl.load(row + H + j, mask=m, other=0).to(tl.float32)
++    # torch: gate.clamp(max=L); up.clamp(min=-L, max=L); where() keeps NaN and signed zeros like clamp.
++    gate = tl.where(gate > LIMIT, LIMIT, gate)
++    up = tl.where(up > LIMIT, LIMIT, tl.where(up < -LIMIT, -LIMIT, up))
++    if SILU_MODE == 9:
++        s = tl.load(SIL + r * H + j, mask=m, other=0)
++    else:
++        s = _silu(gate, SILU_MODE)
++    act = s * up
++    w = tl.load(TW + r) * factor          # routing_weights = topk_weights * routed_scaling_factor
++    act_bf = (w * act).to(tl.bfloat16)    # (routing_weights.unsqueeze(-1) * activated).to(bf16)
++    tl.store(Y + r * H + j, _quant_dequant(act_bf.to(tl.float32), eps, fp8_max), mask=m)
++
++
++# ----------------------------------------------------------------------------------------------
++# C: ordered fp32 combine, ascending logical expert id (stable) per token
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _ordered_combine(RO, IDS, OUT, N: tl.constexpr, TOPK: tl.constexpr, BLOCK: tl.constexpr):
++    t = tl.program_id(0).to(tl.int64)
++    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    cmask = cols < N
++    slots = tl.arange(0, 8)
++    valid = slots < TOPK
++    ids = tl.load(IDS + t * TOPK + slots, mask=valid, other=0x7FFFFFFF)
++    # stable ascending rank of every slot: #{i: id_i < id_j or (id_i == id_j and i < j)}
++    before = (ids[None, :] < ids[:, None]) | ((ids[None, :] == ids[:, None]) & (slots[None, :] < slots[:, None]))
++    rank = tl.sum(before.to(tl.int32), axis=1)
++    acc = tl.zeros((BLOCK,), dtype=tl.float32)
++    for k in tl.static_range(TOPK):
++        j = tl.sum(tl.where(valid & (rank == k), slots, 0))
++        v = tl.load(RO + (t * TOPK + j) * N + cols, mask=cmask, other=0.0)
++        acc = acc + v.to(tl.float32)
++    tl.store(OUT + t * N + cols, acc, mask=cmask)
++
++
++# ----------------------------------------------------------------------------------------------
++# G / D: owner-routed WMMA GEMMs with the AITER `dot_scaled` arithmetic
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _owner_of(ids_ptr, r, R, RP: tl.constexpr):
++    """Lowest flattened route holding an expert owns it; returns (expert, is_owner, ids[RP], routes[RP])."""
++    routes = tl.arange(0, RP)
++    all_ids = tl.load(ids_ptr + routes, mask=routes < R, other=-2)
++    e = tl.load(ids_ptr + r)
++    matching = (routes < R) & (all_ids == e)
++    owner = tl.min(tl.where(matching, routes, RP))
++    return e, owner == r, all_ids, routes
++
++
++@triton.jit
++def _gemm_core(a_ptr, a_row_off, a_mask, w_ptr, s_ptr, offs_n,
++               K: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
++    """acc[16, BLOCK_N] = A[16, K] @ dequant(W)[K, BLOCK_N]; w_ptr/s_ptr address the owner's [N, K/2] / [N, K/32]."""
++    acc = tl.zeros((16, BLOCK_N), dtype=tl.float32)
++    a_ptrs = a_ptr + a_row_off[:, None] + tl.arange(0, BLOCK_K)[None, :]
++    b_ptrs = w_ptr + tl.arange(0, BLOCK_K // 2)[:, None] + offs_n[None, :] * (K // 2)
++    s_ptrs = s_ptr + tl.arange(0, BLOCK_K // 32)[None, :] + offs_n[:, None] * (K // 32)
++    for _ in range(0, K // BLOCK_K):
++        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
++        b = tl.load(b_ptrs)
++        bs = tl.load(s_ptrs)
++        acc = tl.dot_scaled(a, None, "bf16", b, bs, "e2m1", acc=acc, fast_math=True)
++        a_ptrs += BLOCK_K
++        b_ptrs += BLOCK_K // 2
++        s_ptrs += BLOCK_K // 32
++    TAIL: tl.constexpr = K % BLOCK_K
++    if TAIL > 0:
++        a_ptrs = a_ptr + a_row_off[:, None] + (K - TAIL) + tl.arange(0, TAIL)[None, :]
++        b_ptrs = w_ptr + (K - TAIL) // 2 + tl.arange(0, TAIL // 2)[:, None] + offs_n[None, :] * (K // 2)
++        s_ptrs = s_ptr + (K - TAIL) // 32 + tl.arange(0, TAIL // 32)[None, :] + offs_n[:, None] * (K // 32)
++        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
++        b = tl.load(b_ptrs)
++        bs = tl.load(s_ptrs)
++        acc = tl.dot_scaled(a, None, "bf16", b, bs, "e2m1", acc=acc, fast_math=True)
++    return acc
++
++
++@triton.jit(do_not_specialize=["M"])
++def _gate_up_wmma(
++    X, W, S, IDS, Y, M,
++    K: tl.constexpr, N: tl.constexpr, TOPK: tl.constexpr,
++    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, RP: tl.constexpr,
++):
++    """gate/up: X is [M, K] bf16, Y is [M, TOPK, N] bf16. Experts with id < 0 produce zeros."""
++    nt = tl.program_id(0)
++    r = tl.program_id(1)
++    e, is_owner, all_ids, routes = _owner_of(IDS, r, M * TOPK, RP)
++    if is_owner:
++        rows = tl.arange(0, 16)
++        offs_n = nt * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
++        row_mask = (rows < M)[:, None]
++        if e >= 0:
++            e64 = e.to(tl.int64)
++            acc = _gemm_core(X, rows * K, row_mask, W + e64 * (N * (K // 2)), S + e64 * (N * (K // 32)),
++                             offs_n, K, BLOCK_N, BLOCK_K)
++        else:
++            acc = tl.zeros((16, BLOCK_N), dtype=tl.float32)
++        out = acc.to(tl.bfloat16)
++        for slot in tl.static_range(TOPK):
++            tok_ids = tl.load(IDS + rows * TOPK + slot, mask=rows < M, other=-2)
++            hit = (tok_ids == e)[:, None] & row_mask
++            tl.store(Y + (rows[:, None] * TOPK + slot) * N + offs_n[None, :], out, mask=hit)
++
++
++@triton.jit(do_not_specialize=["M"])
++def _down_wmma(
++    A, W, S, IDS, Y, M,
++    K: tl.constexpr, N: tl.constexpr, TOPK: tl.constexpr,
++    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, RP: tl.constexpr,
++):
++    """down: A is [M*TOPK, K] (one activated row per route), Y is [M, TOPK, N] bf16.
++
++    The WMMA row tile holds the owner expert's routes in ascending flattened order (every route that
++    selected the expert, including repeated ids inside one token); more than 16 matches re-stream the
++    weights in passes."""
++    nt = tl.program_id(0)
++    r = tl.program_id(1)
++    e, is_owner, all_ids, routes = _owner_of(IDS, r, M * TOPK, RP)
++    if is_owner:
++        rows = tl.arange(0, 16)
++        offs_n = nt * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
++        match = (routes < M * TOPK) & (all_ids == e)
++        rank = tl.cumsum(match.to(tl.int32), 0) - 1
++        n_match = tl.sum(match.to(tl.int32))
++        for p in range(0, (n_match + 15) // 16):
++            sel = match[None, :] & (rank[None, :] == (p * 16 + rows)[:, None])
++            route_row = tl.sum(tl.where(sel, routes[None, :], 0), axis=1)
++            live = tl.sum(sel.to(tl.int32), axis=1) > 0
++            if e >= 0:
++                e64 = e.to(tl.int64)
++                acc = _gemm_core(A, route_row * K, live[:, None], W + e64 * (N * (K // 2)), S + e64 * (N * (K // 32)),
++                                 offs_n, K, BLOCK_N, BLOCK_K)
++            else:
++                acc = tl.zeros((16, BLOCK_N), dtype=tl.float32)
++            out = acc.to(tl.bfloat16)
++            tl.store(Y + route_row[:, None] * N + offs_n[None, :], out, mask=live[:, None])
++
++
++
++# ----------------------------------------------------------------------------------------------
++# Installed C2/C4/C8 FMA live-row gate/up with a cheaper, value-identical dequant (default at 2/4/8 rows)
++#
++# The installed kernels (dsv41_mxfp4_gate_up.py) spend ~26 VALU lane-ops per weight; ~15 of them evaluate
++# bf16(e2m1 * 2^(s-127)) and flush subnormals.  For every E8M0 scale byte s in [1, 252] that value is exactly
++#   ((mag == 0) ? 0 : ((s - 1) << 23) + (mag == 1 ? 0 : mag << 22)) | (code & 8) << 28     (fp32 bits, mag = code & 7)
++# (checked for all 16 codes x 252 scales against the installed chain).  Programs whose ROWS x 160 scale tile lies in
++# [1, 252] (always, for real checkpoints) take that path; any other tile runs the installed arithmetic.  Loads, the
++# [ROWS, BLOCK_K] product tile, tl.sum, accumulation order, ownership, stores and launch geometry are the installed code.
++# ----------------------------------------------------------------------------------------------
++@triton.jit
++def _live_e2m1_to_fp32(code):
++    magnitude = code & 7
++    bits = tl.where(magnitude < 2, magnitude * 0x3F000000,
++                    (magnitude << 22) + 0x3F000000)
++    return (bits | ((code & 8) << 28)).to(tl.float32, bitcast=True)
++
++
++@triton.jit
++def _live_flush_bf16_subnormal(value):
++    bits = value.to(tl.uint32, bitcast=True)
++    return tl.where((bits & 0x7F800000) == 0,
++                    (bits & 0x80000000).to(tl.float32, bitcast=True), value)
++
++
++@triton.jit
++def _live_weight_exact(code, scale):
++    scale_fp32 = (scale.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
++    weight = (_live_e2m1_to_fp32(code) * scale_fp32).to(tl.bfloat16).to(tl.float32)
++    return _live_flush_bf16_subnormal(weight)
++
++
++@triton.jit
++def _live_weight_fast(code, scale):
++    """Exactly _weight_exact for scale bytes in [1, 252]."""
++    magnitude = code & 7
++    add = tl.where(magnitude == 1, magnitude * 0, magnitude << 22)
++    bits = ((scale.to(tl.uint32) - 1) << 23) + add
++    bits = tl.where(magnitude == 0, bits * 0, bits) | ((code & 8) << 28)
++    return bits.to(tl.float32, bitcast=True)
++
++
++@triton.jit
++def _live_k_loop(A, W, S, IDS, expert, token, paired, rows, cols, ROWS: tl.constexpr, BLOCK_K: tl.constexpr,
++            FAST: tl.constexpr):
++    accumulator = tl.zeros((ROWS,), tl.float32)
++    accumulator_other = tl.zeros((ROWS,), tl.float32)
++    for start in range(0, 5120, BLOCK_K):
++        packed = tl.load(W + expert.to(tl.int64) * (1152 * 2560)
++                         + rows[:, None] * 2560 + (start + cols[None, :]) // 2)
++        code = (packed.to(tl.uint32) >> ((cols[None, :] % 2) * 4)) & 15
++        scale = tl.load(S + expert.to(tl.int64) * (1152 * 160)
++                        + rows[:, None] * 160 + (start + cols[None, :]) // 32)
++        if FAST:
++            weight = _live_weight_fast(code, scale)
++        else:
++            weight = _live_weight_exact(code, scale)
++        activation = tl.load(A + token * 5120 + start + cols).to(tl.float32)
++        activation = _live_flush_bf16_subnormal(activation)
++        accumulator += tl.sum(weight * activation[None, :], axis=1)
++        if paired:
++            activation_other = tl.load(A + (1 - token) * 5120 + start + cols).to(tl.float32)
++            activation_other = _live_flush_bf16_subnormal(activation_other)
++            accumulator_other += tl.sum(weight * activation_other[None, :], axis=1)
++    return accumulator, accumulator_other
++
++
++@triton.jit
++def _live_tile_scales_safe(S, expert, rows):
++    """True when every scale byte of this program's ROWS x 160 scale tile is in [1, 252]."""
++    sc_cols = tl.arange(0, 256)
++    sc = tl.load(S + expert.to(tl.int64) * (1152 * 160) + rows[:, None] * 160 + sc_cols[None, :],
++                 mask=sc_cols[None, :] < 160, other=127)
++    return (tl.min(sc) >= 1) & (tl.max(sc) <= 252)
++
++
++@triton.jit
++def _live_rows(A, W, S, IDS, Y, ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
++    # Lowest flattened route owns this expert, including repeated valid IDs.
++    route = tl.program_id(1)
++    token = route // 6
++    expert = tl.load(IDS + route)
++    if expert == -1:
++        padding_rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
++        tl.store(Y + route * 1152 + padding_rows,
++                 tl.full((ROWS,), 0, tl.bfloat16))
++        return
++    routes = tl.arange(0, 16)
++    experts = tl.load(IDS + routes, mask=routes < 12, other=-1)
++    matching = (routes < 12) & (experts == expert)
++    owner = tl.min(tl.where(matching, routes, 16))
++    if route != owner:
++        return
++    paired = tl.sum((matching & (routes // 6 != token)).to(tl.int32)) > 0
++    first = tl.program_id(0) * ROWS
++    rows = first + tl.arange(0, ROWS)
++    cols = tl.arange(0, BLOCK_K)
++    if _live_tile_scales_safe(S, expert, rows):
++        accumulator, accumulator_other = _live_k_loop(A, W, S, IDS, expert, token, paired, rows, cols, ROWS, BLOCK_K, True)
++    else:
++        accumulator, accumulator_other = _live_k_loop(A, W, S, IDS, expert, token, paired, rows, cols, ROWS, BLOCK_K, False)
++    offsets = routes[:, None] * 1152 + rows[None, :]
++    tl.store(Y + offsets, accumulator[None, :].to(tl.bfloat16),
++             mask=(matching & (routes // 6 == token))[:, None])
++    if paired:
++        tl.store(Y + offsets, accumulator_other[None, :].to(tl.bfloat16),
++                 mask=(matching & (routes // 6 != token))[:, None])
++
++
++@triton.jit
++def _live_row_pairs(A, W, S, IDS, Y, ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
++    # Each adjacent token pair retains the qualified C2 ownership and arithmetic.
++    pair = tl.program_id(2)
++    _live_rows(
++        A + pair * (2 * 5120), W, S, IDS + pair * 12,
++        Y + pair * (12 * 1152), ROWS, BLOCK_K,
++    )
++
++
++# ----------------------------------------------------------------------------------------------
++# host side
++# ----------------------------------------------------------------------------------------------
++_OFF = ("0", "false", "off", "no")
++
++
++def enabled() -> bool:
++    """SGLANG_DSV41_MXFP4_DECODE=0 (or false/off/no) restores the installed sequence."""
++    return os.environ.get("SGLANG_DSV41_MXFP4_DECODE", "1").strip().lower() not in _OFF
++
++
++def gate_up_rows_policy() -> str:
++    """'live' (default): 2/4/8 rows keep the installed FMA live-row gate/up, so every value of the chain is bitwise the
++    installed sequence at every row count.  'wmma': every row count uses the WMMA gate/up (the installed kernel's
++    arithmetic at 1/3/5.. rows); rows of a 2/4/8-row batch then equal their 1-row results instead of the FMA kernel's
++    (rare last-place bf16 differences, measured by tests/mxfp4-decode.py) and the 2/4/8-row gate/up is faster."""
++    value = os.environ.get("SGLANG_DSV41_MXFP4_GATE_UP_ROWS", "live").strip().lower()
++    if value not in ("live", "wmma"):
++        raise ValueError(f"SGLANG_DSV41_MXFP4_GATE_UP_ROWS must be 'live' or 'wmma', got {value!r}")
++    return value
++
++
++def gemm_backend() -> str:
++    """'owner' (default): the owner-routed WMMA gate/up and down kernels of this module.  'aiter': the installed AITER kernels
++    (with moe_align_block_size) for both GEMMs, i.e. only the small-kernel chain is fused; bitwise the installed GEMMs by construction."""
++    value = os.environ.get("SGLANG_DSV41_MXFP4_DECODE_GEMM", "owner").strip().lower()
++    if value not in ("owner", "aiter"):
++        raise ValueError(f"SGLANG_DSV41_MXFP4_DECODE_GEMM must be 'owner' or 'aiter', got {value!r}")
++    return value
++
++
++@functools.lru_cache(maxsize=None)
++def _is_gfx1151(index: int) -> bool:
++    return (
++        bool(torch.version.hip)
++        and torch.cuda.get_device_properties(index).gcnArchName.split(":")[0] == "gfx1151"
++    )
++
++
++def decode_supported(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                     routed_scaling_factor, swiglu_limit) -> bool:
++    """True only for the exact native TP4 geometry and operand dtypes this module was qualified on."""
++    if not enabled():
++        return False
++    x = hidden_states
++    if x.ndim != 2 or not 1 <= x.shape[0] <= MAX_M or x.shape[1] != HIDDEN or x.dtype != torch.bfloat16:
++        return False
++    m = x.shape[0]
++    if x.device.type != "cuda" or not _is_gfx1151(x.device.index if x.device.index is not None else torch.cuda.current_device()):
++        return False
++    if swiglu_limit != 10 or (routed_scaling_factor is not None and not isinstance(routed_scaling_factor, (int, float))):
++        return False
++    shapes = (
++        (x, (m, HIDDEN), (torch.bfloat16,)),
++        (w13, (NUM_EXPERTS, N_GATE_UP, HIDDEN // 2), (torch.int8, torch.uint8)),
++        (w2, (NUM_EXPERTS, N_DOWN, INTER // 2), (torch.int8, torch.uint8)),
++        (s13, (NUM_EXPERTS, N_GATE_UP, HIDDEN // 32), (torch.uint8, torch.float8_e8m0fnu)),
++        (s2, (NUM_EXPERTS, N_DOWN, INTER // 32), (torch.uint8, torch.float8_e8m0fnu)),
++        (topk_weights, (m, TOPK), (torch.float32,)),
++        (topk_ids, (m, TOPK), (torch.int32,)),
++    )
++    for tensor, shape, dtypes in shapes:
++        if tuple(tensor.shape) != shape or tensor.dtype not in dtypes or not tensor.is_contiguous():
++            return False
++        if tensor.device != x.device:
++            return False
++    return True
++
++
++def _route_pad(m: int) -> int:
++    return 32 if m * TOPK <= 32 else 128
++
++
++def _cfg(table: dict, m: int, n: int, k: int, name: str) -> dict:
++    """Tile geometry for `m` rows: SGLANG_DSV41_MXFP4_{GATE_UP,DOWN}_CFG="BLOCK_N,BLOCK_K,num_warps,num_stages" overrides
++    the table (on-node tuning without rebuilding the runtime); tile shapes must divide the GEMM."""
++    override = os.environ.get(f"SGLANG_DSV41_MXFP4_{name}_CFG")
++    if override:
++        block_n, block_k, num_warps, num_stages = (int(v) for v in override.split(","))
++        cfg = dict(BLOCK_N=block_n, BLOCK_K=block_k, num_warps=num_warps, num_stages=num_stages)
++    else:
++        cfg = table.get(m, table[0])
++    assert n % cfg["BLOCK_N"] == 0 and cfg["BLOCK_K"] % 32 == 0 and cfg["BLOCK_K"] <= k, (cfg, n, k)
++    assert (k % cfg["BLOCK_K"]) in (0, 32, 64), "K tail must be a power-of-two multiple of 32"
++    assert cfg["BLOCK_N"] % 16 == 0 and cfg["num_warps"] in (1, 2, 4, 8) and cfg["num_stages"] in (1, 2, 3, 4), cfg
++    return cfg
++
++
++def launch_prep(x, a1):
++    groups = x.shape[0] * (HIDDEN // GROUP)
++    _prep_operand[(triton.cdiv(groups, 8),)](x, a1, groups, 8, EPS, FP8_MAX,
++                                              num_warps=1, num_stages=1, enable_fp_fusion=False)
++
++
++def launch_gate_up_wmma(a1, w13, s13, topk_ids, gu):
++    m = a1.shape[0]
++    g = _cfg(GATE_UP_CFG, m, N_GATE_UP, HIDDEN, "GATE_UP")
++    _gate_up_wmma[(N_GATE_UP // g["BLOCK_N"], m * TOPK)](
++        a1, w13.view(torch.uint8), s13.view(torch.uint8), topk_ids, gu, m,
++        K=HIDDEN, N=N_GATE_UP, TOPK=TOPK, BLOCK_N=g["BLOCK_N"], BLOCK_K=g["BLOCK_K"], RP=_route_pad(m),
++        num_warps=g["num_warps"], num_stages=g["num_stages"], matrix_instr_nonkdim=16, kpack=1)
++
++
++def _launch_live_rows_gate_up(a1, w13, s13, topk_ids, gu) -> bool:
++    """2/4/8-row gate/up with the installed FMA live-row arithmetic (bitwise the installed kernels' results).
++
++    SGLANG_DSV41_MXFP4_LIVE_FAST=0 runs the installed kernels themselves instead of the cheaper-dequant copies."""
++    rows = a1.shape[0]
++    if os.environ.get("SGLANG_DSV41_MXFP4_LIVE_FAST", "1").strip().lower() in _OFF:
++        from sglang.kernels.ops.gemm.dsv41_mxfp4_gate_up import try_gate_up_live_rows
++
++        config = {
++            "BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128 if rows == 2 else 256, "BLOCK_SIZE_K": 64,
++            "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 2,
++            "waves_per_eu": 0, "matrix_instr_nonkdim": 16, "kpack": 1,
++        }
++        return try_gate_up_live_rows(a1, w13, gu, s13, topk_ids, config, TOPK, False)
++    if rows not in (2, 4, 8):
++        return False
++    w, sc = w13.view(torch.uint8), s13.view(torch.uint8)
++    if rows == 2:
++        _live_rows[(N_GATE_UP // 8, 12)](a1, w, sc, topk_ids, gu, ROWS=8, BLOCK_K=512,
++                                         num_warps=4, num_stages=1, enable_fp_fusion=False)
++    else:
++        _live_row_pairs[(N_GATE_UP // 8, 12, rows // 2)](a1, w, sc, topk_ids, gu, ROWS=8, BLOCK_K=512,
++                                                         num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return True
++
++
++def launch_swiglu(gu, topk_weights, a2, factor, mode, silu_in=None):
++    m = gu.shape[0]
++    _swiglu_operand[(m * TOPK, triton.cdiv(INTER // GROUP, 2))](
++        gu, topk_weights, silu_in if silu_in is not None else topk_weights, a2, factor,
++        INTER, 2, 10.0, mode, EPS, FP8_MAX, num_warps=1, num_stages=1, enable_fp_fusion=False)
++
++
++def launch_down_wmma(a2, w2, s2, topk_ids, ro):
++    m = topk_ids.shape[0]
++    d = _cfg(DOWN_CFG, m, N_DOWN, INTER, "DOWN")
++    _down_wmma[(N_DOWN // d["BLOCK_N"], m * TOPK)](
++        a2, w2.view(torch.uint8), s2.view(torch.uint8), topk_ids, ro, m,
++        K=INTER, N=N_DOWN, TOPK=TOPK, BLOCK_N=d["BLOCK_N"], BLOCK_K=d["BLOCK_K"], RP=_route_pad(m),
++        num_warps=d["num_warps"], num_stages=d["num_stages"], matrix_instr_nonkdim=16, kpack=1)
++
++
++def launch_combine(ro, topk_ids, out):
++    _ordered_combine[(ro.shape[0], triton.cdiv(N_DOWN, 256))](ro, topk_ids, out, N_DOWN, TOPK, 256,
++                                                               num_warps=2, num_stages=1, enable_fp_fusion=False)
++
++
++def _installed_gemm_context(m: int):
++    """Installed gate/up and down configs plus the sorted-token layout, exactly as fused_experts_mxfp4 builds them."""
++    from aiter.ops.triton.utils._triton.arch_info import get_arch
++    from aiter.ops.triton.utils.moe_config_utils import get_optimal_moe_config
++
++    from sglang.srt.layers.moe.moe_runner.triton_utils import mxfp4_moe_amd as installed
++    from sglang.srt.layers.moe.moe_runner.triton_utils.moe_align_block_size import moe_align_block_size
++
++    config = get_optimal_moe_config(torch.bfloat16, use_mxfp4=True, M=m)
++    config = installed.sparse_moe_config(config, get_arch(), m, TOPK, NUM_EXPERTS, HIDDEN, INTER)
++    gate_up_config = installed.gate_up_moe_config(config, get_arch(), m, TOPK, NUM_EXPERTS, HIDDEN, INTER)
++    return installed, config, gate_up_config, moe_align_block_size
++
++
++def decode_routed_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                          routed_scaling_factor, swiglu_limit, silu_mode: int = None, stages: bool = False):
++    """Five-kernel routed-expert chain; returns the fp32 [M, 5120] ordered route sum.
++
++    stages=True returns the intermediates (a1, gu, a2, ro, out) for tests."""
++    x = hidden_states
++    m = x.shape[0]
++    dev = x.device
++    mode = SILU_MODE if silu_mode is None else silu_mode
++    aiter = gemm_backend() == "aiter"
++    a1 = torch.empty_like(x)
++    launch_prep(x, a1)
++    gu = torch.empty((m, TOPK, N_GATE_UP), dtype=torch.bfloat16, device=dev)
++    if aiter:
++        installed, config, gate_up_config, align = _installed_gemm_context(m)
++        sorted_ids, expert_ids, post_padded = align(topk_ids, config["BLOCK_SIZE_M"], NUM_EXPERTS)
++        installed._run_mxfp4_gemm(a1, w13, gu, s13, topk_weights, topk_ids, sorted_ids, expert_ids, post_padded,
++                                  config=gate_up_config, top_k=TOPK, mul_routed_weight=False)
++    elif not (m in (2, 4, 8) and gate_up_rows_policy() == "live" and _launch_live_rows_gate_up(a1, w13, s13, topk_ids, gu)):
++        launch_gate_up_wmma(a1, w13, s13, topk_ids, gu)
++    silu_in = None
++    if mode == 9:
++        gate = gu[..., :INTER].float().clamp(max=10.0)
++        silu_in = torch.nn.functional.silu(gate).reshape(m * TOPK, INTER)
++    a2 = torch.empty((m * TOPK, INTER), dtype=torch.bfloat16, device=dev)
++    launch_swiglu(gu, topk_weights, a2, 1.0 if routed_scaling_factor is None else float(routed_scaling_factor), mode, silu_in)
++    ro = torch.empty((m, TOPK, N_DOWN), dtype=torch.bfloat16, device=dev)
++    if aiter:
++        installed._run_mxfp4_gemm(a2, w2, ro, s2, topk_weights, topk_ids, sorted_ids, expert_ids, post_padded,
++                                  config=config, top_k=1, mul_routed_weight=False)
++    else:
++        launch_down_wmma(a2, w2, s2, topk_ids, ro)
++    out = torch.empty((m, N_DOWN), dtype=torch.float32, device=dev)
++    launch_combine(ro, topk_ids, out)
++    if stages:
++        return a1, gu, a2, ro, out
++    return out
++
++
++def try_decode_routed(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                      routed_scaling_factor, swiglu_limit):
++    """Return the routed-expert output, or None when the call is outside the qualified decode envelope."""
++    if not decode_supported(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                            routed_scaling_factor, swiglu_limit):
++        return None
++    return decode_routed_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
++                                 routed_scaling_factor, swiglu_limit)
