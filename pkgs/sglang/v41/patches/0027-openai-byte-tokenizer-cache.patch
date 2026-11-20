@@ -1,0 +1,121 @@
+--- a/sglang/srt/entrypoints/openai/utils.py
++++ b/sglang/srt/entrypoints/openai/utils.py
+@@ -1,7 +1,10 @@
++import json
+ import logging
+ from typing import Any, Literal
++from weakref import WeakKeyDictionary
+
+ import torch
++from tokenizers import decoders
+
+ from sglang.srt.entrypoints.openai.protocol import (
+     CachedTokensDetails,
+@@ -21,9 +24,9 @@
+ # detokenized display string (that loses fragmentary bytes as U+FFFD).
+ _BYTE_DECODER: dict[str, int] = {}
+
+-# Tokenizer-level cache: once verified, we know whether *all* tokens from a
+-# given tokenizer can safely use the byte decoder. Avoids per-token checks.
+-_BYTE_LEVEL_TOKENIZERS: set = set()
++# Cache both classifications without retaining tokenizers or reusing an old
++# classification when a new tokenizer receives the same object id.
++_BYTE_LEVEL_TOKENIZERS: WeakKeyDictionary = WeakKeyDictionary()
+
+
+ def _build_byte_decoder() -> dict[str, int]:
+@@ -51,24 +54,53 @@
+     tokenizers (Mistral, Gemma, T5) store raw Unicode pieces, so applying the
+     byte decoder to them corrupts multi-byte characters.
+
+-    We probe by checking ``is_byte_level`` (HuggingFace fast tokenizers) or
+-    by verifying that a known multi-byte character (é, U+00E9) round-trips:
+-    GPT-2 encodes it as a single byte-level piece ``chr(233)`` whose byte
+-    decoder output [233] does NOT form valid UTF-8, while SentencePiece stores
+-    the full character ``é`` whose UTF-8 is [195, 169].
++    Prefer an explicit boolean or the fast backend's decoder type. Added
++    special tokens may not use that decoder and must be checked per token.
++    For legacy tokenizers without metadata, retain the sampled-token
++    heuristic; its result is cached, including a negative result.
+     """
+-    tid = id(tokenizer)
+-    if tid in _BYTE_LEVEL_TOKENIZERS:
+-        return True
++    try:
++        return _BYTE_LEVEL_TOKENIZERS[tokenizer]
++    except (KeyError, TypeError):
++        pass
++
++    def remember(value: bool) -> bool:
++        # Some third-party tokenizer objects cannot be weakly referenced or
++        # hashed; they retain the uncached path without changing behavior.
++        try:
++            _BYTE_LEVEL_TOKENIZERS[tokenizer] = value
++        except TypeError:
++            pass
++        return value
+
+     # Fast path: HuggingFace fast tokenizers expose is_byte_level.
+     is_bl = getattr(tokenizer, "is_byte_level", None)
+     if isinstance(is_bl, bool):
+-        if is_bl:
+-            _BYTE_LEVEL_TOKENIZERS.add(tid)
+-        return is_bl
++        return remember(is_bl)
++
++    # The actual fast backend declares its decoder. Its added special tokens
++    # need not be byte-level pieces, so sampling them cannot classify BPE.
++    backend = getattr(tokenizer, "backend_tokenizer", None)
++    decoder = getattr(backend, "decoder", None)
++    if isinstance(decoder, decoders.ByteLevel):
++        return remember(True)
++    if isinstance(decoder, decoders.Sequence):
++        # A nested Metaspace decoder must not inherit ByteLevel behavior just
++        # because sampled vocabulary pieces happen to be printable. Only a
++        # single known ByteLevel stage has byte-BPE semantics; mixed/unknown
++        # sequences conservatively use display UTF-8.
++        try:
++            stages = json.loads(decoder.__getstate__())["decoders"]
++        except (KeyError, TypeError, ValueError):
++            stages = []
++        return remember(len(stages) == 1 and stages[0].get("type") == "ByteLevel")
++    if isinstance(
++        decoder,
++        (decoders.Metaspace, decoders.WordPiece, decoders.BPEDecoder, decoders.ByteFallback),
++    ):
++        return remember(False)
+
+-    # Slow path: probe with a known é token.
++    # Legacy slow path for tokenizers without decoder metadata.
+     global _BYTE_DECODER
+     if not _BYTE_DECODER:
+         _BYTE_DECODER = _build_byte_decoder()
+@@ -85,12 +117,11 @@
+             # If any char in the piece is NOT in the byte decoder table,
+             # this tokenizer does NOT use byte-level encoding.
+             if any(ch not in _BYTE_DECODER for ch in piece):
+-                return False
++                return remember(False)
+         # All sampled tokens are byte-decodable → likely byte-level BPE.
+-        _BYTE_LEVEL_TOKENIZERS.add(tid)
+-        return True
++        return remember(True)
+     except Exception:
+-        return False
++        return remember(False)
+
+
+ def token_id_to_bytes(tokenizer, token_id) -> list[int] | None:
+@@ -103,6 +134,12 @@
+     """
+     if not _is_byte_level_tokenizer(tokenizer):
+         return None
++    # Added-token IDs use the caller's display fallback. Query the small map
++    # afresh: promoting an existing ID can leave len(tokenizer) unchanged, so
++    # a cached ID set could silently misencode a Unicode display token.
++    added = getattr(tokenizer, "added_tokens_decoder", None)
++    if added is not None and token_id in added:
++        return None
+     global _BYTE_DECODER
+     if not _BYTE_DECODER:
+         _BYTE_DECODER = _build_byte_decoder()

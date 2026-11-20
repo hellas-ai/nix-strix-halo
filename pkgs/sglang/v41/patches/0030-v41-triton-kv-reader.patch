@@ -1,0 +1,576 @@
+--- a/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
+@@ -22,6 +22,23 @@
+ # gfx942/MI300/MI325 stores e4m3fnuz (bias 8);
+ # gfx950/MI350 and CUDA store OCP e4m3fn (bias 7).
+ _KV_FP8_TY = tl.float8e4b8 if is_gfx942_supported() else tl.float8e4nv
++
++
++def _v41_cache_layout(*caches: torch.Tensor) -> bool:
++    """Only the paged V41 FP8 pair is supported by the new reader."""
++    widths = tuple(cache.shape[-1] for cache in caches)
++    if 288 in widths:
++        raise ValueError("Triton sparse attention does not support V41 FP4 caches")
++    if 528 not in widths:
++        return False  # Preserve the existing V4 reader/validation path.
++    if any(width != 528 for width in widths):
++        raise ValueError("Triton V41 requires matching FP8 main/extra layouts")
++    for cache in caches:
++        if (cache.ndim != 4 or cache.shape[2] != 1 or cache.element_size() != 1
++                or cache.stride(-1) != 1 or cache.stride(1) != 528
++                or cache.stride(0) < cache.shape[1] * 528):
++            raise ValueError("Triton V41 requires a byte-backed paged [P,S,1,528] view")
++    return True
+
+
+ def _bucket_total_tokens(total_tokens: int) -> int:
+@@ -127,6 +144,21 @@
+ # Helper: Process KV block and compute QK scores + accumulator update
+ # This is the core computation shared by both single and dual scope kernels
+ # ============================================================================
++
++
++@triton.jit
++def _load_v41_tile(base, data_offset, scale_offset, valid_2d, lanes, piece: tl.constexpr):
++    values = tl.load(
++        base[:, None] + data_offset[:, None] + piece * 64 + lanes[None, :],
++        mask=valid_2d, other=0,
++    ).to(_KV_FP8_TY, bitcast=True)
++    codes = tl.load(
++        base[:, None] + scale_offset[:, None] + piece * 2 + lanes[None, :] // 32,
++        mask=valid_2d, other=127,
++    ).to(tl.uint8)
++    scales = tl.math.exp2(codes.to(tl.float32) - 127.0).to(tl.bfloat16)
++    values = (values.to(tl.bfloat16) * scales).to(tl.bfloat16)
++    return tl.where(valid_2d, values, 0.0)
+
+
+ @triton.jit
+@@ -167,6 +199,7 @@
+     LOG2E: tl.constexpr,
+     BLOCK_H: tl.constexpr,
+     BLOCK_N: tl.constexpr,
++    KV_V41: tl.constexpr = False,
+ ):
+     """
+     Process one block of KV tokens with batch loading.
+@@ -174,90 +207,108 @@
+     """
+     NEG_INF = float("-inf")
+
+-    scale_ptrs = kv_block_base + scale_base_offset
+-    scale_uint8_0 = tl.load(scale_ptrs, mask=valid, other=127).to(tl.uint8)
+-    scale_uint8_1 = tl.load(scale_ptrs + 1, mask=valid, other=127).to(tl.uint8)
+-    scale_uint8_2 = tl.load(scale_ptrs + 2, mask=valid, other=127).to(tl.uint8)
+-    scale_uint8_3 = tl.load(scale_ptrs + 3, mask=valid, other=127).to(tl.uint8)
+-    scale_uint8_4 = tl.load(scale_ptrs + 4, mask=valid, other=127).to(tl.uint8)
+-    scale_uint8_5 = tl.load(scale_ptrs + 5, mask=valid, other=127).to(tl.uint8)
+-    scale_uint8_6 = tl.load(scale_ptrs + 6, mask=valid, other=127).to(tl.uint8)
+-
+-    tile_base = kv_block_base[:, None] + nope_rope_offset[:, None]
+-
+-    # Batch load all tiles
+-    nope_uint8_0 = tl.load(tile_base + offs_tile[None, :], mask=valid_2d, other=0)
+-    nope_uint8_1 = tl.load(
+-        tile_base + TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
+-    )
+-    nope_uint8_2 = tl.load(
+-        tile_base + 2 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
+-    )
+-    nope_uint8_3 = tl.load(
+-        tile_base + 3 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
+-    )
+-    nope_uint8_4 = tl.load(
+-        tile_base + 4 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
+-    )
+-    nope_uint8_5 = tl.load(
+-        tile_base + 5 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
+-    )
+-    nope_uint8_6 = tl.load(
+-        tile_base + 6 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
+-    )
+-    rope_ptrs = tile_base + D_NOPE + offs_tile[None, :] * 2
+-    rope_lo = tl.load(rope_ptrs, mask=valid_2d, other=0).to(tl.uint16)
+-    rope_hi = tl.load(rope_ptrs + 1, mask=valid_2d, other=0).to(tl.uint16)
+-
+-    scale_bf16_0 = tl.math.exp2(scale_uint8_0.to(tl.float32) - 127.0).to(tl.bfloat16)
+-    scale_bf16_1 = tl.math.exp2(scale_uint8_1.to(tl.float32) - 127.0).to(tl.bfloat16)
+-    scale_bf16_2 = tl.math.exp2(scale_uint8_2.to(tl.float32) - 127.0).to(tl.bfloat16)
+-    scale_bf16_3 = tl.math.exp2(scale_uint8_3.to(tl.float32) - 127.0).to(tl.bfloat16)
+-    scale_bf16_4 = tl.math.exp2(scale_uint8_4.to(tl.float32) - 127.0).to(tl.bfloat16)
+-    scale_bf16_5 = tl.math.exp2(scale_uint8_5.to(tl.float32) - 127.0).to(tl.bfloat16)
+-    scale_bf16_6 = tl.math.exp2(scale_uint8_6.to(tl.float32) - 127.0).to(tl.bfloat16)
+-
+-    qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
+-
+-    nope_fp8_0 = nope_uint8_0.to(_KV_FP8_TY, bitcast=True)
+-    kv_0 = (nope_fp8_0.to(tl.bfloat16) * scale_bf16_0[:, None]).to(tl.bfloat16)
+-    kv_0 = tl.where(valid_2d, kv_0, 0.0)
+-    qk += tl.dot(q_0, tl.trans(kv_0)).to(tl.float32)
+-
+-    nope_fp8_1 = nope_uint8_1.to(_KV_FP8_TY, bitcast=True)
+-    kv_1 = (nope_fp8_1.to(tl.bfloat16) * scale_bf16_1[:, None]).to(tl.bfloat16)
+-    kv_1 = tl.where(valid_2d, kv_1, 0.0)
+-    qk += tl.dot(q_1, tl.trans(kv_1)).to(tl.float32)
+-
+-    nope_fp8_2 = nope_uint8_2.to(_KV_FP8_TY, bitcast=True)
+-    kv_2 = (nope_fp8_2.to(tl.bfloat16) * scale_bf16_2[:, None]).to(tl.bfloat16)
+-    kv_2 = tl.where(valid_2d, kv_2, 0.0)
+-    qk += tl.dot(q_2, tl.trans(kv_2)).to(tl.float32)
+-
+-    nope_fp8_3 = nope_uint8_3.to(_KV_FP8_TY, bitcast=True)
+-    kv_3 = (nope_fp8_3.to(tl.bfloat16) * scale_bf16_3[:, None]).to(tl.bfloat16)
+-    kv_3 = tl.where(valid_2d, kv_3, 0.0)
+-    qk += tl.dot(q_3, tl.trans(kv_3)).to(tl.float32)
+-
+-    nope_fp8_4 = nope_uint8_4.to(_KV_FP8_TY, bitcast=True)
+-    kv_4 = (nope_fp8_4.to(tl.bfloat16) * scale_bf16_4[:, None]).to(tl.bfloat16)
+-    kv_4 = tl.where(valid_2d, kv_4, 0.0)
+-    qk += tl.dot(q_4, tl.trans(kv_4)).to(tl.float32)
+-
+-    nope_fp8_5 = nope_uint8_5.to(_KV_FP8_TY, bitcast=True)
+-    kv_5 = (nope_fp8_5.to(tl.bfloat16) * scale_bf16_5[:, None]).to(tl.bfloat16)
+-    kv_5 = tl.where(valid_2d, kv_5, 0.0)
+-    qk += tl.dot(q_5, tl.trans(kv_5)).to(tl.float32)
+-
+-    nope_fp8_6 = nope_uint8_6.to(_KV_FP8_TY, bitcast=True)
+-    kv_6 = (nope_fp8_6.to(tl.bfloat16) * scale_bf16_6[:, None]).to(tl.bfloat16)
+-    kv_6 = tl.where(valid_2d, kv_6, 0.0)
+-    qk += tl.dot(q_6, tl.trans(kv_6)).to(tl.float32)
+-
+-    kv_7 = (rope_lo | (rope_hi << 8)).to(tl.bfloat16, bitcast=True)
+-    kv_7 = tl.where(valid_2d, kv_7, 0.0)
+-    qk += tl.dot(q_7, tl.trans(kv_7)).to(tl.float32)
+-
++    if KV_V41:
++        qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
++        kv_0 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 0)
++        qk += tl.dot(q_0, tl.trans(kv_0)).to(tl.float32)
++        kv_1 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 1)
++        qk += tl.dot(q_1, tl.trans(kv_1)).to(tl.float32)
++        kv_2 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 2)
++        qk += tl.dot(q_2, tl.trans(kv_2)).to(tl.float32)
++        kv_3 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 3)
++        qk += tl.dot(q_3, tl.trans(kv_3)).to(tl.float32)
++        kv_4 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 4)
++        qk += tl.dot(q_4, tl.trans(kv_4)).to(tl.float32)
++        kv_5 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 5)
++        qk += tl.dot(q_5, tl.trans(kv_5)).to(tl.float32)
++        kv_6 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 6)
++        qk += tl.dot(q_6, tl.trans(kv_6)).to(tl.float32)
++        kv_7 = _load_v41_tile(kv_block_base, nope_rope_offset, scale_base_offset, valid_2d, offs_tile, 7)
++        qk += tl.dot(q_7, tl.trans(kv_7)).to(tl.float32)
++    else:
++        scale_ptrs = kv_block_base + scale_base_offset
++        scale_uint8_0 = tl.load(scale_ptrs, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_1 = tl.load(scale_ptrs + 1, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_2 = tl.load(scale_ptrs + 2, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_3 = tl.load(scale_ptrs + 3, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_4 = tl.load(scale_ptrs + 4, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_5 = tl.load(scale_ptrs + 5, mask=valid, other=127).to(tl.uint8)
++        scale_uint8_6 = tl.load(scale_ptrs + 6, mask=valid, other=127).to(tl.uint8)
++
++        tile_base = kv_block_base[:, None] + nope_rope_offset[:, None]
++
++        # Batch load all tiles
++        nope_uint8_0 = tl.load(tile_base + offs_tile[None, :], mask=valid_2d, other=0)
++        nope_uint8_1 = tl.load(
++            tile_base + TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_2 = tl.load(
++            tile_base + 2 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_3 = tl.load(
++            tile_base + 3 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_4 = tl.load(
++            tile_base + 4 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_5 = tl.load(
++            tile_base + 5 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        nope_uint8_6 = tl.load(
++            tile_base + 6 * TILE_SIZE + offs_tile[None, :], mask=valid_2d, other=0
++        )
++        rope_ptrs = tile_base + D_NOPE + offs_tile[None, :] * 2
++        rope_lo = tl.load(rope_ptrs, mask=valid_2d, other=0).to(tl.uint16)
++        rope_hi = tl.load(rope_ptrs + 1, mask=valid_2d, other=0).to(tl.uint16)
++
++        scale_bf16_0 = tl.math.exp2(scale_uint8_0.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_1 = tl.math.exp2(scale_uint8_1.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_2 = tl.math.exp2(scale_uint8_2.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_3 = tl.math.exp2(scale_uint8_3.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_4 = tl.math.exp2(scale_uint8_4.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_5 = tl.math.exp2(scale_uint8_5.to(tl.float32) - 127.0).to(tl.bfloat16)
++        scale_bf16_6 = tl.math.exp2(scale_uint8_6.to(tl.float32) - 127.0).to(tl.bfloat16)
++
++        qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
++
++        nope_fp8_0 = nope_uint8_0.to(_KV_FP8_TY, bitcast=True)
++        kv_0 = (nope_fp8_0.to(tl.bfloat16) * scale_bf16_0[:, None]).to(tl.bfloat16)
++        kv_0 = tl.where(valid_2d, kv_0, 0.0)
++        qk += tl.dot(q_0, tl.trans(kv_0)).to(tl.float32)
++
++        nope_fp8_1 = nope_uint8_1.to(_KV_FP8_TY, bitcast=True)
++        kv_1 = (nope_fp8_1.to(tl.bfloat16) * scale_bf16_1[:, None]).to(tl.bfloat16)
++        kv_1 = tl.where(valid_2d, kv_1, 0.0)
++        qk += tl.dot(q_1, tl.trans(kv_1)).to(tl.float32)
++
++        nope_fp8_2 = nope_uint8_2.to(_KV_FP8_TY, bitcast=True)
++        kv_2 = (nope_fp8_2.to(tl.bfloat16) * scale_bf16_2[:, None]).to(tl.bfloat16)
++        kv_2 = tl.where(valid_2d, kv_2, 0.0)
++        qk += tl.dot(q_2, tl.trans(kv_2)).to(tl.float32)
++
++        nope_fp8_3 = nope_uint8_3.to(_KV_FP8_TY, bitcast=True)
++        kv_3 = (nope_fp8_3.to(tl.bfloat16) * scale_bf16_3[:, None]).to(tl.bfloat16)
++        kv_3 = tl.where(valid_2d, kv_3, 0.0)
++        qk += tl.dot(q_3, tl.trans(kv_3)).to(tl.float32)
++
++        nope_fp8_4 = nope_uint8_4.to(_KV_FP8_TY, bitcast=True)
++        kv_4 = (nope_fp8_4.to(tl.bfloat16) * scale_bf16_4[:, None]).to(tl.bfloat16)
++        kv_4 = tl.where(valid_2d, kv_4, 0.0)
++        qk += tl.dot(q_4, tl.trans(kv_4)).to(tl.float32)
++
++        nope_fp8_5 = nope_uint8_5.to(_KV_FP8_TY, bitcast=True)
++        kv_5 = (nope_fp8_5.to(tl.bfloat16) * scale_bf16_5[:, None]).to(tl.bfloat16)
++        kv_5 = tl.where(valid_2d, kv_5, 0.0)
++        qk += tl.dot(q_5, tl.trans(kv_5)).to(tl.float32)
++
++        nope_fp8_6 = nope_uint8_6.to(_KV_FP8_TY, bitcast=True)
++        kv_6 = (nope_fp8_6.to(tl.bfloat16) * scale_bf16_6[:, None]).to(tl.bfloat16)
++        kv_6 = tl.where(valid_2d, kv_6, 0.0)
++        qk += tl.dot(q_6, tl.trans(kv_6)).to(tl.float32)
++
++        kv_7 = (rope_lo | (rope_hi << 8)).to(tl.bfloat16, bitcast=True)
++        kv_7 = tl.where(valid_2d, kv_7, 0.0)
++        qk += tl.dot(q_7, tl.trans(kv_7)).to(tl.float32)
+     qk = qk * sm_scale
+     qk = tl.where(valid[None, :], qk, NEG_INF)
+
+@@ -309,7 +360,7 @@
+         triton.Config({"BLOCK_H": 64, "BLOCK_N": 64}, num_warps=8, num_stages=1),
+         triton.Config({"BLOCK_H": 128, "BLOCK_N": 64}, num_warps=8, num_stages=1),
+     ],
+-    key=["total_tokens_bucket", "h_q", "topk"],
++    key=["total_tokens_bucket", "h_q", "topk", "KV_V41"],
+     prune_configs_by={"early_config_prune": _prune_single_scope_configs},
+ )
+ @triton.jit
+@@ -344,14 +395,15 @@
+     HAS_ATTN_SINK: tl.constexpr,
+     BLOCK_H: tl.constexpr,
+     BLOCK_N: tl.constexpr,
++    KV_V41: tl.constexpr = False,
+ ):
+     """Fused gather+dequant+attention kernel for DSV4."""
+     LOG2E: tl.constexpr = 1.4426950408889634
+     D_NOPE: tl.constexpr = 448
+     D_ROPE: tl.constexpr = 64
+     TILE_SIZE: tl.constexpr = 64
+-    BYTES_PER_TOKEN_DATA: tl.constexpr = 576
+-    BYTES_PER_TOKEN_SCALE: tl.constexpr = 8
++    BYTES_PER_TOKEN_DATA: tl.constexpr = 512 if KV_V41 else 576
++    BYTES_PER_TOKEN_SCALE: tl.constexpr = 16 if KV_V41 else 8
+
+     # OPTIMIZED: Swapped grid - pid_h first for better cache locality
+     pid_h = tl.program_id(0)
+@@ -506,6 +558,7 @@
+                     LOG2E,
+                     BLOCK_H,
+                     BLOCK_N,
++                 KV_V41,
+                 )
+             )
+
+@@ -624,6 +677,7 @@
+         output: Attention output [total_tokens, h_q, d_v]
+         lse: Log-sum-exp values [total_tokens, h_q]
+     """
++    kv_v41 = _v41_cache_layout(kv_cache)
+     total_tokens, h_q, d_qk = q.shape
+     topk = indices.shape[1]
+     d_v = DSV4_D_V
+@@ -700,6 +754,7 @@
+                 partial_lse.stride(1),
+                 partial_lse.stride(2),
+                 HAS_TOPK_LENGTH=topk_length is not None,
++                KV_V41=kv_v41,
+             )
+
+         if disable_buffer_ops:
+@@ -823,6 +878,7 @@
+             lse.stride(1),
+             HAS_TOPK_LENGTH=topk_length is not None,
+             HAS_ATTN_SINK=attn_sink is not None,
++            KV_V41=kv_v41,
+         )
+
+     if disable_buffer_ops:
+@@ -868,7 +924,7 @@
+         triton.Config({"BLOCK_H": 16, "BLOCK_N": 64}, num_warps=8, num_stages=1),
+         triton.Config({"BLOCK_H": 64, "BLOCK_N": 64}, num_warps=8, num_stages=1),
+     ],
+-    key=["total_tokens_bucket", "h_q", "topk_main", "topk_extra"],
++    key=["total_tokens_bucket", "h_q", "topk_main", "topk_extra", "KV_V41"],
+     prune_configs_by={"early_config_prune": _prune_dual_scope_configs},
+ )
+ @triton.jit
+@@ -913,6 +969,7 @@
+     HAS_ATTN_SINK: tl.constexpr,
+     BLOCK_H: tl.constexpr,
+     BLOCK_N: tl.constexpr,
++    KV_V41: tl.constexpr = False,
+ ):
+     """
+     OPTIMIZED fused gather+dequant+attention kernel for DSV4 with dual scope.
+@@ -931,8 +988,8 @@
+     D_NOPE: tl.constexpr = 448
+     D_ROPE: tl.constexpr = 64
+     TILE_SIZE: tl.constexpr = 64
+-    BYTES_PER_TOKEN_DATA: tl.constexpr = 576
+-    BYTES_PER_TOKEN_SCALE: tl.constexpr = 8
++    BYTES_PER_TOKEN_DATA: tl.constexpr = 512 if KV_V41 else 576
++    BYTES_PER_TOKEN_SCALE: tl.constexpr = 16 if KV_V41 else 8
+
+     # OPTIMIZED: Swapped grid - pid_h first for better cache locality
+     pid_h = tl.program_id(0)
+@@ -1094,6 +1151,7 @@
+                     LOG2E,
+                     BLOCK_H,
+                     BLOCK_N,
++                 KV_V41,
+                 )
+             )
+
+@@ -1172,6 +1230,7 @@
+                     LOG2E,
+                     BLOCK_H,
+                     BLOCK_N,
++                 KV_V41,
+                 )
+             )
+
+@@ -1276,7 +1335,7 @@
+         triton.Config({"BLOCK_H": 16, "BLOCK_N": 128}, num_warps=8, num_stages=1),
+         triton.Config({"BLOCK_H": 16, "BLOCK_N": 32}, num_warps=8, num_stages=1),
+     ],
+-    key=["total_tokens_bucket", "h_q", "topk_per_split"],
++    key=["total_tokens_bucket", "h_q", "topk_per_split", "KV_V41"],
+ )
+ @triton.jit
+ def _fused_gather_attn_dsv4_dual_scope_splitk_kernel(
+@@ -1321,6 +1380,7 @@
+     HAS_TOPK_LENGTH_EXTRA: tl.constexpr,
+     BLOCK_H: tl.constexpr,
+     BLOCK_N: tl.constexpr,
++    KV_V41: tl.constexpr = False,
+ ):
+     """
+     Split-K fused gather+dequant+attention kernel for DSV4 with dual scope.
+@@ -1331,8 +1391,8 @@
+     LOG2E: tl.constexpr = 1.4426950408889634
+     D_NOPE: tl.constexpr = 448
+     TILE_SIZE: tl.constexpr = 64
+-    BYTES_PER_TOKEN_DATA: tl.constexpr = 576
+-    BYTES_PER_TOKEN_SCALE: tl.constexpr = 8
++    BYTES_PER_TOKEN_DATA: tl.constexpr = 512 if KV_V41 else 576
++    BYTES_PER_TOKEN_SCALE: tl.constexpr = 16 if KV_V41 else 8
+
+     pid_h = tl.program_id(0)
+     pid_t = tl.program_id(1)
+@@ -1487,6 +1547,7 @@
+                     LOG2E,
+                     BLOCK_H,
+                     BLOCK_N,
++                 KV_V41,
+                 )
+             )
+
+@@ -1567,6 +1628,7 @@
+                     LOG2E,
+                     BLOCK_H,
+                     BLOCK_N,
++                 KV_V41,
+                 )
+             )
+
+@@ -1683,6 +1745,7 @@
+         output: Attention output [total_tokens, h_q, d_v]
+         lse: Log-sum-exp values [total_tokens, h_q]
+     """
++    kv_v41 = _v41_cache_layout(kv_cache_main, kv_cache_extra)
+     total_tokens, h_q, d_qk = q.shape
+     topk_main = indices_main.shape[1]
+     topk_extra = indices_extra.shape[1]
+@@ -1791,6 +1854,7 @@
+                 partial_lse.stride(2),
+                 HAS_TOPK_LENGTH_MAIN=topk_length_main is not None,
+                 HAS_TOPK_LENGTH_EXTRA=topk_length_extra is not None,
++                KV_V41=kv_v41,
+             )
+
+         if disable_buffer_ops:
+@@ -1927,6 +1991,7 @@
+             HAS_TOPK_LENGTH_MAIN=topk_length_main is not None,
+             HAS_TOPK_LENGTH_EXTRA=topk_length_extra is not None,
+             HAS_ATTN_SINK=attn_sink is not None,
++            KV_V41=kv_v41,
+         )
+
+     if disable_buffer_ops:
+@@ -1958,7 +2023,7 @@
+         triton.Config({"BLOCK_H": 64, "BLOCK_N": 32}, num_warps=8, num_stages=1),
+         triton.Config({"BLOCK_H": 128, "BLOCK_N": 32}, num_warps=8, num_stages=1),
+     ],
+-    key=["total_tokens_bucket", "h_q", "topk_per_split"],
++    key=["total_tokens_bucket", "h_q", "topk_per_split", "KV_V41"],
+ )
+ @triton.jit
+ def _fused_gather_attn_dsv4_splitk_kernel(
+@@ -1993,13 +2058,14 @@
+     HAS_TOPK_LENGTH: tl.constexpr,
+     BLOCK_H: tl.constexpr,
+     BLOCK_N: tl.constexpr,
++    KV_V41: tl.constexpr = False,
+ ):
+     """Split-K fused gather+dequant+attention kernel for DSV4."""
+     LOG2E: tl.constexpr = 1.4426950408889634
+     D_NOPE: tl.constexpr = 448
+     TILE_SIZE: tl.constexpr = 64
+-    BYTES_PER_TOKEN_DATA: tl.constexpr = 576
+-    BYTES_PER_TOKEN_SCALE: tl.constexpr = 8
++    BYTES_PER_TOKEN_DATA: tl.constexpr = 512 if KV_V41 else 576
++    BYTES_PER_TOKEN_SCALE: tl.constexpr = 16 if KV_V41 else 8
+
+     pid_h = tl.program_id(0)
+     pid_t = tl.program_id(1)
+@@ -2143,6 +2209,7 @@
+                     LOG2E,
+                     BLOCK_H,
+                     BLOCK_N,
++                 KV_V41,
+                 )
+             )
+
+@@ -2822,6 +2889,7 @@
+
+     The kernel computation is identical to the original version.
+     """
++    kv_v41 = _v41_cache_layout(kv_cache_main, kv_cache_extra)
+     total_tokens, h_q, d_qk = q.shape
+     topk_main = indices_main.shape[1]
+     topk_extra = indices_extra.shape[1]
+@@ -2956,6 +3024,7 @@
+                 stride_plse[2],
+                 HAS_TOPK_LENGTH_MAIN=topk_length_main is not None,
+                 HAS_TOPK_LENGTH_EXTRA=topk_length_extra is not None,
++                KV_V41=kv_v41,
+             )
+     else:
+         _fused_gather_attn_dsv4_dual_scope_splitk_kernel[grid_splitk](
+@@ -2998,6 +3067,7 @@
+             stride_plse[2],
+             HAS_TOPK_LENGTH_MAIN=topk_length_main is not None,
+             HAS_TOPK_LENGTH_EXTRA=topk_length_extra is not None,
++            KV_V41=kv_v41,
+         )
+
+     # Run combine kernel
+--- a/sglang/srt/mem_cache/deepseek_v4_memory_pool.py
++++ b/sglang/srt/mem_cache/deepseek_v4_memory_pool.py
+@@ -184,6 +184,13 @@
+         and torch.cuda.get_device_capability()[0] == 10
+     )
+     if _is_hip:
++        # Explicit scientific V41 FP8 path; auto keeps its existing V4 fallback.
++        if (mode == "v41" and resolve_hip_flashmla_backend() == "triton"
++                and torch.cuda.get_device_properties(torch.cuda.current_device())
++                .gcnArchName.split(":", 1)[0] == "gfx1151"):
++            if option != "fp8":
++                raise ValueError("gfx1151/Triton V41 requires explicit compressed layout fp8")
++            return KVLayout.V41, "fp8"
+         supported = (
+             is_gfx95_supported() and resolve_hip_flashmla_backend() == "aiter_sparse"
+         )
+--- a/sglang/srt/models/deepseek_common/amd/deepseek_v4_hip.py
++++ b/sglang/srt/models/deepseek_common/amd/deepseek_v4_hip.py
+@@ -32,6 +32,9 @@
+
+
+ def use_fused_qk_norm_rope(attn) -> bool:
++    if (attn.q_head_norm and envs.SGLANG_DSV4_KV_LAYOUT.get().lower() == "v41"
++            and envs.SGLANG_HACK_FLASHMLA_BACKEND.get() == "triton"):
++        raise ValueError("Triton V41 requires q_head_norm=False and the native V41 KV writer")
+     return bool(envs.SGLANG_OPT_USE_FUSED_QK_NORM_ROPE.get() and attn.q_head_norm)
+
+
+--- a/sglang/kernels/ops/attention/dsv4/kv_layout.py
++++ b/sglang/kernels/ops/attention/dsv4/kv_layout.py
+@@ -72,3 +72,21 @@
+     """The (main, extra) cache pairs the decode kernel accepts: identical layouts,
+     or the fp4 extra cache next to a V4.1 fp8 main cache."""
+     return extra_kv is kv or (kv is KVLayout.V41 and extra_kv is KVLayout.V41_FP4)
++
++
++def gfx1151_triton_v41_fp8_enabled(layout: KVLayout) -> bool:
++    """Explicit paged FP8 policy only; never enable auto or V41_FP4."""
++    if layout is not KVLayout.V41:
++        return False
++    import torch
++    from sglang.srt.environ import envs
++    from sglang.srt.layers.attention.hip_flash_mla import resolve_hip_flashmla_backend
++
++    return bool(
++        torch.version.hip is not None
++        and envs.SGLANG_DSV4_KV_LAYOUT.get().lower() == "v41"
++        and envs.SGLANG_DSV4_COMPRESSED_KV_LAYOUT.get().lower() == "fp8"
++        and resolve_hip_flashmla_backend() == "triton"
++        and torch.cuda.get_device_properties(torch.cuda.current_device())
++        .gcnArchName.split(":", 1)[0] == "gfx1151"
++    )
+--- a/sglang/kernels/ops/attention/dsv4/attn.py
++++ b/sglang/kernels/ops/attention/dsv4/attn.py
+@@ -13,7 +13,7 @@
+ )
+ from sglang.srt.utils import is_gfx95_supported
+
+-from .kv_layout import KVLayout
++from .kv_layout import KVLayout, gfx1151_triton_v41_fp8_enabled
+ from .utils import make_name
+
+
+@@ -104,8 +104,9 @@
+
+         triton_fused_store_cache(input, cache, indices, page_size=page_size, type=type)
+     else:
+-        assert not is_hip_runtime() or is_gfx95_supported(), (
+-            "V4.1 KV stores on HIP require gfx950"
++        assert (not is_hip_runtime() or is_gfx95_supported()
++                or gfx1151_triton_v41_fp8_enabled(layout)), (
++            "V4.1 KV stores on HIP require gfx950 or explicit gfx1151/Triton FP8"
+         )
+         module = _jit_fused_store_module(
+             name=type,
+--- a/sglang/kernels/ops/attention/dsv4/compress.py
++++ b/sglang/kernels/ops/attention/dsv4/compress.py
+@@ -16,7 +16,7 @@
+ )
+ from sglang.srt.utils import is_gfx95_supported, is_hip, is_xpu
+
+-from .kv_layout import KVLayout
++from .kv_layout import KVLayout, gfx1151_triton_v41_fp8_enabled
+ from .utils import make_name
+
+ _is_xpu = is_xpu()
+@@ -468,8 +468,9 @@
+             "the V4.1 layouts are paged FlashMLA main-KV caches"
+         )
+         assert not _is_xpu, "the V4.1 KV layouts are not supported on XPU"
+-        assert not is_hip() or is_gfx95_supported(), (
+-            "V4.1 KV stores on HIP require gfx950"
++        assert (not is_hip() or is_gfx95_supported()
++                or gfx1151_triton_v41_fp8_enabled(layout)), (
++            "V4.1 KV stores on HIP require gfx950 or explicit gfx1151/Triton FP8"
+         )
+     if use_fp4:
+         assert kv.shape[-1] == 128

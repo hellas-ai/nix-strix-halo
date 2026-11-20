@@ -1,0 +1,44 @@
+DeepSeek V4: honor the non-AITER mHC route on ROCm.
+
+The AITER mHC kernels require wave64; compilation fails on gfx1151. Use
+the existing portable hc_pre/hc_post dispatch when SGLANG_USE_AITER=0.
+
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -2251,6 +2251,24 @@
+             )
+             return y, post.squeeze(-1), comb, norm is not None
+
++        if _is_hip and not _use_aiter:
++            from sglang.kernels.ops.layernorm.mhc import hc_pre
++
++            y, comb, post, norm_fused = hc_pre(
++                x.flatten(1),
++                hc_fn,
++                hc_scale,
++                hc_base,
++                self.hc_mult,
++                self.rms_norm_eps,
++                self.hc_eps,
++                self.hc_sinkhorn_iters,
++                post_mult_value=_MHC_POST_MULT_VALUE,
++                out_norm_weight=norm.weight.data if norm is not None else None,
++                out_norm_eps=norm.variance_epsilon if norm is not None else None,
++            )
++            return y, post, comb.view(-1, self.hc_mult, self.hc_mult), norm_fused
++
+         if _is_hip:
+             from aiter.ops.mhc import mhc_pre
+
+@@ -2350,6 +2368,11 @@
+             from sglang.kernels.ops.layernorm.mhc import mhc_post
+
+             return mhc_post(x, residual, post, comb)
++
++        elif _is_hip and not _use_aiter:
++            from sglang.kernels.ops.layernorm.mhc import hc_post
++
++            return hc_post(x, residual, post, comb, self.hc_mult).view_as(residual)
+
+         elif _is_hip:
+             from aiter.ops.mhc import mhc_post

@@ -1,0 +1,11 @@
+--- a/aiter/jit/utils/torch_guard.py
++++ b/aiter/jit/utils/torch_guard.py
+@@ -331,7 +331,7 @@
+                 tags = ()
+             else:
+                 tags = (torch.Tag.needs_fixed_stride_order,)
+-            op_schema = f"aiter::{loadName}" + schema
++            op_schema = loadName + schema
+             aiter_lib.define(op_schema, tags=tags)
+             aiter_lib.impl(f"aiter::{loadName}", custom_func, dispatch_key="CUDA")
+             aiter_lib.impl(f"aiter::{loadName}", custom_func, dispatch_key="CPU")

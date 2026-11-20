@@ -1,0 +1,65 @@
+--- a/sglang/kernels/ops/gemm/fp8_kernel.py
++++ b/sglang/kernels/ops/gemm/fp8_kernel.py
+@@ -8,6 +8,7 @@
+ import triton
+ import triton.language as tl
+
++from sglang.kernels.ops.gemm.deepseek_v41_gemv import _e4m3fn_to_fp32
+ from sglang.srt.layers import deep_gemm_wrapper
+ from sglang.srt.runtime_context import get_platform
+ from sglang.srt.utils import (
+@@ -80,6 +81,7 @@
+     BLOCK_SIZE_K: tl.constexpr,
+     GROUP_SIZE_M: tl.constexpr,
+     needs_masking: tl.constexpr,
++    EXACT_E4M3FN_TO_FP16: tl.constexpr = False,
+ ):
+     """Triton-accelerated function used to perform linear operations (dot
+     product) on input tensors `A` and `B` with block-wise quantization, and store the result in output
+@@ -120,6 +122,10 @@
+         b_s = tl.load(Bs_ptrs)
+
+         scale_step_k = tl.where((k + 1) % n_tiles_k_per_group_k == 0, 1, 0)
++        if EXACT_E4M3FN_TO_FP16:
++            # Every finite E4M3FN value is exactly representable in FP16.
++            a = _e4m3fn_to_fp32(a).to(tl.float16)
++            b = _e4m3fn_to_fp32(b).to(tl.float16)
+         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+         a_ptrs += BLOCK_SIZE_K * stride_ak
+         b_ptrs += BLOCK_SIZE_K * stride_bk
+@@ -770,6 +776,23 @@
+     return C
+
+
++def _use_gfx1151_fp8_prefill_cast(A, B, block_size, output_dtype):
++    """Use exact FP16 operands for native V4.1 prefill on gfx1151."""
++    return (
++        bool(torch.version.hip)
++        and A.dtype == B.dtype == torch.float8_e4m3fn
++        and output_dtype == torch.bfloat16
++        and tuple(block_size) == (32, 32)
++        and A.numel() // A.shape[-1] >= 16
++        and tuple(B.shape) in {
++            (1792, 5120), (8192, 1280), (5120, 2048),
++            (1152, 5120), (5120, 576), (25600, 6144), (4096, 1280),
++        }
++        and torch.cuda.get_device_properties(A.device).gcnArchName.split(":")[0]
++        == "gfx1151"
++    )
++
++
+ def w8a8_block_fp8_matmul_triton(
+     A: torch.Tensor,
+     B: torch.Tensor,
+@@ -828,6 +851,11 @@
+         kernel = _w8a8_block_fp8_matmul_gfx1250
+     else:
+         kernel = select_w8a8_block_fp8_matmul_kernel(M, N, config)
++
++    if kernel is _w8a8_block_fp8_matmul and _use_gfx1151_fp8_prefill_cast(
++        A, B, block_size, output_dtype
++    ):
++        config = {**config, "EXACT_E4M3FN_TO_FP16": True}
+
+     split_k = config.get("SPLIT_K", 1) if hopper_tuned else 1
+     if split_k > 1:

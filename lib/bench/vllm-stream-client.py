@@ -88,6 +88,19 @@ def fmt(value: float | str | None) -> str:
     return str(value)
 
 
+def measured_tokens(value: Any) -> int | None:
+    """Return a token count only for an actual nonnegative JSON integer.
+
+    ``bool`` is a subclass of ``int`` but is not a token count, and neither
+    are floats, strings, negatives, or missing values.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
 def base_row(args: argparse.Namespace, prompt: str) -> dict[str, str]:
     return {
         "timestamp_utc": now_utc(),
@@ -293,56 +306,59 @@ def aggregate(args: argparse.Namespace, prompt: str) -> dict[str, str]:
     wall_s = time.perf_counter() - wall_start
     ok_rows = [row for row in rows if row.get("ok")]
     bad_rows = [row for row in rows if not row.get("ok")]
-    prompt_tokens = [
-        int(row["prompt_tokens"])
-        for row in ok_rows
-        if row.get("prompt_tokens") is not None
-    ]
+
+    prompt_tokens = [measured_tokens(row.get("prompt_tokens")) for row in ok_rows]
     completion_tokens = [
-        int(row["completion_tokens"])
-        for row in ok_rows
-        if row.get("completion_tokens") is not None
+        measured_tokens(row.get("completion_tokens")) for row in ok_rows
     ]
-    ttfts = [
-        float(row["ttft_s"])
-        for row in ok_rows
-        if row.get("ttft_s") is not None
-    ]
+    prompt_measured = all(value is not None for value in prompt_tokens)
+    completion_measured = all(value is not None for value in completion_tokens)
+
+    ttfts = [float(row["ttft_s"]) for row in ok_rows if row.get("ttft_s") is not None]
     decodes = [
-        float(row["decode_s"])
-        for row in ok_rows
-        if row.get("decode_s") is not None
+        float(row["decode_s"]) for row in ok_rows if row.get("decode_s") is not None
     ]
     decode_tps = []
     output_tps = []
-    for row in ok_rows:
-        ctok = row.get("completion_tokens")
-        duration = row.get("duration_s")
-        decode_s = row.get("decode_s")
-        if ctok is None or duration is None:
-            continue
-        ctok_i = int(ctok)
-        if duration > 0:
-            output_tps.append(ctok_i / duration)
-        if decode_s and decode_s > 0:
-            decode_tps.append(max(0, ctok_i - 1) / decode_s)
+    if completion_measured:
+        for row, ctok in zip(ok_rows, completion_tokens):
+            duration = row.get("duration_s")
+            decode_s = row.get("decode_s")
+            if ctok is None or duration is None:
+                continue
+            if duration > 0:
+                output_tps.append(ctok / duration)
+            if decode_s and decode_s > 0:
+                decode_tps.append(max(0, ctok - 1) / decode_s)
 
-    total_completion = sum(completion_tokens)
-    total_prompt = sum(prompt_tokens)
+    total_completion = sum(completion_tokens) if completion_measured else None
+    total_prompt = sum(prompt_tokens) if prompt_measured else None
     errors = " | ".join(str(row.get("error", ""))[:300] for row in bad_rows)
 
     row = base_row(args, prompt)
     row.update(
         {
-            "prompt_tokens_per_req": fmt(statistics.median(prompt_tokens) if prompt_tokens else None),
+            "prompt_tokens_per_req": fmt(
+                statistics.median(prompt_tokens)
+                if prompt_measured and prompt_tokens
+                else None
+            ),
             "requests_ok": str(len(ok_rows)),
             "requests_failed": str(len(bad_rows)),
-            "status": "ok" if ok_rows and not bad_rows else ("partial" if ok_rows else "failed"),
+            "status": "ok"
+            if ok_rows and not bad_rows
+            else ("partial" if ok_rows else "failed"),
             "skip_reason": "",
             "wall_s": fmt(wall_s),
-            "total_prompt_tokens": str(total_prompt),
-            "total_completion_tokens": str(total_completion),
-            "total_tps": fmt(total_completion / wall_s if wall_s > 0 else None),
+            "total_prompt_tokens": fmt(total_prompt) if prompt_measured else "",
+            "total_completion_tokens": (
+                fmt(total_completion) if completion_measured else ""
+            ),
+            "total_tps": fmt(
+                total_completion / wall_s
+                if completion_measured and wall_s > 0
+                else None
+            ),
             "ttft_mean_s": fmt(statistics.mean(ttfts) if ttfts else None),
             "ttft_p50_s": fmt(percentile(ttfts, 50)),
             "ttft_p95_s": fmt(percentile(ttfts, 95)),

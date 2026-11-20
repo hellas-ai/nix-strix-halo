@@ -1,0 +1,28 @@
+--- a/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
++++ b/sglang/kernels/ops/attention/nsa_triton_decode/triton_mla_kernels_decode_fused.py
+@@ -285,6 +285,17 @@
+ # ============================================================================
+ 
+ 
++def _prune_single_scope_configs(configs, named_args, **kwargs):
++    """Use the dual-scope H16 head tile for TP4 single-scope attention.
++
++    Larger head tiles compute masked heads and trigger costly compilations.
++    Keep all three existing BLOCK_N choices; other head counts are unchanged.
++    """
++    if named_args.get("h_q") == 16:
++        return [c for c in configs if c.kwargs.get("BLOCK_H") == 16]
++    return configs
++
++
+ @triton.autotune(
+     configs=[
+         triton.Config({"BLOCK_H": 16, "BLOCK_N": 32}, num_warps=4, num_stages=1),
+@@ -299,6 +310,7 @@
+         triton.Config({"BLOCK_H": 128, "BLOCK_N": 64}, num_warps=8, num_stages=1),
+     ],
+     key=["total_tokens_bucket", "h_q", "topk"],
++    prune_configs_by={"early_config_prune": _prune_single_scope_configs},
+ )
+ @triton.jit
+ def _fused_gather_attn_dsv4_kernel(
