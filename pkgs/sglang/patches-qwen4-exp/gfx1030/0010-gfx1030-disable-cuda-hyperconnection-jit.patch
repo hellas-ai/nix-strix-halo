@@ -1,0 +1,20 @@
+PyTorch exposes HIP devices through the torch.cuda compatibility namespace, and
+gfx1030 is consequently reported as compute capability 10.3.  Do not confuse
+that with NVIDIA SM100: the split-K mix kernel imports cuda-python.  Keep the
+portable Triton/torch mix paths on ROCm by including SGLang's real platform
+predicate in the SM100-only JIT gate.
+
+--- a/sglang/srt/layers/hyperconnection.py
++++ b/sglang/srt/layers/hyperconnection.py
+@@ -8 +8,2 @@
+-from sglang.srt.layers.hc_mix_triton import fused_hc_mix, fused_hc_mix_supported
++from sglang.srt.layers.hc_mix_triton import fused_hc_mix, fused_hc_mix_supported
++from sglang.srt.utils import is_cuda
+@@ -156,6 +157,7 @@ class GatedResidual(HyperConnectionBase):
+             lowrank = self.config.hc_lowrank
+             self._jit_mix_ok = (
+                 envs.SGLANG_HC_MIX_CUDA.get()
++                and is_cuda()
+                 and torch.cuda.is_available()
+                 # The CuTe split-K pair is tcgen05 (sm_100 family) only; the
+                 # default-on env must not route Hopper/Ada to it.

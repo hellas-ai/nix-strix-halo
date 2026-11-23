@@ -1,0 +1,15 @@
+The generic scheduler imports DFlash validation even when speculation is off.
+That reaches spec_utils, whose HIP branch requires sgl-kernel solely for
+fast_topk.  Use SGLang's existing portable implementation on HIP; keep the AOT
+kernel on CUDA.
+
+--- a/sglang/srt/speculative/spec_utils.py
++++ b/sglang/srt/speculative/spec_utils.py
+@@ -83,7 +83,5 @@
+
+ if _is_cuda:
+     from sgl_kernel import fast_topk
+-elif _is_hip:
+-    from sgl_kernel import fast_topk
+ else:
+     from sglang.srt.utils.common import fast_topk

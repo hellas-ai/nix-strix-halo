@@ -1,0 +1,48 @@
+The xgrammar backend imports sgl_kernel's CUDA bitmask operation on every HIP
+device.  The gfx1030 closure has no compatible sgl-kernel wheel, while SGLang's
+in-tree Triton implementation is already used by the other GPU backends and is
+portable to HIP.  Use it on gfx1030 as well so scheduler initialization keeps
+grammar-constrained decoding and tool calls without an unavailable extension.
+
+--- a/sglang/srt/constrained/xgrammar_backend.py
++++ b/sglang/srt/constrained/xgrammar_backend.py
+@@ -38,14 +38,11 @@ from sglang.srt.constrained.utils import is_legacy_structural_tag
+ from sglang.srt.utils import is_hip
+ from sglang.srt.utils.common import is_pin_memory_available
+
+ _is_hip = is_hip()
+
+-if _is_hip:
+-    from sgl_kernel import apply_token_bitmask_inplace_cuda
+-else:
+-    from sglang.kernels.ops.grammar.bitmask_ops import (
+-        apply_token_bitmask_inplace_triton,
+-    )
++from sglang.kernels.ops.grammar.bitmask_ops import (
++    apply_token_bitmask_inplace_triton,
++)
+
+ from sglang.kernels.ops.grammar.token_filter_ops import set_token_filter_triton
+ from sglang.srt.constrained.torch_ops.token_filter_torch_ops import (
+@@ -108,10 +105,7 @@ class XGrammarGrammar(BaseGrammarObject):
+         return vocab_mask.to(device, non_blocking=True)
+
+     def apply_vocab_mask(self, logits: torch.Tensor, vocab_mask: torch.Tensor) -> None:
+         if logits.device.type in {"cuda", "xpu", "musa"}:
+-            if _is_hip:
+-                apply_token_bitmask_inplace_cuda(logits, vocab_mask)
+-            else:
+-                apply_token_bitmask_inplace_triton(logits, vocab_mask)
++            apply_token_bitmask_inplace_triton(logits, vocab_mask)
+         elif logits.device.type == "npu":
+             import sgl_kernel_npu  # noqa: F401
+@@ -258,10 +252,7 @@ class XGrammarGrammarBackend(BaseGrammarBackend):
+     def apply_vocab_mask(logits: torch.Tensor, vocab_mask: torch.Tensor) -> None:
+         if logits.device.type in {"cuda", "npu", "xpu", "musa"}:
+-            if _is_hip:
+-                apply_token_bitmask_inplace_cuda(logits, vocab_mask)
+-            else:
+-                apply_token_bitmask_inplace_triton(logits, vocab_mask)
++            apply_token_bitmask_inplace_triton(logits, vocab_mask)
+         else:
+             raise RuntimeError(f"Unsupported device: {logits.device.type}")
