@@ -1,0 +1,23 @@
+--- a/sglang/kernels/ops/attention/dsv4/candidate_blocks_hip.py
++++ b/sglang/kernels/ops/attention/dsv4/candidate_blocks_hip.py
+@@ -375,13 +375,19 @@
+     )
+     assert compact.shape[1] <= candidates.compact_page_size
+     compact_pos = torch.empty((rows, topk), dtype=torch.int32, device=logits.device)
+-    topk_transform_paged(
++    # Equal score cutoffs use logical token IDs, independently of the
++    # publication's unspecified block order; rounded newest-block slots stay masked.
++    torch.ops.sgl_kernel.deepseek_v4_topk_transform_512(
+         compact,
+         candidates.compact_lens,
+         candidates.compact_page_table,
+         compact_pos,
+         candidates.compact_page_size,
+         None,
++        False,
++        candidates.ids,
++        seq_lens,
++        block_size,
+     )
+     assert page_indices.stride(1) == 1 and page_indices.shape == (rows, topk)
+     assert page_table.stride(1) == 1 and page_table.shape[0] == rows

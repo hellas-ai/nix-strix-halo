@@ -11,6 +11,67 @@ import time
 import urllib.request
 
 
+class StreamError(RuntimeError):
+    """A streamed response that cannot be trusted as a full assistant turn."""
+
+
+def _error_message(error):
+    """Bound and summarize a top-level SSE ``error`` value."""
+    if isinstance(error, dict):
+        text = error.get("message") or json.dumps(error)
+    else:
+        text = str(error)
+    return f"stream error: {text}"[:300]
+
+
+def parse_stream(lines, started):
+    """Assemble an assistant message from streamed SSE ``data:`` lines.
+
+    Raises :class:`StreamError` for a non-null top-level ``error`` value or
+    for EOF before the ``[DONE]`` sentinel, even if a choice already reported
+    ``finish_reason=stop``. Comments, blank lines and usage-only events are
+    ignored.
+    """
+    calls, content, reasoning = {}, [], []
+    first = usage = finish = None
+    done = False
+    for line in lines:
+        if not line.startswith(b"data:"):
+            continue
+        data = line[5:].strip()
+        if data == b"[DONE]":
+            done = True
+            break
+        event = json.loads(data)
+        if event.get("error") is not None:
+            raise StreamError(_error_message(event["error"]))
+        if event.get("usage"):
+            usage = event["usage"]
+        for choice in event.get("choices", []):
+            delta = choice.get("delta", {})
+            if any(delta.get(k) for k in ("content", "reasoning_content", "tool_calls")) and first is None:
+                first = time.monotonic() - started
+            content.append(delta.get("content") or "")
+            reasoning.append(delta.get("reasoning_content") or "")
+            finish = choice.get("finish_reason") or finish
+            for part in delta.get("tool_calls") or []:
+                call = calls.setdefault(part["index"], {
+                    "id": "", "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                })
+                if part.get("id"):
+                    call["id"] += part["id"]
+                for key in ("name", "arguments"):
+                    call["function"][key] += part.get("function", {}).get(key) or ""
+    if not done:
+        raise StreamError("stream ended before [DONE]")
+    message = {"role": "assistant", "content": "".join(content),
+               "reasoning_content": "".join(reasoning)}
+    if calls:
+        message["tool_calls"] = [calls[i] for i in sorted(calls)]
+    return message, finish, usage, first
+
+
 def chat(base, messages, **options):
     payload = {
         "model": "glm-5.3-flash",
@@ -31,36 +92,7 @@ def chat(base, messages, **options):
         if not payload.get("stream"):
             result = json.load(response)
         else:
-            calls, content, reasoning, first, usage, finish = {}, [], [], None, None, None
-            for line in response:
-                if not line.startswith(b"data: "):
-                    continue
-                data = line[6:].strip()
-                if data == b"[DONE]":
-                    break
-                event = json.loads(data)
-                if event.get("usage"):
-                    usage = event["usage"]
-                for choice in event.get("choices", []):
-                    delta = choice.get("delta", {})
-                    if any(delta.get(k) for k in ("content", "reasoning_content", "tool_calls")) and first is None:
-                        first = time.monotonic() - started
-                    content.append(delta.get("content") or "")
-                    reasoning.append(delta.get("reasoning_content") or "")
-                    finish = choice.get("finish_reason") or finish
-                    for part in delta.get("tool_calls") or []:
-                        call = calls.setdefault(part["index"], {
-                            "id": "", "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        })
-                        if part.get("id"):
-                            call["id"] += part["id"]
-                        for key in ("name", "arguments"):
-                            call["function"][key] += part.get("function", {}).get(key) or ""
-            message = {"role": "assistant", "content": "".join(content),
-                       "reasoning_content": "".join(reasoning)}
-            if calls:
-                message["tool_calls"] = [calls[i] for i in sorted(calls)]
+            message, finish, usage, first = parse_stream(response, started)
             result = {"choices": [{"message": message, "finish_reason": finish}],
                       "usage": usage, "first_event_seconds": first}
     result["wall_seconds"] = time.monotonic() - started

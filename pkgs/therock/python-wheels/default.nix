@@ -135,6 +135,15 @@ therockPythonPackages.buildPythonPackage (finalAttrs: {
       --target "$site" \
       "$wheelhouse"/*
 
+    # HSA dlopens the unversioned AQL profiling extension. The wheel only
+    # ships its versioned SONAME, so counter collection otherwise aborts.
+    aql_lib="$site/_rocm_sdk_core/lib"
+    if [ -f "$aql_lib/libhsa-amd-aqlprofile64.so.1" ] \
+      && [ ! -e "$aql_lib/libhsa-amd-aqlprofile64.so" ] \
+      && [ ! -L "$aql_lib/libhsa-amd-aqlprofile64.so" ]; then
+      ln -s libhsa-amd-aqlprofile64.so.1 "$aql_lib/libhsa-amd-aqlprofile64.so"
+    fi
+
     if [ -f "$site/torchvision/_meta_registrations.py" ]; then
       sed -i \
         's#^@torch.library.register_fake("torchvision::nms")$#@register_meta("nms")#' \
