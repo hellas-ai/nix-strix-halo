@@ -1,0 +1,52 @@
+--- a/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
++++ b/sglang/kernels/ops/gemm/deepseek_v41_gemv.py
+@@ -18,8 +18,8 @@
+     groups = tl.arange(0, BLOCK_K // 32)
+     accumulator = tl.zeros((ROWS,), tl.float32)
+     for start in range(0, K, BLOCK_K):
+-        q = tl.load(Q + start + cols).to(tl.float32)
+-        w = tl.load(W + rows[:, None] * K + start + cols[None, :]).to(tl.float32)
++        q = _e4m3fn_to_fp32(tl.load(Q + start + cols))
++        w = _e4m3fn_to_fp32(tl.load(W + rows[:, None] * K + start + cols[None, :]))
+         products = w * q[None, :]
+         dots = tl.sum(tl.reshape(products, (ROWS, BLOCK_K // 32, 32)), axis=2)
+         a_scale = tl.load(QS + start // 32 + groups)
+@@ -34,4 +34,20 @@
+ @triton.jit
++def _e4m3fn_to_fp32(value):
++    """Decode every native E4M3FN code exactly, including signed zero and NaN."""
++    code = value.to(tl.uint8, bitcast=True).to(tl.uint32)
++    magnitude = code & 0x7F
++    normal_bits = (magnitude << 20) + 0x3C000000
++    # Every E4M3FN subnormal is an exactly representable normal FP32 value.
++    subnormal_bits = (magnitude.to(tl.float32) * 0.001953125).to(
++        tl.uint32, bitcast=True
++    )
++    magnitude_bits = tl.where(magnitude < 8, subnormal_bits, normal_bits)
++    # The existing cast emits signed canonical quiet NaNs for codes 0x7f/0xff.
++    magnitude_bits = tl.where(magnitude == 0x7F, 0x7FC00000, magnitude_bits)
++    return (magnitude_bits | ((code & 0x80) << 24)).to(tl.float32, bitcast=True)
++
++
++@triton.jit
+ def _native_c2_gemv(Q, QS, W, WS, Y, N: tl.constexpr, K: tl.constexpr,
+                     ROWS: tl.constexpr, BLOCK_K: tl.constexpr):
+     first = tl.program_id(0) * ROWS
+@@ -42,14 +58,14 @@
+     accumulator1 = tl.zeros((ROWS,), tl.float32)
+     for start in range(0, K, BLOCK_K):
+         # One native weight tile and one weight-scale vector feed both rows.
+-        w = tl.load(W + rows[:, None] * K + start + cols[None, :]).to(tl.float32)
++        w = _e4m3fn_to_fp32(tl.load(W + rows[:, None] * K + start + cols[None, :]))
+         w_scale = tl.load(WS + (first // 32) * (K // 32) + start // 32 + groups)
+-        q0 = tl.load(Q + start + cols).to(tl.float32)
++        q0 = _e4m3fn_to_fp32(tl.load(Q + start + cols))
+         dots0 = tl.sum(tl.reshape(w * q0[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
+         a_scale0 = tl.load(QS + start // 32 + groups)
+         scaled0 = (dots0 * a_scale0[None, :]) * w_scale[None, :]
+         accumulator0 = accumulator0 + tl.sum(scaled0, axis=1)
+-        q1 = tl.load(Q + K + start + cols).to(tl.float32)
++        q1 = _e4m3fn_to_fp32(tl.load(Q + K + start + cols))
+         dots1 = tl.sum(tl.reshape(w * q1[None, :], (ROWS, BLOCK_K // 32, 32)), axis=2)
+         a_scale1 = tl.load(QS + K // 32 + start // 32 + groups)
+         scaled1 = (dots1 * a_scale1[None, :]) * w_scale[None, :]

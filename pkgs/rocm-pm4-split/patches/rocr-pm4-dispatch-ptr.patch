@@ -1,0 +1,144 @@
+ROCR: gfx11 retained-PM4 encoder supports enable_sgpr_dispatch_ptr.
+
+Applies with -p1 at projects/rocr-runtime of rocm-10-sdk-pm4-prepared-source, AFTER Codex's
+scratchless-preserve-tmpring.patch. Source of truth:
+/mnt/Home/src/pm4-clr-gatelog/rocm-10-sdk-pm4-prepared-source, b499e3e..62d8310.
+
+Torch kernels set kernel_code_properties 0x040a (dispatch ptr, kernarg segment ptr, wave32); the
+encoder rejected every such kernel because it only supported bits 0, 3 and 10. Each command
+list now owns a GPU-visible copy of its AQL packets (amd_graph_command_encoder.h,
+hsa_ven_amd_graph.cpp) and the encoder passes the packet address in the dispatch-pointer user
+SGPRs, in ABI order (private segment buffer, dispatch ptr, kernarg ptr).
+
+diff --git a/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h b/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+index 4fe003c..d27f7a9 100644
+--- a/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
++++ b/runtime/hsa-runtime/core/inc/amd_graph_command_encoder.h
+@@ -47,8 +47,11 @@ class Gfx11CommandEncoder {
+  public:
+   Gfx11CommandEncoder() { AcquireSystem(); }
+ 
++  // |dispatch_packet| is a retained copy of |packet| that outlives the list; kernels that ask for
++  // the dispatch pointer (launch geometry from the AQL packet) get its address in their user SGPRs.
+   bool Append(const hsa_kernel_dispatch_packet_t& packet, const Gfx11KernelImage& image,
+-              uint32_t kernel_flags, hsa_ven_amd_graph_dependency_t dependency) {
++              uint32_t kernel_flags, hsa_ven_amd_graph_dependency_t dependency,
++              uint64_t dispatch_packet = 0) {
+     if ((kernel_flags & HSA_VEN_AMD_GRAPH_KERNEL_DYNAMIC_CALLSTACK) != 0 ||
+         (image.kernel_code_properties & ~kSupportedKernelProperties) != 0 ||
+         (packet.private_segment_size != 0 &&
+@@ -107,11 +110,19 @@ class Gfx11CommandEncoder {
+     SetShRegs(kComputeNumThreadX, workgroup, 3);
+     SetShRegs(kComputeResourceLimits, &zero, 1);
+ 
+-    uint32_t user_sgprs[6] = {};
++    uint32_t user_sgprs[8] = {};
+     size_t user_sgpr_count = 0;
+     if ((image.kernel_code_properties & kEnableSgprPrivateSegmentBuffer) != 0) {
+       user_sgpr_count += 4;
+     }
++    // User SGPR order is fixed by the ABI: private segment buffer, dispatch ptr, queue ptr, kernarg ptr.
++    if ((image.kernel_code_properties & kEnableSgprDispatchPtr) != 0) {
++      if (dispatch_packet == 0) {
++        return false;
++      }
++      user_sgprs[user_sgpr_count++] = static_cast<uint32_t>(dispatch_packet);
++      user_sgprs[user_sgpr_count++] = static_cast<uint32_t>(dispatch_packet >> 32);
++    }
+     if ((image.kernel_code_properties & kEnableSgprKernargSegmentPtr) != 0) {
+       if (packet.kernarg_address == nullptr) {
+         return false;
+@@ -160,10 +171,11 @@ class Gfx11CommandEncoder {
+   static constexpr uint32_t kLdsSizeShift = 15;
+   static constexpr uint32_t kLdsGranule = 512;
+   static constexpr uint16_t kEnableSgprPrivateSegmentBuffer = 1 << 0;
++  static constexpr uint16_t kEnableSgprDispatchPtr = 1 << 1;
+   static constexpr uint16_t kEnableSgprKernargSegmentPtr = 1 << 3;
+   static constexpr uint16_t kEnableWavefrontSize32 = 1 << 10;
+   static constexpr uint16_t kSupportedKernelProperties =
+-      kEnableSgprPrivateSegmentBuffer | kEnableSgprKernargSegmentPtr |
++      kEnableSgprPrivateSegmentBuffer | kEnableSgprDispatchPtr | kEnableSgprKernargSegmentPtr |
+       kEnableWavefrontSize32;
+ 
+   static uint32_t Packet3(uint32_t opcode, uint32_t body_dwords, bool compute) {
+diff --git a/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp b/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
+index caff800..aadb84a 100644
+--- a/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
++++ b/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp
+@@ -55,9 +55,10 @@ class CommandList {
+ 
+   CommandList(AMD::GpuAgent* agent, void* ib, uint32_t dwords, uint32_t dispatches,
+               hsa_ven_amd_graph_encoder_family_t family, size_t tmpring_patch_dword,
+-              uint32_t private_wave32, uint32_t private_wave64)
++              uint32_t private_wave32, uint32_t private_wave64, void* packet_images)
+       : agent_(agent),
+         ib_(ib),
++        packet_images_(packet_images),
+         dwords_(dwords),
+         dispatches_(dispatches),
+         family_(family),
+@@ -72,6 +73,9 @@ class CommandList {
+       binding.scratch_users->fetch_sub(1, std::memory_order_release);
+     }
+     agent_->system_deallocator()(ib_);
++    if (packet_images_ != nullptr) {
++      agent_->system_deallocator()(packet_images_);
++    }
+   }
+ 
+   AMD::GpuAgent* agent() const { return agent_; }
+@@ -127,6 +131,7 @@ class CommandList {
+  private:
+   AMD::GpuAgent* agent_;
+   void* ib_;
++  void* packet_images_;  // retained AQL packet copies read through the dispatch pointer
+   uint32_t dwords_;
+   uint32_t dispatches_;
+   hsa_ven_amd_graph_encoder_family_t family_;
+@@ -329,6 +334,22 @@ hsa_status_t Create(hsa_agent_t hsa_agent,
+   uint32_t private_wave32 = 0;
+   uint32_t private_wave64 = 0;
+   constexpr uint16_t kEnableWavefrontSize32 = 1u << 10;
++  // One GPU-visible copy of every packet, for kernels that read their launch geometry through the
++  // dispatch pointer. Written once here; the list's leading system acquire makes it visible.
++  constexpr size_t kPacketImageBytes = sizeof(hsa_kernel_dispatch_packet_t);
++  void* packet_images = gpu_agent->system_allocator()(desc->packet_count * kPacketImageBytes, 4096,
++                                                      core::MemoryRegion::AllocateNoFlags);
++  if (packet_images == nullptr) {
++    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
++  }
++  std::memcpy(packet_images, desc->packets, desc->packet_count * kPacketImageBytes);
++  struct PacketImagesGuard {
++    AMD::GpuAgent* agent;
++    void* images;
++    ~PacketImagesGuard() {
++      if (images != nullptr) agent->system_deallocator()(images);
++    }
++  } packet_images_guard{gpu_agent, packet_images};
+   if (capabilities.encoder_family == HSA_VEN_AMD_GRAPH_ENCODER_GFX11) {
+     Gfx11CommandEncoder builder;
+     for (size_t i = 0; i < desc->packet_count; ++i) {
+@@ -349,7 +370,8 @@ hsa_status_t Create(hsa_agent_t hsa_agent,
+         }
+         return HSA_STATUS_ERROR_INVALID_CODE_OBJECT;
+       }
+-      if (!builder.Append(packet, image, desc->kernel_flags[i], dependency)) {
++      if (!builder.Append(packet, image, desc->kernel_flags[i], dependency,
++                          reinterpret_cast<uint64_t>(packet_images) + i * kPacketImageBytes)) {
+         PrintEncoderRejection(i, capabilities.encoder_family, packet, image,
+                               desc->kernel_flags[i], dependency);
+         return HSA_STATUS_ERROR_INVALID_CODE_OBJECT;
+@@ -423,11 +445,12 @@ hsa_status_t Create(hsa_agent_t hsa_agent,
+   auto* command_list = new (std::nothrow)
+       CommandList(gpu_agent, ib, static_cast<uint32_t>(words.size()),
+                   dispatch_count, capabilities.encoder_family, tmpring_patch_dword,
+-                  private_wave32, private_wave64);
++                  private_wave32, private_wave64, packet_images);
+   if (command_list == nullptr) {
+     gpu_agent->system_deallocator()(ib);
+     return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+   }
++  packet_images_guard.images = nullptr;  // owned by the command list now
+   {
+     std::lock_guard<std::mutex> lock(command_lists_mutex);
+     command_lists.insert(command_list);

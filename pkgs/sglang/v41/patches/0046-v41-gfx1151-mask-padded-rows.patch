@@ -1,0 +1,237 @@
+--- a/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
++++ b/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
+@@ -14,6 +14,12 @@ down, argsort + 6x gather/convert/add).  This module computes the same values wi
+   D  `_down_wmma`       owner-routed WMMA down                                            -> bf16 [M,6,5120]
+   C  `_ordered_combine` fp32 sum of the six routes in ascending logical expert id          -> fp32 [M,5120]
+ 
++Padded graph replays (a 3-row batch replaying the 4-row graph): when the graph runner exposes a device-side live
++row count (`sglang.srt.layers.live_rows`), kernel P also rewrites the routing ids of every dead row to -1.  Every
++later stage already treats id -1 as "no expert": no weight is read for the row and its routed output is zero, so
++a padded row costs no expert bandwidth, while the rows that are live compute exactly what they computed before
++(per-row arithmetic does not depend on which other rows route to an expert).  Eager calls are unchanged.
++
+ Numerics: P, E and C reproduce the torch/Triton expressions of the installed sequence operation for
+ operation (no FP contraction); G and D use `tl.dot_scaled(bf16, e2m1, e8m0, fast_math=True)` with one
+ fp32 accumulator chain over K in WMMA K=16 steps, i.e. the AITER kernel's arithmetic, so per-row
+@@ -34,6 +40,7 @@ from triton.language.extra.hip import libdevice
+ NUM_EXPERTS, HIDDEN, INTER, TOPK = 384, 5120, 576, 6
+ N_GATE_UP, N_DOWN = 2 * INTER, HIDDEN
+ MAX_M = 16
++MAX_ROUTES = 128   # id-mask tile of `_prep_operand_live`: >= MAX_M * TOPK, one compiled variant for every row count
+ 
+ FP8_MAX = 448.0   # torch.finfo(float8_e4m3fn).max; gfx1151 is not e4m3fnuz
+ EPS = 1e-4        # `eps` of the installed `_official_routed_operand`
+@@ -96,6 +103,25 @@ def _prep_operand(X, Y, n_groups, G: tl.constexpr, eps: tl.constexpr, fp8_max: t
+     tl.store(Y + offs, _quant_dequant(x, eps, fp8_max), mask=m)
+ 
+ 
++@triton.jit(do_not_specialize=["n_ids"])
++def _prep_operand_live(X, Y, n_groups, IDS, IDS_OUT, LIVE, n_ids,
++                       G: tl.constexpr, eps: tl.constexpr, fp8_max: tl.constexpr,
++                       TOPK: tl.constexpr, IDP: tl.constexpr):
++    """`_prep_operand` plus the live-row mask: program 0 copies the routing ids, replacing those of rows >= *LIVE by -1."""
++    pid = tl.program_id(0)
++    g = pid * G + tl.arange(0, G)
++    cols = tl.arange(0, 32)
++    offs = g[:, None].to(tl.int64) * 32 + cols[None, :]
++    m = (g < n_groups)[:, None]
++    x = tl.load(X + offs, mask=m, other=0).to(tl.float32)
++    tl.store(Y + offs, _quant_dequant(x, eps, fp8_max), mask=m)
++    if pid == 0:
++        i = tl.arange(0, IDP)
++        im = i < n_ids
++        ids = tl.load(IDS + i, mask=im, other=-1)
++        tl.store(IDS_OUT + i, tl.where(i // TOPK < tl.load(LIVE), ids, -1), mask=im)
++
++
+ # ----------------------------------------------------------------------------------------------
+ # E: SwiGLU + route scale + bf16 + group-32 quant->dequant; one program per (route row, G groups)
+ # ----------------------------------------------------------------------------------------------
+@@ -463,6 +489,18 @@ def launch_prep(x, a1):
+                                               num_warps=1, num_stages=1, enable_fp_fusion=False)
+ 
+ 
++def launch_prep_live(x, a1, topk_ids, ids_out, live_rows):
++    """`launch_prep` that also writes `ids_out` = `topk_ids` with every row >= live_rows[0] routed to expert -1."""
++    groups = x.shape[0] * (HIDDEN // GROUP)
++    n_ids = topk_ids.numel()
++    assert n_ids <= MAX_ROUTES
++    assert live_rows.dtype == torch.int32 and live_rows.numel() == 1 and live_rows.device == x.device
++    assert topk_ids.is_contiguous() and ids_out.shape == topk_ids.shape and ids_out.dtype == torch.int32
++    _prep_operand_live[(triton.cdiv(groups, 8),)](x, a1, groups, topk_ids, ids_out, live_rows, n_ids, 8, EPS, FP8_MAX,
++                                                  topk_ids.shape[1], MAX_ROUTES,
++                                                  num_warps=1, num_stages=1, enable_fp_fusion=False)
++
++
+ def launch_gate_up_wmma(a1, w13, s13, topk_ids, gu):
+     m = a1.shape[0]
+     g = _cfg(GATE_UP_CFG, m, N_GATE_UP, HIDDEN, "GATE_UP")
+@@ -534,9 +572,11 @@ def _installed_gemm_context(m: int):
+ 
+ 
+ def decode_routed_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
+-                          routed_scaling_factor, swiglu_limit, silu_mode: int = None, stages: bool = False):
++                          routed_scaling_factor, swiglu_limit, silu_mode: int = None, stages: bool = False,
++                          live_rows=None):
+     """Five-kernel routed-expert chain; returns the fp32 [M, 5120] ordered route sum.
+ 
++    live_rows: optional int32 device scalar; rows >= live_rows[0] are dead padding, routed to expert -1 (zero output).
+     stages=True returns the intermediates (a1, gu, a2, ro, out) for tests."""
+     x = hidden_states
+     m = x.shape[0]
+@@ -544,7 +584,12 @@ def decode_routed_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_id
+     mode = SILU_MODE if silu_mode is None else silu_mode
+     aiter = gemm_backend() == "aiter"
+     a1 = torch.empty_like(x)
+-    launch_prep(x, a1)
++    if live_rows is None:
++        launch_prep(x, a1)
++    else:
++        masked_ids = torch.empty_like(topk_ids)
++        launch_prep_live(x, a1, topk_ids, masked_ids, live_rows)
++        topk_ids = masked_ids
+     gu = torch.empty((m, TOPK, N_GATE_UP), dtype=torch.bfloat16, device=dev)
+     if aiter:
+         installed, config, gate_up_config, align = _installed_gemm_context(m)
+@@ -578,5 +623,7 @@ def try_decode_routed(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
+     if not decode_supported(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
+                             routed_scaling_factor, swiglu_limit):
+         return None
++    from sglang.srt.layers import live_rows
++
+     return decode_routed_experts(hidden_states, w13, w2, s13, s2, topk_weights, topk_ids,
+-                                 routed_scaling_factor, swiglu_limit)
++                                 routed_scaling_factor, swiglu_limit, live_rows=live_rows.active())
+--- /dev/null
++++ b/sglang/srt/layers/live_rows.py
+@@ -0,0 +1,76 @@
++"""Device-side count of the live rows of a padded decode CUDA-graph replay.
++
++A decode graph captured for `bs` request slots replays for any smaller batch by padding (C3 -> the
++C4 graph, 5..7 -> C8, a DSpark verify batch of 3 requests -> the 4-slot graph).  The padded rows are
++dead: nothing reads their outputs.  The kernels that read weights per *route* (the routed-expert
++MoE) should not spend bandwidth on them, but a captured graph cannot bake the live count in as a
++Python constant: it must read a device value that the replay path refreshes.
++
++`LiveRows` owns that value (one int32 on the device, a stable pointer for the lifetime of the
++runner); the graph runner
++
++  * assigns the padded row count while it warms up / captures a bucket (`set_capture`),
++  * publishes the live row count right before every replay (`publish`, a no-op when it did not
++    change, which is every step without padding), and
++  * exposes the tensor to the model code through `scope`, which is active only while capturing.
++
++Consumers call `active()`: a tensor during capture, `None` in eager execution (and outside any
++runner), where every row is live.  The row-count value is `bs * tokens_per_request`: padded rows are
++always the tail of the batch.
++
++`SGLANG_DSV41_MASK_PADDED_ROWS=0` disables the mechanism (nothing is allocated, `active()` is None).
++"""
++
++from __future__ import annotations
++
++import contextlib
++import os
++from typing import Optional
++
++import torch
++
++_OFF = ("0", "false", "off", "no")
++
++_ACTIVE: Optional[torch.Tensor] = None
++
++
++def enabled() -> bool:
++    return os.environ.get("SGLANG_DSV41_MASK_PADDED_ROWS", "1").strip().lower() not in _OFF
++
++
++def active() -> Optional[torch.Tensor]:
++    """The live-row tensor of the graph being captured, else None (eager: all rows are live)."""
++    return _ACTIVE
++
++
++@contextlib.contextmanager
++def scope(tensor: Optional[torch.Tensor]):
++    global _ACTIVE
++    previous = _ACTIVE
++    _ACTIVE = tensor
++    try:
++        yield
++    finally:
++        _ACTIVE = previous
++
++
++class LiveRows:
++    """One runner's device-side live row count."""
++
++    def __init__(self, capacity: int, device) -> None:
++        assert capacity >= 1
++        self.tensor = torch.full((1,), capacity, dtype=torch.int32, device=device)
++        self._host = capacity
++
++    def set_capture(self, rows: int) -> None:
++        """Before warming up / capturing a bucket of `rows` rows: every row of the capture is live."""
++        self._assign(rows)
++
++    def publish(self, rows: int) -> None:
++        """Before a replay: `rows` leading rows are live.  Stream-ordered with the replay (same stream)."""
++        self._assign(rows)
++
++    def _assign(self, rows: int) -> None:
++        if rows != self._host:
++            self.tensor.fill_(rows)
++            self._host = rows
+--- a/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -61,6 +61,7 @@ from sglang.srt.layers.dp_attention import (
+     set_is_extend_in_batch,
+ )
+ from sglang.srt.layers.engram_graph_prestage import NativeEngramGraphPrestage
++from sglang.srt.layers import live_rows as live_rows_mod
+ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+ from sglang.srt.model_executor.cuda_graph_buffer_registry import (
+     CudaGraphBufferRegistry,
+@@ -491,6 +492,13 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+             ),
+         )
+         self.buffers.share_buffers()
++        # Device-side live row count of a padded replay (read by the row-masked routed
++        # MoE); ragged verify graphs are tier-keyed and carry their own layout.
++        self._live_rows = (
++            live_rows_mod.LiveRows(self.max_num_token, self.device)
++            if live_rows_mod.enabled() and not self.ragged_verify_mode
++            else None
++        )
+         # FB-shared slot registry adopting DecodeInputBuffers storage (same
+         # physical tensors, stable data_ptr for capture vs replay). Provides
+         # the unified fill_from / slot access surface for capture/replay.
+@@ -978,6 +986,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+                     sharded=True,
+                 )
+                 buffers.num_token_non_padded.copy_(local)
++        if self._live_rows is not None:
++            # Warmup and capture of this bucket see every row as live; replay publishes the real count.
++            self._live_rows.set_capture(num_tokens)
+ 
+         pp_proxy_tensors = None
+         # pipeline parallelism
+@@ -1223,7 +1234,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+         # All setup hooks below read get_attn_backend() (TboForwardBatchPreparer,
+         # DeepEP adapter, …) so they must run inside the same ForwardContext
+         # that wraps the warmup/capture forward.
+-        with forward_context(ForwardContext(attn_backend=attn_backend)):
++        with forward_context(ForwardContext(attn_backend=attn_backend)), live_rows_mod.scope(
++            None if self._live_rows is None else self._live_rows.tensor
++        ):
+             self.tbo_plugin.capture_one_batch_size(forward_batch, num_tokens=num_tokens)
+ 
+             if forward_batch.lora_ids is not None:
+@@ -1573,6 +1586,8 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+         )
+         with timer_ctx, self.backend.replay_session():
+             self.load_batch(forward_batch, pp_proxy_tensors)
++            if self._live_rows is not None:
++                self._live_rows.publish(self.raw_num_token)
+             if self.engram_graph_prestage is not None:
+                 generation = self.engram_graph_prestage.prepare(
+                     forward_batch, self.bs

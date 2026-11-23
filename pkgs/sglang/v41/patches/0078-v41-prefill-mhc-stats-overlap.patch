@@ -1,0 +1,153 @@
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -374,6 +374,9 @@
+ 
+ 
+ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
++_dsv41_hc_stats_overlap_enabled = get_bool_env_var(
++    "SGLANG_DSV41_OVERLAP_MHC_STATS"
++)
+ # PoC: compute the (replicated TP1) shared expert on LOCAL hidden before the dp
+ # gather instead of on the gathered global buffer. Requires
+ # SGLANG_SHARED_EXPERT_TP1=1 (replicated shared expert). Default OFF.
+@@ -2855,6 +2858,12 @@
+     ) -> None:
+         super().__init__()
+         self.hc_stats_stream = hc_stats_stream
++        # Separate from the Blackwell stats stream: using that stream's
++        # MhcPostFusion(overlap_only=True) context bypasses the V4.1 compressed
++        # attention ring on gfx1151. Allocate lazily on the first eligible
++        # prefill, and keep one stream per layer for repeated eager calls.
++        self._dsv41_hc_stats_overlap_stream = None
++        self._dsv41_hc_stats_overlap_logged = False
+         self.config = config
+         self.hidden_size = config.hidden_size
+         self.layer_id = layer_id
+@@ -3628,6 +3637,55 @@
+             stats_stream.wait_stream(torch.cuda.current_stream())
+         return y
+ 
++    def _dsv41_hc_stats_overlap_eligible(self, x, forward_batch) -> bool:
++        if not (
++            _dsv41_hc_stats_overlap_enabled
++            and _is_hip
++            and self.config.model_type == "deepseek_v41"
++            and self.hc_stats_stream is None
++            and forward_batch is not None
++            and forward_batch.forward_mode == ForwardMode.EXTEND
++            and x.is_cuda
++            and x.dtype == torch.bfloat16
++            and x.is_contiguous()
++            and 64 <= x.shape[0] <= 65536
++            and x.shape[1:] == (self.hc_mult, 5120)
++            and self.hc_mult == 4
++            and not self.dsa_enable_prefill_cp
++            and not get_is_capture_mode()
++            and not torch.cuda.is_current_stream_capturing()
++        ):
++            return False
++        parallel = get_parallel()
++        return (
++            parallel.tp_size == parallel.attn_tp_size == 4
++            and parallel.attn_dp_size == 1
++            and not get_forward().sp_active
++            and torch.cuda.get_device_properties(x.device).gcnArchName.split(":")[0]
++            == "gfx1151"
++        )
++
++    def _dsv41_fork_hc_stats(self, x, callback):
++        """Run the unchanged generic HIP stats kernels beside a sublayer."""
++        if self._dsv41_hc_stats_overlap_stream is None:
++            self._dsv41_hc_stats_overlap_stream = torch.cuda.Stream(device=x.device)
++        side = self._dsv41_hc_stats_overlap_stream
++        main = torch.cuda.current_stream()
++        side.wait_stream(main)
++        x.record_stream(side)
++        with torch.cuda.stream(side):
++            coefficients = callback()
++            done = side.record_event()
++        for coefficient in coefficients:
++            coefficient.record_stream(main)
++        if not self._dsv41_hc_stats_overlap_logged:
++            logger.info(
++                "DSV41 mHC prefill stats overlap active: layer=%s rows=%s",
++                self.layer_id, x.shape[0],
++            )
++            self._dsv41_hc_stats_overlap_logged = True
++        return coefficients, done
++
+     def _hc_mix_stats(
+         self,
+         x: torch.Tensor,
+@@ -3923,6 +3981,9 @@
+         )
+ 
+         stats_stream = self._get_hc_stats_stream(hidden_states, forward_batch)
++        dsv41_stats_overlap = self._dsv41_hc_stats_overlap_eligible(
++            hidden_states, forward_batch
++        )
+         residual = hidden_states
+         attn_quantized: Optional[list] = (
+             [] if self.self_attn.accepts_mxfp8_swizzled_input() else None
+@@ -3935,6 +3996,13 @@
+             self.hc_attn_base,
+             stats_stream,
+         )
++        attn_stats_values = attn_stats_done = None
++        if dsv41_stats_overlap:
++            # The coefficients use residual, not the attention output. Start
++            # them before combine/attention, then join only before hc_post.
++            attn_stats_values, attn_stats_done = self._dsv41_fork_hc_stats(
++                residual, attn_stats
++            )
+         x = self._hc_combine(
+             hidden_states,
+             apply_pre=prev_pre,
+@@ -4030,11 +4098,15 @@
+             ffn_combined = attn_mhc.combined
+             ffn_normalized = attn_mhc.normalized
+         else:
+-            attn_pre, attn_post, attn_comb = (
+-                (attn_mhc.pre, attn_mhc.post, attn_mhc.comb)
+-                if attn_mhc is not None
+-                else attn_stats()
+-            )
++            if attn_stats_done is not None:
++                torch.cuda.current_stream().wait_event(attn_stats_done)
++                attn_pre, attn_post, attn_comb = attn_stats_values
++            else:
++                attn_pre, attn_post, attn_comb = (
++                    (attn_mhc.pre, attn_mhc.post, attn_mhc.comb)
++                    if attn_mhc is not None
++                    else attn_stats()
++                )
+             if stats_stream is not None:
+                 torch.cuda.current_stream().wait_stream(stats_stream)
+             hidden_states, ffn_combined, ffn_normalized = self._hc_post_with_combine(
+@@ -4056,6 +4128,13 @@
+             self.hc_ffn_base,
+             stats_stream,
+         )
++        ffn_stats_values = ffn_stats_done = None
++        if dsv41_stats_overlap:
++            # Post-attention residual is now complete. The FFN stats kernels
++            # can run beside combine and the full routed/shared MoE branch.
++            ffn_stats_values, ffn_stats_done = self._dsv41_fork_hc_stats(
++                residual, ffn_stats
++            )
+         x = self._hc_combine(
+             hidden_states,
+             apply_pre=attn_pre,
+@@ -4115,7 +4194,11 @@
+             mhc.materialize_stats()
+             ffn_pre, ffn_post, ffn_comb = mhc.pre, mhc.post, mhc.comb
+         else:
+-            ffn_pre, ffn_post, ffn_comb = ffn_stats()
++            if ffn_stats_done is not None:
++                torch.cuda.current_stream().wait_event(ffn_stats_done)
++                ffn_pre, ffn_post, ffn_comb = ffn_stats_values
++            else:
++                ffn_pre, ffn_post, ffn_comb = ffn_stats()
+         if mhc is not None and mhc.output is not None:
+             hidden_states = mhc.output
+             if next_input is not None and mhc.quantized is not None:

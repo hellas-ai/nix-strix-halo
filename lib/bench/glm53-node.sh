@@ -66,6 +66,7 @@ case ${GLM_TRANSPORT:-roce} in
   tcp) export NCCL_IB_DISABLE=1 NCCL_NET=Socket ;;
   *) echo "GLM_TRANSPORT must be roce or tcp" >&2; exit 2 ;;
 esac
+export SGLANG_CACHE_DIR="${SGLANG_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/sglang}"
 export AITER_JIT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/aiter/jit"
 export TRITON_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/glm53/$(hostname)/triton"
 export OMP_NUM_THREADS=${GLM_CPU_THREADS:-8}

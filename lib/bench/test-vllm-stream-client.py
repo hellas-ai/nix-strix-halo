@@ -42,6 +42,28 @@ def consume(events: str) -> dict:
     )
 
 
+def ok_row(
+    *,
+    prompt_tokens=5,
+    completion_tokens=10,
+    duration_s=2.0,
+    ttft_s=1.0,
+    decode_s=1.0,
+) -> dict:
+    return {
+        "request_index": 0,
+        "ok": True,
+        "start": 0.0,
+        "end": duration_s,
+        "duration_s": duration_s,
+        "ttft_s": ttft_s,
+        "decode_s": decode_s,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "error": "",
+    }
+
+
 class StreamSuccessTests(unittest.TestCase):
     def test_full_stream_ok(self):
         row = consume(
@@ -195,6 +217,95 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(row["requests_failed"], "1")
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["total_tps"], "0.000000")
+
+    def test_success_without_usage_leaves_aggregates_unavailable(self):
+        row = self.aggregate_with_rows(
+            [ok_row(prompt_tokens=None, completion_tokens=None)]
+        )
+        self.assertEqual(row["requests_ok"], "1")
+        self.assertEqual(row["status"], "ok")
+        self.assertEqual(row["total_prompt_tokens"], "")
+        self.assertEqual(row["prompt_tokens_per_req"], "")
+        self.assertEqual(row["total_completion_tokens"], "")
+        self.assertEqual(row["total_tps"], "")
+        self.assertEqual(row["output_tps_mean"], "")
+        self.assertEqual(row["decode_tps_mean"], "")
+
+    def test_one_missing_completion_disables_completion_aggregates(self):
+        rows = [
+            ok_row(completion_tokens=10, prompt_tokens=5),
+            ok_row(completion_tokens=None, prompt_tokens=5),
+        ]
+        row = self.aggregate_with_rows(rows)
+        self.assertEqual(row["total_completion_tokens"], "")
+        self.assertEqual(row["total_tps"], "")
+        self.assertEqual(row["output_tps_mean"], "")
+        self.assertEqual(row["decode_tps_mean"], "")
+        # Prompt counts were still fully reported by every successful request.
+        self.assertEqual(row["total_prompt_tokens"], "10")
+
+    def test_one_missing_prompt_only_disables_prompt_aggregates(self):
+        rows = [
+            ok_row(prompt_tokens=5, completion_tokens=10),
+            ok_row(prompt_tokens=None, completion_tokens=10),
+        ]
+        row = self.aggregate_with_rows(rows)
+        self.assertEqual(row["total_prompt_tokens"], "")
+        self.assertEqual(row["prompt_tokens_per_req"], "")
+        self.assertEqual(row["total_completion_tokens"], "20")
+        self.assertNotEqual(row["total_tps"], "")
+        self.assertEqual(row["output_tps_mean"], "5.000000")
+
+    def test_failed_request_does_not_invalidate_measurements(self):
+        good = ok_row(prompt_tokens=5, completion_tokens=10)
+        bad = {
+            "request_index": 1,
+            "ok": False,
+            "start": 0.0,
+            "end": 0.5,
+            "error": "stream error: CUDA OOM",
+        }
+        row = self.aggregate_with_rows([good, bad])
+        self.assertEqual(row["status"], "partial")
+        self.assertEqual(row["total_prompt_tokens"], "5")
+        self.assertEqual(row["total_completion_tokens"], "10")
+
+    def test_measured_zero_usage_is_not_missing(self):
+        row = self.aggregate_with_rows([ok_row(prompt_tokens=0, completion_tokens=0)])
+        self.assertEqual(row["total_prompt_tokens"], "0")
+        self.assertEqual(float(row["prompt_tokens_per_req"]), 0.0)
+        self.assertEqual(row["total_completion_tokens"], "0")
+        self.assertEqual(row["total_tps"], "0.000000")
+        self.assertEqual(row["output_tps_mean"], "0.000000")
+
+    def test_fully_reported_throughput_preserved(self):
+        row = self.aggregate_with_rows(
+            [
+                ok_row(prompt_tokens=5, completion_tokens=10),
+                ok_row(prompt_tokens=5, completion_tokens=10),
+            ]
+        )
+        self.assertEqual(row["total_prompt_tokens"], "10")
+        self.assertEqual(row["prompt_tokens_per_req"], "5.000000")
+        self.assertEqual(row["total_completion_tokens"], "20")
+        self.assertGreater(float(row["total_tps"]), 0.0)
+        self.assertEqual(row["output_tps_mean"], "5.000000")
+
+
+class MeasuredTokensTests(unittest.TestCase):
+    def test_accepts_nonnegative_ints(self):
+        self.assertEqual(client.measured_tokens(0), 0)
+        self.assertEqual(client.measured_tokens(7), 7)
+
+    def test_rejects_bool(self):
+        self.assertIsNone(client.measured_tokens(True))
+        self.assertIsNone(client.measured_tokens(False))
+
+    def test_rejects_invalid_counts(self):
+        self.assertIsNone(client.measured_tokens(None))
+        self.assertIsNone(client.measured_tokens(-1))
+        self.assertIsNone(client.measured_tokens(1.0))
+        self.assertIsNone(client.measured_tokens("3"))
 
 
 if __name__ == "__main__":

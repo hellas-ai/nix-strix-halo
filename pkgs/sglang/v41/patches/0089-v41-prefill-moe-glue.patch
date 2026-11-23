@@ -1,0 +1,140 @@
+diff --git a/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py b/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
+index 68ea443..6d47d8a 100644
+--- a/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
++++ b/sglang/kernels/ops/moe/dsv41_mxfp4_decode.py
+@@ -543,6 +543,45 @@ def launch_swiglu(gu, topk_weights, a2, factor, mode, silu_in=None):
+         INTER, 2, 10.0, mode, EPS, FP8_MAX, num_warps=1, num_stages=1, enable_fp_fusion=False)
+ 
+ 
++# ----------------------------------------------------------------------------------------------
++# prefill (opt-in, SGLANG_DSV41_PREFILL_GLUE=1): the same P and E kernels for the 17..2047-row prefill calls. They are bitwise the installed torch
++# sequences at any row count (per-element arithmetic, one scale per 32-value group); only the launch shape differs: one program per 32 groups
++# (P) or per route row and 16 groups (E) instead of the decode shapes (one warp, 8 and 2 groups), which are launch-bound at 1536 rows.
++# ----------------------------------------------------------------------------------------------
++PREFILL_GLUE = os.environ.get("SGLANG_DSV41_PREFILL_GLUE") == "1"
++_PREFILL_P_GROUPS, _PREFILL_E_GROUPS = 32, 16
++
++
++def prefill_glue_supported(hidden_states, w13, w2, topk_weights, topk_ids, routed_scaling_factor, swiglu_limit) -> bool:
++    x = hidden_states
++    return (
++        PREFILL_GLUE and x.ndim == 2 and x.shape[0] >= 17 and x.shape[1] == HIDDEN and x.dtype == torch.bfloat16 and x.is_contiguous()
++        and x.device.type == "cuda" and _is_gfx1151(x.device.index if x.device.index is not None else torch.cuda.current_device())
++        and swiglu_limit == 10 and (routed_scaling_factor is None or isinstance(routed_scaling_factor, (int, float)))
++        and tuple(w13.shape) == (NUM_EXPERTS, N_GATE_UP, HIDDEN // 2) and tuple(w2.shape) == (NUM_EXPERTS, N_DOWN, INTER // 2)
++        and topk_weights.dtype == torch.float32 and topk_weights.is_contiguous() and tuple(topk_weights.shape) == (x.shape[0], TOPK)
++    )
++
++
++def prefill_operand(x):
++    """== `_official_routed_operand(x)`: group-32 E4M3/E8M0 quantise then dequantise to bf16."""
++    out = torch.empty_like(x)
++    groups = x.shape[0] * (HIDDEN // GROUP)
++    _prep_operand[(triton.cdiv(groups, _PREFILL_P_GROUPS),)](x, out, groups, _PREFILL_P_GROUPS, EPS, FP8_MAX,
++                                                              num_warps=4, num_stages=1, enable_fp_fusion=False)
++    return out
++
++
++def prefill_swiglu(gu, topk_weights, factor):
++    """gu bf16 [M, 6, 1152] contiguous -> bf16 [M*6, 576]: clamp, silu*up, route scale, bf16, group-32 quantise-dequantise."""
++    m = gu.shape[0]
++    a2 = torch.empty((m * TOPK, INTER), dtype=torch.bfloat16, device=gu.device)
++    _swiglu_operand[(m * TOPK, triton.cdiv(INTER // GROUP, _PREFILL_E_GROUPS))](
++        gu, topk_weights, topk_weights, a2, 1.0 if factor is None else float(factor),
++        INTER, _PREFILL_E_GROUPS, 10.0, 0, EPS, FP8_MAX, num_warps=2, num_stages=1, enable_fp_fusion=False)
++    return a2
++
++
+ def launch_down_wmma(a2, w2, s2, topk_ids, ro):
+     m = topk_ids.shape[0]
+     d = _cfg(DOWN_CFG, m, N_DOWN, INTER, "DOWN")
+diff --git a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+index 800ca75..bb8230e 100644
+--- a/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
++++ b/sglang/srt/layers/moe/moe_runner/triton_utils/mxfp4_moe_amd.py
+@@ -256,6 +256,7 @@ def fused_experts_mxfp4(
+         moe_align_block_size,
+     )
+ 
++    prefill_glue = False
+     if hidden_states.shape[0] == 0:
+         if no_combine:
+             return hidden_states.new_empty(
+@@ -290,7 +291,9 @@ def fused_experts_mxfp4(
+                 w2_weight.shape[1], topk_ids.shape[1]) == (384, 5120, 1152, 5120, 6)
+         # Native TP4 decode (1..16 rows): five owner-routed kernels instead of ~50 launches, same
+         # values. SGLANG_DSV41_MXFP4_DECODE=0 restores the sequence below.
+-        from sglang.kernels.ops.moe.dsv41_mxfp4_decode import try_decode_routed
++        from sglang.kernels.ops.moe.dsv41_mxfp4_decode import (
++            prefill_glue_supported, prefill_operand, prefill_swiglu, try_decode_routed,
++        )
+ 
+         routed = try_decode_routed(
+             hidden_states, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale,
+@@ -298,6 +301,11 @@ def fused_experts_mxfp4(
+         )
+         if routed is not None:
+             return routed
++        # Opt-in prefill glue (SGLANG_DSV41_PREFILL_GLUE=1): the decode module's P and E kernels at prefill row counts.
++        prefill_glue = prefill_glue_supported(
++            hidden_states, w13_weight, w2_weight, topk_weights, topk_ids,
++            routed_scaling_factor, swiglu_limit,
++        )
+ 
+     if not official_routed_policy and not no_combine and not apply_router_weight_on_input:
+         # DSpark draft stages (128 experts, top-3, 1..16 rows): four owner-routed launches instead of ~50, same
+@@ -345,7 +353,7 @@ def fused_experts_mxfp4(
+             hidden_states.shape[1], intermediate_size,
+         )
+     gate_up_input = (
+-        _official_routed_operand(hidden_states)
++        (prefill_operand(hidden_states) if prefill_glue else _official_routed_operand(hidden_states))
+         if official_routed_policy else hidden_states
+     )
+     _run_mxfp4_gemm(
+@@ -363,23 +371,28 @@ def fused_experts_mxfp4(
+         mul_routed_weight=apply_router_weight_on_input,
+     )
+ 
+-    gate, up = gate_up.chunk(2, dim=-1)
+-    if official_routed_policy:
+-        gate, up = gate.float(), up.float()
+-    if swiglu_limit is not None:
+-        assert swiglu_limit == 10
+-        gate = gate.clamp(max=swiglu_limit)
+-        up = up.clamp(min=-swiglu_limit, max=swiglu_limit)
+-    activated = F.silu(gate) * up
+-    if official_routed_policy:
+-        routing_weights = topk_weights
+-        if routed_scaling_factor is not None:
+-            routing_weights = routing_weights * routed_scaling_factor
+-        activated = (routing_weights.unsqueeze(-1) * activated).to(hidden_states.dtype)
+-    activated = activated.reshape(num_tokens * top_k, intermediate_size)
+-    del gate_up
+-    if official_routed_policy:
+-        activated = _official_routed_operand(activated)
++    if prefill_glue:
++        # One kernel for clamp, silu*up, route scale, bf16 rounding and the group-32 quantise-dequantise (bitwise the chain below).
++        activated = prefill_swiglu(gate_up, topk_weights, routed_scaling_factor)
++        del gate_up
++    else:
++        gate, up = gate_up.chunk(2, dim=-1)
++        if official_routed_policy:
++            gate, up = gate.float(), up.float()
++        if swiglu_limit is not None:
++            assert swiglu_limit == 10
++            gate = gate.clamp(max=swiglu_limit)
++            up = up.clamp(min=-swiglu_limit, max=swiglu_limit)
++        activated = F.silu(gate) * up
++        if official_routed_policy:
++            routing_weights = topk_weights
++            if routed_scaling_factor is not None:
++                routing_weights = routing_weights * routed_scaling_factor
++            activated = (routing_weights.unsqueeze(-1) * activated).to(hidden_states.dtype)
++        activated = activated.reshape(num_tokens * top_k, intermediate_size)
++        del gate_up
++        if official_routed_policy:
++            activated = _official_routed_operand(activated)
+ 
+     routed_output = torch.empty(
+         (num_tokens, top_k, w2_weight.shape[1]),

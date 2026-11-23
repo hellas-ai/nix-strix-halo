@@ -107,6 +107,7 @@ let
           llama-cpp-rocm
           mlx-rocm
           sglang-rocm
+          sglang-v41-rocm
           therock-rocm
           vllm-rocm
           ;
@@ -127,6 +128,7 @@ let
             linux-multikernel
             mlx-rocm
             multikernel-demo-initrd
+            sglang-v41-rocm
             strix-halo-mes-firmware
             therock-rocm
             tokenizers-cpp

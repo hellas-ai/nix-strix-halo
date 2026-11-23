@@ -1,0 +1,37 @@
+--- a/sglang/kernels/ops/layernorm/native_rmsnorm_decode.py
++++ b/sglang/kernels/ops/layernorm/native_rmsnorm_decode.py
+@@ -43,6 +43,7 @@
+ # tests/rmsnorm-decode.py).  Anything else keeps the torch chain.
+ SUPPORTED_WIDTHS = (128, 512, 1280, 5120)
+ MAX_ROWS = 16
++MAX_PREFILL_ROWS = 65536
+ 
+ 
+ def _last_pow2(n: int) -> int:
+@@ -294,11 +295,24 @@
+         row_stride = x.stride(0)
+     else:
+         return None
+-    if not 1 <= rows <= MAX_ROWS:
++    prefill = rows > MAX_ROWS
++    if prefill:
++        if (os.environ.get("SGLANG_DSV41_NATIVE_RMSNORM_PREFILL") != "1"
++                or rows > MAX_PREFILL_ROWS):
++            return None
++    elif rows < 1:
+         return None
+     tree = tree or native_rmsnorm_tree()
+     if torch_mean_block_width(1 if tree == "invariant" else rows, width) is None:
+         return None
+-    if not _canary_ok(x, weight, eps, tree, rows, width):
++    # Above sixteen rows ATen uses the same per-row reduction geometry.
++    # Validate that equivalence explicitly, then run the existing 128-trial
++    # canary on 32 rows instead of repeating a full prefill allocation for
++    # every distinct chunk length. Decode retains its original canary key.
++    canary_rows = 32 if prefill else rows
++    if tree == "match" and (torch_mean_block_width(canary_rows, width)
++                            != torch_mean_block_width(rows, width)):
++        return None
++    if not _canary_ok(x, weight, eps, tree, canary_rows, width):
+         return None
+     return _launch(x, weight, eps, tree, rows, width, row_stride)

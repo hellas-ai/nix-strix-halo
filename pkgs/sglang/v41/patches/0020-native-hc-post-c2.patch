@@ -1,0 +1,84 @@
+--- a/sglang/srt/models/deepseek_v4.py
++++ b/sglang/srt/models/deepseek_v4.py
+@@ -3255,2 +3255,19 @@
+         elif _is_hip and not _use_aiter:
++            if (
++                getattr(self.config, "model_type", None) == "deepseek_v41"
++                and self.hc_pre_from_prev_sublayer
++                and self.hc_mult == 4 and self.hidden_size == 5120
++                and x.shape == (2, 5120) and residual.shape == (2, 4, 5120)
++                and post.shape == (2, 4) and comb.shape == (2, 4, 4)
++                and x.dtype == residual.dtype == torch.bfloat16
++                and post.dtype == comb.dtype == torch.float32
++                and all(t.is_contiguous() for t in (x, residual, post, comb))
++                and x.is_cuda and all(t.device == x.device for t in (residual, post, comb))
++                and torch.cuda.get_device_properties(x.device).gcnArchName.split(":")[0]
++                == "gfx1151"
++            ):
++                from sglang.kernels.ops.layernorm.native_hc_post import native_hc_post_c2
++
++                return native_hc_post_c2(x, residual, post, comb)
++
+             from sglang.kernels.ops.layernorm.mhc import hc_post
+--- /dev/null
++++ b/sglang/kernels/ops/layernorm/native_hc_post.py
+@@ -0,0 +1,59 @@
++"""Exact-order gfx1151 C2 post-residual mixing for native V4.1 mHC."""
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _hc_post_c2(X, R, P, C, Y, H: tl.constexpr, BLOCK: tl.constexpr):
++    h = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++    j = tl.program_id(1)
++    t = tl.program_id(2)
++    x = tl.load(X + t * H + h).to(tl.float32)
++    post = tl.load(P + t * 4 + j)
++    r0 = tl.load(R + (t * 4 + 0) * H + h).to(tl.float32)
++    r1 = tl.load(R + (t * 4 + 1) * H + h).to(tl.float32)
++    r2 = tl.load(R + (t * 4 + 2) * H + h).to(tl.float32)
++    r3 = tl.load(R + (t * 4 + 3) * H + h).to(tl.float32)
++    c0 = tl.load(C + t * 16 + 0 * 4 + j)
++    c1 = tl.load(C + t * 16 + 1 * 4 + j)
++    c2 = tl.load(C + t * 16 + 2 * 4 + j)
++    c3 = tl.load(C + t * 16 + 3 * 4 + j)
++    # Torch materializes FP32 products, then its four per-thread accumulators
++    # each add the +0 identity before a sequential (not pairwise) combination.
++    a0 = 0.0 + c0 * r0
++    a1 = 0.0 + c1 * r1
++    a2 = 0.0 + c2 * r2
++    a3 = 0.0 + c3 * r3
++    total = ((a0 + a1) + a2) + a3
++    result = post * x + total
++    tl.store(Y + (t * 4 + j) * H + h, result.to(tl.bfloat16))
++
++
++def native_hc_post_c2(x, residual, post, comb):
++    """Preserve FP32 product/add boundaries and one final BF16 rounding."""
++    if (
++        x.shape != (2, 5120)
++        or residual.shape != (2, 4, 5120)
++        or post.shape != (2, 4)
++        or comb.shape != (2, 4, 4)
++        or x.dtype != torch.bfloat16
++        or residual.dtype != torch.bfloat16
++        or post.dtype != torch.float32
++        or comb.dtype != torch.float32
++        or not all(t.is_contiguous() for t in (x, residual, post, comb))
++        or x.device.type != "cuda"
++        or not all(t.device == x.device for t in (residual, post, comb))
++        or not torch.version.hip
++        or torch.cuda.get_device_properties(x.device).gcnArchName.split(":")[0]
++        != "gfx1151"
++    ):
++        raise ValueError("native HC post requires exact gfx1151 C2 operands")
++    output = torch.empty_like(residual)
++    _hc_post_c2[(20, 4, 2)](
++        x, residual, post, comb, output, 5120, 256,
++        num_warps=4, num_stages=1, enable_fp_fusion=False,
++        allow_flush_denorm=False,
++    )
++    return output
